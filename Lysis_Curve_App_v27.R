@@ -411,7 +411,13 @@ ui <- fluidPage(
                                         ),
                                         conditionalPanel(condition = "input.error_display_mode == 'shadow'",
                                                          sliderInput("shadow_alpha", "Ribbon Alpha:", 0.05, 0.6, 0.2, 0.05)
-                                        )
+                                        ),
+                                        checkboxInput("show_error_caption",
+                                                      "Annotate error type + n in caption",
+                                                      value = FALSE),
+                                        p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+                                          "Adds a figure caption stating the error measure (SD / SEM / 95% CI) ",
+                                          "and the replicate count — recommended for publication figures.")
                        )
                    )
                  ),
@@ -824,6 +830,7 @@ server <- function(input, output, session) {
       asymmetric_error      = FALSE,      error_bar_style        = "T",
       error_bar_width       = 1,          error_bar_thickness    = 0.8,
       error_bar_position    = "middle",   shadow_alpha           = 0.2,
+      show_error_caption    = FALSE,
       custom_aspect_ratio   = FALSE,      aspect_ratio           = 1,
       export_format         = "pdf",      export_width           = 10,
       export_height         = 8,          export_dpi             = 300,
@@ -1540,6 +1547,8 @@ server <- function(input, output, session) {
     p <- p + base_t + theme(
       text             = element_text(family = input$font_family),
       plot.title       = element_text(size = input$title_font_size,       face = tf, hjust = 0.5),
+      plot.caption     = element_text(size = max(8, input$axis_text_font_size * 0.7),
+                                      hjust = 1, color = "grey30"),
       axis.title       = element_text(size = input$axis_label_font_size,  face = af),
       axis.text        = element_text(size = input$axis_text_font_size),
       axis.text.x      = element_text(angle = x_ang,
@@ -1559,12 +1568,37 @@ server <- function(input, output, session) {
     
     if (isTRUE(input$custom_aspect_ratio))
       p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
-    
+
+    # Optional publication caption describing the error measure and replicate count.
+    # Purely additive: NULL (unchanged output) unless the user opts in AND error bars
+    # are being drawn. Reads n from plot_data, which is populated in prepare_plot_data().
+    err_caption <- NULL
+    if (isTRUE(input$show_error_caption) && input$error_type != "none" &&
+        !is.null(plot_data$n) && length(plot_data$n) > 0) {
+      err_lab <- switch(input$error_type,
+                        sd   = "SD",
+                        sem  = "SEM",
+                        ci95 = "95% CI",
+                        input$error_type)
+      n_rng <- range(plot_data$n, na.rm = TRUE)
+      n_txt <- if (is.finite(n_rng[1]) && n_rng[1] == n_rng[2])
+        paste0("n = ", n_rng[1])
+      else
+        paste0("n = ", n_rng[1], "–", n_rng[2])
+      mult_txt <- if (!is.null(input$error_multiplier) &&
+                      is.numeric(input$error_multiplier) &&
+                      input$error_multiplier != 1)
+        paste0(input$error_multiplier, "× ") else ""
+      err_caption <- paste0("Error bars: ", mult_txt, "mean ± ", err_lab,
+                            " (", n_txt, ").")
+    }
+
     p + coord_cartesian(clip = "off") +
       labs(x        = input$x_axis_label,
            y        = input$y_axis_label,
            title    = input$plot_title,
-           subtitle = if (nchar(trimws(input$plot_subtitle)) > 0) input$plot_subtitle else NULL)
+           subtitle = if (nchar(trimws(input$plot_subtitle)) > 0) input$plot_subtitle else NULL,
+           caption  = err_caption)
   }
   
   generate_plot <- function() {
