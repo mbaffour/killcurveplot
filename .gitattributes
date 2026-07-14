@@ -1,0 +1,6 @@
+
+# Launcher line endings — shell scripts MUST stay LF (CRLF breaks the shebang on macOS/Linux)
+*.sh        text eol=lf
+*.command   text eol=lf
+run_app.R   text eol=lf
+*.bat       text eol=crlf
