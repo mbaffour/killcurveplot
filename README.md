@@ -1,5 +1,17 @@
 # Lysis Curve OD Visualization App — User Guide
 
+## Quick start — double-click to run (no command line)
+
+If you have [R](https://cran.r-project.org/) installed, you don't need the terminal:
+
+| OS | Double-click |
+|----|--------------|
+| **Windows** | `Run Lysis Curve Plotter.bat` |
+| **macOS** | `Run Lysis Curve Plotter.command` |
+| **Linux** | `./run.sh` |
+
+The **first run** installs the required R packages (a few minutes); after that the app opens in your web browser instantly. You can also run it directly with `Rscript run_app.R`.
+
 ## What This App Does
 
 This is an interactive tool for visualizing Optical Density (OD) time-series data. You upload a CSV file containing your experimental measurements, and the app generates publication-quality plots with full control over colors, shapes, error bars, axis scales, labels, and more.
