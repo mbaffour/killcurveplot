@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kill Curve Studio</title>
+<script src="/static/plotly.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="logo" aria-hidden="true">📉</span>
+    <div>
+      <h1>Kill Curve Studio</h1>
+      <p class="tag">Lysis · growth · kill-curve plotting and analysis</p>
+    </div>
+  </div>
+  <div class="hdr-actions">
+    <span id="fileBadge" class="badge" hidden></span>
+    <!-- Persistent, always-visible warning that the plotted values are transformed.
+         The Preprocessing panel is collapsible, so it cannot be the only signal. -->
+    <span id="xformBadge" class="badge warn" hidden
+          title="The plotted values are transformed. Open Preprocessing to change this."></span>
+    <button class="btn ghost" id="themeBtn" title="Toggle dark mode" aria-label="Toggle dark mode">🌙</button>
+    <button class="btn ghost" id="helpBtn">Help</button>
+  </div>
+</header>
+
+<div class="app">
+  <!-- ─────────── sidebar ─────────── -->
+  <aside class="side" id="side">
+    <section class="card">
+      <h2>Data</h2>
+      <label class="file-drop" id="drop">
+        <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx" class="sr-file">
+        <strong>Choose a file</strong>
+        <span>or drag &amp; drop — CSV, TSV or .xlsx</span>
+      </label>
+      <div class="row gap">
+        <button class="btn small" id="demoBtn">Load demo data</button>
+        <a class="btn small ghost" href="/api/sample-csv">Template</a>
+      </div>
+      <div id="dataInfo" class="info" hidden></div>
+    </section>
+
+    <details class="card" open>
+      <summary><h2>Samples</h2></summary>
+      <div id="sampleList" class="samples"></div>
+      <p class="hint" id="sampleHint">Load data to see your samples.</p>
+    </details>
+
+    <details class="card" id="prepCard">
+      <summary><h2>Preprocessing</h2></summary>
+      <div class="field">
+        <label for="blank_sample">Blank / background sample</label>
+        <select id="blank_sample" data-cfg="blank_sample"><option value="">None</option></select>
+        <p class="hint">Subtracted from every other sample at each timepoint, then hidden.</p>
+      </div>
+      <div class="field">
+        <label for="normalize">Normalisation</label>
+        <select id="normalize" data-cfg="normalize">
+          <option value="none">None (raw values)</option>
+          <option value="t0">To first timepoint (fold change)</option>
+          <option value="max">To each sample's maximum</option>
+          <option value="zscore">Z-score per sample</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="smooth_window">Smoothing window <span class="val" id="smooth_windowVal"></span></label>
+        <input type="range" id="smooth_window" data-cfg="smooth_window" min="1" max="11" step="2" value="1">
+        <p class="hint">1 = off. Rolling mean over N points.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><h2>Time range</h2></summary>
+      <div class="row">
+        <div class="field"><label for="time_min">From</label>
+          <input type="number" id="time_min" data-cfg="time_min" step="any" placeholder="start"></div>
+        <div class="field"><label for="time_max">To</label>
+          <input type="number" id="time_max" data-cfg="time_max" step="any" placeholder="end"></div>
+      </div>
+      <div class="field">
+        <label for="exclude_timepoints">Exclude timepoints</label>
+        <input type="text" id="exclude_timepoints" data-cfg="exclude_timepoints" placeholder="e.g. 0, 15, 120-140">
+        <p class="hint">Single values and ranges, comma separated.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><h2>Axes</h2></summary>
+      <div class="row">
+        <div class="field"><label for="x_axis_label">X label</label>
+          <input type="text" id="x_axis_label" data-cfg="x_axis_label"></div>
+        <div class="field"><label for="y_axis_label">Y label</label>
+          <input type="text" id="y_axis_label" data-cfg="y_axis_label"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="x_scale_type">X scale</label>
+          <select id="x_scale_type" data-cfg="x_scale_type">
+            <option value="linear">Linear</option><option value="log">Log₁₀</option>
+            <option value="reverse">Reversed</option></select></div>
+        <div class="field"><label for="y_scale_type">Y scale</label>
+          <select id="y_scale_type" data-cfg="y_scale_type">
+            <option value="linear">Linear</option><option value="log">Log₁₀</option>
+            <option value="reverse">Reversed</option></select></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="x_min">X min</label><input type="number" id="x_min" data-cfg="x_min" step="any" placeholder="auto"></div>
+        <div class="field"><label for="x_max">X max</label><input type="number" id="x_max" data-cfg="x_max" step="any" placeholder="auto"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="y_min">Y min</label><input type="number" id="y_min" data-cfg="y_min" step="any" placeholder="auto"></div>
+        <div class="field"><label for="y_max">Y max</label><input type="number" id="y_max" data-cfg="y_max" step="any" placeholder="auto"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="x_tick_interval">X tick step</label><input type="number" id="x_tick_interval" data-cfg="x_tick_interval" step="any" placeholder="auto"></div>
+        <div class="field"><label for="axis_text_angle">X tick angle</label><input type="number" id="axis_text_angle" data-cfg="axis_text_angle" step="5" min="-90" max="90"></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="show_major_gridlines" data-cfg="show_major_gridlines"> Major gridlines</label>
+        <label><input type="checkbox" id="show_minor_gridlines" data-cfg="show_minor_gridlines"> Minor gridlines</label>
+        <label><input type="checkbox" id="x_minor_ticks" data-cfg="x_minor_ticks"> X minor ticks</label>
+        <label><input type="checkbox" id="y_minor_ticks" data-cfg="y_minor_ticks"> Y minor ticks</label>
+        <label><input type="checkbox" id="panel_border" data-cfg="panel_border"> Panel border</label>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><h2>Appearance</h2></summary>
+      <div class="field">
+        <label for="color_palette">Colour palette</label>
+        <select id="color_palette" data-cfg="color_palette"></select>
+        <div class="swatches" id="swatches"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="template">Theme</label>
+          <select id="template" data-cfg="template">
+            <option value="simple_white">Simple white (publication)</option>
+            <option value="plotly_white">Plotly white</option>
+            <option value="ggplot2">ggplot2</option>
+            <option value="seaborn">Seaborn</option>
+            <option value="presentation">Presentation</option>
+            <option value="plotly_dark">Dark</option>
+          </select></div>
+        <div class="field"><label for="font_family">Font</label>
+          <select id="font_family" data-cfg="font_family">
+            <option>Arial</option><option>Helvetica</option><option>Times New Roman</option>
+            <option>Georgia</option><option>Courier New</option><option>Verdana</option>
+          </select></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="line_thickness">Line width <span class="val" id="line_thicknessVal"></span></label>
+          <input type="range" id="line_thickness" data-cfg="line_thickness" min="0.5" max="8" step="0.5"></div>
+        <div class="field"><label for="shape_size">Point size <span class="val" id="shape_sizeVal"></span></label>
+          <input type="range" id="shape_size" data-cfg="shape_size" min="0" max="20" step="1"></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="show_lines" data-cfg="show_lines"> Lines</label>
+        <label><input type="checkbox" id="show_points" data-cfg="show_points"> Points</label>
+        <label><input type="checkbox" id="vary_shape" data-cfg="vary_shape"> Vary point shape</label>
+        <label><input type="checkbox" id="vary_linetype" data-cfg="vary_linetype"> Vary line style</label>
+        <label><input type="checkbox" id="show_end_labels" data-cfg="show_end_labels"> Label line ends</label>
+        <label><input type="checkbox" id="show_legend" data-cfg="show_legend"> Legend</label>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><h2>Error bars</h2></summary>
+      <div class="row">
+        <div class="field"><label for="error_type">Measure</label>
+          <select id="error_type" data-cfg="error_type">
+            <option value="sd">Standard deviation</option>
+            <option value="sem">SEM</option>
+            <option value="ci95">95% confidence interval</option>
+          </select></div>
+        <div class="field"><label for="error_display_mode">Display</label>
+          <select id="error_display_mode" data-cfg="error_display_mode">
+            <option value="bar">Error bars</option>
+            <option value="ribbon">Shaded ribbon</option>
+            <option value="none">None</option>
+          </select></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="error_bar_width">Cap width</label>
+          <input type="number" id="error_bar_width" data-cfg="error_bar_width" min="0" max="20" step="1"></div>
+        <div class="field"><label for="shadow_alpha">Ribbon opacity</label>
+          <input type="number" id="shadow_alpha" data-cfg="shadow_alpha" min="0" max="1" step="0.05"></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="show_error_caption" data-cfg="show_error_caption"> Annotate error type + n on the figure</label>
+      </div>
+      <p class="hint">Samples with one replicate have no dispersion, so no bar is drawn.</p>
+    </details>
+
+    <details class="card">
+      <summary><h2>Titles</h2></summary>
+      <div class="field"><label for="plot_title">Title</label>
+        <input type="text" id="plot_title" data-cfg="plot_title"></div>
+      <div class="field"><label for="plot_subtitle">Subtitle</label>
+        <input type="text" id="plot_subtitle" data-cfg="plot_subtitle"></div>
+      <div class="row">
+        <div class="field"><label for="title_font_size">Title size</label>
+          <input type="number" id="title_font_size" data-cfg="title_font_size" min="6" max="48"></div>
+        <div class="field"><label for="axis_label_font_size">Axis label size</label>
+          <input type="number" id="axis_label_font_size" data-cfg="axis_label_font_size" min="6" max="36"></div>
+      </div>
+      <div class="field"><label for="axis_text_font_size">Tick label size</label>
+        <input type="number" id="axis_text_font_size" data-cfg="axis_text_font_size" min="6" max="30"></div>
+    </details>
+
+    <details class="card">
+      <summary><h2>Annotations</h2></summary>
+      <h3>Highlight regions</h3>
+      <div id="regionList" class="mini-list"></div>
+      <button class="btn small" id="addRegion">+ Add region</button>
+      <h3>Time markers</h3>
+      <div id="markerList" class="mini-list"></div>
+      <button class="btn small" id="addMarker">+ Add marker</button>
+    </details>
+
+    <details class="card">
+      <summary><h2>Analysis settings</h2></summary>
+      <div class="field">
+        <label for="control_sample">Control sample (for log reduction)</label>
+        <select id="control_sample" data-cfg="control_sample"><option value="">None</option></select>
+      </div>
+      <div class="row">
+        <div class="field"><label for="growth_window">Growth-rate window</label>
+          <input type="number" id="growth_window" data-cfg="growth_window" min="2" max="20" step="1"></div>
+        <div class="field"><label for="log_drop">Log drop target</label>
+          <input type="number" id="log_drop" data-cfg="log_drop" min="0.5" max="9" step="0.5"></div>
+      </div>
+      <div class="field"><label for="lysis_drop_frac">Lysis onset threshold <span class="val" id="lysis_drop_fracVal"></span></label>
+        <input type="range" id="lysis_drop_frac" data-cfg="lysis_drop_frac" min="0.01" max="0.5" step="0.01">
+        <p class="hint">Fractional fall below the running peak that counts as lysis.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><h2>Settings file</h2></summary>
+      <div class="row gap">
+        <a class="btn small" href="/api/settings/export">Save settings</a>
+        <label class="btn small ghost">Load settings
+          <input type="file" id="settingsInput" accept=".json" class="sr-file"></label>
+      </div>
+      <button class="btn small danger" id="resetBtn">Reset everything</button>
+      <div id="settingsMsg" class="info" hidden></div>
+    </details>
+  </aside>
+
+  <!-- ─────────── main ─────────── -->
+  <main class="main">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="plot" role="tab" aria-selected="true">Plot</button>
+      <button class="tab" data-tab="analysis" role="tab" aria-selected="false">Analysis</button>
+      <button class="tab" data-tab="fits" role="tab" aria-selected="false">Curve fits</button>
+      <button class="tab" data-tab="data" role="tab" aria-selected="false">Data</button>
+      <button class="tab" data-tab="export" role="tab" aria-selected="false">Export</button>
+    </nav>
+
+    <section class="pane active" id="pane-plot">
+      <div id="plot" class="plot" role="img" aria-label="Curve plot. The Analysis and Data tabs give the same information as text."></div>
+      <div id="plotEmpty" class="empty">
+        <h3>No data yet</h3>
+        <p>Choose a CSV on the left, or load the demo dataset to explore the tool.</p>
+        <button class="btn" id="demoBtn2">Load demo data</button>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-analysis">
+      <div class="pane-head">
+        <div>
+          <h3>Curve metrics</h3>
+          <p class="hint">Computed from the plotted (filtered, blanked, normalised) values.</p>
+        </div>
+        <a class="btn small" href="/api/analysis.csv">Download CSV</a>
+      </div>
+      <div class="table-wrap"><table id="analysisTable"></table></div>
+      <div id="analysisEmpty" class="empty"><p>Load data to see metrics.</p></div>
+      <div class="legend-note" id="metricHelp"></div>
+    </section>
+
+    <section class="pane" id="pane-fits">
+      <div class="pane-head">
+        <div>
+          <h3>Growth model fits</h3>
+          <p class="hint">Non-linear least squares. Check R² before trusting any parameter.</p>
+        </div>
+        <div class="row gap">
+          <select id="fitModel">
+            <option value="logistic">Logistic</option>
+            <option value="gompertz">Gompertz (modified)</option>
+            <option value="baranyi">Baranyi–Roberts</option>
+          </select>
+          <button class="btn small" id="runFit">Fit models</button>
+          <button class="btn small ghost" id="clearFit">Clear overlay</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="fitTable"></table></div>
+      <div id="fitEmpty" class="empty"><p>Load data, then fit a model.</p></div>
+    </section>
+
+    <section class="pane" id="pane-data">
+      <div class="pane-head">
+        <div><h3>Aggregated data</h3>
+          <p class="hint">Replicates collapsed to mean ± dispersion — exactly what is plotted.</p></div>
+        <a class="btn small" href="/api/export/csv">Download CSV</a>
+      </div>
+      <div class="table-wrap"><table id="dataTable"></table></div>
+      <div id="dataEmpty" class="empty"><p>Load data to inspect it.</p></div>
+    </section>
+
+    <section class="pane" id="pane-export">
+      <h3>Export figure</h3>
+      <div class="row">
+        <div class="field"><label for="export_width">Width (in)</label>
+          <input type="number" id="export_width" data-cfg="export_width" min="1" max="40" step="0.5"></div>
+        <div class="field"><label for="export_height">Height (in)</label>
+          <input type="number" id="export_height" data-cfg="export_height" min="1" max="40" step="0.5"></div>
+        <div class="field"><label for="export_dpi">DPI</label>
+          <input type="number" id="export_dpi" data-cfg="export_dpi" min="72" max="1200" step="10"></div>
+      </div>
+      <p class="hint">Journals usually want 300+ DPI, or a vector format (PDF/SVG) which is resolution-independent.</p>
+      <div class="export-grid">
+        <button class="btn exp" data-exp="png">PNG</button>
+        <button class="btn exp" data-exp="jpeg">JPEG</button>
+        <button class="btn exp" data-exp="svg">SVG (vector)</button>
+        <button class="btn exp" data-exp="pdf">PDF (vector)</button>
+        <button class="btn exp" data-exp="tiff">TIFF</button>
+        <button class="btn exp" data-exp="html">Interactive HTML</button>
+        <button class="btn exp" data-exp="pptx">PowerPoint</button>
+        <button class="btn exp" data-exp="gif">Animated GIF</button>
+        <button class="btn exp" data-exp="csv">Plotted data (CSV)</button>
+      </div>
+      <div class="field narrow">
+        <label for="gif_fps">GIF frames per second</label>
+        <input type="number" id="gif_fps" data-cfg="gif_fps" min="0.2" max="10" step="0.2">
+      </div>
+      <p class="hint">PowerPoint and GIF build the plot one sample at a time — good for talks.</p>
+      <div id="exportMsg" class="info" hidden></div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<dialog id="helpDlg">
+  <h2>Kill Curve Studio</h2>
+  <p>Everything runs on your own machine. No data is uploaded.</p>
+  <h3>Your data</h3>
+  <p><strong>Wide</strong> — first column is time, one column per sample. Repeat a column
+     name to mark replicates; they are averaged and become the error bars.</p>
+  <p><strong>Long</strong> — three columns: time, a sample/group name, and the value.</p>
+  <p>The layout is detected automatically.</p>
+  <h3>Metrics</h3>
+  <ul>
+    <li><strong>μmax</strong> — steepest slope of ln(signal); the exponential growth rate.</li>
+    <li><strong>Doubling time</strong> — ln2 / μmax.</li>
+    <li><strong>Lag</strong> — where the μmax tangent meets the starting value.</li>
+    <li><strong>Lysis onset</strong> — first fall below the running peak by your threshold.</li>
+    <li><strong>Log reduction</strong> — log₁₀(control / sample); needs a control sample.</li>
+    <li><strong>Time to N-log drop</strong> — interpolated crossing, not the next sample time.</li>
+  </ul>
+  <p class="hint">These are planning and analysis aids — always sanity-check against your raw data.</p>
+  <form method="dialog"><button class="btn">Close</button></form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
