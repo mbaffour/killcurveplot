@@ -57,6 +57,9 @@ DEFAULTS = {
     "show_error_caption": False,
     "show_legend": True, "legend_orientation": "v", "legend_x": 1.02,
     "legend_y": 1.0, "legend_font_size": 13,
+    # Pin the plot area so it depends on these settings and not on how long the
+    # sample names happen to be — otherwise panels in one figure don't match.
+    "lock_panel": True, "legend_gutter_in": 1.6,
     "blank_sample": None, "normalize": "none", "smooth_window": 1,
     "time_min": None, "time_max": None, "exclude_timepoints": "",
     "regions": [], "markers": [],
@@ -378,8 +381,14 @@ def demo():
     cfg = STATE["cfg"]
     cfg.update(time_min=None, time_max=None, exclude_timepoints="",
                blank_sample=None, control_sample="Uninfected",
-               plot_title="Phage lysis curves", y_axis_label="OD (A550)",
-               x_axis_label="Time (minutes)")
+               plot_title="Phage lysis curves")
+    # Labels the user has customised survive loading the demo, matching how
+    # /api/upload guards the same two fields. Overwriting them meant a glance at
+    # the demo silently discarded a typed-in axis title.
+    for key, val in (("y_axis_label", "OD (A550)"),
+                     ("x_axis_label", "Time (minutes)")):
+        if cfg.get(key) in (DEFAULTS[key], "", None):
+            cfg[key] = val
     return jsonify(_clean_for_json({
         "ok": True, "filename": STATE["filename"], "layout": layout["layout"],
         "samples": STATE["samples"], "n_rows": int(len(df)),
@@ -405,6 +414,20 @@ def table():
 
 
 # ── routes: settings ────────────────────────────────────────────────────────
+def _enforce_scale_interlock(cfg):
+    """A signed transform cannot share a figure with a log axis.
+
+    Z-scoring mean-centres each sample, so about half of every curve is negative
+    by construction and a log axis simply drops those points — the figure keeps
+    its tidy "— z-score" axis note while silently missing half its data. The two
+    settings are reachable independently from the UI, so couple them here.
+    """
+    if cfg.get("normalize") == "zscore" and cfg.get("y_scale_type") == "log":
+        cfg["y_scale_type"] = "linear"
+        return "Z-score can be negative, so the Y axis was switched to linear."
+    return None
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 def config():
     if request.method == "POST":
@@ -415,6 +438,7 @@ def config():
             for k, v in cfg.items():
                 if k in DEFAULTS:
                     STATE["cfg"][k] = v
+            _enforce_scale_interlock(STATE["cfg"])
         st = body.get("styles")
         if isinstance(st, dict):
             for k, v in st.items():
@@ -482,10 +506,34 @@ def settings_import():
 @app.route("/api/figure")
 def figure():
     try:
-        fig, _ = _fig()
-        return app.response_class(fig.to_json(), mimetype="application/json")
+        fig, agg = _fig()
+        payload = json.loads(fig.to_json())
+        # Ride along on the request the UI already makes. Plotly.react is handed
+        # data/layout explicitly, so an extra sibling key is inert.
+        notes = list(getattr(agg, "attrs", {}).get("warnings", []) or [])
+        notes += _unplottable_note(agg, STATE["cfg"])
+        if notes:
+            payload["warnings"] = notes
+        return app.response_class(json.dumps(payload), mimetype="application/json")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _unplottable_note(agg, cfg):
+    """Warn when a log axis is silently swallowing measured points.
+
+    A fully lysed well legitimately reads at or below the media blank, so after
+    subtraction its late timepoints are <= 0 — exactly the ones carrying the
+    result. Plotly just stops the line, with nothing to say the points exist.
+    """
+    if cfg.get("y_scale_type") != "log" or agg is None or not len(agg):
+        return []
+    m = pd.to_numeric(agg["mean"], errors="coerce")
+    n = int(((m <= 0) & m.notna()).sum())
+    if not n:
+        return []
+    return [f"{n} plotted point(s) are at or below zero and cannot be shown on a "
+            f"log axis. They are still listed in the Data tab."]
 
 
 def _analysis_rows():

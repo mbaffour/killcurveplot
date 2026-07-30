@@ -167,6 +167,15 @@ def to_long(df: pd.DataFrame, layout: dict | None = None) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def _warn(df, message):
+    """Attach a user-facing warning to a frame without disturbing its data."""
+    notes = list(df.attrs.get("warnings", []))
+    if message not in notes:
+        notes.append(message)
+    df.attrs["warnings"] = notes
+    return df
+
+
 def _blank_subtract(long_df, blank_sample):
     """Subtract the blank's mean value at each timepoint from every sample."""
     if not blank_sample or blank_sample not in set(long_df["sample"]):
@@ -174,8 +183,52 @@ def _blank_subtract(long_df, blank_sample):
     blanks = (long_df[long_df["sample"] == blank_sample]
               .groupby("time")["value"].mean())
     out = long_df.copy()
-    out["value"] = out["value"] - out["time"].map(blanks).fillna(0.0)
+
+    # A timepoint the blank never recorded used to subtract 0.0, which leaves
+    # that one point carrying the full blank while its neighbours are corrected
+    # — it then stands ~16x above them and reads as a real regrowth event.
+    # Interpolating over the gap keeps the correction continuous instead.
+    times = np.sort(out["time"].unique())
+    filled = blanks.reindex(times).interpolate(method="index").ffill().bfill()
+    missing = [t for t in times if t not in blanks.index]
+    if missing and filled.notna().any():
+        out = _warn(out, f"Blank '{blank_sample}' had no reading at "
+                         f"{len(missing)} timepoint(s); its value there was "
+                         f"interpolated from neighbouring timepoints.")
+    out["value"] = out["value"] - out["time"].map(filled).fillna(0.0)
     return out[out["sample"] != blank_sample].reset_index(drop=True)
+
+
+# A fold change is only meaningful when the baseline is a real signal. Below
+# this fraction of a sample's own peak the baseline is plate-reader noise (or a
+# blank-subtraction residue), and dividing by it manufactures huge or
+# sign-flipped values from nothing.
+_BASE_MIN_FRAC = 0.01
+
+
+def _safe_denominator(out, base, what):
+    """Per-sample divisor, blanked out where it cannot support a fold change.
+
+    Guarding only against exactly 0 is not enough. After blank subtraction a
+    t0 mean routinely lands a hair either side of zero, and dividing by it does
+    not merely exaggerate — at -0.0025 a genuine 6x rise is reported as -99x,
+    inverting the curve. A positive 0.0005 is just as wrong (+501x) and passes
+    any sign test, so the guard has to be on MAGNITUDE relative to the sample.
+    """
+    scale = out.groupby("sample")["value"].apply(lambda s: float(np.nanmax(np.abs(s))) if len(s) else np.nan)
+    bad = []
+    safe = {}
+    for name, b in base.items():
+        lim = _BASE_MIN_FRAC * float(scale.get(name, np.nan) or 0.0)
+        if not np.isfinite(b) or b <= 0 or (np.isfinite(lim) and abs(b) < lim):
+            bad.append(str(name))
+        else:
+            safe[name] = b
+    if bad:
+        out = _warn(out, f"{what} is at or near zero for {', '.join(sorted(bad))} "
+                         f"— a fold change is undefined there, so those samples "
+                         f"are not shown. Check the blank.")
+    return out, out["sample"].map(safe)
 
 
 def _normalize(long_df, mode):
@@ -190,13 +243,14 @@ def _normalize(long_df, mode):
         # 0.1/0.2/0.3 normalised to 0.1 average to 2.0, not 1.0).
         t0 = out["time"].min()
         base = (out[out["time"] == t0].groupby("sample")["value"].mean())
-        denom = out["sample"].map(base).replace(0, np.nan)
+        out, denom = _safe_denominator(out, base, "The baseline (t₀)")
         out["value"] = out["value"] / denom
     elif mode == "max":
         # Same reasoning: normalise to the peak of the averaged curve.
         peak = (out.groupby(["sample", "time"])["value"].mean()
                    .groupby("sample").max())
-        out["value"] = out["value"] / out["sample"].map(peak).replace(0, np.nan)
+        out, denom = _safe_denominator(out, peak, "The peak value")
+        out["value"] = out["value"] / denom
     elif mode == "zscore":
         m = out.groupby("sample")["value"].transform("mean")
         s = out.groupby("sample")["value"].transform("std").replace(0, np.nan)
@@ -221,6 +275,7 @@ def aggregate(long_df: pd.DataFrame, error_type: str = "sem",
         df = _blank_subtract(df, blank_sample)
     if normalize:
         df = _normalize(df, normalize)
+    notes = list(df.attrs.get("warnings", []))     # groupby drops attrs; carry them
     if log_transform:
         pos = df["value"][df["value"] > 0]
         floor = (pos.min() * 1e-6) if len(pos) else 1e-12
@@ -249,4 +304,7 @@ def aggregate(long_df: pd.DataFrame, error_type: str = "sem",
 
     et = (error_type or "sem").lower()
     out["err"] = out[et] if et in ("sd", "sem", "ci95") else 0.0
-    return out.sort_values(["sample", "time"]).reset_index(drop=True)
+    out = out.sort_values(["sample", "time"]).reset_index(drop=True)
+    if notes:
+        out.attrs["warnings"] = notes
+    return out

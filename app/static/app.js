@@ -92,10 +92,22 @@ const PLOT_CONFIG = {
   responsive: true,
   displaylogo: false,
   // Screen download uses the SAME renderer as the on-screen plot, so it is
-  // WYSIWYG and needs no server round-trip or headless browser.
+  // WYSIWYG and needs no server round-trip or headless browser. Its size comes
+  // from the Export pane (see syncCameraButton) — left to itself the camera
+  // exports 3x whatever the browser window happens to be, so the same figure
+  // came out a different size, and a different ASPECT RATIO, on every window.
   toImageButtonOptions: { format: "png", filename: "kill-curve", scale: 3 },
   modeBarButtonsToAdd: ["hoverclosest", "hovercompare"],
 };
+
+/** Point the modebar camera at the configured export size. */
+function syncCameraButton() {
+  const g = exportGeometry("png");
+  PLOT_CONFIG.toImageButtonOptions = {
+    format: "png", filename: exportStem(),
+    width: g.width, height: g.height, scale: g.scale,
+  };
+}
 
 async function drawPlot() {
   // Deliberately does NOT gate on a client-side "hasData" flag: that flag could
@@ -112,7 +124,15 @@ async function drawPlot() {
     $("#plotEmpty").hidden = !empty;
     $("#plot").style.display = empty ? "none" : "";
     S.hasData = !empty;
+    // Data the figure cannot show must be stated, not just omitted.
+    const warn = $("#dataWarn");
+    if (warn) {
+      const notes = fig.warnings || [];
+      warn.hidden = notes.length === 0;
+      warn.textContent = notes.join("  ");
+    }
     if (empty) { Plotly.purge("plot"); return; }
+    syncCameraButton();          // keep the camera on the configured export size
     await Plotly.react("plot", traces, fig.layout, PLOT_CONFIG);
   } catch (e) {
     toast("Could not draw the plot: " + e.message, true);
@@ -200,6 +220,7 @@ const NORM_LABEL = { t0: "normalised to t₀", max: "normalised to max",
                      zscore: "z-score", control: "relative to control" };
 function transformNote() {
   const bits = [];
+  if (S.cfg.blank_sample) bits.push("blank-subtracted");
   const n = S.cfg.normalize;
   if (n && n !== "none") bits.push(NORM_LABEL[n] || String(n));
   const w = parseInt(S.cfg.smooth_window, 10);
@@ -360,19 +381,109 @@ async function uploadFile(file) {
 }
 
 /* ── export ────────────────────────────────────────────────── */
+/** Pixel canvas and scale for one export, matching the server's rules.
+
+    DPI is meaningless for SVG: plotly multiplies the root width/height by
+    scale while leaving the viewBox alone, so scaling only inflates the
+    DECLARED page size. At the default 300 DPI that shipped a "10 x 8 in" SVG
+    reporting 31 x 25 in, next to a PDF button giving a correct 10 x 8.
+    render_images() pins scale=1 for vector for exactly this reason. */
+function exportGeometry(fmt) {
+  const w = Number(S.cfg.export_width || 10), h = Number(S.cfg.export_height || 8);
+  const dpi = Number(S.cfg.export_dpi || 300);
+  return {
+    width: Math.round(w * 96), height: Math.round(h * 96),
+    scale: fmt === "svg" ? 1 : Math.max(dpi / 96, 0.1),
+    dpi,
+  };
+}
+
+/** Filename stem, so a series of conditions doesn't become kill-curve (3).png. */
+function exportStem() {
+  const raw = S.filename || "";
+  const stem = raw.replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9_-]+/g, "_");
+  return stem || "kill-curve";
+}
+
+/** Splice a pHYs chunk into a PNG so it declares its real physical size.
+
+    Chrome's canvas encoder writes no resolution at all, so a 3000x2400 PNG
+    (10 x 8 in at 300 DPI) is read as 96 DPI and placed 31 in wide in Word.
+    The server does this in Python; the PNG/JPEG buttons never reach it. */
+function pngWithDpi(buf, dpi) {
+  const b = new Uint8Array(buf);
+  const sig = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (b.length < 8 || !sig.every((v, i) => b[i] === v)) return buf;
+
+  const ppu = Math.round(dpi / 0.0254);            // pixels per metre
+  const data = new Uint8Array(9);
+  new DataView(data.buffer).setUint32(0, ppu);
+  new DataView(data.buffer).setUint32(4, ppu);
+  data[8] = 1;                                     // unit 1 = the metre
+
+  const typed = new Uint8Array(13);
+  typed.set([0x70, 0x48, 0x59, 0x73]);             // "pHYs"
+  typed.set(data, 4);
+  const chunk = new Uint8Array(21);
+  new DataView(chunk.buffer).setUint32(0, 9);
+  chunk.set(typed, 4);
+  new DataView(chunk.buffer).setUint32(17, crc32(typed));
+
+  // Walk chunks: replace an existing pHYs, else insert straight after IHDR.
+  let pos = 8, afterIhdr = null, existing = null;
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  while (pos + 8 <= b.length) {
+    const len = dv.getUint32(pos);
+    const type = String.fromCharCode(b[pos + 4], b[pos + 5], b[pos + 6], b[pos + 7]);
+    const next = pos + 12 + len;
+    if (next > b.length) return buf;                // truncated: leave alone
+    if (type === "IHDR") afterIhdr = next;
+    else if (type === "pHYs") { existing = [pos, next]; break; }
+    else if (type === "IDAT") break;
+    pos = next;
+  }
+  const cut = existing ? existing : (afterIhdr === null ? null : [afterIhdr, afterIhdr]);
+  if (!cut) return buf;
+  const out = new Uint8Array(b.length - (cut[1] - cut[0]) + chunk.length);
+  out.set(b.subarray(0, cut[0]), 0);
+  out.set(chunk, cut[0]);
+  out.set(b.subarray(cut[1]), cut[0] + chunk.length);
+  return out.buffer;
+}
+
+let CRC_TABLE = null;
+function crc32(bytes) {
+  if (!CRC_TABLE) {
+    CRC_TABLE = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      CRC_TABLE[n] = c >>> 0;
+    }
+  }
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
 /** Client-side export for formats Plotly.js can render itself.
     Guarantees the file matches the screen and needs no headless browser. */
 async function clientExport(fmt) {
-  const w = Number(S.cfg.export_width || 10), h = Number(S.cfg.export_height || 8);
-  const dpi = Number(S.cfg.export_dpi || 300);
-  const px = { width: Math.round(w * 96), height: Math.round(h * 96) };
+  const g = exportGeometry(fmt);
   const url = await Plotly.toImage($("#plot"), {
-    format: fmt, width: px.width, height: px.height, scale: Math.max(dpi / 96, 0.1),
+    format: fmt, width: g.width, height: g.height, scale: g.scale,
   });
+  let href = url;
+  if (fmt === "png") {
+    // Re-tag the raster so it lands at the requested physical size.
+    const buf = await (await fetch(url)).arrayBuffer();
+    href = URL.createObjectURL(new Blob([pngWithDpi(buf, g.dpi)], { type: "image/png" }));
+  }
   const a = document.createElement("a");
-  a.href = url;
-  a.download = `kill-curve.${fmt === "jpeg" ? "jpg" : fmt}`;
+  a.href = href;
+  a.download = `${exportStem()}.${fmt === "jpeg" ? "jpg" : fmt}`;
   document.body.appendChild(a); a.click(); a.remove();
+  if (href !== url) setTimeout(() => URL.revokeObjectURL(href), 2000);
 }
 
 async function doExport(fmt) {
@@ -462,6 +573,7 @@ async function loadConfig() {
   const j = await api("/api/config");
   S.cfg = j.cfg; S.styles = j.styles; S.defaults = j.defaults;
   S.palettes = j.palettes; S.shapes = j.shapes; S.dashes = j.dashes;
+  S.filename = j.filename || "";   // names exports after the data, as the server does
   if (j.samples && j.samples.length) S.samples = j.samples;
 
   const psel = $("#color_palette");

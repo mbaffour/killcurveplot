@@ -65,6 +65,10 @@ def transform_note(cfg):
     never be mistaken for raw signal) and the UI badge.
     """
     bits = []
+    if cfg.get("blank_sample"):
+        # A blank-corrected axis must say so for the same reason a normalised
+        # one does: the figure outlives the screen it was configured on.
+        bits.append("blank-subtracted")
     n = cfg.get("normalize")
     if n and n not in ("none", ""):
         bits.append(_NORM_LABEL.get(n, str(n)))
@@ -75,6 +79,64 @@ def transform_note(cfg):
     if w > 1:
         bits.append(f"smoothed ({w}-pt)")
     return " · ".join(bits)
+
+
+def legend_label_budget(cfg):
+    """How many characters fit the reserved legend gutter, or None if unpinned."""
+    if not cfg.get("lock_panel", True) or not cfg.get("show_legend", True):
+        return None
+    gutter = float(cfg.get("legend_gutter_in", 1.6) or 0)
+    if gutter <= 0:
+        return None
+    fs = float(cfg.get("legend_font_size", 13) or 13)
+    # ~0.55 em average glyph width for Arial, less the swatch and its gap.
+    return max(4, int((gutter * 96 - _LEGEND_SWATCH) / (0.55 * fs)))
+
+
+_LEGEND_SWATCH = 42          # marker + key-to-text gap, in px at 96 dpi
+
+
+def _axis_block_px(cfg):
+    """Height below the panel taken by the x tick labels plus the axis title."""
+    tick = float(cfg.get("axis_text_font_size", 14) or 14)
+    lab = float(cfg.get("axis_label_font_size", 16) or 16)
+    return 14 + 1.7 * tick + 1.6 * lab
+
+
+def _margins(cfg, caption):
+    """Plot-area margins in px on the 96-dpi base canvas.
+
+    With autoexpand, Plotly sizes the gutter to whatever the legend text happens
+    to be, so renaming one sample moved the panel from 724 to 558 px wide at an
+    unchanged canvas — two panels of one figure then draw the same time sweep at
+    different mm-per-minute, and lysis looks steeper in whichever panel had the
+    shorter names. Pinning the margins makes the panel a function of the
+    settings alone, which is what lets a figure series match.
+    """
+    top = 60 if (cfg.get("plot_title") or cfg.get("plot_subtitle")) else 20
+    # A paper-referenced annotation below the axis does not trigger autoexpand,
+    # so the error caption has to be reserved for either way.
+    bottom_extra = 60 if caption else 0
+
+    if not cfg.get("lock_panel", True):
+        return {"l": 10, "r": 10, "t": top,
+                "b": (10 + bottom_extra), "autoexpand": True}
+
+    tick = float(cfg.get("axis_text_font_size", 14) or 14)
+    lab = float(cfg.get("axis_label_font_size", 16) or 16)
+    # Deterministic allowances: derived from the font sizes, which are settings,
+    # rather than from measured label text, which is data.
+    left = int(round(18 + 3.2 * tick + 1.5 * lab))
+    bottom = int(round(_axis_block_px(cfg))) + bottom_extra
+    right = 12
+    if cfg.get("show_legend", True):
+        gutter = float(cfg.get("legend_gutter_in", 1.6) or 0)
+        if gutter > 0:
+            # Never let the key eat the figure: a gutter sensible at 10 in would
+            # swallow a 3.5 in single-column panel whole.
+            width_px = max(float(cfg.get("export_width", 10) or 10), 1.0) * 96
+            right = int(round(min(gutter * 96, 0.4 * width_px)))
+    return {"l": left, "r": right, "t": top, "b": bottom, "autoexpand": False}
 
 
 def _axis_kwargs(cfg, which):
@@ -106,7 +168,9 @@ def _axis_kwargs(cfg, which):
                      "color": cfg.get("axis_color", "#000000")},
         "zeroline": False,
         "mirror": bool(cfg.get("panel_border", True)),
-        "automargin": True,
+        # automargin would grow the margins back out to fit the labels, undoing
+        # the pinned panel; _margins already reserves room from the font sizes.
+        "automargin": not cfg.get("lock_panel", True),
         # R uses axis.ticks.length = 0.15 cm with a 0.5-linewidth black tick.
         # 0.15 cm is ~5.7 px at 96 dpi; Plotly's default is an unstated 5.
         "ticklen": float(cfg.get("tick_length", 5.7)),
@@ -146,16 +210,33 @@ def _axis_kwargs(cfg, which):
         except (TypeError, ValueError):
             pass
 
-    lo, hi = cfg.get(p + "min"), cfg.get(p + "max")
-    if lo not in (None, "") and hi not in (None, ""):
+    # A one-sided bound is a normal thing to want (cap a kill curve at OD 1.0 and
+    # let the bottom find itself). Requiring BOTH silently discarded whichever
+    # one was set: the field accepted the number and the figure ignored it.
+    def _bound(v):
+        if v in (None, ""):
+            return None
         try:
-            lo, hi = float(lo), float(hi)
-            # Plotly log axes take EXPONENTS, not data values. Passing raw data
-            # values here silently produces a wildly wrong range.
-            ax["range"] = [math.log10(max(lo, 1e-12)), math.log10(max(hi, 1e-12))] \
-                if stype == "log" else [lo, hi]
+            v = float(v)
         except (TypeError, ValueError):
-            pass
+            return None
+        if stype != "log":
+            return v
+        # Plotly log axes take EXPONENTS, not data values. Passing raw data
+        # values here silently produces a wildly wrong range.
+        if v <= 0:
+            # log10 of 0 is undefined; clamping it to 1e-12 used to yield a
+            # 12-decade axis with the data squeezed into the top sixth. Letting
+            # Plotly autorange that end is the honest answer.
+            return None
+        return math.log10(v)
+
+    lo, hi = _bound(cfg.get(p + "min")), _bound(cfg.get(p + "max"))
+    if lo is not None or hi is not None:
+        ax["range"] = [lo, hi]
+        # With one end free, Plotly needs to be told to still fit the data.
+        if lo is None or hi is None:
+            ax["autorange"] = "max" if lo is None else "min"
     return ax
 
 
@@ -199,12 +280,20 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
             except (TypeError, ValueError):
                 _floor = float(_pos.min())
 
+    _truncated = [0]        # how many whiskers the floor actually shortened
+
     def _lower_err(y_, e_):
         """Downward error extent, clamped so a log axis stays readable."""
         if _floor is None:
             return e_
-        return np.maximum(y_ - np.maximum(y_ - e_, _floor), 0.0)
+        out = np.maximum(y_ - np.maximum(y_ - e_, _floor), 0.0)
+        # Track the clamp so the caption cannot claim a plain "mean ± SEM" over
+        # a bar that was cut short — on the demo data 5 of 76 are, and the
+        # lowest point loses its lower whisker entirely.
+        _truncated[0] += int(np.count_nonzero(out < e_ - 1e-15))
+        return out
 
+    _budget = legend_label_budget(cfg)
     for i, name in enumerate(names):
         st = styles.get(name, {})
         if st.get("visible") is False:
@@ -215,6 +304,10 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
 
         color = st.get("color") or (pal[i] if i < len(pal) else "#333333")
         label = st.get("label") or name
+        if _budget and len(label) > _budget:
+            # The gutter is reserved, so an over-long key would run off the page
+            # rather than push the panel narrower. Show that it was shortened.
+            label = label[:_budget - 1].rstrip() + "…"
         dash = st.get("dash") or DASHES[i % len(DASHES)] if cfg.get("vary_linetype") else (st.get("dash") or "solid")
         shape = st.get("shape") or (SHAPES[i % len(SHAPES)] if cfg.get("vary_shape", True) else "circle")
 
@@ -304,6 +397,11 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
         except (TypeError, ValueError):
             mtxt = ""
         caption = f"Error bars: {mtxt}mean ± {et}" + (f" ({nstr})" if nstr else "") + "."
+        if _truncated[0]:
+            # Otherwise the figure asserts a symmetric SEM over bars the log
+            # floor cut short, which is a claim the drawing does not support.
+            caption += (f" {_truncated[0]} lower bar(s) truncated at the "
+                        f"axis floor.")
 
     fig.update_layout(
         title={"text": title_txt,
@@ -327,22 +425,18 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
                 # fixed slab of whitespace. `itemwidth` at its minimum keeps the
                 # key-to-text gap small, which is what makes a Prism legend look compact.
                 "itemwidth": 30, "tracegroupgap": 4},
-        # Let Plotly size the gutter to the actual legend text (automargin on both axes
-        # handles the tick/title side). A hard r=150 left a dead band on every figure —
-        # wide enough for a long sample name, absurd for "MOI 1".
-        margin={"l": 10, "r": 10,
-                "t": 60 if (cfg.get("plot_title") or cfg.get("plot_subtitle")) else 20,
-                # autoexpand does not account for a paper-referenced annotation placed
-                # below the axis, so the error caption was clipped in half at the page
-                # edge. Reserve for it explicitly when one is being drawn.
-                "b": 70 if caption else 10, "autoexpand": True},
+        margin=_margins(cfg, caption),
         plot_bgcolor=cfg.get("plot_bgcolor", "#FFFFFF"),
         paper_bgcolor=cfg.get("paper_bgcolor", "#FFFFFF"),
         hovermode="closest",
     )
     if caption:
-        fig.add_annotation(text=caption, xref="paper", yref="paper", x=0, y=-0.16,
-                           showarrow=False, xanchor="left",
+        # Offset in PIXELS from the panel's bottom edge, not as a fraction of the
+        # panel: a fractional offset scales with panel height, so on a short
+        # figure the caption climbed into the x-axis title and overprinted it.
+        fig.add_annotation(text=caption, xref="paper", yref="paper", x=0, y=0,
+                           yshift=-(_axis_block_px(cfg) + 16),
+                           showarrow=False, xanchor="left", yanchor="top",
                            font={"size": max(9, int(cfg.get("axis_text_font_size", 14)) - 3),
                                  "color": "#555", "family": cfg.get("font_family", "Arial")})
     return fig
@@ -361,16 +455,61 @@ def _rgba(hexcolor, alpha):
 
 
 # ── Export ──────────────────────────────────────────────────────────────────
+def _png_with_dpi(png, dpi):
+    """Return `png` with a pHYs chunk declaring `dpi`, without re-encoding it.
+
+    Kaleido emits an untagged PNG, which every consumer is then entitled to read
+    as 96 dpi: a 10 x 8 in figure rendered at 300 dpi is 3000 x 2400 px, and Word
+    or InDesign will place that at 31 x 25 in. Splicing the chunk in beats
+    re-saving through PIL because the pixels are untouched.
+    """
+    import struct
+    import zlib
+
+    ppu = int(round(float(dpi) / 0.0254))          # pixels per metre
+    data = struct.pack(">IIB", ppu, ppu, 1)        # unit 1 = the metre
+    chunk = (struct.pack(">I", len(data)) + b"pHYs" + data
+             + struct.pack(">I", zlib.crc32(b"pHYs" + data) & 0xFFFFFFFF))
+
+    if png[:8] != b"\x89PNG\r\n\x1a\n":
+        return png
+
+    # Walk the chunks once, noting where IHDR ends and whether a pHYs already
+    # exists. Both are needed before deciding, because PIL writes pHYs *after*
+    # IHDR: inserting on sight of IHDR would leave two of them, and a reader
+    # that honours the later one still sees the stale density.
+    pos, after_ihdr, existing = 8, None, None
+    while pos + 8 <= len(png):
+        ln = struct.unpack(">I", png[pos:pos + 4])[0]
+        typ = png[pos + 4:pos + 8]
+        nxt = pos + 12 + ln
+        if nxt > len(png):
+            return png                             # truncated: leave it alone
+        if typ == b"IHDR":
+            after_ihdr = nxt
+        elif typ == b"pHYs":
+            existing = (pos, nxt)
+            break                                  # pHYs precedes IDAT; done
+        elif typ == b"IDAT":
+            break                                  # no pHYs in this file
+        pos = nxt
+
+    if existing:
+        return png[:existing[0]] + chunk + png[existing[1]:]
+    if after_ihdr:
+        return png[:after_ihdr] + chunk + png[after_ihdr:]
+    return png
+
+
 def figure_to_bytes(fig, fmt="png", width_in=10.0, height_in=8.0, dpi=300):
     """Render a figure to bytes at a real physical size.
 
     Kaleido works in pixels at scale=1, so inches x DPI is converted here. TIFF
     is produced by converting a high-DPI PNG, since kaleido has no TIFF writer.
+    Raster formats are tagged with their DPI on the way out, so that placing one
+    in a document gives the size that was asked for rather than a 3x enlargement.
     """
     fmt = (fmt or "png").lower()
-    w_px = max(int(round(float(width_in) * 96)), 10)
-    h_px = max(int(round(float(height_in) * 96)), 10)
-    scale = max(float(dpi) / 96.0, 0.1)
 
     if fmt in ("html",):
         # Inline the whole plotly bundle rather than linking a CDN: the app's
@@ -380,17 +519,33 @@ def figure_to_bytes(fig, fmt="png", width_in=10.0, height_in=8.0, dpi=300):
     if fmt == "json":
         return fig.to_json().encode("utf-8")
 
-    if fmt == "tiff":
-        # kaleido has no TIFF writer, so tag a high-DPI PNG instead.
+    if fmt in ("tiff", "jpeg", "jpg"):
+        # kaleido writes neither TIFF nor a density-tagged JPEG, so both are
+        # derived from a lossless PNG. Going PNG -> JPEG here also means the
+        # image is JPEG-compressed exactly once.
         png = render_images([fig], "png", width_in, height_in, dpi)[0]
         from PIL import Image
         im = Image.open(io.BytesIO(png))
         buf = io.BytesIO()
-        # dpi must be tagged or the TIFF opens at the wrong physical size.
-        im.save(buf, format="TIFF", dpi=(float(dpi), float(dpi)), compression="tiff_lzw")
+        # Kaleido returns RGBA even for an opaque white figure. Neither TIFF nor
+        # JPEG should carry that: a 4-sample TIFF with unassociated alpha is a
+        # routine journal-preflight rejection, and JPEG has no alpha at all.
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGBA")
+            flat = Image.new("RGB", im.size, (255, 255, 255))
+            flat.paste(im, mask=im.split()[-1])
+            im = flat
+        # dpi must be tagged or the file opens at the wrong physical size.
+        if fmt == "tiff":
+            im.save(buf, format="TIFF", dpi=(float(dpi), float(dpi)),
+                    compression="tiff_lzw")
+        else:
+            im.save(buf, format="JPEG", dpi=(float(dpi), float(dpi)),
+                    quality=95, subsampling=0)
         return buf.getvalue()
 
-    return render_images([fig], fmt, width_in, height_in, dpi)[0]
+    out = render_images([fig], fmt, width_in, height_in, dpi)[0]
+    return _png_with_dpi(out, dpi) if fmt == "png" else out
 
 
 def cumulative_frames(agg, cfg, styles, samples):
