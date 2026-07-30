@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# transient render/probe artifacts (kaleido Chrome profiles, scratch renders)
+_look_*
+_fig_*.png
+_current_figure.png

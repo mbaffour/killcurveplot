@@ -107,9 +107,25 @@ def _axis_kwargs(cfg, which):
         "zeroline": False,
         "mirror": bool(cfg.get("panel_border", True)),
         "automargin": True,
+        # R uses axis.ticks.length = 0.15 cm with a 0.5-linewidth black tick.
+        # 0.15 cm is ~5.7 px at 96 dpi; Plotly's default is an unstated 5.
+        "ticklen": float(cfg.get("tick_length", 5.7)),
+        "tickwidth": float(cfg.get("tick_width", 1.2)),
     }
     if stype == "log":
         ax["type"] = "log"
+        # Label DECADES ONLY, as a journal figure does. Plotly's default log axis
+        # labels intermediate ticks and formats small numbers with SI prefixes, so
+        # an OD axis came out reading  2, 1, 5, 2, 0.1, 5, 2, 0.01 … 100µ  —
+        # "100µ" is meaningless for absorbance and the 5/2 labels are chart junk.
+        # dtick=1 puts one label per power of ten; the decade subdivisions stay as
+        # unlabelled minor ticks, which is exactly the ggprism/scales look.
+        ax["dtick"] = 1
+        ax["exponentformat"] = cfg.get("log_exponent_format", "power")  # 10⁻³, not 0.001/100µ
+        ax["showexponent"] = "all"
+        ax.setdefault("minor", {})
+        ax["minor"].update({"ticks": "outside", "ticklen": 3, "showgrid": False,
+                            "tickcolor": cfg.get("axis_color", "#000000")})
     elif stype == "reverse":
         ax["autorange"] = "reversed"
     else:
@@ -119,9 +135,10 @@ def _axis_kwargs(cfg, which):
         ax["tickangle"] = cfg.get("axis_text_angle", 0)
 
     if cfg.get(p + "minor_ticks"):
-        ax["minor"] = {"ticks": "outside", "ticklen": 3,
-                       "showgrid": bool(cfg.get("show_minor_gridlines", False)),
-                       "gridcolor": cfg.get("minor_gridline_color", "#F2F2F2")}
+        ax.setdefault("minor", {})
+        ax["minor"].update({"ticks": "outside", "ticklen": 3,
+                            "showgrid": bool(cfg.get("show_minor_gridlines", False)),
+                            "gridcolor": cfg.get("minor_gridline_color", "#F2F2F2")})
 
     if cfg.get(p + "tick_interval"):
         try:
@@ -164,6 +181,30 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
     show_line = bool(cfg.get("show_lines", True))
     mult = float(cfg.get("error_multiplier", 1) or 1)
 
+    # On a LOG y axis an error bar whose lower bound crosses zero has no bottom:
+    # y-e <= 0 is -infinity in log space, so Plotly stretched the panel down to
+    # chase it and two noisy wells wasted ~a third of the figure. R exposes a
+    # "floor error bars" option for exactly this. Floor at one decade below the
+    # smallest positive plotted mean — a visible, honest whisker that cannot
+    # rescale the plot. Both the bars and the ribbon use this same floor, so the
+    # two renderings of the same data no longer disagree.
+    _log_y = cfg.get("y_scale_type") == "log"
+    _floor = None
+    if _log_y and agg is not None and len(agg):
+        _pos = agg["mean"].to_numpy(dtype=float)
+        _pos = _pos[np.isfinite(_pos) & (_pos > 0)]
+        if _pos.size:
+            try:
+                _floor = float(cfg.get("error_floor") or 0) or float(_pos.min())
+            except (TypeError, ValueError):
+                _floor = float(_pos.min())
+
+    def _lower_err(y_, e_):
+        """Downward error extent, clamped so a log axis stays readable."""
+        if _floor is None:
+            return e_
+        return np.maximum(y_ - np.maximum(y_ - e_, _floor), 0.0)
+
     for i, name in enumerate(names):
         st = styles.get(name, {})
         if st.get("visible") is False:
@@ -186,8 +227,9 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
 
         if err_mode == "ribbon" and np.any(e > 0):
             lo, hi = y - e, y + e
-            if cfg.get("y_scale_type") == "log":
-                lo = np.maximum(lo, 1e-12)     # a log axis cannot show <=0
+            if _log_y:
+                # Same floor as the bars — these used to disagree for identical data.
+                lo = y - _lower_err(y, e)
             fig.add_trace(go.Scatter(
                 x=np.concatenate([t, t[::-1]]),
                 y=np.concatenate([hi, lo[::-1]]),
@@ -207,7 +249,8 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
         )
         if err_mode == "bar" and np.any(e > 0):
             trace.error_y = {
-                "type": "data", "array": e, "visible": True,
+                "type": "data", "array": e, "arrayminus": _lower_err(y, e),
+                "symmetric": False, "visible": True,
                 "thickness": float(cfg.get("error_bar_thickness", 1)),
                 "width": float(cfg.get("error_bar_width", 4)),
                 "color": color,
@@ -254,7 +297,13 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
         ns = sorted(set(int(v) for v in agg["n"].dropna().tolist())) if "n" in agg else []
         nstr = (f"n = {ns[0]}" if len(ns) == 1 else
                 (f"n = {min(ns)}–{max(ns)}" if ns else ""))
-        caption = f"Error bars: {et}" + (f"; {nstr}" if nstr else "")
+        # Wording matches the R original: "Error bars: mean ± SEM (n = 2–3)."
+        mult = cfg.get("error_multiplier", 1)
+        try:
+            mtxt = "" if float(mult) == 1 else f"{mult}× "
+        except (TypeError, ValueError):
+            mtxt = ""
+        caption = f"Error bars: {mtxt}mean ± {et}" + (f" ({nstr})" if nstr else "") + "."
 
     fig.update_layout(
         title={"text": title_txt,
@@ -273,8 +322,20 @@ def build_figure(agg, cfg, styles=None, analysis_overlays=None, samples=None):
                 "xanchor": "left", "yanchor": "top",
                 "font": {"size": cfg.get("legend_font_size", 13),
                          "family": cfg.get("font_family", "Arial")},
-                "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0},
-        margin={"l": 80, "r": 150 if cfg.get("show_legend", True) else 40, "t": 70, "b": 70},
+                "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
+                # Tight against the panel and hugging the longest label, instead of a
+                # fixed slab of whitespace. `itemwidth` at its minimum keeps the
+                # key-to-text gap small, which is what makes a Prism legend look compact.
+                "itemwidth": 30, "tracegroupgap": 4},
+        # Let Plotly size the gutter to the actual legend text (automargin on both axes
+        # handles the tick/title side). A hard r=150 left a dead band on every figure —
+        # wide enough for a long sample name, absurd for "MOI 1".
+        margin={"l": 10, "r": 10,
+                "t": 60 if (cfg.get("plot_title") or cfg.get("plot_subtitle")) else 20,
+                # autoexpand does not account for a paper-referenced annotation placed
+                # below the axis, so the error caption was clipped in half at the page
+                # edge. Reserve for it explicitly when one is being drawn.
+                "b": 70 if caption else 10, "autoexpand": True},
         plot_bgcolor=cfg.get("plot_bgcolor", "#FFFFFF"),
         paper_bgcolor=cfg.get("paper_bgcolor", "#FFFFFF"),
         hovermode="closest",
