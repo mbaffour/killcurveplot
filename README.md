@@ -16,7 +16,9 @@ The **first run** installs the required R packages (a few minutes); after that t
 
 This is an interactive tool for visualizing Optical Density (OD) time-series data. You upload a CSV file containing your experimental measurements, and the app generates publication-quality plots with full control over colors, shapes, error bars, axis scales, labels, and more.
 
-You can export your plots as PDF, PNG, JPEG, SVG, TIFF, PowerPoint, or animated GIF.
+You can export your plots as PDF, PNG, JPEG, SVG, TIFF, PowerPoint, or animated GIF — and (new in v2.8) export the underlying summary statistics and curve metrics as CSV, or generate a complete single-file **HTML or PDF analysis report** containing the figure, statistics tables, metric definitions, data provenance, and session info.
+
+Not sure where to start? Click **"Load Demo Data"** under the file picker to explore the app with a built-in example dataset (3 samples × 3 replicates).
 
 ---
 
@@ -53,7 +55,7 @@ Packages are add-ons that the app depends on. You only need to do this once.
 install.packages(c(
   "shiny", "tidyverse", "ggpubr", "scales",
   "ggrepel", "ggprism", "svglite", "jsonlite",
-  "officer", "rvg", "gifski"
+  "officer", "rvg", "gifski", "base64enc", "gridExtra"
 ))
 ```
 
@@ -65,13 +67,13 @@ If you see any errors mentioning a specific package, try installing that package
 install.packages("package_name_here")
 ```
 
-**Note:** The `officer`, `rvg`, and `gifski` packages are optional. Without them, the PowerPoint and GIF export buttons will be disabled, but everything else works fine.
+**Note:** The `officer`, `rvg`, `gifski`, `base64enc`, and `gridExtra` packages are optional. Without them, the PowerPoint, GIF, HTML-report, and PDF-report buttons (respectively) will be disabled, but everything else works fine.
 
 ---
 
 ## Step 3: Run the App
 
-1. In RStudio, go to **File → Open File** and navigate to the `Lysis_Curve_App_v27.R` file.
+1. In RStudio, go to **File → Open File** and navigate to the `Lysis_Curve_App_v28.R` file.
 2. The file will open in the top-left editor panel.
 3. Click the **"Run App"** button at the top-right of the editor panel. It has a green play icon and the text "Run App".
    - If you don't see "Run App", make sure the `.R` file is the active tab in the editor.
@@ -97,6 +99,8 @@ Each column is a different sample, and each row is a time point. The first colum
 | 90   | 0.70     | 0.82     | 0.61     |
 
 If you have replicates, give them the same column name. The app will automatically calculate the mean and standard deviation.
+
+> **Accuracy note (fixed in v2.8):** versions up to v2.7 silently used only the *first* column of each repeated name, so means were based on a single replicate and error bars disappeared. v2.8 pools all replicate columns correctly. After loading a file, check the green **data summary box** under the file picker — it shows exactly how many replicate columns were detected per sample, so you can confirm the app read your data the way you intended.
 
 | Time | WT | WT | WT | Mutant | Mutant | Mutant |
 |------|----|----|----|--------|--------|--------|
@@ -186,6 +190,24 @@ Set the frames per second and GIF dimensions, then click **"Download Animated GI
 
 ---
 
+## Stats & Reports (new in v2.8)
+
+Expand the **Stats & Reports** section in the sidebar. Everything here reflects the *current* sample selection and time filtering — exactly what the plot shows.
+
+### Statistics Export
+
+- **Summary Statistics (CSV)** — per sample and time point: mean, SD, n, SEM, and the 95% CI half-width (computed as t₀.₉₇₅,ₙ₋₁ × SEM). `n` counts only non-missing replicate values.
+- **Curve Metrics (CSV)** — one row per sample: initial/final/min/max values and their times, fold change, % drop from max, AUC (trapezoidal rule), time to fall below half of the maximum (linearly interpolated), steepest decline rate and its interval, maximum specific growth rate (max slope of ln(mean)), and doubling time (ln 2 / growth rate). Metrics that don't apply (e.g. doubling time for a curve that never grows) are reported as `NA`, never fabricated.
+
+### Analysis Report (single file)
+
+Fill in an optional title, author, and notes, then click:
+
+- **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis.
+- **PDF Report** — the same content as a multi-page PDF (title/provenance page, figure page, paginated tables). No LaTeX or pandoc required.
+
+---
+
 ## Troubleshooting
 
 **"Error: could not find function..."** — You're missing a package. Go back to Step 2 and install the missing package.
@@ -214,4 +236,4 @@ Set the frames per second and GIF dimensions, then click **"Download Animated GI
 
 ---
 
-*Lysis Curve OD Visualization App v2.7 — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.8 — Michael Baffour Awuah / Ramsey Lab*

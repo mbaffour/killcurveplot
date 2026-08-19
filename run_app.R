@@ -1,8 +1,9 @@
 #!/usr/bin/env Rscript
 # Auto-installs any missing packages on first run, then opens the Shiny app in your browser.
 # Launched by the "Run Lysis Curve Plotter" (.bat / .command) scripts, or run:  Rscript run_app.R
-APP  <- "Lysis_Curve_App_v27.R"
-PKGS <- c("shiny","tidyverse","ggpubr","ggprism","ggrepel","scales","svglite","jsonlite","gifski","officer","rvg")
+APP  <- "Lysis_Curve_App_v28.R"
+PKGS <- c("shiny","tidyverse","ggpubr","ggprism","ggrepel","scales","svglite","jsonlite",
+          "gifski","officer","rvg","base64enc","gridExtra")
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 
 # Use a writable personal library — R in "Program Files" usually isn't user-writable,
