@@ -1195,7 +1195,12 @@ server <- function(input, output, session) {
                    "sample","Sample","group","Group")
     if (any(potential %in% colnames(data))) return(TRUE)
     if (ncol(data) <= 4) {
-      vd <- sapply(data, function(x) length(unique(x)) / nrow(data))
+      # Only NON-NUMERIC columns can be grouping candidates: a numeric OD
+      # column with repeated values (e.g. a flat/constant control) must not
+      # flip a small wide file into long format.
+      nn <- !vapply(data, is.numeric, logical(1))
+      if (!any(nn)) return(FALSE)
+      vd <- sapply(data[nn], function(x) length(unique(x)) / nrow(data))
       return(any(vd < 0.3 & vd > 0))
     }
     FALSE
