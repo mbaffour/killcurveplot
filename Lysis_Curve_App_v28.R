@@ -142,34 +142,123 @@ parse_excluded_timepoints <- function(text, all_timepoints) {
 # ── Curve metrics ─────────────────────────────────────────────────────────────
 # All metrics are computed from the per-sample MEAN curve exactly as plotted
 # (i.e. after time filtering / point exclusion), sorted by time.
-# Definitions (also embedded in reports):
-#   auc_trapezoid        – area under the mean curve, trapezoidal rule
-#   t_half_max_decline   – first time AFTER the curve maximum at which the mean
-#                          falls below 50% of the maximum; linearly interpolated
-#                          between the two bracketing time points; NA if the
-#                          curve never falls below half-max
-#   steepest_decline_rate– most negative slope between consecutive mean points
-#   max_specific_growth  – max slope of ln(mean) between consecutive points
-#                          (only intervals where both means > 0); NA if the
-#                          curve never increases
-#   doubling_time        – ln(2) / max_specific_growth (NA when no growth)
-compute_curve_metrics <- function(pd) {
+#
+# The growth/lysis engine (mu_max, lag_phase, stat_phase_dur, lysis_time,
+# lysis_rate, od_drop, residual_od, recovery_slope, and the reference-based
+# infection metrics) is a port of calculate_growth_metrics() /
+# calculate_infection_metrics() from the companion analysis app used for the
+# N4 lysis paper ("Lysis Curve Ap 26.03.13.R"), verified against it by a
+# parity test suite. The rolling regression is implemented in base R (no zoo
+# dependency) with identical centered-window semantics.
+#
+# Two DELIBERATE corrections vs the reference implementation:
+#  1. Infection metrics: the reference uses ifelse() with a length-1
+#     condition, which silently recycles the FIRST sample's relative value
+#     to every sample. Here each sample gets its own correct ratio.
+#  2. mu_max requires a rolling slope > 1e-10 (reference: > 0), so an exactly
+#     flat curve is not reported as growing with doubling time ~ 1e17 due to
+#     floating-point noise in the regression.
+
+# Centered rolling slope of y ~ t over consecutive index windows of `win`
+# points; replicates zoo::rollapply(..., align = "center", fill = NA).
+rolling_slope <- function(t, y, win) {
+  n   <- length(t)
+  out <- rep(NA_real_, n)
+  if (win > n || win < 2) return(out)
+  offset <- floor((win - 1) / 2)   # zoo places even-width windows left of center
+  for (s in seq_len(n - win + 1)) {
+    idx <- s:(s + win - 1)
+    tt  <- t[idx]; yy <- y[idx]
+    out[s + offset] <- if (diff(range(tt)) == 0) 0 else
+      unname(coef(lm(yy ~ tt))[2])
+  }
+  out
+}
+
+# ref_sample: optional name of an uninfected/reference sample; when given (and
+# present in the data) the five reference-normalised infection metrics are added.
+compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL) {
   if (is.null(pd) || nrow(pd) == 0) return(NULL)
   pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
   out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
-    t <- g$time; y <- g$mean_value
-    npts <- length(t)
-    imax <- which.max(y); imin <- which.min(y)
-    init <- y[1]; fin <- y[npts]
+    t_vec  <- g$time; od_vec <- g$mean_value
+    n_pts  <- length(t_vec)
+    max_idx <- which.max(od_vec); min_idx <- which.min(od_vec)
+    initial_od <- od_vec[1]
+    max_od     <- od_vec[max_idx]
+    final_od   <- od_vec[n_pts]
 
-    auc <- if (npts >= 2)
-      sum(diff(t) * (head(y, -1) + tail(y, -1)) / 2) else NA_real_
+    auc <- if (n_pts >= 2)
+      sum(diff(t_vec) * (head(od_vec, -1) + tail(od_vec, -1)) / 2) else NA_real_
 
-    # Time to fall below half of the maximum, searching AFTER the max
-    half <- y[imax] * 0.5
+    # ── mu_max + lag phase via centered rolling regression on log(OD) ────────
+    # (paper method: window of `smooth_window` points; lag = first time the
+    # rolling slope reaches 10% of mu_max)
+    mu_max <- NA_real_; lag_phase <- NA_real_
+    win <- min(smooth_window, n_pts)
+    if (n_pts >= win && win >= 3) {
+      log_od <- log(pmax(od_vec, 1e-9))
+      roll_slopes <- tryCatch(rolling_slope(t_vec, log_od, win),
+                              error = function(e) rep(NA_real_, n_pts))
+      # deviation from the reference engine: require slopes > 1e-10 (not > 0)
+      # so floating-point noise on a flat curve is not reported as growth
+      # (the reference can emit mu_max ~ 1e-18 -> doubling time ~ 1e17)
+      valid <- which(is.finite(roll_slopes) & roll_slopes > 1e-10)
+      if (length(valid) > 0) {
+        mu_max    <- max(roll_slopes[valid], na.rm = TRUE)
+        threshold <- 0.10 * mu_max
+        lag_idx   <- which(roll_slopes >= threshold & is.finite(roll_slopes))
+        lag_phase <- if (length(lag_idx) > 0) t_vec[lag_idx[1]] else NA_real_
+      }
+    }
+    doubling_time <- if (is.finite(mu_max) && mu_max > 0) log(2) / mu_max else NA_real_
+
+    # ── Stationary phase duration: time spent within 95% of max OD ───────────
+    stat_phase_dur <- NA_real_
+    if (max_idx > 1) {
+      near_max <- which(od_vec >= 0.95 * max_od)
+      if (length(near_max) >= 2)
+        stat_phase_dur <- t_vec[max(near_max)] - t_vec[min(near_max)]
+    }
+
+    # ── Lysis detection (paper method) ───────────────────────────────────────
+    # onset = first post-peak point whose decline from peak exceeds 5% of peak;
+    # rate  = linear-regression slope from peak to the post-peak trough
+    lysis_time <- NA_real_; lysis_rate <- NA_real_
+    od_drop <- NA_real_; residual_od <- NA_real_; recovery_slope <- NA_real_
+    if (max_idx < n_pts) {
+      post_peak  <- (max_idx + 1):n_pts
+      od_decline <- max_od - od_vec[post_peak]
+      lysis_idx  <- which(od_decline > 0.05 * max_od)
+      if (length(lysis_idx) > 0) {
+        lysis_time <- t_vec[post_peak[lysis_idx[1]]]
+        trough_idx <- max_idx + which.min(od_vec[post_peak])
+        if (trough_idx > max_idx) {
+          lw <- max_idx:trough_idx
+          if (length(lw) >= 2)
+            lysis_rate <- tryCatch(
+              unname(coef(lm(od_vec[lw] ~ t_vec[lw]))[2]),
+              error = function(e) NA_real_)
+        }
+        post_min    <- min(od_vec[post_peak], na.rm = TRUE)
+        od_drop     <- max_od - post_min
+        residual_od <- post_min
+        if (trough_idx < n_pts) {
+          rw <- trough_idx:n_pts
+          if (length(rw) >= 3) {
+            rec <- tryCatch(unname(coef(lm(od_vec[rw] ~ t_vec[rw]))[2]),
+                            error = function(e) NA_real_)
+            recovery_slope <- if (is.finite(rec) && rec > 0) rec else NA_real_
+          }
+        }
+      }
+    }
+
+    # ── Additional transparent metrics ───────────────────────────────────────
+    half <- max_od * 0.5
     t50  <- NA_real_
-    if (imax < npts) {
-      at <- t[imax:npts]; ay <- y[imax:npts]
+    if (max_idx < n_pts) {
+      at <- t_vec[max_idx:n_pts]; ay <- od_vec[max_idx:n_pts]
       below <- which(ay < half)
       if (length(below)) {
         j <- below[1]
@@ -180,79 +269,101 @@ compute_curve_metrics <- function(pd) {
         }
       }
     }
-
-    # Steepest decline between consecutive mean points
     dec_rate <- NA_real_; dec_int <- NA_character_
-    if (npts >= 2) {
-      dt <- diff(t)
-      slopes <- ifelse(dt > 0, diff(y) / dt, NA_real_)
+    if (n_pts >= 2) {
+      dt <- diff(t_vec)
+      slopes <- ifelse(dt > 0, diff(od_vec) / dt, NA_real_)
       if (any(is.finite(slopes))) {
         k <- which.min(ifelse(is.finite(slopes), slopes, Inf))
         dec_rate <- slopes[k]
-        dec_int  <- paste0(t[k], "–", t[k+1])
-      }
-    }
-
-    # Max specific growth rate on the ln scale (both endpoints must be > 0)
-    mu <- NA_real_; mu_int <- NA_character_
-    if (npts >= 2) {
-      dt <- diff(t)
-      ok <- head(y, -1) > 0 & tail(y, -1) > 0 & dt > 0
-      ln_slopes <- rep(NA_real_, npts - 1)
-      ln_slopes[ok] <- diff(log(y))[ok] / dt[ok]
-      pos <- is.finite(ln_slopes) & ln_slopes > 0
-      if (any(pos)) {
-        k <- which.max(ifelse(pos, ln_slopes, -Inf))
-        mu <- ln_slopes[k]
-        mu_int <- paste0(t[k], "–", t[k+1])
+        dec_int  <- paste0(t_vec[k], "–", t_vec[k+1])
       }
     }
 
     data.frame(
-      sample                    = g$variable[1],
-      n_timepoints              = npts,
-      t_start                   = t[1],
-      t_end                     = t[npts],
-      initial_value             = init,
-      final_value               = fin,
-      min_value                 = y[imin],
-      t_at_min                  = t[imin],
-      max_value                 = y[imax],
-      t_at_max                  = t[imax],
-      fold_change_final_vs_initial = if (init != 0) fin / init else NA_real_,
-      pct_drop_from_max         = if (y[imax] != 0) (y[imax] - fin) / y[imax] * 100 else NA_real_,
-      auc_trapezoid             = auc,
+      sample          = g$variable[1],
+      n_timepoints    = n_pts,
+      t_start         = t_vec[1],
+      t_end           = t_vec[n_pts],
+      initial_od      = initial_od,
+      max_od          = max_od,
+      time_max_od     = t_vec[max_idx],
+      min_od          = od_vec[min_idx],
+      time_min_od     = t_vec[min_idx],
+      final_od        = final_od,
+      auc             = auc,
+      mu_max          = mu_max,
+      doubling_time   = doubling_time,
+      lag_phase       = lag_phase,
+      stat_phase_dur  = stat_phase_dur,
+      lysis_time      = lysis_time,
+      lysis_rate      = lysis_rate,
+      od_drop         = od_drop,
+      residual_od     = residual_od,
+      recovery_slope  = recovery_slope,
+      lysis_efficiency = if (max_od > 0 && is.finite(od_drop)) od_drop / max_od else NA_real_,
+      recovery_ratio  = if (max_od > 0) final_od / max_od else NA_real_,
+      fold_change_final_vs_initial = if (initial_od != 0) final_od / initial_od else NA_real_,
+      pct_drop_from_max = if (max_od != 0) (max_od - final_od) / max_od * 100 else NA_real_,
       t_half_max_decline        = t50,
       steepest_decline_rate     = dec_rate,
       steepest_decline_interval = dec_int,
-      max_specific_growth_rate  = mu,
-      growth_interval           = mu_int,
-      doubling_time             = if (is.finite(mu) && mu > 0) log(2) / mu else NA_real_,
       stringsAsFactors = FALSE
     )
   })
-  do.call(rbind, c(out, list(make.row.names = FALSE)))
+  m <- do.call(rbind, c(out, list(make.row.names = FALSE)))
+
+  # ── Reference-normalised infection metrics (paper method) ──────────────────
+  if (!is.null(ref_sample) && nzchar(ref_sample) && ref_sample %in% m$sample) {
+    ref <- m[m$sample == ref_sample, , drop = FALSE]
+    ref_auc    <- mean(ref$auc,    na.rm = TRUE)
+    ref_mu_max <- mean(ref$mu_max, na.rm = TRUE)
+    ref_max_od <- mean(ref$max_od, na.rm = TRUE)
+    m$relative_growth    <- if (is.finite(ref_auc) && ref_auc > 0)
+      m$auc / ref_auc else NA_real_
+    m$infection_strength <- if (is.finite(ref_auc) && ref_auc > 0)
+      1 - (m$auc / ref_auc) else NA_real_
+    m$relative_mu_max    <- if (is.finite(ref_mu_max) && ref_mu_max > 0)
+      m$mu_max / ref_mu_max else NA_real_
+    m$relative_max_od    <- if (is.finite(ref_max_od) && ref_max_od > 0)
+      m$max_od / ref_max_od else NA_real_
+    m$lysis_onset_delta  <- m$lysis_time - m$lag_phase
+  }
+  m
 }
 
 METRIC_DEFINITIONS <- c(
-  n_timepoints              = "Number of time points in the (filtered) mean curve",
-  t_start                   = "First time point plotted",
-  t_end                     = "Last time point plotted",
-  initial_value             = "Mean value at the first time point",
-  final_value               = "Mean value at the last time point",
-  min_value                 = "Minimum of the mean curve",
-  t_at_min                  = "Time at which the minimum occurs",
-  max_value                 = "Maximum of the mean curve",
-  t_at_max                  = "Time at which the maximum occurs",
-  fold_change_final_vs_initial = "final_value / initial_value (NA if initial is 0)",
-  pct_drop_from_max         = "(max_value - final_value) / max_value x 100",
-  auc_trapezoid             = "Area under the mean curve (trapezoidal rule)",
-  t_half_max_decline        = "First time after the maximum at which the mean falls below 50% of the maximum (linear interpolation); NA if never",
-  steepest_decline_rate     = "Most negative slope between consecutive mean points (value units per time unit)",
+  n_timepoints    = "Number of time points in the (filtered) mean curve",
+  t_start         = "First time point plotted",
+  t_end           = "Last time point plotted",
+  initial_od      = "Mean value at the first time point",
+  max_od          = "Maximum (peak) of the mean curve",
+  time_max_od     = "Time at which the peak occurs",
+  min_od          = "Global minimum of the mean curve",
+  time_min_od     = "Time at which the global minimum occurs",
+  final_od        = "Mean value at the last time point",
+  auc             = "Area under the mean curve (trapezoidal rule)",
+  mu_max          = "Maximum specific growth rate: largest centered rolling-window regression slope of ln(mean) vs time (window = smoothing setting, default 5 points); NA if the curve never grows",
+  doubling_time   = "ln(2) / mu_max; NA when there is no growth phase",
+  lag_phase       = "First time at which the rolling ln-slope reaches 10% of mu_max",
+  stat_phase_dur  = "Time spanned by all points within 95% of the peak",
+  lysis_time      = "Lysis onset: first post-peak time at which the decline from peak exceeds 5% of the peak; NA if the curve never declines past that",
+  lysis_rate      = "Linear-regression slope of the mean from the peak to the post-peak trough (negative = decline)",
+  od_drop         = "Peak minus post-peak minimum (absolute decline)",
+  residual_od     = "Post-peak minimum (residual OD after lysis)",
+  recovery_slope  = "Positive linear-regression slope from the post-peak trough to the end (regrowth / burst proxy); NA if no recovery",
+  lysis_efficiency = "od_drop / max_od (fraction of the peak lost to lysis)",
+  recovery_ratio  = "final_od / max_od",
+  fold_change_final_vs_initial = "final_od / initial_od (NA if initial is 0)",
+  pct_drop_from_max = "(max_od - final_od) / max_od x 100",
+  t_half_max_decline = "First time after the peak at which the mean falls below 50% of the peak (linear interpolation); NA if never",
+  steepest_decline_rate = "Most negative slope between consecutive mean points",
   steepest_decline_interval = "Time interval over which the steepest decline occurs",
-  max_specific_growth_rate  = "Maximum slope of ln(mean) between consecutive points; NA if the curve never increases",
-  growth_interval           = "Time interval of the maximum specific growth rate",
-  doubling_time             = "ln(2) / max_specific_growth_rate; NA when there is no growth phase"
+  relative_growth    = "auc / auc(reference sample)",
+  infection_strength = "1 - auc / auc(reference sample)",
+  relative_mu_max    = "mu_max / mu_max(reference sample)",
+  relative_max_od    = "max_od / max_od(reference sample)",
+  lysis_onset_delta  = "lysis_time - lag_phase"
 )
 
 # ── Report helpers ────────────────────────────────────────────────────────────
@@ -272,7 +383,7 @@ html_escape <- function(x) {
   gsub(">", "&gt;",  x, fixed = TRUE)
 }
 
-html_table <- function(df, digits = 5) {
+html_table <- function(df, digits = 5, class = NULL) {
   if (is.null(df) || nrow(df) == 0) return("<p><em>No data.</em></p>")
   head_row <- paste0("<th>", html_escape(colnames(df)), "</th>", collapse = "")
   body <- vapply(seq_len(nrow(df)), function(i) {
@@ -280,11 +391,14 @@ html_table <- function(df, digits = 5) {
       v <- df[i, j]
       txt <- if (is.numeric(v)) fmt_sig(v, digits) else html_escape(as.character(v))
       if (is.na(df[i, j])) txt <- "NA"
+      txt <- gsub("\n", "<br/>", txt, fixed = TRUE)
       paste0("<td>", txt, "</td>")
     }, character(1))
     paste0("<tr>", paste0(cells, collapse = ""), "</tr>")
   }, character(1))
-  paste0("<div class='tblwrap'><table><thead><tr>", head_row, "</tr></thead><tbody>",
+  cls <- if (is.null(class)) "" else paste0(" class='", class, "'")
+  paste0("<div class='tblwrap'><table", cls, "><thead><tr>", head_row,
+         "</tr></thead><tbody>",
          paste0(body, collapse = ""), "</tbody></table></div>")
 }
 
@@ -292,8 +406,11 @@ html_table <- function(df, digits = 5) {
 # meta: named list with title, author, notes, generated, data_file, format,
 #       time_col, samples_txt, filter_txt, error_txt, settings_df
 build_html_report <- function(meta, img_b64, stats_df, metrics_df) {
-  defs_df <- data.frame(metric = names(METRIC_DEFINITIONS),
-                        definition = unname(METRIC_DEFINITIONS),
+  def_keys <- if (!is.null(metrics_df))
+    intersect(names(METRIC_DEFINITIONS), colnames(metrics_df))
+  else names(METRIC_DEFINITIONS)
+  defs_df <- data.frame(metric = def_keys,
+                        definition = unname(METRIC_DEFINITIONS[def_keys]),
                         stringsAsFactors = FALSE)
   si <- utils::sessionInfo()
   pkg_names <- sort(names(si$otherPkgs %||% list()))
@@ -305,6 +422,12 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df) {
     paste0("<h2>Notes</h2><p class='notes'>",
            gsub("\n", "<br/>", html_escape(meta$notes)), "</p>") else ""
 
+  notebook_html <- if (!is.null(meta$notebook_df))
+    paste0("<h2>Experiment notebook</h2>",
+           html_table(meta$notebook_df, class = "wrap prov")) else ""
+
+  font_pt <- meta$font_pt %||% 14
+
   paste0(
 "<!DOCTYPE html><html><head><meta charset='utf-8'>
 <title>", html_escape(meta$title), "</title>
@@ -312,7 +435,7 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df) {
   html { background: #ffffff; }
   body { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
          max-width: 1000px; margin: 24px auto; padding: 0 16px;
-         color: #212529; background: #ffffff; }
+         color: #212529; background: #ffffff; font-size: ", font_pt, "px; }
   h1 { border-bottom: 3px solid #343a40; padding-bottom: 8px; margin-bottom: 4px; }
   h2 { color: #343a40; border-bottom: 1px solid #dee2e6; padding-bottom: 4px; margin-top: 32px; }
   .meta { color: #6c757d; font-size: 0.9em; margin-bottom: 20px; }
@@ -324,6 +447,7 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df) {
   img.figure { max-width: 100%; height: auto; border: 1px solid #dee2e6; }
   .notes { background: #fff9db; border: 1px solid #ffe066; border-radius: 6px; padding: 12px; }
   .prov td:first-child { font-weight: bold; background: #f1f3f5; }
+  table.wrap td { white-space: normal; }
   footer { margin-top: 40px; color: #adb5bd; font-size: 0.8em; border-top: 1px solid #dee2e6; padding-top: 8px; }
   @media print { body { max-width: none; } h2 { page-break-after: avoid; } .tblwrap { overflow-x: visible; } }
 </style></head><body>
@@ -340,8 +464,9 @@ notes_html,
 <tr><td>Samples plotted</td><td>",  html_escape(meta$samples_txt), "</td></tr>
 <tr><td>Time filtering</td><td>",   html_escape(meta$filter_txt),  "</td></tr>
 <tr><td>Error display</td><td>",    html_escape(meta$error_txt),   "</td></tr>
-</table></div>
-<h2>Figure</h2>
+</table></div>",
+notebook_html,
+"<h2>Figure</h2>
 <img class='figure' src='data:image/png;base64,", img_b64, "' alt='Lysis curve figure'/>
 <h2>Summary statistics</h2>
 <p>Per sample and time point, computed from the currently loaded (and filtered) data.
@@ -369,16 +494,17 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
   grDevices::pdf(file, width = width, height = height, onefile = TRUE)
   on.exit(grDevices::dev.off(), add = TRUE)
 
+  fscale <- (meta$font_pt %||% 14) / 14   # report font size control
   tt  <- gridExtra::ttheme_default(
-    core    = list(fg_params = list(cex = 0.55)),
-    colhead = list(fg_params = list(cex = 0.6)))
+    core    = list(fg_params = list(cex = 0.55 * fscale)),
+    colhead = list(fg_params = list(cex = 0.6 * fscale)))
 
   # ── Page 1: title + provenance ──
   grid::grid.newpage()
-  grid::grid.text(meta$title, y = 0.90, gp = grid::gpar(fontsize = 22, fontface = "bold"))
+  grid::grid.text(meta$title, y = 0.90, gp = grid::gpar(fontsize = 22 * fscale, fontface = "bold"))
   sub <- paste0(if (nzchar(meta$author %||% "")) paste0(meta$author, "  •  ") else "",
                 "Generated ", meta$generated)
-  grid::grid.text(sub, y = 0.84, gp = grid::gpar(fontsize = 11, col = "grey40"))
+  grid::grid.text(sub, y = 0.84, gp = grid::gpar(fontsize = 11 * fscale, col = "grey40"))
   prov <- c(paste0("Data file: ",       meta$data_file),
             paste0("Detected format: ", meta$format),
             paste0("Time column: ",     meta$time_col),
@@ -386,13 +512,27 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
             paste0("Time filtering: ",  meta$filter_txt),
             paste0("Error display: ",   meta$error_txt))
   grid::grid.text(paste(prov, collapse = "\n"), y = 0.68, just = "top",
-                  gp = grid::gpar(fontsize = 11, lineheight = 1.4))
+                  gp = grid::gpar(fontsize = 11 * fscale, lineheight = 1.4))
   if (nzchar(trimws(meta$notes %||% ""))) {
     grid::grid.text(paste0("Notes:\n", meta$notes), y = 0.40, just = "top",
-                    gp = grid::gpar(fontsize = 10, lineheight = 1.3, col = "grey20"))
+                    gp = grid::gpar(fontsize = 10 * fscale, lineheight = 1.3, col = "grey20"))
   }
 
-  # ── Page 2: figure ──
+  # ── Experiment notebook page (only when fields were filled in) ──
+  if (!is.null(meta$notebook_df)) {
+    nb <- meta$notebook_df
+    nb$value <- vapply(nb$value, function(s)
+      paste(strwrap(s, 60), collapse = "\n"), character(1))
+    grid::grid.newpage()
+    grid::grid.text("Experiment notebook", y = 0.97,
+                    gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
+    g <- gridExtra::tableGrob(nb, rows = NULL, theme = tt)
+    gw <- grid::convertWidth(sum(g$widths), "npc", valueOnly = TRUE)
+    vp <- if (gw > 0.98) grid::viewport(y = 0.5, width = 0.98 / gw) else grid::viewport(y = 0.5)
+    grid::pushViewport(vp); grid::grid.draw(g); grid::popViewport()
+  }
+
+  # ── Figure page ──
   print(plot_obj)
 
   # ── Stats table pages (chunked) ──
@@ -412,7 +552,7 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
                              if (length(starts) > 1)
                                paste0("  (rows ", s, "–", min(s + rows_per_page - 1, n),
                                       " of ", n, ")") else ""),
-                      y = 0.97, gp = grid::gpar(fontsize = 13, fontface = "bold"))
+                      y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
       g <- gridExtra::tableGrob(chunk, rows = NULL, theme = tt)
       # scale down if wider than page
       gw <- grid::convertWidth(sum(g$widths), "npc", valueOnly = TRUE)
@@ -422,18 +562,19 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
   }
   page_table(stats_df,   "Summary statistics (mean / SD / n / SEM / 95% CI)")
   if (!is.null(metrics_df)) {
-    # metrics are wide; split into two blocks of columns for readability
-    half <- ceiling(ncol(metrics_df) / 2)
-    m1 <- metrics_df[, c(1, 2:half), drop = FALSE]
-    m2 <- metrics_df[, c(1, (half + 1):ncol(metrics_df)), drop = FALSE]
-    page_table(m1, "Curve metrics (1 of 2)")
-    page_table(m2, "Curve metrics (2 of 2)")
-    defs_df <- data.frame(metric = names(METRIC_DEFINITIONS),
-                          definition = unname(METRIC_DEFINITIONS),
+    # metrics are wide; page through blocks of columns, repeating the sample col
+    other  <- setdiff(seq_len(ncol(metrics_df)), 1)
+    blocks <- split(other, ceiling(seq_along(other) / 7))
+    for (bi in seq_along(blocks)) {
+      mb <- metrics_df[, c(1, blocks[[bi]]), drop = FALSE]
+      page_table(mb, paste0("Curve metrics (", bi, " of ", length(blocks), ")"))
+    }
+    defs_df <- data.frame(metric = intersect(names(METRIC_DEFINITIONS), colnames(metrics_df)),
                           stringsAsFactors = FALSE)
+    defs_df$definition <- unname(METRIC_DEFINITIONS[defs_df$metric])
     defs_df$definition <- vapply(defs_df$definition, function(s)
       paste(strwrap(s, 70), collapse = "\n"), character(1))
-    page_table(defs_df, "Metric definitions", rows_per_page = 18)
+    page_table(defs_df, "Metric definitions", rows_per_page = 14)
   }
   invisible(file)
 }
@@ -664,6 +805,7 @@ ui <- fluidPage(
                        numericInput("title_font_size",      "Title Font Size:",  20, 8, 48),
                        numericInput("axis_label_font_size", "Axis Label Size:",  20, 8, 36),
                        numericInput("axis_text_font_size",  "Axis Text Size:",   16, 6, 32),
+                       numericInput("legend_font_size",     "Legend Font Size:", 14, 6, 32),
                        checkboxInput("bold_title",         "Bold Title",         TRUE),
                        checkboxInput("italic_axis_labels", "Italic Axis Labels", FALSE),
                        selectInput("axis_text_angle", "X-axis Text Angle:",
@@ -844,6 +986,71 @@ ui <- fluidPage(
                    )
                  ),
 
+                 # ── Experiment Notebook ───────────────────────────────────────────────────
+                 # Structured lab-notebook record (modeled on the companion app's
+                 # Experiment Notes tab). Everything filled in here is embedded in
+                 # the HTML / PDF reports; empty fields are skipped.
+                 tags$details(
+                   tags$summary("Experiment Notebook"),
+                   div(class = "panel-section",
+                       h4("Experiment Identity", class = "panel-title"),
+                       textInput("nb_exp_id",       "Experiment ID / Name:", ""),
+                       fluidRow(
+                         column(6, dateInput("nb_date", "Date:", value = Sys.Date())),
+                         column(6, textInput("nb_experimenter", "Experimenter:", ""))
+                       ),
+                       fluidRow(
+                         column(6, textInput("nb_project",     "Project:", "")),
+                         column(6, textInput("nb_institution", "Lab / Institution:", ""))
+                       )
+                   ),
+                   div(class = "panel-section",
+                       h4("Biology & Conditions", class = "panel-title"),
+                       selectInput("nb_exp_type", "Experiment Type:",
+                                   choices = c("Phage Infection", "Plasmid Induction",
+                                               "Growth Curve", "Lysis Curve",
+                                               "Dose-Response", "Other"),
+                                   selected = "Phage Infection"),
+                       fluidRow(
+                         column(6, textInput("nb_host_strain",   "Host Strain(s):", "")),
+                         column(6, textInput("nb_phage_plasmid", "Phage / Plasmid:", ""))
+                       ),
+                       fluidRow(
+                         column(6, textInput("nb_moi",       "MOI:", "")),
+                         column(6, textInput("nb_replicate", "Replicate / Batch:", ""))
+                       ),
+                       fluidRow(
+                         column(6, textInput("nb_media",       "Growth Medium:", "")),
+                         column(6, textInput("nb_temperature", "Temperature (°C):", ""))
+                       ),
+                       fluidRow(
+                         column(6, textInput("nb_time_inf", "Time of Infection/Induction:", "")),
+                         column(6, textInput("nb_inducer",  "Inducer (+ conc.):", ""))
+                       )
+                   ),
+                   div(class = "panel-section",
+                       h4("Notes", class = "panel-title"),
+                       textAreaInput("nb_observations", "Observations / Results:", "", rows = 3),
+                       textAreaInput("nb_issues",       "Issues / Anomalies:",     "", rows = 2),
+                       textAreaInput("nb_next_steps",   "Next Steps:",             "", rows = 2),
+                       textInput("nb_tags", "Tags (comma-separated):", "",
+                                 placeholder = "e.g. pilot, MG1655, N4, low-MOI"),
+                       h5("Custom Fields", style = "margin-top:10px;"),
+                       fluidRow(
+                         column(5, textInput("nb_custom_key1", "Key:",   "", placeholder = "Field")),
+                         column(7, textInput("nb_custom_val1", "Value:", ""))
+                       ),
+                       fluidRow(
+                         column(5, textInput("nb_custom_key2", "Key:",   "", placeholder = "Field")),
+                         column(7, textInput("nb_custom_val2", "Value:", ""))
+                       ),
+                       fluidRow(
+                         column(5, textInput("nb_custom_key3", "Key:",   "", placeholder = "Field")),
+                         column(7, textInput("nb_custom_val3", "Value:", ""))
+                       )
+                   )
+                 ),
+
                  # ── Stats & Reports ───────────────────────────────────────────────────────
                  tags$details(
                    tags$summary("Stats & Reports"),
@@ -858,9 +1065,18 @@ ui <- fluidPage(
                        downloadButton("downloadMetricsCSV", "Curve Metrics (CSV)",
                                       style = "width:100%;"),
                        p(style = "font-size:.78em;color:#777;margin-top:4px;",
-                         "Per-sample metrics: initial/final/min/max, fold change, AUC, ",
-                         "time to half-max after peak, steepest decline, max growth rate, ",
-                         "doubling time."),
+                         "Per-sample growth & lysis metrics (same engine as the lysis-paper ",
+                         "companion app): μmax, doubling time, lag phase, stationary ",
+                         "duration, lysis onset/rate, OD drop, residual OD, recovery slope, ",
+                         "AUC, lysis efficiency, and more."),
+                       numericInput("metrics_smooth_window",
+                                    "μmax smoothing window (points):", 5, 3, 15, 1),
+                       selectInput("metrics_ref_sample",
+                                   "Reference sample (infection metrics):",
+                                   choices = c("None" = "")),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Pick your uninfected control to add relative growth, infection ",
+                         "strength, relative μmax, relative max OD, and lysis-onset Δ."),
                        hr(),
                        h4("Analysis Report", class = "panel-title"),
                        p(style = "font-size:.82em;color:#555;",
@@ -870,6 +1086,10 @@ ui <- fluidPage(
                        textInput("report_author", "Author / Lab:", ""),
                        textAreaInput("report_notes", "Summary / notes (optional):", "",
                                      rows = 3, resize = "vertical"),
+                       numericInput("report_font_size", "Report base font size (pt):", 14, 9, 24),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Scales all report text and tables (HTML and PDF). ",
+                         "Everything in the Experiment Notebook section is included too."),
                        html_report_ui,
                        pdf_report_ui
                    )
@@ -1051,6 +1271,9 @@ server <- function(input, output, session) {
     updateNumericInput(session, "x_min", value = tr[1])
     updateNumericInput(session, "x_max", value = tr[2])
     updateSelectInput(session, "selected_samples", choices = rv$od_vars, selected = rv$od_vars)
+    updateSelectInput(session, "metrics_ref_sample",
+                      choices = c("None" = "", setNames(rv$od_vars, rv$od_vars)),
+                      selected = "")
 
     all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[rv$time_col]])))))
     rv$all_timepoints <- all_t[is.finite(all_t)]
@@ -1309,7 +1532,16 @@ server <- function(input, output, session) {
       gif_fps               = 1,          gif_width              = 800,
       gif_height            = 600,        x_extra_ticks          = "",
       report_title          = "Lysis Curve Analysis Report",
-      report_author         = "",         report_notes           = ""
+      report_author         = "",         report_notes           = "",
+      metrics_smooth_window = 5,          legend_font_size       = 14,
+      report_font_size      = 14,
+      nb_exp_id = "", nb_experimenter = "", nb_project = "", nb_institution = "",
+      nb_exp_type = "Phage Infection", nb_host_strain = "", nb_phage_plasmid = "",
+      nb_moi = "", nb_replicate = "", nb_media = "", nb_temperature = "",
+      nb_time_inf = "", nb_inducer = "", nb_observations = "", nb_issues = "",
+      nb_next_steps = "", nb_tags = "",
+      nb_custom_key1 = "", nb_custom_val1 = "", nb_custom_key2 = "", nb_custom_val2 = "",
+      nb_custom_key3 = "", nb_custom_val3 = ""
     )
     for (nm in names(defs)) {
       tryCatch({
@@ -2044,6 +2276,8 @@ server <- function(input, output, session) {
       axis.ticks        = element_line(color = "black", linewidth = 0.5),
       axis.ticks.length = unit(0.15, "cm"),
       legend.position   = "right",
+      legend.text       = element_text(size = input$legend_font_size %||% 14),
+      legend.title      = element_text(size = input$legend_font_size %||% 14),
       legend.background = element_rect(fill = "white", color = "gray80"),
       legend.key        = element_rect(fill = NA),
       panel.border      = element_rect(color = "black", fill = NA, linewidth = 0.5)
@@ -2171,12 +2405,18 @@ server <- function(input, output, session) {
     }
   )
 
+  curve_metrics_current <- function() {
+    compute_curve_metrics(prepare_plot_data(),
+                          smooth_window = input$metrics_smooth_window %||% 5,
+                          ref_sample    = input$metrics_ref_sample)
+  }
+
   output$downloadMetricsCSV <- downloadHandler(
     filename = function()
       paste0("curve_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
     content = function(file) {
       req(rv$data, input$selected_samples)
-      write.csv(compute_curve_metrics(prepare_plot_data()), file, row.names = FALSE)
+      write.csv(curve_metrics_current(), file, row.names = FALSE)
     }
   )
 
@@ -2199,13 +2439,52 @@ server <- function(input, output, session) {
     settings_df <- data.frame(
       setting = c("X scale", "Y scale", "X label", "Y label", "Palette",
                   "Line thickness", "Points shown", "Point size",
-                  "Export size (in)", "Export DPI"),
+                  "Export size (in)", "Export DPI",
+                  "μmax smoothing window", "Reference sample"),
       value = c(input$x_scale_type, input$y_scale_type,
                 input$x_axis_label, input$y_axis_label, input$color_palette,
                 input$line_thickness, input$show_points, input$shape_size,
                 paste0(input$export_width, " × ", input$export_height),
-                input$export_dpi),
+                input$export_dpi,
+                input$metrics_smooth_window %||% 5,
+                if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample
+                else "none (infection metrics omitted)"),
       stringsAsFactors = FALSE)
+    # ── Experiment notebook: collect non-empty fields ─────────────────────────
+    nb_pairs <- list(
+      "Experiment ID"      = input$nb_exp_id,
+      "Date"               = as.character(input$nb_date %||% ""),
+      "Experimenter"       = input$nb_experimenter,
+      "Project"            = input$nb_project,
+      "Lab / Institution"  = input$nb_institution,
+      "Experiment type"    = input$nb_exp_type,
+      "Host strain(s)"     = input$nb_host_strain,
+      "Phage / plasmid"    = input$nb_phage_plasmid,
+      "MOI"                = input$nb_moi,
+      "Replicate / batch"  = input$nb_replicate,
+      "Growth medium"      = input$nb_media,
+      "Temperature (°C)"   = input$nb_temperature,
+      "Time of infection/induction" = input$nb_time_inf,
+      "Inducer"            = input$nb_inducer,
+      "Observations / results" = input$nb_observations,
+      "Issues / anomalies" = input$nb_issues,
+      "Next steps"         = input$nb_next_steps,
+      "Tags"               = input$nb_tags
+    )
+    for (i in 1:3) {
+      k <- input[[paste0("nb_custom_key", i)]]
+      v <- input[[paste0("nb_custom_val", i)]]
+      if (nzchar(trimws(k %||% ""))) nb_pairs[[trimws(k)]] <- v %||% ""
+    }
+    keep <- vapply(nb_pairs, function(v) nzchar(trimws(v %||% "")), logical(1))
+    # Date always has a default; only emit the notebook when a real field is set
+    notebook_df <- if (any(keep & names(nb_pairs) != "Date" &
+                           names(nb_pairs) != "Experiment type")) {
+      data.frame(field = names(nb_pairs)[keep],
+                 value = unlist(nb_pairs[keep], use.names = FALSE),
+                 stringsAsFactors = FALSE)
+    } else NULL
+
     list(title       = if (nzchar(trimws(input$report_title))) input$report_title
                        else "Lysis Curve Analysis Report",
          author      = input$report_author,
@@ -2218,7 +2497,9 @@ server <- function(input, output, session) {
          samples_txt = paste(samps, collapse = ", "),
          filter_txt  = filter_txt,
          error_txt   = error_txt,
-         settings_df = settings_df)
+         settings_df = settings_df,
+         notebook_df = notebook_df,
+         font_pt     = input$report_font_size %||% 14)
   }
 
   if (has_base64enc) {
@@ -2227,8 +2508,7 @@ server <- function(input, output, session) {
         paste0("lysis_report_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".html"),
       content = function(file) {
         req(rv$data, input$selected_samples)
-        pd      <- prepare_plot_data()
-        metrics <- compute_curve_metrics(pd)
+        metrics <- curve_metrics_current()
         p       <- generate_plot()
         tmp_png <- tempfile(fileext = ".png")
         on.exit(unlink(tmp_png), add = TRUE)
@@ -2249,8 +2529,7 @@ server <- function(input, output, session) {
         paste0("lysis_report_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".pdf"),
       content = function(file) {
         req(rv$data, input$selected_samples)
-        pd      <- prepare_plot_data()
-        metrics <- compute_curve_metrics(pd)
+        metrics <- curve_metrics_current()
         build_pdf_report(file, report_meta(), generate_plot(),
                          stats_table_export(), metrics,
                          width = max(input$export_width, 8),

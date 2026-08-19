@@ -197,14 +197,24 @@ Expand the **Stats & Reports** section in the sidebar. Everything here reflects 
 ### Statistics Export
 
 - **Summary Statistics (CSV)** — per sample and time point: mean, SD, n, SEM, and the 95% CI half-width (computed as t₀.₉₇₅,ₙ₋₁ × SEM). `n` counts only non-missing replicate values.
-- **Curve Metrics (CSV)** — one row per sample: initial/final/min/max values and their times, fold change, % drop from max, AUC (trapezoidal rule), time to fall below half of the maximum (linearly interpolated), steepest decline rate and its interval, maximum specific growth rate (max slope of ln(mean)), and doubling time (ln 2 / growth rate). Metrics that don't apply (e.g. doubling time for a curve that never grows) are reported as `NA`, never fabricated.
+- **Curve Metrics (CSV)** — 27 per-sample growth & lysis metrics using the **same engine as the lysis-paper companion app** (verified to reproduce its numbers by an automated parity suite): initial/max/min/final OD and their times, AUC (trapezoidal), **μmax** (centered rolling-window regression on ln OD; window adjustable, default 5 points), **doubling time**, **lag phase** (first time the rolling slope reaches 10% of μmax), **stationary-phase duration**, **lysis onset** (first post-peak decline > 5% of peak), **lysis rate** (regression slope peak→trough), **OD drop**, **residual OD**, **recovery slope**, lysis efficiency, recovery ratio, fold change, % drop from max, time to half-max after peak, and steepest point-to-point decline. Metrics that don't apply (e.g. doubling time for a curve that never grows) are reported as `NA`, never fabricated.
+- **Infection metrics** — pick your uninfected control in *Reference sample* to add the five reference-normalized metrics: relative growth (AUC ratio), infection strength (1 − AUC ratio), relative μmax, relative max OD, and lysis-onset Δ from lag. *(Note: the reference implementation in the companion app has an `ifelse()` recycling bug that assigns the first sample's relative values to every sample; this app computes each sample's own ratio correctly.)*
+
+### Experiment Notebook
+
+The **Experiment Notebook** sidebar section (modeled on the companion app's Experiment Notes tab) records the full experimental context: experiment ID, date, experimenter, project, lab; experiment type, host strain(s), phage/plasmid, MOI, replicate/batch; medium, temperature, time of infection, inducer; observations, issues, next steps, tags; plus three free key–value custom fields. Every non-empty field is embedded in the HTML and PDF reports automatically, so the report doubles as a complete lab-notebook record.
 
 ### Analysis Report (single file)
 
 Fill in an optional title, author, and notes, then click:
 
-- **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis.
-- **PDF Report** — the same content as a multi-page PDF (title/provenance page, figure page, paginated tables). No LaTeX or pandoc required.
+- **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the experiment notebook record, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis.
+- **PDF Report** — the same content as a multi-page PDF (title/provenance page, notebook page, figure page, paginated tables). No LaTeX or pandoc required.
+- **Report base font size** — scales all report text and tables in both formats.
+
+### Everything stays editable
+
+All of this is live: change the Y-axis label (Axis Settings → Labels & Formatting), rename any legend entry (Variable Styling → Legend Label), switch fonts and sizes (title, axis labels, axis text, and legend each have their own size control), recolor any sample, then re-download the figure or regenerate the report — the outputs always reflect the current state of the plot.
 
 ---
 
