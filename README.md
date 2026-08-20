@@ -1,5 +1,9 @@
 # Lysis Curve OD Visualization App — User Guide
 
+> **Docs:** [Metrics reference (formulas + sources)](docs/METRICS_REFERENCE.md) · [Changelog](CHANGELOG.md) · Tests: `Rscript tests/test_v28.R` (52 checks), `Rscript tests/test_metrics_parity.R` (29 parity checks vs [lysis-curve-app](https://github.com/mbaffour/lysis-curve-app))
+>
+> **Looking for the full analysis platform** (Analysis tab, 30+ metrics, statistics, heatmaps, curve fitting, virulence metrics)? That's the companion app: [mbaffour/lysis-curve-app](https://github.com/mbaffour/lysis-curve-app). This repo is the lightweight plotter.
+
 ## Quick start — double-click to run (no command line)
 
 If you have [R](https://cran.r-project.org/) installed, you don't need the terminal:
