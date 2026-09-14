@@ -20,9 +20,10 @@ mean, SD, `n` (**non-missing replicate values only**), `SEM = SD/√n`,
 | `n_timepoints`, `t_start`, `t_end` | Size and span of the (filtered) curve |
 | `initial_od`, `final_od` | First / last mean value |
 | `max_od`, `time_max_od` | Peak and its time |
-| `min_od`, `time_min_od` | Global minimum and its time |
+| `global_min_od`, `time_global_min_od` | The curve's global minimum and its time — usually the inoculum, near `t_start`. **Not** the post-lysis floor; see `residual_od` for that. |
 | `auc` | Trapezoidal area under the mean curve |
-| `mu_max` | Largest centered rolling-window regression slope of ln(mean) vs time (window = smoothing setting, default 5 points; slopes must exceed 1e-10 so flat curves report NA) |
+| `mu_max` | Largest centered rolling-window regression slope of ln(mean) vs time (window = smoothing setting, default 5 points; slopes must exceed 1e-10 so flat curves report NA). Any window touching a non-positive OD reading is excluded rather than clamped — see `n_nonpositive_od` below. |
+| `n_nonpositive_od` | Count of time points with OD ≤ 0 (e.g. a blank-subtraction artefact). Windows touching one of these contribute no `mu_max` slope; `mu_max`/`doubling_time`/`lag_phase` may be NA or based on fewer windows when this is > 0. |
 | `doubling_time` | `ln(2)/mu_max`; NA without growth |
 | `lag_phase` | First time the rolling ln-slope reaches 10% of `mu_max` |
 | `stat_phase_dur` | Time spanned by points ≥ 95% of the peak |
