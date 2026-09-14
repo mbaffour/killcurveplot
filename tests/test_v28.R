@@ -127,6 +127,33 @@ testServer(app, {
   l0 <- pd4[pd4$time == 0, ]
   check("long + NA: n = 2", l0$n == 2)
   check("long + NA: mean = 0.055", near(l0$mean_value, 0.055))
+
+  # KC-1: n = 1 must export SD/SEM/95% CI as NA (undefined), never 0
+  tmp4 <- tempfile(fileext = ".csv")
+  writeLines(c("Time,S1", "0,0.1", "10,0.5"), tmp4)
+  ingest_data(read.csv(tmp4, stringsAsFactors = FALSE, check.names = FALSE), "single_rep.csv")
+  session$setInputs(selected_samples = "S1")
+  pd5 <- prepare_plot_data()
+  check("KC-1: n = 1 at every time point", all(pd5$n == 1))
+  check("KC-1: sd_value is NA (not 0) at n = 1",  all(is.na(pd5$sd_value)))
+  check("KC-1: sem_value is NA (not 0) at n = 1", all(is.na(pd5$sem_value)))
+  check("KC-1: ci95_value is NA (not 0) at n = 1", all(is.na(pd5$ci95_value)))
+  st5 <- stats_table_export()
+  check("KC-1: exported CSV has NA sd/sem/ci95 at n = 1",
+        all(is.na(st5$sd)) && all(is.na(st5$sem)) && all(is.na(st5$ci95_half_width)))
+
+  # A mix of n=1 and n>=2 time points: only the n=1 rows should be NA
+  tmp5 <- tempfile(fileext = ".csv")
+  writeLines(c("Time,S2,S2", "0,0.10,0.12", "10,0.50,NA"), tmp5)
+  ingest_data(read.csv(tmp5, stringsAsFactors = FALSE, check.names = FALSE), "mixed_n.csv")
+  session$setInputs(selected_samples = "S2")
+  pd6   <- prepare_plot_data()
+  r_n2  <- pd6[pd6$time == 0, ]
+  r_n1  <- pd6[pd6$time == 10, ]
+  check("KC-1: n = 2 row keeps a real (non-NA) sd/sem/ci95",
+        r_n2$n == 2 && !is.na(r_n2$sd_value) && !is.na(r_n2$sem_value) && !is.na(r_n2$ci95_value))
+  check("KC-1: n = 1 row (NA replicate dropped) is NA, not 0",
+        r_n1$n == 1 && is.na(r_n1$sd_value) && is.na(r_n1$sem_value) && is.na(r_n1$ci95_value))
 })
 
 cat("\n--- Report builders (headless, real functions) ---\n")

@@ -1907,9 +1907,13 @@ server <- function(input, output, session) {
                   # count only the non-NA values that actually enter the mean —
                   # counting NA rows would silently understate SEM / CI
                   n          = sum(!is.na(.data[[rv$value_col]])), .groups = "drop") %>%
-        mutate(sd_value   = ifelse(is.na(sd_value), 0, sd_value),
-               sem_value  = ifelse(n > 0, sd_value / sqrt(n), 0),
-               ci95_value = qt(0.975, df = pmax(n - 1, 1)) * sem_value)
+        # KC-1: SD/SEM/95% CI are UNDEFINED at n < 2, not zero. sd() of a
+        # single value already returns NA; the old code overwrote that NA
+        # with 0, which reads as a perfectly precise measurement in the
+        # exported CSV and report tables. Keep NA and let the plot layer
+        # decide whether/how to draw it (see the error-bar block below).
+        mutate(sem_value  = ifelse(n >= 2, sd_value / sqrt(n), NA_real_),
+               ci95_value = ifelse(n >= 2, qt(0.975, df = pmax(n - 1, 1)) * sem_value, NA_real_))
       names(pd)[names(pd) == rv$group_col] <- "variable"
       names(pd)[names(pd) == rv$time_col]  <- "time"
     } else {
@@ -1932,9 +1936,9 @@ server <- function(input, output, session) {
         summarise(mean_value = mean(value, na.rm = TRUE),
                   sd_value   = sd(  value, na.rm = TRUE),
                   n          = sum(!is.na(value)), .groups = "drop") %>%
-        mutate(sd_value   = ifelse(is.na(sd_value), 0, sd_value),
-               sem_value  = ifelse(n > 0, sd_value / sqrt(n), 0),
-               ci95_value = qt(0.975, df = pmax(n - 1, 1)) * sem_value)
+        # KC-1: see the long-format branch above — NA (undefined), not 0.
+        mutate(sem_value  = ifelse(n >= 2, sd_value / sqrt(n), NA_real_),
+               ci95_value = ifelse(n >= 2, qt(0.975, df = pmax(n - 1, 1)) * sem_value, NA_real_))
     }
     pd %>% filter(is.finite(time) & is.finite(mean_value))
   }
@@ -2047,10 +2051,13 @@ server <- function(input, output, session) {
     if (input$error_type != "none") {
       ec     <- switch(input$error_type, sd="sd_value", sem="sem_value", ci95="ci95_value")
       em     <- input$error_multiplier
-      # Guard against NA error values (single-replicate samples produce NA sd)
+      # KC-1: an NA error value means "undefined" (n < 2 replicates at that
+      # point), not zero. Leave it NA — pmax()/arithmetic below propagate it
+      # to err_lo/err_hi automatically — and draw the error-bar/ribbon layer
+      # from a subset that excludes those rows, rather than drawing a false
+      # zero-height bar for a single replicate.
       err_vals <- plot_data[[ec]]
-      err_vals[is.na(err_vals)] <- 0
-      
+
       lo_val <- if (input$y_scale_type == "log")
         pmax(plot_data$mean_value - err_vals * em, 1e-9)
       else if (isTRUE(input$asymmetric_error))
@@ -2059,12 +2066,13 @@ server <- function(input, output, session) {
         plot_data$mean_value - err_vals * em
       plot_data$err_lo <- lo_val
       plot_data$err_hi <- plot_data$mean_value + err_vals * em
-      
+      eb_data <- plot_data[!is.na(plot_data$err_lo) & !is.na(plot_data$err_hi), , drop = FALSE]
+
       dm <- if (!is.null(input$error_display_mode)) input$error_display_mode else "bars"
       if (dm == "shadow") {
         using_shadow <- TRUE
         p <- p +
-          geom_ribbon(data = plot_data,
+          geom_ribbon(data = eb_data,
                       aes(x = time, ymin = err_lo, ymax = err_hi,
                           group = variable, fill = variable),
                       alpha = input$shadow_alpha, color = NA, inherit.aes = FALSE)
@@ -2075,12 +2083,12 @@ server <- function(input, output, session) {
           position_dodge(0.2) else position_identity()
         blt <- if (!is.null(input$error_bar_style) && input$error_bar_style == "dashed") "dashed" else "solid"
         if (!is.null(input$error_bar_style) && input$error_bar_style == "T") {
-          p <- p + geom_errorbar(data = plot_data,
+          p <- p + geom_errorbar(data = eb_data,
                                  aes(x = time, ymin = err_lo, ymax = err_hi, color = variable),
                                  width = input$error_bar_width, linewidth = input$error_bar_thickness,
                                  linetype = blt, position = pos, inherit.aes = FALSE)
         } else {
-          p <- p + geom_linerange(data = plot_data,
+          p <- p + geom_linerange(data = eb_data,
                                   aes(x = time, ymin = err_lo, ymax = err_hi, color = variable),
                                   linewidth = input$error_bar_thickness,
                                   linetype = blt, position = pos, inherit.aes = FALSE)

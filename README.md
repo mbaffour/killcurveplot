@@ -230,7 +230,7 @@ All of this is live: change the Y-axis label (Axis Settings → Labels & Formatt
 
 **The plot shows an error message in red text.** — This usually means something is wrong with the data or a setting combination. Try resetting settings with the "Clear & Reset" button. Check that your CSV has numeric values in the data columns and a proper time column.
 
-**Error bars / shadow ribbon doesn't show.** — If you have only one replicate per sample per time point, the standard deviation is zero, so there's nothing to display. This is expected behavior. You need multiple replicates for error bars to be meaningful.
+**Error bars / shadow ribbon doesn't show.** — If you have only one replicate per sample per time point, the standard deviation is **undefined** (not zero — you cannot measure spread from a single value), so no bar is drawn at that point and the Summary Statistics CSV / report tables show `NA` for SD, SEM, and the 95% CI at that time point. This is expected behavior. You need at least two replicates for error bars — and for the exported statistics — to be meaningful.
 
 **The app is slow or laggy.** — If you have a very large number of samples, the app may take a moment to update. The app debounces inputs (waits 400ms after you stop adjusting before redrawing), so slight delays are intentional.
 
