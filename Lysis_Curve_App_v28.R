@@ -969,10 +969,11 @@ ui <- fluidPage(
                                         ),
                                         checkboxInput("show_error_caption",
                                                       "Annotate error type + n in caption",
-                                                      value = FALSE),
+                                                      value = TRUE),
                                         p(style = "font-size:.8em;color:#777;margin-top:-6px;",
                                           "Adds a figure caption stating the error measure (SD / SEM / 95% CI) ",
-                                          "and the replicate count — recommended for publication figures.")
+                                          "and the replicate count — on by default (KC-6) so a default SEM-bar ",
+                                          "figure never leaves the app unlabelled; recommended for publication figures.")
                        )
                    )
                  ),
@@ -1561,7 +1562,7 @@ server <- function(input, output, session) {
       asymmetric_error      = FALSE,      error_bar_style        = "T",
       error_bar_width       = 1,          error_bar_thickness    = 0.8,
       error_bar_position    = "middle",   shadow_alpha           = 0.2,
-      show_error_caption    = FALSE,
+      show_error_caption    = TRUE,       # KC-6: default figure states the error measure + n
       custom_aspect_ratio   = FALSE,      aspect_ratio           = 1,
       export_format         = "pdf",      export_width           = 10,
       export_height         = 8,          export_dpi             = 300,

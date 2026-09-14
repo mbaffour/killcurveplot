@@ -246,6 +246,15 @@ src <- readLines("Lysis_Curve_App_v28.R")
 check("global_exceptions appears twice (save + load)",
       sum(grepl("global_exceptions <- c(\"shape_size\", \"color_palette\")", src, fixed = TRUE)) == 2)
 
+cat("\n--- KC-6: default figure labels its SEM error bars ---\n")
+check("show_error_caption defaults to TRUE in the UI widget",
+      any(grepl('checkboxInput\\("show_error_caption"', src)) &&
+      { i <- grep('checkboxInput\\("show_error_caption"', src)[1]
+        any(grepl("value = TRUE", src[i:(i + 3)])) })
+check("Clear-settings reset also defaults show_error_caption to TRUE",
+      any(grepl("show_error_caption\\s*=\\s*TRUE", src)) &&
+      !any(grepl("show_error_caption\\s*=\\s*FALSE", src)))
+
 cat("\n--- KC-8: settings JSON version matches the app, not a stale \"2.5\" ---\n")
 check("APP_VERSION constant is defined and is not the stale \"2.5\"",
       !is.null(env$APP_VERSION) && is.character(env$APP_VERSION) && env$APP_VERSION != "2.5")
