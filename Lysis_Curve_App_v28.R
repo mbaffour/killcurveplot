@@ -204,15 +204,41 @@ rolling_slope <- function(t, y, win) {
   out
 }
 
+# KC-3: simple centered moving average, used ONLY to locate the peak (see
+# peak_smooth_window below) -- not to alter any reported OD value. Edge
+# points use a smaller, still-centered window rather than padding with NA,
+# so every point gets a value. w = 1 (the default) is a no-op: half = 0
+# makes every window just the point itself, returning y unchanged.
+moving_average <- function(y, w) {
+  n <- length(y)
+  if (!is.finite(w) || w <= 1 || n < 2) return(y)
+  half <- (w - 1) %/% 2
+  vapply(seq_len(n), function(i) {
+    lo <- max(1, i - half); hi <- min(n, i + half)
+    mean(y[lo:hi], na.rm = TRUE)
+  }, numeric(1))
+}
+
 # ref_sample: optional name of an uninfected/reference sample; when given (and
 # present in the data) the five reference-normalised infection metrics are added.
-compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL) {
+# peak_smooth_window: OFF by default (1 = no smoothing). At the app's own demo
+# noise level (~4%), which(max)/lysis-onset detection on the raw mean curve
+# can move by a whole timepoint between otherwise-identical noise draws (see
+# AUDIT-2026-09.md, KC-3), which cascades into lysis_time/lysis_rate/od_drop/
+# residual_od/lysis_efficiency/recovery_ratio/t_half_max_decline, all anchored
+# on the peak index. When > 1, the peak (and only the peak) is located on a
+# centered moving average of the curve instead of the raw curve; every
+# reported OD value still comes from the raw data at that index -- smoothing
+# only decides WHERE the peak is, never WHAT its value is.
+compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
+                                  peak_smooth_window = 1) {
   if (is.null(pd) || nrow(pd) == 0) return(NULL)
   pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
   out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
     t_vec  <- g$time; od_vec <- g$mean_value
     n_pts  <- length(t_vec)
-    max_idx <- which.max(od_vec); min_idx <- which.min(od_vec)
+    peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
+    max_idx <- which.max(peak_vec); min_idx <- which.min(od_vec)
     initial_od <- od_vec[1]
     max_od     <- od_vec[max_idx]
     final_od   <- od_vec[n_pts]
@@ -1133,6 +1159,18 @@ ui <- fluidPage(
                        numericInput("metrics_smooth_window",
                                     "μmax smoothing window (points):", 5, 3, 15, 1),
                        uiOutput("nonpositive_od_warning_ui"),
+                       numericInput("metrics_peak_smooth_window",
+                                    "Peak-detection smoothing window (points, 1 = off):",
+                                    1, 1, 15, 2),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "OFF by default. At typical replicate noise, which point counts as ",
+                         "“the peak” can shift by a whole time point between runs — ",
+                         "and lysis_time, lysis_rate, od_drop, residual_od, lysis_efficiency, ",
+                         "recovery_ratio and t_half_max_decline are all anchored on it. Raising ",
+                         "this locates the peak on a centered moving average (a simple, ",
+                         "documented smoother) instead of the raw curve; every reported OD ",
+                         "value still comes from the raw data — smoothing only decides ",
+                         "WHERE the peak is."),
                        selectInput("metrics_ref_sample",
                                    "Reference sample (infection metrics):",
                                    choices = c("None" = "")),
@@ -1597,6 +1635,7 @@ server <- function(input, output, session) {
       report_title          = "Lysis Curve Analysis Report",
       report_author         = "",         report_notes           = "",
       metrics_smooth_window = 5,          legend_font_size       = 14,
+      metrics_peak_smooth_window = 1,     # KC-3: off by default
       report_font_size      = 14,
       nb_exp_id = "", nb_experimenter = "", nb_project = "", nb_institution = "",
       nb_exp_type = "Phage Infection", nb_host_strain = "", nb_phage_plasmid = "",
@@ -2478,8 +2517,9 @@ server <- function(input, output, session) {
 
   curve_metrics_current <- function() {
     compute_curve_metrics(prepare_plot_data(),
-                          smooth_window = input$metrics_smooth_window %||% 5,
-                          ref_sample    = input$metrics_ref_sample)
+                          smooth_window       = input$metrics_smooth_window %||% 5,
+                          ref_sample          = input$metrics_ref_sample,
+                          peak_smooth_window  = input$metrics_peak_smooth_window %||% 1)
   }
 
   # KC-2: warn when any sample has non-positive OD readings, since those
@@ -2528,13 +2568,16 @@ server <- function(input, output, session) {
       setting = c("X scale", "Y scale", "X label", "Y label", "Palette",
                   "Line thickness", "Points shown", "Point size",
                   "Export size (in)", "Export DPI",
-                  "μmax smoothing window", "Reference sample"),
+                  "μmax smoothing window", "Peak-detection smoothing window",
+                  "Reference sample"),
       value = c(input$x_scale_type, input$y_scale_type,
                 input$x_axis_label, input$y_axis_label, input$color_palette,
                 input$line_thickness, input$show_points, input$shape_size,
                 paste0(input$export_width, " × ", input$export_height),
                 input$export_dpi,
                 input$metrics_smooth_window %||% 5,
+                paste0(input$metrics_peak_smooth_window %||% 1,
+                       if (identical(input$metrics_peak_smooth_window %||% 1, 1)) " (off)" else ""),
                 if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample
                 else "none (infection metrics omitted)"),
       stringsAsFactors = FALSE)

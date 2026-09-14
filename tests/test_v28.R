@@ -124,6 +124,45 @@ pd_allpos <- data.frame(time = c(0, 10, 20), variable = "P",
 check("KC-2: n_nonpositive_od = 0 when all OD > 0",
       env$compute_curve_metrics(pd_allpos, smooth_window = 3)$n_nonpositive_od == 0)
 
+cat("\n--- KC-3: optional peak-detection smoothing (off by default) ---\n")
+check("moving_average(w=1) is a no-op (the default)",
+      identical(env$moving_average(c(1, 2, 3, 4, 5), 1), c(1, 2, 3, 4, 5)))
+check("moving_average(w=3): centered, smaller window at the edges",
+      near(env$moving_average(c(1, 2, 3, 4, 5), 3)[1], 1.5) &&
+      near(env$moving_average(c(1, 2, 3, 4, 5), 3)[3], 3) &&
+      near(env$moving_average(c(1, 2, 3, 4, 5), 3)[5], 4.5))
+
+# Omitting peak_smooth_window must reproduce the exact pre-KC-3 numbers.
+m_default   <- env$compute_curve_metrics(pd_toy)
+m_explicit1 <- env$compute_curve_metrics(pd_toy, peak_smooth_window = 1)
+check("KC-3: peak_smooth_window defaults to 1 (identical to the old, unsmoothed behaviour)",
+      isTRUE(all.equal(m_default, m_explicit1)))
+
+# A symmetric growth/lysis curve, true peak at t=60. Two "noisy" variants bump
+# a DIFFERENT neighbor above the true peak (deterministic, not random, so this
+# is reproducible): variant A's raw peak lands at t=50, variant B's at t=70 --
+# exactly the kind of single-timepoint jitter the audit measured from 4%
+# multiplicative noise. With peak_smooth_window = 3 both must stabilize back
+# to the true peak at t=60.
+od_clean <- c(0.05, 0.08, 0.13, 0.22, 0.35, 0.50, 0.55, 0.50, 0.35, 0.22, 0.13, 0.08, 0.05)
+t_clean  <- seq(0, 120, 10)
+od_A <- od_clean; od_A[6] <- 0.56   # bump t=50 above the true peak (0.55)
+od_B <- od_clean; od_B[8] <- 0.56   # bump t=70 above the true peak instead
+pd_A <- data.frame(time = t_clean, variable = "A", mean_value = od_A)
+pd_B <- data.frame(time = t_clean, variable = "B", mean_value = od_B)
+
+raw_A <- env$compute_curve_metrics(pd_A)
+raw_B <- env$compute_curve_metrics(pd_B)
+check("KC-3: without smoothing, noise moves the detected peak (unstable)",
+      raw_A$time_max_od == 50 && raw_B$time_max_od == 70)
+
+sm_A <- env$compute_curve_metrics(pd_A, peak_smooth_window = 3)
+sm_B <- env$compute_curve_metrics(pd_B, peak_smooth_window = 3)
+check("KC-3: with peak_smooth_window = 3, both variants find the true peak at t=60",
+      sm_A$time_max_od == 60 && sm_B$time_max_od == 60)
+check("KC-3: max_od is still the RAW value at the (smoothed-located) peak, not a smoothed value",
+      near(sm_A$max_od, 0.55) && near(sm_B$max_od, 0.55))
+
 cat("\n--- Server integration via testServer: replicate pooling ---\n")
 tmp <- tempfile(fileext = ".csv")
 writeLines(c("Time,WT,WT,WT,Mutant,Mutant,Mutant",

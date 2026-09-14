@@ -13,6 +13,21 @@ Notation: `t_i` time points, `y_i` mean value, `n` points.
 mean, SD, `n` (**non-missing replicate values only**), `SEM = SD/√n`,
 `CI95 half-width = t(0.975, n−1) × SEM`.
 
+### Peak-detection smoothing (optional, OFF by default)
+
+Every lysis-related metric below (`lysis_time`, `lysis_rate`, `od_drop`,
+`residual_od`, `recovery_slope`, `lysis_efficiency`, `recovery_ratio`,
+`t_half_max_decline`) is anchored on `max_idx`, the index of the detected
+peak. At the app's own demo noise level (~4% multiplicative), which raw
+point counts as "the peak" can move by a whole time point between
+otherwise-identical noise draws, and every metric above moves with it. The
+**Peak-detection smoothing window** control (sidebar, default 1 = off)
+locates the peak on a centered moving average (`moving_average()`, window
+in points) of the curve instead of the raw curve; every *reported* OD value
+still comes from the raw data at that index — smoothing only decides WHERE
+the peak is, never WHAT its value is. Off by default so existing exports
+are bit-for-bit unchanged unless a user opts in.
+
 ## Curve metrics (per sample)
 
 | Metric | Definition |
