@@ -27,6 +27,31 @@ check("rgb_to_hex(255,0,0) == #FF0000 (no alpha suffix)",
 check("rgb_to_hex keeps alpha when < 1",
       nchar(env$rgb_to_hex(255, 0, 0, 0.5)) == 9)
 
+cat("\n--- KC-11: decimal-comma / semicolon CSV support ---\n")
+us_csv <- tempfile(fileext = ".csv")
+writeLines(c("Time,WT,Mutant", "0,0.05,0.06", "10,0.12,0.15"), us_csv)
+eu_csv <- tempfile(fileext = ".csv")
+writeLines(c("Time;WT;Mutant", "0;0,05;0,06", "10;0,12;0,15"), eu_csv)
+
+check("detect_csv_locale: US/UK comma file -> \"us\"",
+      env$detect_csv_locale(us_csv) == "us")
+check("detect_csv_locale: European semicolon file -> \"eu\"",
+      env$detect_csv_locale(eu_csv) == "eu")
+
+d_us <- env$read_csv_locale_aware(us_csv, "auto")
+check("read_csv_locale_aware: US file auto-detected and parsed numeric",
+      is.numeric(d_us$WT) && near(d_us$WT[1], 0.05))
+
+d_eu <- env$read_csv_locale_aware(eu_csv, "auto")
+check("read_csv_locale_aware: EU file auto-detected (3 columns, not collapsed to 1)",
+      ncol(d_eu) == 3)
+check("read_csv_locale_aware: EU decimal comma parsed as numeric, not character/NA",
+      is.numeric(d_eu$WT) && near(d_eu$WT[1], 0.05) && near(d_eu$Mutant[2], 0.15))
+
+d_eu_explicit <- env$read_csv_locale_aware(eu_csv, "eu")
+check("read_csv_locale_aware: explicit \"eu\" locale matches auto-detect",
+      identical(d_eu$WT, d_eu_explicit$WT))
+
 cat("\n--- make_demo_data ---\n")
 dd <- env$make_demo_data()
 check("demo: duplicate replicate columns, 3 per sample",

@@ -130,6 +130,30 @@ rgb_to_hex <- function(r, g, b, a = 1) {
   if (aa >= 1) rgb(rr, gg, bb) else rgb(rr, gg, bb, aa)
 }
 
+# KC-11: read.csv() with no arguments assumes the US/UK locale (comma field
+# separator, "." decimal mark). A European export ("1,5E+08" values with
+# ";" field separators) then parses every numeric column to character, and
+# those get silently dropped later by the numeric coercion + !is.na(cfu)-
+# style filters -- the user sees missing data with no clue why. Sniff the
+# separator from the header line (a semicolon-delimited file has no commas
+# in its header) unless the user picked a locale explicitly.
+detect_csv_locale <- function(path) {
+  first_line <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
+  if (length(first_line) == 0) return("us")
+  if (grepl(";", first_line, fixed = TRUE)) "eu" else "us"
+}
+
+read_csv_locale_aware <- function(path, locale = "auto") {
+  loc <- if (identical(locale, "auto")) detect_csv_locale(path) else locale
+  sep <- if (identical(loc, "eu")) ";" else ","
+  dec <- if (identical(loc, "eu")) "," else "."
+  tryCatch(
+    read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = FALSE),
+    error = function(e)
+      read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE)
+  )
+}
+
 parse_excluded_timepoints <- function(text, all_timepoints) {
   if (is.null(text) || nchar(trimws(text)) == 0) return(numeric(0))
   parts <- strsplit(trimws(text), "[,; ]+")[[1]]
@@ -712,6 +736,11 @@ ui <- fluidPage(
     sidebarPanel(width = 3,
                  
                  fileInput("file", "Choose CSV File", accept = c("text/csv", ".csv")),
+                 selectInput("csv_locale", "CSV format:",
+                             choices = c("Auto-detect"                              = "auto",
+                                        "US/UK (comma-separated, . decimal)"        = "us",
+                                        "European (semicolon-separated, , decimal)" = "eu"),
+                             selected = "auto"),
                  actionButton("load_demo", "Load Demo Data", icon = icon("flask"),
                               style = "width:100%;margin:-8px 0 10px 0;font-size:.85em;"),
                  uiOutput("data_summary_ui"),
@@ -1326,11 +1355,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$file, {
     req(input$file)
-    data <- tryCatch(
-      read.csv(input$file$datapath, stringsAsFactors = FALSE, check.names = FALSE),
-      error = function(e)
-        read.csv(input$file$datapath, stringsAsFactors = FALSE, check.names = TRUE)
-    )
+    data <- read_csv_locale_aware(input$file$datapath, input$csv_locale %||% "auto")
     ingest_data(data, input$file$name)
   })
 
