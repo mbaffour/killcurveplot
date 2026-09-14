@@ -57,9 +57,17 @@ epsilon.
 ## Tests
 
 ```bash
-Rscript tests/test_v28.R              # 52 integration checks (shiny::testServer)
-Rscript tests/test_metrics_parity.R   # 29 parity checks vs lysis-curve-app
+Rscript tests/test_v28.R              # integration checks (shiny::testServer)
+Rscript tests/test_metrics_parity.R   # parity checks vs lysis-curve-app
 ```
 
-The parity suite needs a clone of `mbaffour/lysis-curve-app` as a sibling
-directory (or `REF_APP=<path to its .R file>`); it skips politely otherwise.
+The parity suite's reference-comparison checks need a clone of
+`mbaffour/lysis-curve-app` as a sibling directory (or `REF_APP=<path to its
+.R file>`) whose `calculate_growth_metrics()`/`calculate_infection_metrics()`
+still match the shape this suite's `grab()`-based extraction expects. All
+other checks (rolling_slope vs `zoo`, infection-metrics self-consistency,
+and the hand-computed spot checks) always run. If the reference is missing,
+or present but its function signature has drifted, the suite now **fails**
+by default (KC-5 — it used to silently exit 0) with a message naming the
+cause; set `ALLOW_SKIP=1` to downgrade that to a visibly-printed skip
+instead.
