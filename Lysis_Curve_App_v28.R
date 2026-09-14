@@ -830,6 +830,13 @@ ui <- fluidPage(
                                         "US/UK (comma-separated, . decimal)"        = "us",
                                         "European (semicolon-separated, , decimal)" = "eu"),
                              selected = "auto"),
+                 numericInput("blank_od", "Subtract blank/media OD (optional):", 0, step = 0.001),
+                 p(style = "font-size:.78em;color:#777;margin-top:-8px;",
+                   "0 = off (default). This app assumes pre-blanked input; if your CSV still has ",
+                   "a media/blank OD baked in, enter it here — it's subtracted from every ",
+                   "reading before plotting, statistics, and curve metrics, and noted in the ",
+                   "report provenance. Small negative values after subtraction are expected and ",
+                   "handled correctly (see the μmax non-positive-OD note above)."),
                  actionButton("load_demo", "Load Demo Data", icon = icon("flask"),
                               style = "width:100%;margin:-8px 0 10px 0;font-size:.85em;"),
                  uiOutput("data_summary_ui"),
@@ -1713,6 +1720,7 @@ server <- function(input, output, session) {
       report_author         = "",         report_notes           = "",
       metrics_smooth_window = 5,          legend_font_size       = 14,
       metrics_peak_smooth_window = 1,     # KC-3: off by default
+      blank_od               = 0,         # KC-7: off by default
       report_font_size      = 14,
       nb_exp_id = "", nb_experimenter = "", nb_project = "", nb_institution = "",
       nb_exp_type = "Phage Infection", nb_host_strain = "", nb_phage_plasmid = "",
@@ -2109,6 +2117,13 @@ server <- function(input, output, session) {
         mutate(sem_value  = ifelse(n >= 2, sd_value / sqrt(n), NA_real_),
                ci95_value = ifelse(n >= 2, qt(0.975, df = pmax(n - 1, 1)) * sem_value, NA_real_))
     }
+    # KC-7: optional blank/media OD subtraction. A constant offset applied
+    # equally to every reading commutes with averaging, so subtracting it
+    # here (once, from the already-aggregated mean) is exactly equivalent
+    # to subtracting it from every raw value before averaging -- sd/n are
+    # unaffected either way (SD is shift-invariant).
+    blank <- input$blank_od %||% 0
+    if (is.numeric(blank) && !is.na(blank) && blank != 0) pd$mean_value <- pd$mean_value - blank
     pd %>% filter(is.finite(time) & is.finite(mean_value))
   }
 
@@ -2151,6 +2166,10 @@ server <- function(input, output, session) {
       })
       out <- bind_rows(pieces)
     }
+    # KC-7: see prepare_plot_data() above -- same constant blank offset,
+    # applied per replicate value here since this frame is un-averaged.
+    blank <- input$blank_od %||% 0
+    if (is.numeric(blank) && !is.na(blank) && blank != 0) out$value <- out$value - blank
     out %>% filter(is.finite(time) & is.finite(value))
   }
 
@@ -2704,6 +2723,7 @@ server <- function(input, output, session) {
       setting = c("X scale", "Y scale", "X label", "Y label", "Palette",
                   "Line thickness", "Points shown", "Point size",
                   "Export size (in)", "Export DPI",
+                  "Blank/media OD subtracted",
                   "μmax smoothing window", "Peak-detection smoothing window",
                   "Reference sample"),
       value = c(input$x_scale_type, input$y_scale_type,
@@ -2711,6 +2731,7 @@ server <- function(input, output, session) {
                 input$line_thickness, input$show_points, input$shape_size,
                 paste0(input$export_width, " × ", input$export_height),
                 input$export_dpi,
+                { b <- input$blank_od %||% 0; if (is.na(b) || b == 0) "none (off)" else b },
                 input$metrics_smooth_window %||% 5,
                 paste0(input$metrics_peak_smooth_window %||% 1,
                        if (identical(input$metrics_peak_smooth_window %||% 1, 1)) " (off)" else ""),

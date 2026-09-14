@@ -125,6 +125,22 @@ Three columns: time, a grouping column (e.g., "Sample" or "Condition"), and a va
 
 The app auto-detects which format you're using.
 
+### Blank / media OD
+
+The app **assumes your data is already blank-subtracted** — it has no media-blank
+handling of its own beyond the optional **"Subtract blank/media OD"** field in the
+sidebar (0 = off, the default). If your CSV still has a constant media/blank OD baked
+into every reading, enter that value there: it's subtracted from every reading before
+plotting, statistics, and curve metrics, and the value used is recorded in the report
+provenance. A small negative OD after subtraction is expected and handled correctly —
+see the μmax note in [Stats & Reports](#stats--reports-new-in-v28) below.
+
+### Decimal-comma / semicolon CSV exports
+
+Some plate-reader software exports European-locale CSVs (`;`-separated, `,` as the
+decimal mark, e.g. `1,5E+08`). Use the **"CSV format"** selector next to the file
+picker — Auto-detect (the default, sniffed from the header line), US/UK, or European.
+
 ---
 
 ## Using the App

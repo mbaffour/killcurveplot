@@ -280,6 +280,34 @@ testServer(app, {
         near(rpd4$value[rpd4$replicate == 1 & rpd4$time == 0],  0.05) &&
         near(rpd4$value[rpd4$replicate == 1 & rpd4$time == 30], 0.12))
 
+  # KC-7: optional blank/media OD subtraction (off by default)
+  tmp5 <- tempfile(fileext = ".csv")
+  writeLines(c("Time,X,X", "0,0.12,0.14", "10,0.30,0.34"), tmp5)
+  ingest_data(read.csv(tmp5, stringsAsFactors = FALSE, check.names = FALSE), "blank_test.csv")
+  session$setInputs(selected_samples = "X", blank_od = 0)
+  pd_noblank <- prepare_plot_data()
+  check("KC-7: blank_od = 0 (the default) leaves values unchanged",
+        near(pd_noblank$mean_value[pd_noblank$time == 0], mean(c(0.12, 0.14))))
+
+  session$setInputs(blank_od = 0.10)
+  pd_blank <- prepare_plot_data()
+  check("KC-7: blank subtraction shifts the mean curve by exactly the blank value",
+        near(pd_blank$mean_value[pd_blank$time == 0],  mean(c(0.12, 0.14)) - 0.10) &&
+        near(pd_blank$mean_value[pd_blank$time == 10], mean(c(0.30, 0.34)) - 0.10))
+  check("KC-7: sd_value is unaffected by a constant blank shift (shift-invariant)",
+        near(pd_blank$sd_value[pd_blank$time == 0], sd(c(0.12, 0.14))))
+
+  rep_blank <- prepare_replicate_data()
+  check("KC-7: per-replicate values are shifted by the same blank",
+        isTRUE(all.equal(sort(rep_blank$value[rep_blank$time == 0]),
+                         sort(c(0.12, 0.14) - 0.10))))
+
+  st_blank <- stats_table_export()
+  check("KC-7: exported Summary Statistics CSV reflects the blank-corrected mean",
+        near(st_blank$mean[st_blank$time == 0], mean(c(0.12, 0.14)) - 0.10))
+
+  session$setInputs(blank_od = 0)   # reset for any later checks in this block
+
   # KC-1: n = 1 must export SD/SEM/95% CI as NA (undefined), never 0
   tmp4 <- tempfile(fileext = ".csv")
   writeLines(c("Time,S1", "0,0.1", "10,0.5"), tmp4)
