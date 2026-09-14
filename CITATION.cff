@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use the Lysis Curve OD Visualization App (killcurveplot), please cite it using the metadata from this file."
+title: "Lysis Curve OD Visualization App (killcurveplot)"
+version: "2.9.0"
+date-released: "2026-09-14"
+type: software
+abstract: "An R Shiny app for plotting bacterial kill/lysis (OD) curves, with a paper-grade curve-metrics engine (mu_max, doubling time, lysis onset/rate, AUC, and more), replicate-aware summary statistics, an experiment notebook, and single-file HTML/PDF analysis reports."
+authors:
+  - family-names: "Awuah"
+    given-names: "Michael Baffour"
+    affiliation: "Ramsey Lab"
+repository-code: "https://github.com/mbaffour/killcurveplot"
+url: "https://github.com/mbaffour/killcurveplot"
+license: "GPL-3.0-only"
+keywords:
+  - "bacteriophage"
+  - "phage biology"
+  - "lysis curve"
+  - "OD600"
+  - "growth curve"
+  - "R Shiny"
+  - "ggplot2"
+  - "reproducibility"

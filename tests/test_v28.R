@@ -280,6 +280,14 @@ check("Clear-settings reset also defaults show_error_caption to TRUE",
       any(grepl("show_error_caption\\s*=\\s*TRUE", src)) &&
       !any(grepl("show_error_caption\\s*=\\s*FALSE", src)))
 
+cat("\n--- KC-9: CITATION.cff and a licence/citation section in the README ---\n")
+check("CITATION.cff exists at repo root", file.exists("CITATION.cff"))
+check("CITATION.cff declares the GPL-3 licence",
+      any(grepl("^license:.*GPL-3", readLines("CITATION.cff"))))
+readme <- readLines("README.md")
+check("README has a License section", any(grepl("^## License", readme)))
+check("README has a Citation section", any(grepl("^## Citation", readme)))
+
 cat("\n--- KC-8: settings JSON version matches the app, not a stale \"2.5\" ---\n")
 check("APP_VERSION constant is defined and is not the stale \"2.5\"",
       !is.null(env$APP_VERSION) && is.character(env$APP_VERSION) && env$APP_VERSION != "2.5")

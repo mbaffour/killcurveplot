@@ -250,4 +250,16 @@ All of this is live: change the Y-axis label (Axis Settings → Labels & Formatt
 
 ---
 
-*Lysis Curve OD Visualization App v2.8 — Michael Baffour Awuah / Ramsey Lab*
+## License
+
+This project is released under the [GNU General Public License v3.0](LICENSE) (GPL-3.0).
+
+## Citation
+
+Citation metadata is provided in [`CITATION.cff`](CITATION.cff). If you use this app in
+published work, please cite it using that file's metadata (GitHub and Zenodo both read
+`CITATION.cff` automatically to generate a formatted citation).
+
+---
+
+*Lysis Curve OD Visualization App v2.9 — Michael Baffour Awuah / Ramsey Lab*
