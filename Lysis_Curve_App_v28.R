@@ -103,6 +103,11 @@ has_gifski    <- requireNamespace("gifski",    quietly = TRUE)
 has_base64enc <- requireNamespace("base64enc", quietly = TRUE)
 has_gridExtra <- requireNamespace("gridExtra", quietly = TRUE)
 
+# Single source of truth for the app version. Used in the HTML report footer
+# and the saved-settings JSON so a bundle/session can be tied back to the code
+# that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
+APP_VERSION <- "2.9.0"
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 safe_id <- function(x) gsub("[^A-Za-z0-9_]", "_", x)
@@ -482,7 +487,7 @@ html_table(meta$settings_df),
 "<h2>Reproducibility</h2>
 <p>", html_escape(paste0(si$R.version$version.string, "; platform ", si$platform)), "</p>
 <p style='font-size:0.85em;color:#6c757d;'>Attached packages: ", html_escape(pkg_txt), "</p>
-<footer>Lysis Curve OD Visualization App v2.8 &middot; Michael Baffour Awuah / Ramsey Lab</footer>
+<footer>Lysis Curve OD Visualization App v", APP_VERSION, " &middot; Michael Baffour Awuah / Ramsey Lab</footer>
 </body></html>")
 }
 
@@ -1378,7 +1383,7 @@ server <- function(input, output, session) {
       }
       
       out <- list(
-        version           = "2.5",
+        version           = APP_VERSION,
         saved_at          = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
         global_settings   = global_settings,
         sample_aesthetics = sample_aesthetics

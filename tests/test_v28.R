@@ -190,5 +190,12 @@ src <- readLines("Lysis_Curve_App_v28.R")
 check("global_exceptions appears twice (save + load)",
       sum(grepl("global_exceptions <- c(\"shape_size\", \"color_palette\")", src, fixed = TRUE)) == 2)
 
+cat("\n--- KC-8: settings JSON version matches the app, not a stale \"2.5\" ---\n")
+check("APP_VERSION constant is defined and is not the stale \"2.5\"",
+      !is.null(env$APP_VERSION) && is.character(env$APP_VERSION) && env$APP_VERSION != "2.5")
+check("saved settings JSON stamps APP_VERSION rather than a literal \"2.5\"",
+      any(grepl("version\\s*=\\s*APP_VERSION", src)) &&
+      !any(grepl('version\\s*=\\s*"2\\.5"', src)))
+
 cat("\n============ SUMMARY:", pass, "passed /", fail, "failed ============\n")
 if (fail > 0) quit(status = 1)
