@@ -70,6 +70,35 @@ mf <- env$compute_curve_metrics(pd_flat)
 check("flat curve: no crash, t50 NA, growth NA",
       is.na(mf$t_half_max_decline) && is.na(mf$mu_max))
 
+cat("\n--- KC-2: non-positive OD is excluded from mu_max windows, not clamped ---\n")
+# A -0.002 first reading (routine after blank subtraction) followed by a
+# curve that exactly doubles every 10 time units. With window=3 the two
+# windows touching the negative point (output positions 1-2) must be NA;
+# the two clean windows (positions 3-4) give the true slope ln(2)/10.
+pd_neg <- data.frame(time = c(0, 10, 20, 30, 40), variable = "N",
+                     mean_value = c(-0.002, 0.05, 0.1, 0.2, 0.4))
+mn <- env$compute_curve_metrics(pd_neg, smooth_window = 3)
+check("KC-2: n_nonpositive_od counted correctly", mn$n_nonpositive_od == 1)
+check("KC-2: mu_max = ln(2)/10 (from the clean windows only, not inflated)",
+      near(mn$mu_max, log(2) / 10, tol = 1e-6))
+check("KC-2: doubling_time = 10", near(mn$doubling_time, 10, tol = 1e-6))
+
+# Directly demonstrate the regression the old code had: clamping the
+# negative reading to 1e-9 before log() (log(pmax(od, 1e-9))) puts an
+# enormous artificial slope into the window that contains it, which wins
+# max() and inflates mu_max well above the true ln(2)/10.
+old_clamped_log <- log(pmax(pd_neg$mean_value, 1e-9))
+old_slopes  <- env$rolling_slope(pd_neg$time, old_clamped_log, 3)
+old_mu_max  <- max(old_slopes[is.finite(old_slopes) & old_slopes > 1e-10])
+check("KC-2: the old clamp-based slope would have been far larger than the fixed mu_max",
+      old_mu_max > mn$mu_max * 2)
+
+# A sample with no non-positive readings reports n_nonpositive_od = 0
+pd_allpos <- data.frame(time = c(0, 10, 20), variable = "P",
+                        mean_value = c(0.1, 0.2, 0.4))
+check("KC-2: n_nonpositive_od = 0 when all OD > 0",
+      env$compute_curve_metrics(pd_allpos, smooth_window = 3)$n_nonpositive_od == 0)
+
 cat("\n--- Server integration via testServer: replicate pooling ---\n")
 tmp <- tempfile(fileext = ".csv")
 writeLines(c("Time,WT,WT,WT,Mutant,Mutant,Mutant",

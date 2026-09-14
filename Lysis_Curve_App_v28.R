@@ -201,10 +201,30 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL) {
     # rolling slope reaches 10% of mu_max)
     mu_max <- NA_real_; lag_phase <- NA_real_
     win <- min(smooth_window, n_pts)
+    # KC-2: a non-positive OD has no logarithm. The old clamp,
+    # log(pmax(od_vec, 1e-9)), mapped e.g. a -0.002 blank-subtraction
+    # artefact (routine after plate-reader blanking) onto log(1e-9) = -20.7
+    # -- about twenty log units below every real reading -- so the rolling
+    # window containing it fit an enormous artificial slope that always won
+    # max(), inflating mu_max ~2.8x on a representative test curve and
+    # understating doubling time to match. Treat non-positive OD as missing
+    # for this log-scale metric instead of clamping it: any window that
+    # touches one gets no slope at all, and the count is reported below so
+    # an affected sample is easy to spot.
+    n_nonpositive_od <- sum(is.finite(od_vec) & od_vec <= 0)
     if (n_pts >= win && win >= 3) {
-      log_od <- log(pmax(od_vec, 1e-9))
+      pos_od <- is.finite(od_vec) & od_vec > 0
+      log_od <- rep(NA_real_, n_pts)
+      log_od[pos_od] <- log(od_vec[pos_od])
       roll_slopes <- tryCatch(rolling_slope(t_vec, log_od, win),
                               error = function(e) rep(NA_real_, n_pts))
+      if (n_nonpositive_od > 0) {
+        offset <- floor((win - 1) / 2)
+        for (s in seq_len(n_pts - win + 1)) {
+          idx <- s:(s + win - 1)
+          if (any(!pos_od[idx])) roll_slopes[s + offset] <- NA_real_
+        }
+      }
       # deviation from the reference engine: require slopes > 1e-10 (not > 0)
       # so floating-point noise on a flat curve is not reported as growth
       # (the reference can emit mu_max ~ 1e-18 -> doubling time ~ 1e17)
@@ -298,6 +318,7 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL) {
       final_od        = final_od,
       auc             = auc,
       mu_max          = mu_max,
+      n_nonpositive_od = n_nonpositive_od,
       doubling_time   = doubling_time,
       lag_phase       = lag_phase,
       stat_phase_dur  = stat_phase_dur,
@@ -349,6 +370,7 @@ METRIC_DEFINITIONS <- c(
   final_od        = "Mean value at the last time point",
   auc             = "Area under the mean curve (trapezoidal rule)",
   mu_max          = "Maximum specific growth rate: largest centered rolling-window regression slope of ln(mean) vs time (window = smoothing setting, default 5 points); NA if the curve never grows",
+  n_nonpositive_od = "Count of time points with OD <= 0 (e.g. a blank-subtraction artefact). Any mu_max rolling window touching one of these is excluded rather than clamped, so mu_max/doubling_time/lag_phase may be NA or based on fewer windows when this is > 0",
   doubling_time   = "ln(2) / mu_max; NA when there is no growth phase",
   lag_phase       = "First time at which the rolling ln-slope reaches 10% of mu_max",
   stat_phase_dur  = "Time spanned by all points within 95% of the peak",
@@ -1076,6 +1098,7 @@ ui <- fluidPage(
                          "AUC, lysis efficiency, and more."),
                        numericInput("metrics_smooth_window",
                                     "μmax smoothing window (points):", 5, 3, 15, 1),
+                       uiOutput("nonpositive_od_warning_ui"),
                        selectInput("metrics_ref_sample",
                                    "Reference sample (infection metrics):",
                                    choices = c("None" = "")),
@@ -2428,6 +2451,23 @@ server <- function(input, output, session) {
                           smooth_window = input$metrics_smooth_window %||% 5,
                           ref_sample    = input$metrics_ref_sample)
   }
+
+  # KC-2: warn when any sample has non-positive OD readings, since those
+  # points are excluded from the mu_max/doubling_time/lag_phase windows
+  # (see compute_curve_metrics) rather than silently clamped.
+  output$nonpositive_od_warning_ui <- renderUI({
+    m <- tryCatch(curve_metrics_current(), error = function(e) NULL)
+    if (is.null(m) || !"n_nonpositive_od" %in% colnames(m)) return(NULL)
+    bad <- m[m$n_nonpositive_od > 0, c("sample", "n_nonpositive_od"), drop = FALSE]
+    if (nrow(bad) == 0) return(NULL)
+    txt <- paste0(bad$sample, " (", bad$n_nonpositive_od, ")", collapse = ", ")
+    div(style = "background:#fff3cd;border:1px solid #ffe69c;border-radius:4px;
+                 padding:6px 8px;margin:4px 0 8px;font-size:.78em;color:#664d03;",
+        HTML(paste0("<b>Non-positive OD detected</b> (samples, count of points): ", txt,
+                    ". Those time points are excluded from the &mu;max/doubling-time/",
+                    "lag-phase windows rather than clamped &mdash; a common cause is a ",
+                    "small negative reading after blank subtraction.")))
+  })
 
   output$downloadMetricsCSV <- downloadHandler(
     filename = function()
