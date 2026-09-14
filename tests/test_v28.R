@@ -163,6 +163,45 @@ check("KC-3: with peak_smooth_window = 3, both variants find the true peak at t=
 check("KC-3: max_od is still the RAW value at the (smoothed-located) peak, not a smoothed value",
       near(sm_A$max_od, 0.55) && near(sm_B$max_od, 0.55))
 
+cat("\n--- KC-4: per-replicate metrics (mean +/- SD across replicates), additive ---\n")
+# Two replicates of sample "S" that peak at DIFFERENT times but the SAME
+# value (0.5): the mean curve's peak is a tie-broken 0.35 at t=10, while
+# each individual replicate genuinely peaks at 0.5. This demonstrates why
+# the two metrics are not interchangeable: max_od is nonlinear (argmax),
+# so mean(per-replicate max_od) != max_od(mean curve).
+rep_pd_S <- data.frame(
+  time      = c(0, 10, 20, 0, 10, 20),
+  variable  = "S",
+  replicate = c(1, 1, 1, 2, 2, 2),
+  value     = c(0.1, 0.5, 0.2, 0.1, 0.2, 0.5))
+rm_S <- env$compute_replicate_metrics(rep_pd_S)
+check("KC-4: n_replicates = 2", rm_S$n_replicates == 2)
+check("KC-4: per-replicate max_od mean = 0.5 (both replicates individually peak at 0.5)",
+      near(rm_S$max_od_mean, 0.5))
+check("KC-4: per-replicate max_od sd = 0 (both replicates peak at exactly the same value)",
+      near(rm_S$max_od_sd, 0, 1e-12))
+mean_pd_S <- data.frame(time = c(0, 10, 20), variable = "S", mean_value = c(0.1, 0.35, 0.35))
+cm_S <- env$compute_curve_metrics(mean_pd_S)
+check("KC-4: mean-curve max_od (0.35) != per-replicate mean max_od (0.5) -- not interchangeable",
+      near(cm_S$max_od, 0.35) && !isTRUE(all.equal(cm_S$max_od, rm_S$max_od_mean)))
+
+# One growing replicate, one flat (mu_max NA): safe_mean/safe_sd must skip
+# the NA rather than propagating it or silently treating it as 0.
+rep_pd_G <- data.frame(
+  time      = rep(c(0, 10, 20, 30), 2),
+  variable  = "G",
+  replicate = rep(c(1, 2), each = 4),
+  value     = c(0.05, 0.1, 0.2, 0.4,   0.2, 0.2, 0.2, 0.2))
+rm_G  <- env$compute_replicate_metrics(rep_pd_G)
+solo1 <- env$compute_curve_metrics(
+  data.frame(time = c(0, 10, 20, 30), variable = "G1", mean_value = c(0.05, 0.1, 0.2, 0.4)))
+check("KC-4: mu_max mean = the one non-NA replicate's value (flat replicate excluded, not zeroed)",
+      near(rm_G$mu_max_mean, solo1$mu_max))
+check("KC-4: mu_max sd is NA with only one non-NA replicate (not 0)",
+      is.na(rm_G$mu_max_sd))
+check("KC-4: compute_replicate_metrics returns NULL on empty input",
+      is.null(env$compute_replicate_metrics(rep_pd_S[0, ])))
+
 cat("\n--- Server integration via testServer: replicate pooling ---\n")
 tmp <- tempfile(fileext = ".csv")
 writeLines(c("Time,WT,WT,WT,Mutant,Mutant,Mutant",
@@ -185,6 +224,17 @@ testServer(app, {
         near(wt0$ci95_value, qt(0.975, 2) * 0.01/sqrt(3), 1e-12))
   mu0 <- pd[pd$variable == "Mutant" & pd$time == 30, ]
   check("Mutant t=30 mean over 3 reps", near(mu0$mean_value, mean(c(0.08, 0.09, 0.07))))
+
+  # KC-4: prepare_replicate_data() must keep every individual replicate
+  # curve un-averaged, with a stable per-sample replicate index
+  rep_pd <- prepare_replicate_data()
+  check("prepare_replicate_data: 3 replicates x 2 samples x 2 timepoints = 12 rows",
+        nrow(rep_pd) == 12)
+  wt_rep_od0 <- sort(rep_pd$value[rep_pd$variable == "WT" & rep_pd$time == 0])
+  check("prepare_replicate_data: WT t=0 keeps all 3 raw values (not averaged)",
+        isTRUE(all.equal(wt_rep_od0, sort(c(0.05, 0.06, 0.04)))))
+  check("prepare_replicate_data: replicate index is 1..3 per sample",
+        setequal(rep_pd$replicate[rep_pd$variable == "WT"], c(1, 2, 3)))
 
   st <- stats_table_export()
   check("stats export columns",
@@ -220,6 +270,15 @@ testServer(app, {
   l0 <- pd4[pd4$time == 0, ]
   check("long + NA: n = 2", l0$n == 2)
   check("long + NA: mean = 0.055", near(l0$mean_value, 0.055))
+
+  # KC-4: long-format replicate identity is inferred from row order within
+  # each (sample, time) group; the NA row (occurrence 3 at t=0) is dropped
+  rpd4 <- prepare_replicate_data()
+  check("prepare_replicate_data (long): NA value dropped, 5 rows remain (not 6)",
+        nrow(rpd4) == 5)
+  check("prepare_replicate_data (long): replicate 1 tracks the 1st row at each time (0.05, 0.12)",
+        near(rpd4$value[rpd4$replicate == 1 & rpd4$time == 0],  0.05) &&
+        near(rpd4$value[rpd4$replicate == 1 & rpd4$time == 30], 0.12))
 
   # KC-1: n = 1 must export SD/SEM/95% CI as NA (undefined), never 0
   tmp4 <- tempfile(fileext = ".csv")

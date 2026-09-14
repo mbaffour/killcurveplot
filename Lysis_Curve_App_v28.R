@@ -219,23 +219,24 @@ moving_average <- function(y, w) {
   }, numeric(1))
 }
 
-# ref_sample: optional name of an uninfected/reference sample; when given (and
-# present in the data) the five reference-normalised infection metrics are added.
+# KC-4: the full per-curve metrics engine, factored out into its own function
+# so the EXACT SAME formulas run on a per-replicate curve
+# (compute_replicate_metrics(), below) as on the mean curve
+# (compute_curve_metrics(), below) -- not a re-implementation that could
+# silently drift from it. Returns one row of metrics for a single
+# (t_vec, od_vec) curve.
+#
 # peak_smooth_window: OFF by default (1 = no smoothing). At the app's own demo
-# noise level (~4%), which(max)/lysis-onset detection on the raw mean curve
-# can move by a whole timepoint between otherwise-identical noise draws (see
+# noise level (~4%), which(max)/lysis-onset detection on the raw curve can
+# move by a whole timepoint between otherwise-identical noise draws (see
 # AUDIT-2026-09.md, KC-3), which cascades into lysis_time/lysis_rate/od_drop/
 # residual_od/lysis_efficiency/recovery_ratio/t_half_max_decline, all anchored
 # on the peak index. When > 1, the peak (and only the peak) is located on a
 # centered moving average of the curve instead of the raw curve; every
 # reported OD value still comes from the raw data at that index -- smoothing
 # only decides WHERE the peak is, never WHAT its value is.
-compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
-                                  peak_smooth_window = 1) {
-  if (is.null(pd) || nrow(pd) == 0) return(NULL)
-  pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
-  out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
-    t_vec  <- g$time; od_vec <- g$mean_value
+compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
+                                      smooth_window = 5, peak_smooth_window = 1) {
     n_pts  <- length(t_vec)
     peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
     max_idx <- which.max(peak_vec); min_idx <- which.min(od_vec)
@@ -356,7 +357,7 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
     }
 
     data.frame(
-      sample          = g$variable[1],
+      sample          = sample_name,
       n_timepoints    = n_pts,
       t_start         = t_vec[1],
       t_end           = t_vec[n_pts],
@@ -390,6 +391,17 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
       steepest_decline_interval = dec_int,
       stringsAsFactors = FALSE
     )
+}
+
+# ref_sample: optional name of an uninfected/reference sample; when given (and
+# present in the data) the five reference-normalised infection metrics are added.
+compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
+                                  peak_smooth_window = 1) {
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
+  out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
+    compute_one_curve_metrics(g$time, g$mean_value, g$variable[1],
+                              smooth_window, peak_smooth_window)
   })
   m <- do.call(rbind, c(out, list(make.row.names = FALSE)))
 
@@ -410,6 +422,57 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
     m$lysis_onset_delta  <- m$lysis_time - m$lag_phase
   }
   m
+}
+
+# KC-4: compute_curve_metrics() above runs the metrics engine ONCE per
+# sample, on the already-averaged mean curve -- so every one of its 27+
+# metrics is a single number with no replicate-to-replicate uncertainty and
+# no path to "is this difference real". This is additive alongside it, not
+# a replacement: it runs compute_one_curve_metrics() once per INDIVIDUAL
+# replicate curve, then reports mean +/- SD across replicates for every
+# metric. The two are NOT the same number -- the mean of per-replicate
+# metrics is generally not equal to the metric of the mean curve, because
+# most of these metrics (mu_max, lysis_time, ...) are nonlinear functions
+# of the curve -- so both are kept, clearly labelled, rather than one being
+# presented as if it were the other.
+#
+# rep_pd: long, UN-averaged data with columns time, variable, replicate,
+# value (see prepare_replicate_data() in the server). "replicate" is an
+# arbitrary but stable per-sample index -- for wide files it is the
+# replicate column's position (matching rv$col_map); for long files with no
+# explicit replicate-ID column it is the row's occurrence order within its
+# (sample, time) group, which assumes same-replicate rows appear in a
+# consistent relative order across time points.
+compute_replicate_metrics <- function(rep_pd, smooth_window = 5, peak_smooth_window = 1) {
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(NULL)
+  rep_pd <- rep_pd[is.finite(rep_pd$value), , drop = FALSE]
+  if (nrow(rep_pd) == 0) return(NULL)
+  rep_pd <- rep_pd[order(rep_pd$variable, rep_pd$replicate, rep_pd$time), , drop = FALSE]
+  rep_key <- interaction(rep_pd$variable, rep_pd$replicate, drop = TRUE)
+
+  per_rep <- lapply(split(rep_pd, rep_key, drop = TRUE), function(g) {
+    row <- compute_one_curve_metrics(g$time, g$value, g$variable[1],
+                                     smooth_window, peak_smooth_window)
+    row$replicate <- g$replicate[1]
+    row
+  })
+  rm <- do.call(rbind, c(per_rep, list(make.row.names = FALSE)))
+
+  safe_mean <- function(x) if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
+  safe_sd   <- function(x) if (sum(!is.na(x)) < 2) NA_real_ else sd(x, na.rm = TRUE)
+
+  metric_cols <- setdiff(names(rm)[vapply(rm, is.numeric, logical(1))],
+                         c("replicate"))
+  out <- lapply(split(rm, rm$sample, drop = TRUE), function(g) {
+    row <- data.frame(sample = g$sample[1], n_replicates = nrow(g),
+                      stringsAsFactors = FALSE)
+    for (cc in metric_cols) {
+      row[[paste0(cc, "_mean")]] <- safe_mean(g[[cc]])
+      row[[paste0(cc, "_sd")]]   <- safe_sd(g[[cc]])
+    }
+    row
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
 }
 
 METRIC_DEFINITIONS <- c(
@@ -1155,7 +1218,21 @@ ui <- fluidPage(
                          "Per-sample growth & lysis metrics (same engine as the lysis-paper ",
                          "companion app): μmax, doubling time, lag phase, stationary ",
                          "duration, lysis onset/rate, OD drop, residual OD, recovery slope, ",
-                         "AUC, lysis efficiency, and more."),
+                         "AUC, lysis efficiency, and more. Computed from the MEAN curve — a ",
+                         "single number per sample, with no replicate-to-replicate uncertainty."),
+                       br(),
+                       downloadButton("downloadReplicateMetricsCSV",
+                                      "Per-Replicate Metrics, mean ± SD (CSV)",
+                                      style = "width:100%;"),
+                       p(style = "font-size:.78em;color:#777;margin-top:4px;",
+                         "KC-4: the SAME metrics engine run once per individual replicate curve, ",
+                         "then reported as mean ± SD across replicates per sample — additive ",
+                         "alongside Curve Metrics above, not a replacement for it. These two are ",
+                         "not the same number: most of these metrics are nonlinear functions of ",
+                         "the curve, so the mean of the per-replicate metrics is generally not ",
+                         "equal to the metric of the mean curve. For long-format files with no ",
+                         "explicit replicate-ID column, replicate identity is inferred from row ",
+                         "order within each (sample, time) group."),
                        numericInput("metrics_smooth_window",
                                     "μmax smoothing window (points):", 5, 3, 15, 1),
                        uiOutput("nonpositive_od_warning_ui"),
@@ -2034,7 +2111,49 @@ server <- function(input, output, session) {
     }
     pd %>% filter(is.finite(time) & is.finite(mean_value))
   }
-  
+
+  # KC-4: the un-averaged counterpart of prepare_plot_data() -- one row per
+  # (time, sample, replicate), never collapsed to a mean. Feeds
+  # compute_replicate_metrics() so per-replicate metrics can be computed
+  # with mean +/- SD reported across replicates, alongside (not instead of)
+  # the mean-curve metrics prepare_plot_data()/compute_curve_metrics() give.
+  prepare_replicate_data <- function(samples = NULL) {
+    req(rv$data, rv$time_col, input$selected_samples)
+    samps <- if (!is.null(samples)) samples else input$selected_samples
+    if (rv$is_long_format) {
+      req(rv$group_col, rv$value_col)
+      d <- apply_time_filters(rv$data, rv$time_col)
+      d <- d[d[[rv$group_col]] %in% samps, , drop = FALSE]
+      d <- d[order(d[[rv$group_col]], d[[rv$time_col]]), , drop = FALSE]
+      # Long files have no explicit replicate-ID column: the nth row within
+      # each (sample, time) cell is treated as "replicate n". This assumes
+      # same-replicate rows appear in a consistent relative order across
+      # time points (true whenever each time point's rows were entered/
+      # exported in the same replicate order, the common case).
+      rep_idx <- ave(seq_len(nrow(d)),
+                     d[[rv$group_col]], d[[rv$time_col]], FUN = seq_along)
+      out <- data.frame(time      = d[[rv$time_col]],
+                        variable  = d[[rv$group_col]],
+                        replicate = rep_idx,
+                        value     = suppressWarnings(as.numeric(as.character(d[[rv$value_col]]))),
+                        stringsAsFactors = FALSE)
+    } else {
+      d    <- apply_time_filters(rv$data, rv$time_col)
+      meas <- intersect(rv$od_vars_raw, samps)
+      t_vec <- d[[rv$time_col]]
+      pieces <- lapply(meas, function(vn) {
+        idxs <- rv$col_map[[vn]]
+        if (is.null(idxs)) idxs <- which(colnames(d) == vn)
+        bind_rows(lapply(seq_along(idxs), function(r)
+          data.frame(time      = t_vec, variable = vn, replicate = r,
+                    value     = suppressWarnings(as.numeric(as.character(d[[idxs[r]]]))),
+                    stringsAsFactors = FALSE)))
+      })
+      out <- bind_rows(pieces)
+    }
+    out %>% filter(is.finite(time) & is.finite(value))
+  }
+
   # ── Aesthetics resolver ──────────────────────────────────────────────────────
   resolve_aesthetics <- function(samples) {
     n          <- length(samples)
@@ -2545,6 +2664,23 @@ server <- function(input, output, session) {
     content = function(file) {
       req(rv$data, input$selected_samples)
       write.csv(curve_metrics_current(), file, row.names = FALSE)
+    }
+  )
+
+  # KC-4: per-replicate metrics (mean +/- SD across replicates), additive
+  # alongside curve_metrics_current() above.
+  replicate_metrics_current <- function() {
+    compute_replicate_metrics(prepare_replicate_data(),
+                              smooth_window      = input$metrics_smooth_window %||% 5,
+                              peak_smooth_window = input$metrics_peak_smooth_window %||% 1)
+  }
+
+  output$downloadReplicateMetricsCSV <- downloadHandler(
+    filename = function()
+      paste0("replicate_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content = function(file) {
+      req(rv$data, input$selected_samples)
+      write.csv(replicate_metrics_current(), file, row.names = FALSE)
     }
   )
 

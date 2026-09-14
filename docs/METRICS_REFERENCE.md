@@ -54,6 +54,34 @@ are bit-for-bit unchanged unless a user opts in.
 | `t_half_max_decline` | First time after the peak below 50% of the peak, linearly interpolated; NA if never |
 | `steepest_decline_rate/interval` | Most negative consecutive-point slope, and where |
 
+## Per-replicate metrics (optional, additive — "Per-Replicate Metrics, mean ± SD (CSV)")
+
+Everything above is computed **once per sample, from the already-averaged mean
+curve** — a single number with no replicate-to-replicate uncertainty. The
+Per-Replicate Metrics export instead runs the exact same metrics engine
+(`compute_one_curve_metrics()`) **once per individual replicate curve**, then
+reports `<metric>_mean` and `<metric>_sd` across replicates per sample, plus
+`n_replicates`.
+
+**These are not the same number.** Most of these metrics are nonlinear
+functions of the curve (`max_od` picks whichever point is the argmax;
+`mu_max` picks the largest of many regression slopes; `lysis_time` is a
+threshold crossing), so the mean of the per-replicate metrics is generally
+**not** equal to the metric of the mean curve — e.g. two replicates that each
+individually peak at OD 0.5, at different times, can average to a mean curve
+whose peak is only 0.35. Both numbers are kept, separately labelled, rather
+than one being presented as if it were the other. A metric that is `NA` for
+some replicates (e.g. `mu_max` on a replicate that never grows) is excluded
+from that replicate's contribution to the mean/SD, not treated as zero; the
+SD is `NA` (not 0) when fewer than two replicates have a defined value for
+that metric — the same reasoning as KC-1 for summary statistics.
+
+Replicate identity: for wide files it is the replicate column's position
+(matching the same `rv$col_map` used for the REPLICATE FIX); for long files
+with no explicit replicate-ID column, it is the row's occurrence order within
+each (sample, time) group, which assumes same-replicate rows are entered in a
+consistent relative order across time points.
+
 ## Infection metrics (choose a reference sample)
 
 | Metric | Definition |
