@@ -366,6 +366,149 @@ testServer(app, {
         length(unique(p_dr$data$moi)) == 5)
 })
 
+cat("\n--- v2.12.2: auto legend corner ---\n")
+set.seed(7)
+# a cloud in one quadrant, with one anchor point in each of two other corners to pin the axis ranges
+bx <- c(0, 10, runif(30, 7, 9.5)); by <- c(0, 10, runif(30, 0.5, 3))     # cloud bottom-right; anchors BL, TR
+check("auto_legend_corner: data in the bottom-right -> top-left",
+      identical(env$auto_legend_corner(bx, by), "top-left"))
+tx <- c(0, 10, runif(30, 0.5, 3)); ty <- c(0, 10, runif(30, 7, 9.5))     # cloud top-left; anchors BL, TR
+check("auto_legend_corner: data in the top-left -> bottom-right (emptiest)",
+      identical(env$auto_legend_corner(tx, ty), "bottom-right"))
+ux <- c(0, 10, runif(30, 0.5, 3)); uy <- c(0, 0, runif(30, 7, 9.5))      # cloud top-left; anchors BL, BR
+check("auto_legend_corner: only the top-left populated (anchors BL, BR) -> top-right",
+      identical(env$auto_legend_corner(ux, uy), "top-right"))
+check("auto_legend_corner: empty vector -> top-left", identical(env$auto_legend_corner(numeric(0), numeric(0)), "top-left"))
+check("auto_legend_corner: ties go top-left, then top-right, then the bottom corners",
+      identical(env$auto_legend_corner(c(0, 10), c(0, 0)), "top-left") &&
+      identical(env$auto_legend_corner(c(0, 0, 10), c(0, 10, 0)), "top-right") &&
+      identical(env$auto_legend_corner(c(0, 0, 10, 10, 0, 10), c(10, 9, 10, 9, 0, 0)), "bottom-left"))
+# log axis: the midpoint is taken on log10(y): 0.01..1 splits at 0.1, not at 0.505
+lx <- c(0, 0, 0, 10); ly <- c(0.01, 0.02, 0.5, 1)
+check("auto_legend_corner: log_y splits at the log midpoint",
+      identical(env$auto_legend_corner(lx, ly, log_y = TRUE), "bottom-right") &&
+      identical(env$auto_legend_corner(lx, ly, log_y = FALSE), "top-left"))
+# corner-box variant (what the figures use): a rising curve leaves the top-left corner free even though
+# that quadrant holds points, and the bottom-right band of a lysis trough is not mistaken for empty
+cx <- seq(0, 10, length.out = 40); cy <- 10^(-2 + 2 * cx / 10)                 # log-linear rise
+check("auto_legend_corner (corner box): a rising log curve -> top-left; box = NULL is the quadrant rule",
+      identical(env$auto_legend_corner(cx, cy, TRUE, box = env$inside_legend_box(3)), "top-left") &&
+      identical(env$auto_legend_corner(c(0, 10), c(0, 0), box = NULL), "top-left"))
+check("auto_legend_corner (corner box): empty vector -> top-left",
+      identical(env$auto_legend_corner(numeric(0), numeric(0), box = env$inside_legend_box(3)), "top-left"))
+check("journal preset uses inside-auto", identical(env$journal_preset_settings(89, 65)$legend_position, "inside-auto"))
+check("inside legends use a compact key",
+      isTRUE(all.equal(as.numeric(env$inside_legend_theme("top-left")$legend.key.spacing.y), 1)) &&
+      identical(as.numeric(env$inside_legend_theme("top-left")$legend.margin), c(1, 3, 1, 3)))
+
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected", legend_position = "inside-auto")
+  check("inside-auto: main figure (3 samples) gets an inside legend",
+        identical(generate_plot()$theme$legend.position, "inside"))
+  check("inside-auto: growth-rate figure (3 samples) gets an inside legend",
+        identical(generate_analysis_plot("growth_rate")$theme$legend.position, "inside"))
+  th <- generate_plot()$theme
+  check("inside-auto: justification is a corner and the key is compact",
+        all(th$legend.justification.inside %in% c(0, 1)) && isTRUE(all.equal(as.numeric(th$legend.key.spacing.y), 1)))
+  session$setInputs(legend_position = "right")
+  check("default legend position stays outside (right)", identical(generate_plot()$theme$legend.position, "right"))
+})
+testServer(app, {
+  ingest_data(env$make_demo_data("moi_series"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected", legend_position = "inside-auto")
+  check("inside-auto: 6 samples fall back to a right legend in the main figure",
+        identical(generate_plot()$theme$legend.position, "right"))
+  check("inside-auto: 6 samples fall back to a right legend in the analysis figures",
+        identical(generate_analysis_plot("replicate_overlay")$theme$legend.position, "right"))
+  # metric summary: 5+ samples -> angled labels instead of staggered rows
+  ms <- generate_analysis_plot("metric_summary")
+  xg <- ggplot_build(ms)$layout$panel_scales_x[[1]]$guide
+  check("metric summary with 6 samples uses guide_axis(angle = 45)", isTRUE(xg$params$angle == 45))
+  check("metric facet labels are the short ones",
+        all(c(paste0("OD drop (", input$y_axis_label, ")"), "Lysis onset (min)") %in% levels(ms$data$metric)) &&
+        env$metric_axis_label("lysis_rate", "min", "OD") == "Lysis rate (OD per min)" &&
+        env$metric_axis_label("t_half_max_decline", "min", "OD") == "Time to half peak (min)")
+  # dose-response axis labels read as plain numbers
+  p_dr <- generate_analysis_plot("dose_response")
+  sx <- ggplot_build(p_dr)$layout$panel_scales_x[[1]]
+  labs_x <- sx$get_labels(sx$get_breaks())
+  labs_x <- labs_x[!is.na(labs_x) & nzchar(labs_x)]
+  check("dose-response x labels are plain numbers (0.01 ... 100), not 1e-02",
+        !any(grepl("e", labs_x)) && all(c("0.01", "0.1", "1", "10", "100") %in% labs_x))
+  check("dose-response with one phage series has one series name", length(unique(p_dr$data$series)) == 1)
+  # a single MOI level -> message, not a degenerate plot
+  session$setInputs(selected_samples = c("Uninfected", "Phage MOI 10"))
+  e1 <- plot_error(generate_analysis_plot("dose_response"))
+  check("dose-response with one MOI level shows the 'needs at least two MOI levels' message",
+        !is.null(e1) && grepl("Dose-response needs at least two MOI levels; this selection has one.", gsub("\n", " ", e1), fixed = TRUE))
+})
+testServer(app, {
+  ingest_data(env$make_demo_data("two_phages"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time")
+  p2 <- generate_analysis_plot("dose_response"); real_plot("two_phages: dose-response renders", p2)
+  check("two_phages: dose-response data has two series (Phage A, Phage B)",
+        identical(sort(unique(p2$data$series)), c("Phage A", "Phage B")))
+  gn <- vapply(p2$layers, function(l) class(l$geom)[1], "")
+  check("two_phages: one connecting line and one end label per series",
+        sum(gn == "GeomLine") == 2 && sum(gn == "GeomText") == 2)
+})
+
+cat("\n--- v2.12.2: first-peak mode ---\n")
+tt_r <- seq(0, 240, by = 30)
+od_r <- c(0.05, 0.275, 0.5, 0.275, 0.05, 0.3, 0.55, 0.7, 0.8)   # lyses after t = 60, regrows above the first peak
+mg <- env$compute_one_curve_metrics(tt_r, od_r, "R")
+mf <- env$compute_one_curve_metrics(tt_r, od_r, "R", peak_mode = "first_local")
+check("peak mode global: the peak is the late regrowth maximum (t = 240) and lysis is NA",
+      mg$time_max_od == 240 && is.na(mg$lysis_time) && is.na(mg$od_drop))
+check("peak mode first_local: peak at t = 60, finite lysis_time and od_drop",
+      mf$time_max_od == 60 && is.finite(mf$lysis_time) && near(mf$od_drop, 0.45) && is.finite(mf$t_half_max_decline))
+check("peak mode default equals 'global'", identical(env$compute_one_curve_metrics(tt_r, od_r, "R"), mg))
+check("first_local falls back to the global maximum when no decline follows",
+      env$compute_one_curve_metrics(1:5, c(0.05, 0.1, 0.3, 0.6, 0.9), "M", peak_mode = "first_local")$time_max_od == 5)
+lys <- c(0.05, 0.2, 0.5, 0.8, 0.4, 0.1, 0.03)   # the trough is below the inoculum: t = 0 must not count as "the peak"
+check("first_local on an ordinary lysis curve equals the global peak",
+      identical(env$compute_one_curve_metrics(0:6, lys, "L", peak_mode = "first_local"),
+                env$compute_one_curve_metrics(0:6, lys, "L")))
+pd_r <- data.frame(time = tt_r, variable = "R", mean_value = od_r)
+check("compute_curve_metrics threads peak_mode",
+      env$compute_curve_metrics(pd_r)$time_max_od == 240 &&
+      env$compute_curve_metrics(pd_r, peak_mode = "first_local")$time_max_od == 60)
+rp_r <- data.frame(time = rep(tt_r, 2), variable = "R", replicate = rep(1:2, each = length(tt_r)), value = rep(od_r, 2))
+check("replicate rows and summary thread peak_mode",
+      all(env$compute_replicate_metric_rows(rp_r, peak_mode = "first_local")$time_max_od == 60) &&
+      all(env$compute_replicate_metric_rows(rp_r)$time_max_od == 240) &&
+      env$compute_replicate_metrics(rp_r, peak_mode = "first_local")$time_max_od_mean == 60)
+testServer(app, {
+  ingest_data(env$make_demo_data("resistance"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected")
+  mg <- curve_metrics_current()
+  check("resistance demo, global peak: the regrowing sample has no lysis onset",
+        is.na(mg$lysis_time[mg$sample == "Phage MOI 1 + resistant"]))
+  session$setInputs(metrics_peak_mode = "first_local")
+  mf <- curve_metrics_current()
+  check("resistance demo, first_local: lysis onset and OD drop are found at the 90 min peak",
+        is.finite(mf$lysis_time[mf$sample == "Phage MOI 1 + resistant"]) &&
+        mf$time_max_od[mf$sample == "Phage MOI 1 + resistant"] == 90 && mf$time_max_od[mf$sample == "Uninfected"] == 360)
+  rr <- replicate_metric_rows_current()
+  check("replicate metrics follow the peak mode too",
+        all(rr$time_max_od[rr$sample == "Phage MOI 1 + resistant"] <= 105))
+  pl <- generate_analysis_plot("landmarks"); real_plot("landmarks figure renders with first_local", pl)
+  gl <- vapply(pl$layers, function(l) class(l$geom)[1], "")
+  pk <- layer_data(pl, which(gl == "GeomPoint")[1])
+  check("landmarks mark the first peak (shape 16 at t = 90 for the regrowth curve)",
+        any(pk$shape == 16 & abs(pk$x - 90) < 1e-9))
+  check("metrics_peak_mode has an APP_DEFAULTS entry", identical(env$APP_DEFAULTS$metrics_peak_mode, "global"))
+})
+
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (nzchar(render_dir)) cat("renders in:", render_dir, "\n")
 if (fail > 0) quit(status = 1)

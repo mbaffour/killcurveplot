@@ -1,6 +1,19 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.12.2 -- Review round (all opt-in; the default main figure is unchanged):
+#   LEGEND AUTO CORNER -- legend position "Inside: emptiest corner (auto)" puts
+#                         the key in the quadrant with the fewest plotted points
+#                         (auto_legend_corner); > 5 entries fall back to "right".
+#                         Inside keys are more compact. The journal preset uses it.
+#   LABELS             -- shorter metric facet titles, 45-degree x labels for 5+
+#                         samples, plain-number MOI axis labels.
+#   DOSE-RESPONSE      -- one line + end label per phage (MOI stripped from the
+#                         sample label); a single MOI level shows a message.
+#   PEAK MODE          -- metrics_peak_mode "first_local": lysis metrics anchored
+#                         on the first peak followed by a > 5 % decline, for
+#                         regrowth / resistance curves (default "global").
+#
 # v2.11 -- Analysis figures, replicate statistics, dashboard:
 #   SHARED THEME       -- figure_theme_layers(): the main figure's fonts, line
 #                         weights, legend and spacing (journal preset included)
@@ -152,7 +165,7 @@ has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.12.1"
+APP_VERSION <- "2.12.2"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -281,11 +294,38 @@ moving_average <- function(y, w) {
 # centered moving average of the curve instead of the raw curve; every
 # reported OD value still comes from the raw data at that index -- smoothing
 # only decides WHERE the peak is, never WHAT its value is.
+#
+# peak_mode (v2.12.2): "global" (default, unchanged) takes the global maximum as
+# the peak. "first_local" is for regrowth / resistance curves, where the global
+# maximum is the late regrowth and every lysis metric would be NA: the peak is
+# the first point that is the running maximum AND is followed by a decline of
+# more than 5 % before the curve rises above it again (see first_local_peak_index).
+first_local_peak_index <- function(peak_vec) {
+  n <- length(peak_vec)
+  run_max <- -Inf
+  for (i in seq_len(n - 1)) {
+    v <- peak_vec[i]
+    if (!is.finite(v) || v < run_max) next      # not a running maximum
+    run_max <- v
+    later <- peak_vec[(i + 1):n]
+    j <- which(later < 0.95 * v)[1]             # first decline of more than 5 %
+    # The spec'd rule is "some later point is below 95 % of peak_vec[i]". Taken
+    # literally it also accepts every point on the way UP (a later lysis trough
+    # is lower than the inoculum, so t = 0 would be "the peak"). Requiring that
+    # the curve has not exceeded v by the time it first declines keeps the rule
+    # identical for a real peak and rejects the rising points.
+    if (!is.na(j) && !any(later[seq_len(j)] > v, na.rm = TRUE)) return(i)
+  }
+  which.max(peak_vec)
+}
 compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
-                                      smooth_window = 5, peak_smooth_window = 1) {
+                                      smooth_window = 5, peak_smooth_window = 1,
+                                      peak_mode = c("global", "first_local")) {
+    peak_mode <- match.arg(peak_mode)
     n_pts  <- length(t_vec)
     peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
-    max_idx <- which.max(peak_vec); min_idx <- which.min(od_vec)
+    max_idx <- if (peak_mode == "first_local") first_local_peak_index(peak_vec) else which.max(peak_vec)
+    min_idx <- which.min(od_vec)
     initial_od <- od_vec[1]
     max_od     <- od_vec[max_idx]
     final_od   <- od_vec[n_pts]
@@ -442,12 +482,12 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
 # ref_sample: optional name of an uninfected/reference sample; when given (and
 # present in the data) the five reference-normalised infection metrics are added.
 compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
-                                  peak_smooth_window = 1) {
+                                  peak_smooth_window = 1, peak_mode = "global") {
   if (is.null(pd) || nrow(pd) == 0) return(NULL)
   pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
   out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
     compute_one_curve_metrics(g$time, g$mean_value, g$variable[1],
-                              smooth_window, peak_smooth_window)
+                              smooth_window, peak_smooth_window, peak_mode)
   })
   m <- do.call(rbind, c(out, list(make.row.names = FALSE)))
 
@@ -495,7 +535,7 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
 # replicate, each replicate divided by the reference sample's replicate MEAN
 # (same definitions as compute_curve_metrics).
 compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth_window = 1,
-                                          ref_sample = NULL) {
+                                          ref_sample = NULL, peak_mode = "global") {
   if (is.null(rep_pd) || nrow(rep_pd) == 0) return(NULL)
   rep_pd <- rep_pd[is.finite(rep_pd$value), , drop = FALSE]
   if (nrow(rep_pd) == 0) return(NULL)
@@ -504,7 +544,7 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
 
   per_rep <- lapply(split(rep_pd, rep_key, drop = TRUE), function(g) {
     row <- compute_one_curve_metrics(g$time, g$value, g$variable[1],
-                                     smooth_window, peak_smooth_window)
+                                     smooth_window, peak_smooth_window, peak_mode)
     row$replicate <- g$replicate[1]
     row
   })
@@ -522,8 +562,10 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
   rm
 }
 
-compute_replicate_metrics <- function(rep_pd, smooth_window = 5, peak_smooth_window = 1) {
-  rm <- compute_replicate_metric_rows(rep_pd, smooth_window, peak_smooth_window)
+compute_replicate_metrics <- function(rep_pd, smooth_window = 5, peak_smooth_window = 1,
+                                      peak_mode = "global") {
+  rm <- compute_replicate_metric_rows(rep_pd, smooth_window, peak_smooth_window,
+                                      peak_mode = peak_mode)
   if (is.null(rm)) return(NULL)
 
   safe_mean <- function(x) if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
@@ -548,8 +590,8 @@ METRIC_DEFINITIONS <- c(
   t_start         = "First time point plotted",
   t_end           = "Last time point plotted",
   initial_od      = "Mean value at the first time point",
-  max_od          = "Maximum (peak) of the mean curve",
-  time_max_od     = "Time at which the peak occurs",
+  max_od          = "Maximum (peak) of the mean curve or, with peak mode 'first_local', the first peak followed by a > 5 % decline",
+  time_max_od     = "Time at which the peak occurs (global maximum or, with peak mode 'first_local', the first peak followed by a > 5 % decline)",
   global_min_od      = "Global minimum of the mean curve (usually the inoculum, near t_start) -- NOT the post-lysis floor; see residual_od for that",
   time_global_min_od = "Time at which the global minimum occurs",
   final_od        = "Mean value at the last time point",
@@ -1024,6 +1066,56 @@ journal_width_mm <- function(family, columns, custom_mm = 89) {
          jp$single)
 }
 
+# ── v2.12.2: inside legends ──────────────────────────────────────────────────
+# Theme for a legend anchored just inside a panel corner. Compact key (tight
+# vertical spacing and margin) so it covers as little of the panel as possible.
+inside_legend_theme <- function(corner = "top-left") {
+  just <- switch(corner,
+                 "top-left" = c(0, 1), "top-right" = c(1, 1),
+                 "bottom-left" = c(0, 0), "bottom-right" = c(1, 0), c(1, 1))
+  pos  <- ifelse(just == 1, 0.98, 0.02)
+  theme(legend.position = "inside",
+        legend.position.inside = pos, legend.justification.inside = just,
+        legend.key.spacing.y = unit(1, "pt"), legend.margin = margin(1, 3, 1, 3))
+}
+
+# The panel corner with the fewest plotted points: the panel is split into
+# quadrants at the midpoint of the x range and of the y range (log10 scale when
+# the y axis is log), points are counted per quadrant, and the emptiest corner
+# wins; ties go top-left, then top-right, then bottom-left, then bottom-right.
+#
+# box = NULL (default) is exactly the quadrant rule above. box = c(w, h) counts
+# instead the points inside a corner box covering the fraction w of the x range
+# and h of the y range at each corner, i.e. roughly the area a legend occupies;
+# the figures use it because a whole quadrant can look empty while the thin band
+# of data along its edge is exactly where a legend box lands.
+auto_legend_corner <- function(x, y, log_y = FALSE, box = NULL) {
+  corners <- c("top-left", "top-right", "bottom-left", "bottom-right")
+  ok <- is.finite(x) & is.finite(y)
+  if (isTRUE(log_y)) ok <- ok & y > 0
+  x <- x[ok]; y <- y[ok]
+  if (!length(x)) return(corners[1])
+  if (isTRUE(log_y)) y <- log10(y)
+  if (is.null(box)) {
+    right <- x > mean(range(x)); top <- y > mean(range(y))
+    n <- c(sum(!right & top), sum(right & top), sum(!right & !top), sum(right & !top))
+  } else {
+    u <- if (diff(range(x)) > 0) (x - min(x)) / diff(range(x)) else rep(0.5, length(x))
+    v <- if (diff(range(y)) > 0) (y - min(y)) / diff(range(y)) else rep(0.5, length(y))
+    l <- u <= box[1]; r <- u >= 1 - box[1]; t <- v >= 1 - box[2]; b <- v <= box[2]
+    n <- c(sum(l & t), sum(r & t), sum(l & b), sum(r & b))
+  }
+  corners[which.min(n)]
+}
+# More legend entries than this and an inside key is taller than the empty
+# corner of any panel: "inside-auto" falls back to an outside (right) legend.
+INSIDE_LEGEND_MAX_ENTRIES <- 5
+# Corner box a legend occupies, as fractions of the panel (x, y): about 10 % of
+# the height per entry, and 20 % + 1.6 % per label character of the width
+# (measured on 89 x 60 mm journal panels at 6 pt).
+inside_legend_box <- function(n_entries, label_chars = 12)
+  c(min(0.7, 0.2 + 0.016 * label_chars), min(0.9, 0.1 * n_entries + 0.05))
+
 # Everything a journal preset pushes into the UI. Each is an ordinary input
 # afterwards, so Save Settings captures it and the user can still adjust it.
 # Text 6-8 pt (Nature: 5-7 pt max, Cell: 6-8 pt), data lines 0.75 pt, axes and
@@ -1043,7 +1135,7 @@ journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_ran
     error_bar_thickness = 0.25,   # ~0.5 pt error bars
     axis_line_pt = 0.5, tick_length_mm = 1.2,
     theme_base_pt = 7, y_tick_label_style = "trim",
-    legend_position = "inside-top-left", legend_box_border = FALSE, legend_key_mm = 4,
+    legend_position = "inside-auto", legend_box_border = FALSE, legend_key_mm = 4,
     legend_order = "selected",   # control first, as listed in the file; same order in every panel
     panel_label = panel_label, panel_label_size = 8,
     color_palette = "colorblind",
@@ -1090,21 +1182,21 @@ export_device <- function(format) {
 # ── v2.11: analysis figures, replicate statistics, MOI ───────────────────────
 ANALYSIS_METRIC_LABELS <- c(
   lysis_time         = "Lysis onset",
-  od_drop            = "OD drop (peak − trough)",
-  lysis_efficiency   = "Lysis efficiency (fraction of peak)",
-  lysis_rate         = "Lysis rate (OD per time)",
-  t_half_max_decline = "Time to half of peak",
+  od_drop            = "OD drop",
+  lysis_efficiency   = "Lysis efficiency",
+  lysis_rate         = "Lysis rate",
+  t_half_max_decline = "Time to half peak",
   residual_od        = "Residual OD after lysis",
-  recovery_slope     = "Recovery slope (OD per time)",
+  recovery_slope     = "Recovery slope",
   mu_max             = "μmax (ln OD per time)",
   doubling_time      = "Doubling time",
   lag_phase          = "Lag phase",
   max_od             = "Peak OD",
   time_max_od        = "Time of peak",
-  auc                = "Area under curve",
+  auc                = "AUC",
   final_od           = "Final OD",
-  relative_growth    = "Relative growth (AUC / reference)",
-  infection_strength = "Infection strength (1 − AUC ratio)",
+  relative_growth    = "Relative growth",
+  infection_strength = "Infection strength",
   relative_mu_max    = "Relative μmax",
   relative_max_od    = "Relative peak OD"
 )
@@ -1116,7 +1208,7 @@ metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
     paste0(base, " (", tunit, ")")
   else if (m == "mu_max") paste0("\u03bcmax (", tunit, "\u207b\u00b9)")
   else if (m %in% c("lysis_rate", "recovery_slope"))
-    paste0(sub(" \\(OD per time\\)", "", base), " (", ylab, " per ", tunit, ")")
+    paste0(base, " (", ylab, " per ", tunit, ")")
   else if (m %in% c("od_drop", "residual_od", "max_od", "final_od")) paste0(base, " (", ylab, ")")
   else if (m == "auc") paste0(base, " (", ylab, " \u00d7 ", tunit, ")")
   else base
@@ -1336,6 +1428,7 @@ APP_DEFAULTS <- list(
   report_author         = "",         report_notes           = "",
   metrics_smooth_window = 5,          legend_font_size       = 14,
   metrics_peak_smooth_window = 1,     # KC-3: off by default
+  metrics_peak_mode = "global",       # v2.12.2: "first_local" for regrowth / resistance curves
   blank_od               = 0,         # KC-7: off by default
   report_font_size      = 14,
   report_include_analysis = TRUE,   # v2.11.1: analysis figures + replicate statistics in reports
@@ -1620,6 +1713,7 @@ ui <- fluidPage(
                                                "Inside: top-right"    = "inside-top-right",
                                                "Inside: bottom-left"  = "inside-bottom-left",
                                                "Inside: bottom-right" = "inside-bottom-right",
+                                               "Inside: emptiest corner (auto)" = "inside-auto",
                                                "None"                 = "none"),
                                    selected = "right"),
                        checkboxInput("legend_box_border", "Legend box border", TRUE),
@@ -2002,6 +2096,15 @@ ui <- fluidPage(
                          "documented smoother) instead of the raw curve; every reported OD ",
                          "value still comes from the raw data — smoothing only decides ",
                          "WHERE the peak is."),
+                       selectInput("metrics_peak_mode", "Peak used for lysis metrics:",
+                                   choices = c("Global maximum (default)" = "global",
+                                               "First peak before a > 5 % decline (regrowth / resistance curves)" = "first_local"),
+                                   selected = "global"),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "A curve that lyses and then regrows above its first peak has its global ",
+                         "maximum at the end, so lysis onset, OD drop and time to half peak come out NA. ",
+                         "“First peak” anchors them on the first peak that is followed by a ",
+                         "decline of more than 5 % instead (falls back to the global maximum if there is none)."),
                        selectInput("metrics_ref_sample",
                                    "Reference sample (infection metrics):",
                                    choices = c("None" = "")),
@@ -3090,7 +3193,9 @@ server <- function(input, output, session) {
   # same fonts, line weights, legend, spacing and journal preset. Adding the
   # list to a ggplot applies the layers in order; the main figure's output is
   # byte-identical to v2.10 (test suite).
-  figure_theme_layers <- function() {
+  # v2.12.2: xy = list(x, y) of the plotted points, n_entries = legend entries,
+  # log_y = y axis is log. Only used by legend_position "inside-auto".
+  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12) {
     tf      <- if (isTRUE(input$bold_title))        "bold"   else "plain"
     af      <- if (isTRUE(input$italic_axis_labels)) "italic" else "plain"
     # v2.10: theme spacing (margins, gaps) follows the theme's base_size, which
@@ -3143,14 +3248,16 @@ server <- function(input, output, session) {
     # Legend placement: outside positions as before; "inside-*" anchors the key
     # just inside a panel corner (journal panels rarely spend column width on
     # an outside key).
-    if (startsWith(leg_pos, "inside-")) {
-      just <- switch(sub("^inside-", "", leg_pos),
-                     "top-left" = c(0, 1), "top-right" = c(1, 1),
-                     "bottom-left" = c(0, 0), "bottom-right" = c(1, 0), c(1, 1))
-      pos  <- ifelse(just == 1, 0.98, 0.02)
-      layers <- c(layers, list(theme(legend.position = "inside",
-                                     legend.position.inside = pos, legend.justification.inside = just,
-                                     legend.margin = margin(2, 4, 2, 4))))
+    if (identical(leg_pos, "inside-auto")) {
+      # emptiest corner of the plotted data; too many entries -> outside right
+      if (n_entries > INSIDE_LEGEND_MAX_ENTRIES) {
+        layers <- c(layers, list(theme(legend.position = "right")))
+      } else {
+        corner <- if (is.null(xy)) "top-left" else auto_legend_corner(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars))
+        layers <- c(layers, list(inside_legend_theme(corner)))
+      }
+    } else if (startsWith(leg_pos, "inside-")) {
+      layers <- c(layers, list(inside_legend_theme(sub("^inside-", "", leg_pos))))
     } else {
       layers <- c(layers, list(theme(legend.position = leg_pos)))
     }
@@ -3494,7 +3601,9 @@ server <- function(input, output, session) {
     
     bs     <- input$theme_base_pt %||% 0
     pl_lab <- trimws(input$panel_label %||% "")
-    p <- p + figure_theme_layers()
+    p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value),
+                                 n_entries = n_vars, log_y = identical(input$y_scale_type, "log"),
+                                 label_chars = max(nchar(unname(leg_labels)), 1))
     
     if (isTRUE(input$custom_aspect_ratio))
       p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
@@ -3763,7 +3872,8 @@ server <- function(input, output, session) {
     compute_replicate_metric_rows(prepare_replicate_data(),
                                   smooth_window      = input$metrics_smooth_window %||% 5,
                                   peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
-                                  ref_sample         = input$metrics_ref_sample)
+                                  ref_sample         = input$metrics_ref_sample,
+                                  peak_mode          = input$metrics_peak_mode %||% "global")
   }
   analysis_stat_metric <- function() {
     if (identical(input$analysis_type, "dose_response")) input$analysis_dose_metric %||% "lysis_time"
@@ -3792,6 +3902,8 @@ server <- function(input, output, session) {
   # figure_theme_layers(), so it matches the main figure exactly.
   build_analysis_plot <- function(type) {
     dose_no_legend <- FALSE
+    leg_xy <- NULL      # plotted x/y of this figure, for legend_position "inside-auto"
+    leg_log_y <- FALSE
     ehw    <- error_half_width()
     eb_col <- input$error_bar_color %||% "sample"
     samps  <- input$selected_samples
@@ -3819,8 +3931,11 @@ server <- function(input, output, session) {
         long$metric <- factor(long$metric, levels = mets,
                               labels = vapply(mets, metric_axis_label, "", tunit = tunit, ylab = input$y_axis_label %||% "OD"))
         long$sample <- factor(long$sample, levels = sample_levels(samps), labels = unname(labs_v[sample_levels(samps)]))
-        x_guide <- if (as.numeric(input$axis_text_angle %||% "0") == 0 && max(nchar(levels(long$sample))) > 6)
-          guide_axis(n.dodge = 2) else waiver()   # long sample names: two staggered rows
+        x_guide <- if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+          else if (nlevels(long$sample) >= 5 || max(nchar(levels(long$sample))) > 16)
+            guide_axis(angle = 45)      # 5+ samples (or names too long for two rows in a 44 mm facet): angle, not stagger
+          else if (max(nchar(levels(long$sample))) > 6) guide_axis(n.dodge = 2)   # 3-4 long names: two staggered rows
+          else waiver()
         summ <- long %>% group_by(metric, sample) %>%
           summarise(mean = mean(value), sd = ehw(value), n = n(), .groups = "drop")
         g <- ggplot(long, aes(x = sample, y = value))
@@ -3835,7 +3950,7 @@ server <- function(input, output, session) {
                         width = 0.5, linewidth = pt2lw(0.75), inherit.aes = FALSE) +
           geom_point(aes(color = sample), shape = 21, fill = "white", size = ptsz * 0.6,
                      stroke = pt2lw(0.5), position = position_jitter(width = 0.12, height = 0, seed = 1)) +
-          facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 22)) +
+          facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 18)) +
           scale_color_manual(values = setNames(unname(cols), unname(labs_v[names(cols)])), guide = "none") +
           scale_x_discrete(guide = x_guide) +
           scale_y_continuous(expand = expansion(mult = c(0.08, 0.18))) +   # headroom for marks
@@ -3868,6 +3983,7 @@ server <- function(input, output, session) {
         gr$mu_sd <- if (et == "none") NA_real_ else em * switch(et,
           sd = gr$mu_sd, sem = gr$mu_sd / sqrt(gr$n),
           ci95 = qt(0.975, df = pmax(gr$n - 1, 1)) * gr$mu_sd / sqrt(gr$n), gr$mu_sd)
+        leg_xy <- list(x = gr$time, y = gr$mu_mean)
         g <- ggplot(gr, aes(x = time, y = mu_mean, color = variable, linetype = variable, group = variable)) +
           geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed")
         if (any(is.finite(gr$mu_sd)))
@@ -3884,6 +4000,7 @@ server <- function(input, output, session) {
           "Pick the uninfected reference sample under Stats & Reports first." else "No data.")
         nd$variable <- factor(nd$variable, levels = sample_levels(samps))
         ref_lab <- if (mode == "reference") unname(labs_v[ref]) else "t = 0"
+        leg_xy <- list(x = nd$time, y = nd$ratio)
         ggplot(nd, aes(x = time, y = ratio, color = variable, linetype = variable,
                        shape = variable, group = variable)) +
           geom_hline(yintercept = 1, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
@@ -3895,6 +4012,7 @@ server <- function(input, output, session) {
         rp <- prepare_replicate_data(); pd <- prepare_plot_data()
         rp$variable <- factor(rp$variable, levels = sample_levels(samps)); pd$variable <- factor(pd$variable, levels = sample_levels(samps))
         rp$curve <- interaction(rp$variable, rp$replicate)
+        leg_xy <- list(x = rp$time, y = rp$value); leg_log_y <- identical(input$y_scale_type, "log")
         g <- ggplot() +
           geom_line(data = rp, aes(x = time, y = value, color = variable, group = curve),
                     linewidth = lw * 0.5, alpha = 0.45) +
@@ -3913,20 +4031,46 @@ server <- function(input, output, session) {
                 c("sample", "replicate", "moi", metric), drop = FALSE]
         names(d)[4] <- "value"
         if (nrow(d) == 0) stop("No sample has a positive MOI for this metric. Put the MOI in the sample name ('Phage MOI 10') or in the MOI box as 'sample = MOI'.")
+        if (length(unique(d$moi)) < 2)
+          stop("Dose-response needs at least two MOI levels; this selection has one.")
         summ <- d %>% group_by(sample, moi) %>%
           summarise(mean = mean(value), sd = ehw(value), .groups = "drop")
         d$sample <- factor(d$sample, levels = sample_levels(samps)); summ$sample <- factor(summ$sample, levels = sample_levels(samps))
         dose_no_legend <- all(grepl("MOI", unname(labs_v[unique(as.character(d$sample))]), ignore.case = TRUE))
-        ggplot(summ, aes(x = moi, y = mean)) +
-          geom_line(color = "grey40", linewidth = pt2lw(0.5)) +
+        # One series per phage: the legend label with its MOI token removed
+        # ("Phage A MOI 10" -> "Phage A"); one connecting line per series.
+        smp_lab <- unname(labs_v[as.character(summ$sample)])
+        series  <- trimws(gsub("(?i)\\s*MOI[[:space:]_:=]*[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?", "", smp_lab, perl = TRUE))
+        series[!nzchar(series)] <- "Phage"
+        summ$series <- series
+        summ <- summ[order(summ$series, summ$moi), , drop = FALSE]
+        series_levels <- unique(summ$series[order(match(as.character(summ$sample), samps))])
+        # series colour = colour of the series' first sample (selection order)
+        series_col <- vapply(series_levels, function(sr) {
+          smp <- samps[samps %in% as.character(summ$sample[summ$series == sr])][1]
+          unname(cols[smp]) }, "")
+        leg_xy <- list(x = log10(summ$moi), y = summ$mean)
+        g <- ggplot(summ, aes(x = moi, y = mean))
+        for (sr in series_levels) {
+          ss <- summ[summ$series == sr, , drop = FALSE]
+          g <- g + geom_line(data = ss, aes(x = moi, y = mean, group = series), colour = series_col[[sr]],
+                             linewidth = pt2lw(0.5), inherit.aes = FALSE)
+          if (length(series_levels) > 1)   # end label: readable without a key
+            g <- g + geom_text(data = ss[which.max(ss$moi), , drop = FALSE], aes(x = moi, y = mean),
+                               label = paste0("  ", sr), colour = series_col[[sr]], hjust = 0,
+                               size = (input$legend_font_size %||% 14) / ggplot2::.pt, inherit.aes = FALSE)
+        }
+        g <- g +
           geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, color = sample),
                         width = 0, linewidth = pt2lw(0.5), na.rm = TRUE) +
           geom_point(data = d, aes(x = moi, y = value, color = sample), shape = 21, fill = "white",
                      size = ptsz * 0.6, stroke = pt2lw(0.5)) +
           geom_point(aes(color = sample, shape = sample), size = ptsz) +
           base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
-          scale_x_log10() +
+          scale_x_log10(labels = scales::label_number(drop0trailing = TRUE, big.mark = ""),
+                        expand = if (length(series_levels) > 1) expansion(mult = c(0.05, 0.35)) else waiver()) +
           labs(x = "MOI", y = metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD"))
+        g
       },
       landmarks = {
         # The computed metrics drawn where they come from on each mean curve:
@@ -3945,7 +4089,7 @@ server <- function(input, output, session) {
             sl  <- tryCatch(rolling_slope(g$time, lo, min(win, nrow(g))), error = function(e) NULL)
             if (!is.null(sl) && any(is.finite(sl) & sl > 1e-10)) t_mu <- g$time[which.max(ifelse(is.finite(sl), sl, -Inf))]
           }
-          pk <- which.max(g$mean_value)
+          pk <- if (is.finite(m$time_max_od[i])) which.min(abs(g$time - m$time_max_od[i])) else which.max(g$mean_value)   # same peak as the metrics (peak mode)
           t_trough <- if (pk < nrow(g)) g$time[pk + which.min(g$mean_value[(pk + 1):nrow(g)])] else NA_real_
           data.frame(variable = s,
                      landmark = c("Lag end", "\u03bcmax", "Peak", "Lysis onset", "Half of peak", "Trough"),
@@ -3983,7 +4127,8 @@ server <- function(input, output, session) {
           labs(x = input$x_axis_label, y = NULL)
       },
       stop("Unknown analysis figure type"))
-    p <- p + figure_theme_layers()
+    p <- p + figure_theme_layers(xy = leg_xy, n_entries = length(samps), log_y = leg_log_y,
+                                 label_chars = max(nchar(unname(labs_v)), 1))
     if (type == "metric_summary")   # facet strips: axis-title size, no grey box (theme default is 0.8 x base)
       p <- p + theme(legend.position = "none",
                      strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
@@ -4001,8 +4146,9 @@ server <- function(input, output, session) {
     req(rv$data, input$selected_samples)
     tryCatch(build_analysis_plot(type), error = function(e) {
       ggplot() +
-        annotate("text", x = 0.5, y = 0.5, label = paste("Figure not available:", conditionMessage(e)),
-                 color = "grey30", size = 3.5, hjust = 0.5) +
+        annotate("text", x = 0.5, y = 0.5,
+                 label = paste(strwrap(paste("Figure not available:", conditionMessage(e)), width = 40), collapse = "\n"),
+                 color = "grey30", size = 2.6, hjust = 0.5) +
         theme_void()
     })
   }
@@ -4173,7 +4319,8 @@ server <- function(input, output, session) {
     compute_curve_metrics(prepare_plot_data(),
                           smooth_window       = input$metrics_smooth_window %||% 5,
                           ref_sample          = input$metrics_ref_sample,
-                          peak_smooth_window  = input$metrics_peak_smooth_window %||% 1)
+                          peak_smooth_window  = input$metrics_peak_smooth_window %||% 1,
+                          peak_mode           = input$metrics_peak_mode %||% "global")
   }
 
   # KC-2: warn when any sample has non-positive OD readings, since those
@@ -4207,7 +4354,8 @@ server <- function(input, output, session) {
   replicate_metrics_current <- function() {
     compute_replicate_metrics(prepare_replicate_data(),
                               smooth_window      = input$metrics_smooth_window %||% 5,
-                              peak_smooth_window = input$metrics_peak_smooth_window %||% 1)
+                              peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
+                              peak_mode          = input$metrics_peak_mode %||% "global")
   }
 
   output$downloadReplicateMetricsCSV <- downloadHandler(
@@ -4241,7 +4389,7 @@ server <- function(input, output, session) {
                   "Export size", "Export DPI",
                   "Blank/media OD subtracted",
                   "μmax smoothing window", "Peak-detection smoothing window",
-                  "Reference sample"),
+                  "Peak used for lysis metrics", "Reference sample"),
       value = c(input$x_scale_type, input$y_scale_type,
                 input$x_axis_label, input$y_axis_label, input$color_palette,
                 input$line_thickness, input$show_points, input$shape_size,
@@ -4251,6 +4399,8 @@ server <- function(input, output, session) {
                 input$metrics_smooth_window %||% 5,
                 paste0(input$metrics_peak_smooth_window %||% 1,
                        if (identical(input$metrics_peak_smooth_window %||% 1, 1)) " (off)" else ""),
+                if (identical(input$metrics_peak_mode %||% "global", "first_local"))
+                  "first peak before a > 5 % decline" else "global maximum",
                 if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample
                 else "none (infection metrics omitted)"),
       stringsAsFactors = FALSE)

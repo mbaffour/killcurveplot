@@ -1,5 +1,46 @@
 # Changelog
 
+## v2.12.2 — 2026-10-19
+
+Review round on the gallery figures. All changes are opt-in or limited to
+analysis figures; the default main figure is byte-identical to v2.9.0.
+
+- **Auto legend corner**: new legend position "Inside: emptiest corner
+  (auto)" (`inside-auto`, used by the journal preset). The panel is split into
+  quadrants at the x midpoint and the y midpoint (log10 when the y axis is
+  log), and the key goes in the corner with the fewest plotted points (ties:
+  top-left, top-right). The figures count points inside a legend-sized corner
+  box (sized from the number of entries and the label length) rather than the whole
+  quadrant, because a quadrant can look empty while a thin band of data along
+  its edge (a lysis trough) is exactly where the legend lands; the quadrant
+  rule is `auto_legend_corner(box = NULL)`. More than 5 legend entries fall back to a right
+  legend. All inside placements now use a compact key
+  (`legend.key.spacing.y` 1 pt, `legend.margin` 1/3/1/3 pt). Default stays
+  "right".
+- **Metric summary labels**: facet titles shortened ("OD drop", "Lysis
+  efficiency", "Lysis rate", "Time to half peak", ...) and wrapped at 18
+  characters; 5 or more samples use 45-degree x labels instead of staggered
+  rows (3-4 names still stagger unless one is over 16 characters, which
+  would overlap in a 44 mm facet, so those angle too); figure error messages
+  are wrapped to fit the panel; rate metrics read "(OD per min)".
+- **Dose-response axis**: MOI labels print as 0.01, 0.1, 1, 10, 100, not 1e-02.
+- **Dose-response with one MOI level** shows "Dose-response needs at least two
+  MOI levels; this selection has one." instead of a degenerate axis.
+- **Dose-response series**: one connecting line per phage (the MOI token is
+  removed from the sample label), in the colour of the series' first sample,
+  with the phage name written at the end of each line when there is more than
+  one series.
+- **Peak mode** (Stats & Reports, "Peak used for lysis metrics"):
+  `first_local` anchors the lysis metrics on the first peak followed by a
+  > 5 % decline, so regrowth / resistance curves get a lysis onset, OD drop and
+  half-peak time. The landmarks figure follows the same peak. Default
+  "global" is unchanged. The rule also requires that the curve has not risen
+  above the candidate before the decline; without it t = 0 counts as the
+  peak on ordinary lysis curves (see docs/METRICS_REFERENCE.md).
+- Tests: auto corner on synthetic clouds, inside-auto fallback, label and
+  guide checks, one-MOI message, two-series dose-response, peak mode on a
+  synthetic regrowth curve and the resistance demo.
+
 ## v2.12.1 — 2026-10-19
 
 Five demo scenarios, so every figure has a meaningful example. The default

@@ -28,6 +28,22 @@ still comes from the raw data at that index — smoothing only decides WHERE
 the peak is, never WHAT its value is. Off by default so existing exports
 are bit-for-bit unchanged unless a user opts in.
 
+### Peak mode (optional, "global" by default)
+
+A curve that lyses and then regrows above its first peak (resistant mutants)
+has its global maximum at the end, so `lysis_time`, `od_drop`,
+`t_half_max_decline` and the other peak-anchored metrics are NA, and the
+landmarks figure marks the wrong peak. With **Peak used for lysis metrics =
+First peak before a > 5 % decline** (`peak_mode = "first_local"`), `max_idx`
+is the first index `i` such that `peak_vec[i]` is the running maximum, a later
+point falls below 95 % of `peak_vec[i]`, and the curve has not risen above
+`peak_vec[i]` before that decline (without this last condition every point on
+the way up would qualify whenever the post-lysis trough is below the
+inoculum). If there is no such point the global maximum is used. Every
+downstream metric (lysis, `od_drop`, residual, recovery, `t_half_max_decline`)
+then uses that index unchanged, and `max_od` / `time_max_od` report it.
+`peak_vec` is the raw or smoothed curve exactly as for the smoothing option.
+
 ## Curve metrics (per sample)
 
 | Metric | Definition |

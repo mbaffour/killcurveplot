@@ -33,6 +33,8 @@ for (sc in c("lysis", "moi_series", "resistance", "hours", "two_phages")) {
                       nb_host_strain = "E. coli B", nb_phage_plasmid = "phage T4", nb_media = "LB",
                       nb_temperature = "37", nb_replicate = "3 biological replicates")
     do.call(session$setInputs, env$journal_preset_settings(89, 60, "a"))
+    # the resistance curve regrows above its first peak: anchor the lysis metrics on the first peak
+    if (sc == "resistance") session$setInputs(metrics_peak_mode = "first_local")
     session$setInputs(x_axis_label = if (sc == "hours") "Time (hours)" else "Time (minutes)")
     session$setInputs(analysis_metrics = c("lysis_time", "od_drop", "mu_max", "infection_strength"),
                       analysis_dose_metric = "lysis_time")   # MOI parses from the sample names; no override box
