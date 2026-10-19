@@ -19,7 +19,7 @@ dir.create(out, recursive = TRUE, showWarnings = FALSE)
 env <- new.env(); app <- source("Lysis_Curve_App_v28.R", local = env)$value
 quiet <- function(expr) suppressWarnings(suppressMessages(expr))
 
-for (sc in c("lysis", "moi_series", "resistance", "hours", "two_phages")) {
+for (sc in strsplit(Sys.getenv("KC_SCENARIOS", "lysis,moi_series,resistance,hours,two_phages"), ",")[[1]]) {
   cat("\n=== scenario:", sc, "===\n")
   sc_out <- file.path(out, sc)
   dir.create(sc_out, recursive = TRUE, showWarnings = FALSE)

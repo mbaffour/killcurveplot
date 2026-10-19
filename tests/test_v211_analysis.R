@@ -34,6 +34,8 @@ real_plot <- function(desc, p) {
 
 env <- new.env()
 app <- source("Lysis_Curve_App_v28.R", local = env)$value
+# the legacy-geometry sections run with the panel filling the export size ("fit"); the v2.15 section uses fixed panels
+fit_defaults <- modifyList(env$APP_DEFAULTS, list(panel_size_mode = "fit"))
 check("app sources cleanly", inherits(app, "shiny.appobj"))
 check("APP_VERSION is 2.11.0 or later", package_version(env$APP_VERSION) >= "2.11.0")
 render_dir <- Sys.getenv("KC_RENDER_DIR", "")
@@ -173,7 +175,7 @@ types <- c("metric_summary", "growth_rate", "normalized", "replicate_overlay", "
 
 testServer(app, {
   ingest_data(env$make_demo_data(), "Demo data (built-in)")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected")
 
@@ -200,7 +202,7 @@ testServer(app, {
 
   cat("\n--- journal preset applies to the analysis figure too ---\n")
   pd <- prepare_plot_data()
-  do.call(session$setInputs, env$journal_preset_settings(89, 65, "a", diff(range(pd$time))))
+  do.call(session$setInputs, modifyList(env$journal_preset_settings(89, 65, "a", diff(range(pd$time))), list(panel_size_mode = "fit")))
   # max_od is finite for the uninfected reference, so marks vs reference can be drawn
   session$setInputs(analysis_panel_label = "b", analysis_metrics = c("lysis_time", "max_od"))
   p_ms <- generate_analysis_plot("metric_summary")
@@ -362,7 +364,7 @@ testServer(app, {
 cat("\n--- v2.12.4: dashboard NA formatting, lysis threshold, report figures (resistance) ---\n")
 testServer(app, {
   ingest_data(env$make_demo_data("resistance"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time")
   m_r <- curve_metrics_current()
@@ -427,7 +429,7 @@ check("lysis threshold is threaded through compute_curve_metrics and the replica
 cat("\n--- v2.12.1: MOI-series demo through the server ---\n")
 testServer(app, {
   ingest_data(env$make_demo_data("moi_series"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time")
   real_plot("moi_series demo: main figure renders", generate_plot())
@@ -487,7 +489,7 @@ check("inside legends use a compact key",
 
 testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected", legend_position = "inside-auto")
   check("inside-auto: main figure (3 samples) gets an inside legend",
@@ -502,7 +504,7 @@ testServer(app, {
 })
 testServer(app, {
   ingest_data(env$make_demo_data("moi_series"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected", legend_position = "inside-auto")
   check("inside-auto: 6 samples fall back to a right legend in the main figure",
@@ -533,7 +535,7 @@ testServer(app, {
 })
 testServer(app, {
   ingest_data(env$make_demo_data("resistance"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected", legend_position = "inside-auto")
   check("collision fallback: resistance main figure (curves cross every corner box) gets a right legend",
@@ -545,7 +547,7 @@ testServer(app, {
 })
 testServer(app, {
   ingest_data(env$make_demo_data("two_phages"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected", legend_position = "inside-auto")
   check("inside-auto: 5 samples (two_phages) fall back to a right legend",
@@ -553,7 +555,7 @@ testServer(app, {
 })
 testServer(app, {
   ingest_data(env$make_demo_data("two_phages"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time")
   p2 <- generate_analysis_plot("dose_response"); real_plot("two_phages: dose-response renders", p2)
@@ -598,7 +600,7 @@ check("replicate rows and summary thread peak_mode",
       env$compute_replicate_metrics(rp_r, peak_mode = "first_local")$time_max_od_mean == 60)
 testServer(app, {
   ingest_data(env$make_demo_data("resistance"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected")
   mg <- curve_metrics_current()
@@ -640,10 +642,10 @@ check("compose panel choices: main first, then the analysis figures with the Ana
       identical(names(env$COMPOSE_PANEL_CHOICES)[1], "Lysis curve (main)"))
 testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected")
-  do.call(session$setInputs, env$journal_preset_settings(89, 65, "a"))
+  do.call(session$setInputs, modifyList(env$journal_preset_settings(89, 65, "a"), list(panel_size_mode = "fit")))
   session$setInputs(analysis_metrics = c("lysis_time", "od_drop"), analysis_panel_label = "b")
   info <- compose_info()
   check("compose_info: main + metric summary + growth rate + normalized, two columns, two rows",
@@ -722,7 +724,7 @@ testServer(app, {
 })
 testServer(app, {
   ingest_data(env$make_demo_data("resistance"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
                     metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time")
   session$setInputs(compose_panels = c("main", "growth_rate", "dose_response"))
@@ -741,7 +743,7 @@ testServer(app, {
 cat("\n--- v2.14: sized file names, size bar, true-size previews ---\n")
 testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)          # the startup state, no preset pressed
+  do.call(session$setInputs, fit_defaults)          # the startup state, no preset pressed
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected")
   check("main download name at startup: lysis_curve_a_89x65mm.svg", identical(main_download_name(), "lysis_curve_a_89x65mm.svg"))
   check("analysis download name at startup: metric_summary_b_89x65mm.svg", identical(analysis_download_name(), "metric_summary_b_89x65mm.svg"))
@@ -781,7 +783,7 @@ testServer(app, {
   check("Apply journal preset marks the units as mm", identical(rv$units_seen, "mm"))
   session$setInputs(apply_legacy_look = 2); session$setInputs(apply_journal_preset_bar = 1)
   check("the size bar's button runs the same preset handler", identical(rv$units_seen, "mm"))
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   # previews: aspect ratio in canvas mode, fitted zoom in true-size mode
   session$setInputs(preview_mode = "canvas", plot_width = 820)
   pc <- as.character(preview_container("od_plot", "od_plot_img"))
@@ -825,7 +827,7 @@ check("friendly_error_message appends the hint to memory errors only",
       !grepl("Reduce DPI", env$friendly_error_message(simpleError("object 'x' not found")), fixed = TRUE))
 testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected")
   session$setInputs(export_units = "in", export_width = 500, export_height = 8)
   check("export_size_in clamps 500 in to 60 in (and leaves the other side alone)", near(export_size_in()[1], 60) && near(export_size_in()[2], 8))
@@ -875,7 +877,7 @@ testServer(app, {
 # downloads fail with a readable message and a hint, not an opaque error
 testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "demo")
-  do.call(session$setInputs, env$APP_DEFAULTS)
+  do.call(session$setInputs, fit_defaults)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", export_format = "png",
                     export_units = "mm", export_width = 89, export_height = 65, export_dpi = 600)
   dl <- tryCatch(output$downloadPlot, error = function(e) NULL)
@@ -900,6 +902,66 @@ testServer(app, {
   check("more than 200 samples: the data-size warning appears", grepl("Large data set", html, fixed = TRUE))
   check("2500 time points x 900 samples exceeds 2,000,000 values: dashboard figures skipped", dashboard_too_big())
   check("...with a note explaining it", grepl("skipped", output$dash_size_note$html, fixed = TRUE))
+})
+
+cat("\n--- v2.15.0: fixed panel size (square panels) ---\n")
+check("panel inputs have APP_DEFAULTS entries (fixed, 65 x 65 mm, square); the legacy preset sets 'fit'",
+      identical(env$APP_DEFAULTS$panel_size_mode, "fixed") && env$APP_DEFAULTS$panel_width_mm == 65 &&
+      env$APP_DEFAULTS$panel_height_mm == 65 && isTRUE(env$APP_DEFAULTS$panel_square) &&
+      identical(env$legacy_preset_settings()$panel_size_mode, "fit"))
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)           # the startup state: fixed 65 x 65 mm panel
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected",
+                    analysis_metrics = c("lysis_time", "od_drop", "mu_max", "infection_strength"))
+  panel_mm <- function(g) {
+    lay <- g$layout[grepl("^panel", g$layout$name), , drop = FALSE]
+    c(sum(vapply(unique(unlist(Map(seq, lay$l, lay$r))), function(i) grid::convertWidth(g$widths[i], "mm", valueOnly = TRUE), 0)),
+      sum(vapply(unique(unlist(Map(seq, lay$t, lay$b))), function(i) grid::convertHeight(g$heights[i], "mm", valueOnly = TRUE), 0)))
+  }
+  g <- main_fixed_info(); szm <- attr(g, "size_mm")
+  check("the main figure's panel is 65 x 65 mm (measured from the gtable)", all(abs(panel_mm(g) - 65) < 0.1))
+  check("the figure is larger than the panel in both directions (axes, labels around it)", all(szm > 65) && all(szm < 100))
+  check("export_size_in() is the computed figure size", all(abs(export_size_in() * 25.4 - szm) < 1e-6))
+  svg_f <- of("fixed_main.svg")
+  quiet(ggsave(svg_f, main_plot_obj(), device = env$export_device("svg"), width = export_size_in()[1], height = export_size_in()[2],
+               units = "in", bg = "white", limitsize = FALSE))
+  hdr <- grep("<svg", readLines(svg_f), value = TRUE)[1]
+  w_pt <- as.numeric(sub(".*width='([0-9.]+)pt'.*", "\\1", hdr)); h_pt <- as.numeric(sub(".*height='([0-9.]+)pt'.*", "\\1", hdr))
+  check("SVG export size equals the computed figure size (+/- 0.5 mm)",
+        abs(w_pt / 72 * 25.4 - szm[1]) < 0.5 && abs(h_pt / 72 * 25.4 - szm[2]) < 0.5)
+  check("the computed size covers both devices' text metrics (svglite and ragg each within 0.4 mm of it)", {
+    meas <- function(open) { open(); on.exit(grDevices::dev.off())
+      c(grid::convertWidth(sum(g$widths), "mm", valueOnly = TRUE), grid::convertHeight(sum(g$heights), "mm", valueOnly = TRUE)) }
+    a1 <- meas(function() svglite::svglite(tempfile(fileext = ".svg"), width = 400 / 25.4, height = 400 / 25.4))
+    a2 <- meas(function() ragg::agg_png(tempfile(fileext = ".png"), width = 400, height = 400, units = "mm", res = 72))
+    all(szm >= pmax(a1, a2) - 1e-6) && all(abs(a1 - a2) < 0.4) && all(szm - pmin(a1, a2) < 0.4) })
+  check("the bar shows panel size, figure size and the fit indicator",
+        grepl("Panel 65 × 65 mm", output$figure_standard_bar$html, fixed = TRUE) &&
+        grepl("fits: single column", output$figure_standard_bar$html, fixed = TRUE))
+  session$setInputs(legend_position = "right")
+  gr <- main_fixed_info()
+  check("an outside legend makes the figure wider; the panel stays 65 x 65 mm",
+        attr(gr, "size_mm")[1] > szm[1] + 10 && all(abs(panel_mm(gr) - 65) < 0.1))
+  session$setInputs(legend_position = "inside-auto", panel_width_mm = 50)
+  check("a 50 mm square panel gives a smaller figure", attr(main_fixed_info(), "size_mm")[1] < szm[1] - 10)
+  session$setInputs(panel_width_mm = 65)
+  # fit mode (the legacy geometry) keeps the export size
+  session$setInputs(panel_size_mode = "fit", export_units = "mm", export_width = 89, export_height = 65)
+  svg_fit <- of("fit_main.svg")
+  quiet(ggsave(svg_fit, main_plot_obj(), device = env$export_device("svg"), width = export_size_in()[1], height = export_size_in()[2],
+               units = "in", bg = "white"))
+  check("fit mode: the SVG is 89 mm wide (252.28pt) as before", grepl("width='252.28pt'", grep("<svg", readLines(svg_fit), value = TRUE)[1]))
+  session$setInputs(panel_size_mode = "fixed")
+  # curve analysis figures get the square panel too; the composer lays fixed panels out in a grid
+  session$setInputs(analysis_type = "growth_rate")
+  ga <- analysis_fixed_info(); check("growth-rate figure: 65 x 65 mm panel", all(abs(panel_mm(ga) - 65) < 0.1))
+  session$setInputs(compose_panels = c("main", "growth_rate", "normalized", "landmarks"), compose_ncol = "2")
+  ci <- compose_info()
+  check("fixed composer: 4 panels, 2 columns, width = 2 x the widest cell",
+        ci$n == 4 && ci$ncol == 2 && inherits(ci$plot, "gtable") &&
+        abs(ci$width_mm - 2 * grid::convertWidth(ci$plot$widths[1], "mm", valueOnly = TRUE)) < 1e-6 &&
+        abs(ci$width_mm - attr(ci$plot, "size_mm")[1]) < 1e-6 && ci$width_mm > 2 * 65)
 })
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
