@@ -373,8 +373,15 @@ testServer(app, {
   check("dashboard table never prints '\u2014 \u00b1' (NA mean-curve value shown as a dash alone)",
         !grepl("\u2014 \u00b1", tbl_r, fixed = TRUE) && grepl("Uninfected", tbl_r))
   rm_r <- replicate_metrics_current()
-  check("(the regression case is real: the Uninfected replicate SD of lysis onset is finite although the mean-curve value is NA)",
-        is.finite(rm_r$lysis_time_sd[rm_r$sample == "Uninfected"]))
+  # LC-3: this used to assert the regression case was reachable (a finite replicate SD of
+  # lysis onset on the Uninfected control although the mean-curve value is NA), because a
+  # single 5 % dip on 4 %-CV noise scored an uninfected replicate as lysing. That false
+  # positive is exactly what the noise-aware, sustained rule removes: no Uninfected
+  # replicate reports a lysis onset any more. The "— ±" guard in dash_metrics_table is
+  # kept for real data; here we assert the corrected behaviour.
+  check("LC-3: no Uninfected replicate reports a (false) lysis onset, so its SD is NA like the mean-curve value",
+        is.na(rm_r$lysis_time_sd[rm_r$sample == "Uninfected"]) &&
+        is.na(rm_r$lysis_time_mean[rm_r$sample == "Uninfected"]))
   check("dashboard table keeps 'value \u00b1 sd' for finite values", grepl("\u00b1", tbl_r, fixed = TRUE))
   if (env$has_base64enc) {
     meta <- report_meta(); meta$generated <- "2026-10-19 00:00:00"
@@ -409,19 +416,25 @@ pd_l <- do.call(rbind, lapply(unique(colnames(demo_l)[-1]), function(vn)
   data.frame(time = demo_l$Time, variable = vn, mean_value = rowMeans(demo_l[, colnames(demo_l) == vn, drop = FALSE]))))
 check("compute_curve_metrics: explicit lysis_threshold = 0.05 equals the default output",
       identical(env$compute_curve_metrics(pd_l), env$compute_curve_metrics(pd_l, lysis_threshold = 0.05)))
-rp_l <- data.frame(time = rep(0:8, 2), variable = "P", replicate = rep(1:2, each = 9),
-                   value = rep(c(0.05, 0.2, 0.5, 0.8, 1.0, 0.94, 1.0, 1.0, 1.0), 2))
+# LC-3: a lysis dip must now be SUSTAINED (2 consecutive points past the
+# detection threshold) and a lone 6 % dip on a plateau is noise by design, so
+# the plateau-with-a-dip fixture has a 2-point 6 % dip, and enough flat plateau
+# for the median-based curve_noise_sd() to be ~0 (on a short curve the dip and the
+# growth shoulder are over half of the second differences and inflate the noise floor).
+pl6 <- c(0.05, 0.2, 0.5, 0.8, rep(1.0, 10), 0.94, 0.94, rep(1.0, 9))  # plateau with a sustained 6 % dip
+n6  <- length(pl6)
+rp_l <- data.frame(time = rep(seq_len(n6) - 1L, 2), variable = "P", replicate = rep(1:2, each = n6),
+                   value = rep(pl6, 2))
 check("replicate rows and summary: explicit 0.05 equals the default",
       identical(env$compute_replicate_metric_rows(rp_l), env$compute_replicate_metric_rows(rp_l, lysis_threshold = 0.05)) &&
       identical(env$compute_replicate_metrics(rp_l), env$compute_replicate_metrics(rp_l, lysis_threshold = 0.05)))
-pl6 <- c(0.05, 0.2, 0.5, 0.8, 1.0, 0.94, 1.0, 1.0, 1.0)   # plateau with a single 6 % dip
-l05 <- env$compute_one_curve_metrics(0:8, pl6, "P", lysis_threshold = 0.05)
-l10 <- env$compute_one_curve_metrics(0:8, pl6, "P", lysis_threshold = 0.10)
+l05 <- env$compute_one_curve_metrics(seq_len(n6) - 1L, pl6, "P", lysis_threshold = 0.05)
+l10 <- env$compute_one_curve_metrics(seq_len(n6) - 1L, pl6, "P", lysis_threshold = 0.10)
 check("plateau with a 6 % dip: lysis_time is finite at a 5 % threshold and NA at 10 %",
       is.finite(l05$lysis_time) && is.na(l10$lysis_time) && is.na(l10$od_drop) && is.finite(l05$od_drop))
 check("lysis threshold is threaded through compute_curve_metrics and the replicate functions",
-      is.finite(env$compute_curve_metrics(data.frame(time = 0:8, variable = "P", mean_value = pl6))$lysis_time) &&
-      is.na(env$compute_curve_metrics(data.frame(time = 0:8, variable = "P", mean_value = pl6), lysis_threshold = 0.10)$lysis_time) &&
+      is.finite(env$compute_curve_metrics(data.frame(time = seq_len(n6) - 1L, variable = "P", mean_value = pl6))$lysis_time) &&
+      is.na(env$compute_curve_metrics(data.frame(time = seq_len(n6) - 1L, variable = "P", mean_value = pl6), lysis_threshold = 0.10)$lysis_time) &&
       all(is.na(env$compute_replicate_metric_rows(rp_l, lysis_threshold = 0.10)$lysis_time)) &&
       all(is.finite(env$compute_replicate_metric_rows(rp_l)$lysis_time)) &&
       is.na(env$compute_replicate_metrics(rp_l, lysis_threshold = 0.10)$lysis_time_mean))

@@ -55,8 +55,16 @@ for (w in c(3, 4, 5, 6)) {
 }
 
 # ── Extract reference functions from the paper app source (best-effort) ─────
-ref_file <- Sys.getenv("REF_APP",
-                       file.path("..", "lysis-curve-app", "Lysis Curve Ap 26.03.13.R"))
+# Default location: the sibling clone. A git worktree under .claude/worktrees/<name>/
+# is four directories deeper than the main checkout, so that location is tried too.
+ref_name <- "Lysis Curve Ap 26.03.13.R"
+ref_candidates <- c(file.path("..", "lysis-curve-app", ref_name),
+                    file.path("..", "..", "..", "..", "lysis-curve-app", ref_name))
+ref_file <- Sys.getenv("REF_APP", "")
+if (!nzchar(ref_file)) {
+  hit <- ref_candidates[file.exists(ref_candidates)]
+  ref_file <- if (length(hit)) hit[1] else ref_candidates[1]
+}
 ref_env  <- new.env()
 ref_ok   <- FALSE
 ref_status <- NULL
@@ -74,7 +82,20 @@ if (!file.exists(ref_file)) {
       stop("anchor pattern not found -- the reference source has changed shape")
     ref_src[s:(e - 1)]
   }
+  # Helper functions / constants the reference engine calls (noise estimate, peak
+  # finder, sustain length, ...). Extracted by PARSING the file and evaluating just
+  # the named top-level assignments, which is robust to the line-slicing grab()
+  # below going stale when a helper is added or moved.
+  grab_defs <- function(names_wanted) {
+    exprs <- parse(file = ref_file, keep.source = FALSE)
+    for (e in exprs)
+      if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) &&
+          as.character(e[[2]]) %in% names_wanted)
+        eval(e, envir = ref_env)
+    invisible(NULL)
+  }
   ref_ok <- tryCatch({
+    grab_defs(c("curve_noise_sd", "LYSIS_SUSTAIN_PTS", "first_prominent_peak_idx"))
     eval(parse(text = grab("^calculate_growth_metrics <- function",
                            "Derivative data")), envir = ref_env)
     eval(parse(text = grab("^calculate_infection_metrics <- function",
@@ -216,7 +237,8 @@ check("infection metrics absent for unknown reference",
 
 # ── Hand-computed spot checks (independent of both implementations) ──────────
 m4 <- env$compute_curve_metrics(curves$short4, smooth_window = 5)
-check("short4: lysis_time = 20 (first >5% decline post-peak)", m4$lysis_time == 20)
+# LC-9: interpolated crossing of the 5 % level (0.38) between t=10 (0.4) and t=20 (0.2) = 11, not the first sampled point past it (20)
+check("short4: lysis_time = 11 (interpolated 5% decline crossing, LC-9)", both_equal(m4$lysis_time, 11))
 check("short4: od_drop = 0.35", both_equal(m4$od_drop, 0.35))
 check("short4: residual_od = 0.05", both_equal(m4$residual_od, 0.05))
 check("short4: lysis_rate = -0.0175 (lm slope peak->trough)",

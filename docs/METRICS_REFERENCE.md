@@ -62,8 +62,8 @@ scenario).
 | `n_nonpositive_od` | Count of time points with OD ≤ 0 (e.g. a blank-subtraction artefact). Windows touching one of these contribute no `mu_max` slope; `mu_max`/`doubling_time`/`lag_phase` may be NA or based on fewer windows when this is > 0. |
 | `doubling_time` | `ln(2)/mu_max`; NA without growth |
 | `lag_phase` | First time the rolling ln-slope reaches 10% of `mu_max` |
-| `stat_phase_dur` | Time spanned by points ≥ 95% of the peak |
-| `lysis_time` | Lysis onset: first post-peak time with decline from the peak greater than the lysis threshold (default 5% of the peak, adjustable with **Lysis onset: decline from peak that counts as lysis (%)**, `lysis_threshold`); NA if never. The threshold also gates `lysis_rate`, `od_drop`, `residual_od`, `lysis_efficiency` and `recovery_slope`, which are NA when no point declines past it |
+| `stat_phase_dur` | Duration of the **longest contiguous run** of points ≥ 95% of the peak (see *Lysis detection rules* below); NA when the longest run is a single point |
+| `lysis_time` | Lysis onset: the **linearly interpolated** time at which the mean falls the lysis threshold (default 5% of the peak, adjustable with **Lysis onset: decline from peak that counts as lysis (%)**, `lysis_threshold`) below the peak, called only when the decline is **noise-aware and sustained** (see *Lysis detection rules* below); NA if never. The threshold also gates `lysis_rate`, `od_drop`, `residual_od`, `lysis_efficiency` and `recovery_slope`, which are NA when no point declines past it |
 | `lysis_rate` | Regression slope from peak to post-peak trough |
 | `od_drop` | Peak − post-peak minimum |
 | `residual_od` | Post-peak minimum |
@@ -74,6 +74,41 @@ scenario).
 | `pct_drop_from_max` | `(max_od − final_od)/max_od × 100` |
 | `t_half_max_decline` | First time after the peak below 50% of the peak, linearly interpolated; NA if never |
 | `steepest_decline_rate/interval` | Most negative consecutive-point slope, and where |
+
+### Lysis detection rules (ported from the companion app, audit findings LC-3 / LC-9 / LC-17)
+
+Three accuracy fixes, ported from `calculate_growth_metrics()` in
+`lysis-curve-app` (`AUDIT-2026-09.md`). Output column names are unchanged.
+
+* **Noise-aware, sustained onset (LC-3).** Lysis is *detected* only when the
+  decline below the peak exceeds `max(lysis_threshold × peak, 3 × σ)` for
+  `LYSIS_SUSTAIN_PTS` (= 2) consecutive points. σ = `curve_noise_sd(od)` is a
+  robust point-to-point noise SD from the second differences,
+  `median(|y_i − 2y_{i+1} + y_{i+2}|) × 1.4826 / √6` (the median keeps genuine
+  curvature — the growth shoulder, the lysis kink — from inflating it; 0 with
+  fewer than 5 points). A single point 5 % below a noisy peak is noise, not
+  lysis: the old one-point 5 % rule scored a clean 4 %-CV uninfected control as
+  lysing in 39 % of simulated runs, and the demo Uninfected replicates now
+  correctly report NA. Consequences: a curve whose peak has fewer than two points
+  after it can never report lysis, and `lysis_time`, `lysis_rate`, `od_drop`,
+  `residual_od`, `lysis_efficiency`, `recovery_slope` are all NA together when
+  lysis is not detected.
+* **Interpolated `lysis_time` (LC-9).** Once lysis is detected, `lysis_time` is
+  the time at which the curve first falls `lysis_threshold × peak` below the peak
+  (the plain 5 % level, **not** the noise-inflated detection level, so the number
+  does not move with the curve's noise), linearly interpolated between the last
+  point above that level and the first below it. The old value was the first
+  *sampled* point already past the threshold, late by up to one acquisition
+  interval and not comparable between runs sampled at different intervals.
+* **Contiguous stationary phase (LC-17).** `stat_phase_dur` is the duration of
+  the **longest contiguous run** of points ≥ 95 % of the peak. The old definition
+  spanned the first to the last near-peak point, running straight through a lysis
+  trough between two separate near-peak episodes. Note: the companion app uses the
+  run *containing the peak*; this app uses the *longest* run (identical whenever
+  the peak's own run is the longest, which is the usual case).
+
+The peak itself is still the global maximum (or the `first_local` mode's peak);
+the companion app's first-prominent-peak anchor (LC-2) is *not* ported.
 
 ## Per-replicate metrics (optional, additive — "Per-Replicate Metrics, mean ± SD (CSV)")
 

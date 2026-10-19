@@ -323,6 +323,41 @@ moving_average <- function(y, w) {
   }, numeric(1))
 }
 
+# LC-3 (ported from curve_noise_sd() in "Lysis Curve Ap 26.03.13.R"): robust
+# point-to-point noise SD from second differences. For white noise the second
+# difference y[i] - 2y[i+1] + y[i+2] has variance 6*sigma^2, so
+# sigma = median(|d2|) * 1.4826 / sqrt(6). The MEDIAN is what makes it usable:
+# real curvature (growth shoulder, lysis kink) shows up in a handful of large
+# second differences and cannot inflate the noise floor. Returns 0 when there
+# are fewer than 5 finite points (too little data to estimate anything).
+curve_noise_sd <- function(y) {
+  y <- y[is.finite(y)]
+  n <- length(y)
+  if (n < 5) return(0)
+  d2 <- y[1:(n - 2)] - 2 * y[2:(n - 1)] + y[3:n]
+  s  <- stats::median(abs(d2)) * 1.4826 / sqrt(6)
+  if (!is.finite(s) || s < 0) return(0)
+  s
+}
+
+# LC-3: number of consecutive post-peak points that must sit below the lysis
+# detection threshold before a decline counts as lysis. One point below a fixed
+# 5 % of peak scored a clean 4 %-CV uninfected control as lysing in 39 % of
+# simulated runs (and the app's own demo Uninfected replicates).
+LYSIS_SUSTAIN_PTS <- 2L
+
+# LC-17: start/end indices of the longest contiguous TRUE run in `flag`
+# (first one on ties), or NULL when there is none. Used for stat_phase_dur.
+longest_true_run <- function(flag) {
+  flag <- !is.na(flag) & flag
+  if (!any(flag)) return(NULL)
+  r <- rle(flag)
+  ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1L
+  k <- which(r$values)
+  k <- k[which.max(r$lengths[k])]
+  c(start = starts[k], end = ends[k])
+}
+
 # KC-4: the full per-curve metrics engine, factored out into its own function
 # so the EXACT SAME formulas run on a per-replicate curve
 # (compute_replicate_metrics(), below) as on the mean curve
@@ -427,24 +462,59 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
     doubling_time <- if (is.finite(mu_max) && mu_max > 0) log(2) / mu_max else NA_real_
 
     # ── Stationary phase duration: time spent within 95% of max OD ───────────
+    # LC-17: the LONGEST CONTIGUOUS run of points >= 95 % of the peak, not the
+    # span from the first to the last such point. The span ran straight
+    # through a lysis trough (or any dip) between two separate near-peak
+    # episodes -- the opposite of "time spent near the maximum". A single
+    # near-peak point gives no duration (NA), as before.
     stat_phase_dur <- NA_real_
     if (max_idx > 1) {
-      near_max <- which(od_vec >= 0.95 * max_od)
-      if (length(near_max) >= 2)
-        stat_phase_dur <- t_vec[max(near_max)] - t_vec[min(near_max)]
+      run <- longest_true_run(is.finite(od_vec) & od_vec >= 0.95 * max_od)
+      if (!is.null(run) && run[["end"]] > run[["start"]])
+        stat_phase_dur <- t_vec[run[["end"]]] - t_vec[run[["start"]]]
     }
 
-    # ── Lysis detection (paper method) ───────────────────────────────────────
-    # onset = first post-peak point whose decline from peak exceeds 5% of peak;
+    # ── Lysis detection ──────────────────────────────────────────────────────
+    # Detection and reporting are deliberately separate (LC-3 / LC-9; ported
+    # from calculate_growth_metrics() in the companion app).
+    #   DETECT (LC-3): the post-peak decline must exceed
+    #     max(lysis_threshold * peak, 3 * curve_noise_sd(od))
+    #     for LYSIS_SUSTAIN_PTS consecutive points. A single point 5 % below
+    #     a noisy peak is noise, not lysis.
+    #   REPORT (LC-9): once lysis is called, lysis_time is the LINEARLY
+    #     INTERPOLATED time at which the curve first falls lysis_threshold *
+    #     peak below the peak (the noise term is NOT in the interpolation, so
+    #     the number does not move with the curve's noise). The old value was
+    #     the first sampled point already past the threshold -- late by up to
+    #     one acquisition interval and not comparable across sampling rates.
     # rate  = linear-regression slope from peak to the post-peak trough
     lysis_time <- NA_real_; lysis_rate <- NA_real_
     od_drop <- NA_real_; residual_od <- NA_real_; recovery_slope <- NA_real_
+    noise_sd <- curve_noise_sd(od_vec)
     if (max_idx < n_pts) {
       post_peak  <- (max_idx + 1):n_pts
+      detect_thr <- max(lysis_threshold * max_od, 3 * noise_sd)
+      report_thr <- lysis_threshold * max_od
       od_decline <- max_od - od_vec[post_peak]
-      lysis_idx  <- which(od_decline > lysis_threshold * max_od)
-      if (length(lysis_idx) > 0) {
-        lysis_time <- t_vec[post_peak[lysis_idx[1]]]
+      below      <- is.finite(od_decline) & od_decline > detect_thr
+      need       <- as.integer(LYSIS_SUSTAIN_PTS)
+      onset      <- NA_integer_
+      if (length(below) >= need) {
+        runs <- vapply(seq_len(length(below) - need + 1L),
+                       function(i) all(below[i:(i + need - 1L)]), logical(1))
+        if (any(runs)) onset <- which(runs)[1]
+      }
+      if (!is.na(onset)) {
+        # the report level is crossed at or before the sustained run starts
+        cross   <- which(is.finite(od_decline) & od_decline > report_thr &
+                         seq_along(od_decline) <= onset)
+        abs_idx <- post_peak[if (length(cross)) cross[1] else onset]
+        level   <- max_od - report_thr
+        y0 <- od_vec[abs_idx - 1L]; y1 <- od_vec[abs_idx]
+        x0 <- t_vec[abs_idx - 1L];  x1 <- t_vec[abs_idx]
+        lysis_time <- if (is.finite(y0) && is.finite(y1) && y0 > level && y0 > y1)
+                        x0 + (x1 - x0) * (y0 - level) / (y0 - y1)
+                      else t_vec[abs_idx]
         trough_idx <- max_idx + which.min(od_vec[post_peak])
         if (trough_idx > max_idx) {
           lw <- max_idx:trough_idx
@@ -653,8 +723,8 @@ METRIC_DEFINITIONS <- c(
   n_nonpositive_od = "Count of time points with OD <= 0 (e.g. a blank-subtraction artefact). Any mu_max rolling window touching one of these is excluded rather than clamped, so mu_max/doubling_time/lag_phase may be NA or based on fewer windows when this is > 0",
   doubling_time   = "ln(2) / mu_max; NA when there is no growth phase",
   lag_phase       = "First time at which the rolling ln-slope reaches 10% of mu_max",
-  stat_phase_dur  = "Time spanned by all points within 95% of the peak",
-  lysis_time      = "Lysis onset: first post-peak time at which the decline from peak exceeds the lysis threshold (adjustable, default 5%) of the peak; NA if the curve never declines past that",
+  stat_phase_dur  = "Duration of the longest contiguous run of points within 95% of the peak (separate near-peak episodes are not joined across a dip)",
+  lysis_time      = "Lysis onset: linearly interpolated time at which the mean falls the lysis threshold (adjustable, default 5%) of the peak below the peak. Called only when the post-peak decline exceeds max(threshold x peak, 3 x the curve's noise SD) for 2 consecutive points, so noise on an uninfected plateau is not scored as lysis; NA otherwise",
   lysis_rate      = "Linear-regression slope of the mean from the peak to the post-peak trough (negative = decline)",
   od_drop         = "Peak minus post-peak minimum (absolute decline)",
   residual_od     = "Post-peak minimum (residual OD after lysis) -- this is the post-lysis floor; see global_min_od for the curve's overall minimum",
