@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.14.1 — 2026-10-19
+
+Hardening after a "vector memory limit reached" report. No change to normal output.
+
+- **One raster guard**: `safe_raster_dpi(width_in, height_in, dpi, max_pixels = 40e6)`
+  returns the largest dpi (floored, at least 36) that keeps the image within 40
+  megapixels, with attribute `capped`. It is used by every raster render: the
+  true-size preview (`renderImage`), PNG/TIFF/JPEG downloads of the main,
+  analysis and composed figures, the report PNGs and the GIF frames. A
+  notification says when the dpi was reduced.
+- **Size and zoom clamps**: `export_size_in()` limits each side to 60 in
+  (1524 mm) with a notification and falls back to 89 x 65 mm for an emptied or
+  zero box; the preview zoom is clamped to 0.5-4 and the page width to 200-8000
+  px; GIF and canvas sizes are bounded. (`ggsave(limitsize = FALSE)`: the app's
+  own limit governs.)
+- **Tick-count guards**: a manual x tick interval, or a time range, that would
+  draw more than 500 major or minor ticks falls back to ggplot's default breaks
+  (the break vectors are counted before they are built), and an exponent range
+  over 20 decades (or reversed) on the log axis uses default minor breaks; each
+  shows a notification.
+- **Graceful failures**: preview and dashboard renders show the error figure
+  instead of failing; every download (images, reports, CSV, PPTX, GIF) fails with
+  a readable message and an error notification. Memory errors get the hint
+  "Reduce DPI, export size, zoom or the number of points."
+- **Data-size sanity**: more than 5,000 time points or 200 samples adds a
+  persistent warning to the data summary; the dashboard's four figures are
+  skipped (with a note) above 2,000,000 values (time points x samples x
+  replicates).
+- **Memory diagnostics**: the report's key-settings table has the R vector
+  memory limit (`mem.maxVSize()`) and the figure raster sizes used.
+- Tests: raster guard values, size clamps, tick guards (manual interval 0.001),
+  a wrong-unit (89 x 65 in) preview and download, data-size warnings, report rows.
+
 ## v2.14.0 — 2026-10-19
 
 **Change of default output.** The app now starts in the journal standard instead

@@ -244,6 +244,13 @@ at native size, and *Save a Copy* as Plain SVG or PDF for submission.
 The reasoning, the sources for each number and the full Inkscape loop are in
 [docs/FIGURE_STANDARDS.md](docs/FIGURE_STANDARDS.md).
 
+**Safety limits.** Raster images (previews, PNG/TIFF/JPEG, report figures, GIF
+frames) are limited to 40 megapixels: if the size and DPI ask for more, the DPI
+is reduced and a notification says so. Export sizes are limited to 60 in
+(1524 mm) per side, zoom to 0.5-4x and absurd tick settings fall back to default
+ticks. If a render still fails, the figure area shows the error (with a hint for
+memory errors) and downloads report it instead of failing silently.
+
 ### Compose a figure in the app
 
 The **Compose figure** tab (after Dashboard) assembles the finished multi-panel

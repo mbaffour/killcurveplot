@@ -1,6 +1,10 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.14.1 -- Hardening: one raster guard (safe_raster_dpi, 40 megapixel cap) on every raster
+#   render, size/zoom clamps, tick-count guards, render and download errors shown instead of
+#   fatal (with a hint for memory errors), data-size warnings, memory line in the report.
+#
 # v2.14.0 -- Journal standard by default (a deliberate change of default output):
 #   STARTUP STATE     -- APP_DEFAULTS = journal_preset_settings(89, 65, "a"): Nature single
 #                        column, Arial 6-8 pt, SVG, true-size preview. The pre-v2.14 look is
@@ -199,7 +203,7 @@ has_patchwork <- requireNamespace("patchwork", quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.14.0"
+APP_VERSION <- "2.14.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1252,6 +1256,36 @@ export_device <- function(format) {
          jpeg = if (has_ragg) ragg::agg_jpeg else "jpeg",
          format)
 }
+
+# ── v2.14.1: guards against oversized allocations ────────────────────────────
+# Largest dpi <= `dpi` for which width_in x height_in x dpi^2 stays within max_pixels (floored to
+# an integer, never below 36). attr(, "capped") is TRUE when the dpi was reduced. A size in the
+# wrong unit (89 in instead of 89 mm) at 600 dpi would otherwise ask for ~2 gigapixels.
+safe_raster_dpi <- function(width_in, height_in, dpi, max_pixels = 40e6) {
+  out <- dpi; capped <- FALSE
+  area <- width_in * height_in
+  if (is.finite(area) && area > 0 && is.finite(dpi) && area * dpi^2 > max_pixels) {
+    out <- max(36, floor(sqrt(max_pixels / area))); capped <- TRUE
+  }
+  attr(out, "capped") <- capped
+  out
+}
+RASTER_MAX_PIXELS <- 40e6
+SIZE_MAX_IN <- 60                       # each export dimension, inches (1524 mm)
+TICK_MAX_BREAKS <- 500                  # more breaks than this -> ggplot's default breaks
+# A readable message for a failed render; memory errors get a hint.
+friendly_error_message <- function(e) {
+  msg <- conditionMessage(e)
+  if (grepl("vector memory limit|cannot allocate (vector|memory)|memory limit", msg, ignore.case = TRUE))
+    msg <- paste0(msg, " Reduce DPI, export size, zoom or the number of points.")
+  msg
+}
+# The placeholder figure every failed plot render shows.
+plot_error_figure <- function(msg)
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = paste("Plot error:", msg),
+             color = "red", size = 4, hjust = 0.5) +
+    theme_void()
 
 # ── v2.11: analysis figures, replicate statistics, MOI ───────────────────────
 ANALYSIS_METRIC_LABELS <- c(
@@ -2403,6 +2437,7 @@ ui <- fluidPage(
             "From the mean curve; lysis onset and OD drop also show \u00b1 SD across replicates. ",
             "Full tables: Stats & Reports \u2192 CSV downloads."),
           tableOutput("dash_metrics_table"),
+          uiOutput("dash_size_note"),
           fluidRow(
             column(6, h5("Lysis curve"),           plotOutput("dash_fig_main",    height = "280px")),
             column(6, h5("Specific growth rate"),  plotOutput("dash_fig_rate",    height = "280px"))
@@ -2425,6 +2460,20 @@ ui <- fluidPage(
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server <- function(input, output, session) {
+  
+  # v2.14.1: every download in this server fails with a readable message (and a notification)
+  # instead of an opaque error; memory errors get a hint. Shadows shiny::downloadHandler locally.
+  guarded_content <- function(fn) function(file) {
+    tryCatch(fn(file), error = function(e) {
+      if (inherits(e, "shiny.silent.error")) stop(e)
+      msg <- friendly_error_message(e)
+      guard_notify("download_error", paste("Download failed:", msg), "error")
+      stop(msg, call. = FALSE)
+    })
+  }
+  downloadHandler <- function(filename, content, contentType = NULL, outputArgs = list())
+    shiny::downloadHandler(filename = filename, content = guarded_content(content),
+                           contentType = contentType, outputArgs = outputArgs)
   
   rv <- reactiveValues(
     data              = NULL,
@@ -2644,6 +2693,26 @@ server <- function(input, output, session) {
   })
 
   # ── Data summary (what the app detected) ─────────────────────────────────────
+  # v2.14.1: how big the loaded data is (time points, samples, replicates per sample)
+  data_size_info <- function() {
+    ntp <- length(rv$all_timepoints); ns <- length(rv$od_vars)
+    nrep <- if (isTRUE(rv$is_long_format)) max(1, round(nrow(rv$data) / max(1, ntp * ns)))
+            else max(1, lengths(rv$col_map))
+    list(ntp = ntp, ns = ns, nrep = nrep, cells = as.numeric(ntp) * ns * nrep)
+  }
+  DATA_WARN_TIMEPOINTS <- 5000; DATA_WARN_SAMPLES <- 200; DASHBOARD_MAX_CELLS <- 2e6
+  dashboard_too_big <- function() {
+    if (is.null(rv$data)) return(FALSE)
+    isTRUE(data_size_info()$cells > DASHBOARD_MAX_CELLS)
+  }
+  output$dash_size_note <- renderUI({
+    if (!dashboard_too_big()) return(NULL)
+    i <- data_size_info()
+    div(class = "settings-status warn", style = "margin:8px 0;",
+        sprintf("The dashboard figures are skipped for data this large (%s time points x %s samples x %s replicates = %s values, limit %s). Use the Analysis figures tab or reduce the selection / time window.",
+                i$ntp, i$ns, i$nrep, format(i$cells, big.mark = ",", scientific = FALSE),
+                format(DASHBOARD_MAX_CELLS, big.mark = ",", scientific = FALSE)))
+  })
   output$data_summary_ui <- renderUI({
     req(rv$data)
     rep_txt <- if (rv$is_long_format) {
@@ -2656,13 +2725,19 @@ server <- function(input, output, session) {
              ifelse(lengths(rv$col_map) > 1, " replicate cols)", " col)"),
              collapse = ", ")
     }
-    div(class = "settings-status ok", style = "margin-bottom:10px;",
-        HTML(paste0(
-          "<b>", html_escape(rv$data_source %||% "data"), "</b><br/>",
-          "Format: <b>", if (rv$is_long_format) "long" else "wide", "</b> &middot; ",
-          "Time column: <b>", html_escape(rv$time_col), "</b> &middot; ",
-          length(rv$all_timepoints), " time points<br/>",
-          "Samples: ", html_escape(rep_txt))))
+    di <- data_size_info()
+    big <- if (di$ntp > DATA_WARN_TIMEPOINTS || di$ns > DATA_WARN_SAMPLES)
+      div(class = "settings-status warn", style = "margin-top:6px;",
+          sprintf("Large data set (%s time points, %s samples): analysis figures and statistics may be slow.", di$ntp, di$ns))
+    div(style = "margin-bottom:10px;",
+        div(class = "settings-status ok",
+            HTML(paste0(
+              "<b>", html_escape(rv$data_source %||% "data"), "</b><br/>",
+              "Format: <b>", if (rv$is_long_format) "long" else "wide", "</b> &middot; ",
+              "Time column: <b>", html_escape(rv$time_col), "</b> &middot; ",
+              length(rv$all_timepoints), " time points<br/>",
+              "Samples: ", html_escape(rep_txt)))),
+        big)
   })
   
   # ── Settings: Save ───────────────────────────────────────────────────────────
@@ -3712,7 +3787,17 @@ server <- function(input, output, session) {
         is.numeric(manual_interval) &&
         manual_interval > 0
       
-      if (use_manual) {
+      # v2.14.1: count the breaks BEFORE building them: an interval of 0.0001 over a 6-hour axis
+      # (or a huge time range) would otherwise allocate millions of break positions.
+      iv_est   <- if (use_manual) manual_interval else if (mt2 <= 60) 10 else if (mt2 <= 120) 30 else 60
+      minor_st <- if (use_manual) manual_interval / 2 else if (mt2 <= 60) 5 else if (mt2 <= 120) 10 else 30
+      n_major_est <- (mt2 - x0) / iv_est + 1; n_minor_est <- (mt2 - x0) / minor_st + 1
+      ticks_ok <- all(is.finite(c(n_major_est, n_minor_est))) && max(n_major_est, n_minor_est) <= TICK_MAX_BREAKS
+      if (!ticks_ok) {
+        guard_notify("tick_guard", sprintf("The x tick interval would draw about %s ticks; ggplot's default breaks are used instead.",
+                                           format(round(max(n_major_est, n_minor_est)), big.mark = ",", scientific = FALSE)))
+        mjb <- NULL; mnb <- NULL
+      } else if (use_manual) {
         iv  <- manual_interval
         mjb <- seq(x0, ceiling((mt2 - x0) / iv) * iv + x0, by = iv)
         # Always include the actual data endpoint if it isn't already a break
@@ -3730,11 +3815,12 @@ server <- function(input, output, session) {
       }
       
       # Union in any extra positions the user explicitly requested
-      if (length(extra_ticks) > 0)
+      if (!is.null(mjb) && length(extra_ticks) > 0)
         mjb <- sort(unique(c(mjb, extra_ticks)))
       
-      p <- p + scale_x_continuous(limits = x_lims, expand = x_exp, breaks = mjb,
-                                  minor_breaks = mnb, guide = guide_prism_minor())
+      p <- p + if (is.null(mjb)) scale_x_continuous(limits = x_lims, expand = x_exp, guide = guide_prism_minor())
+               else scale_x_continuous(limits = x_lims, expand = x_exp, breaks = mjb,
+                                       minor_breaks = mnb, guide = guide_prism_minor())
     } else {
       p <- p + scale_x_continuous(limits = x_lims, expand = x_exp)
     }
@@ -3744,10 +3830,16 @@ server <- function(input, output, session) {
       if (isTRUE(input$use_advanced_ticks)) {
         minE <- input$y_log_min_exponent; maxE <- input$y_log_max_exponent
         if (is.null(y_lims)) y_lims <- c(10^minE, if (maxE >= 0) 10^(maxE+1) else 10^maxE)
+        if (!is.finite(maxE - minE) || maxE < minE || maxE - minE > 20) {
+          # v2.14.1: a nonsensical or enormous exponent range: default minor breaks
+          guard_notify("tick_guard", "The log axis exponent range is too wide (or reversed) for minor ticks; default breaks are used.")
+          p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs, guide = guide_prism_minor())
+        } else {
         ymn <- c(rep(1:9, maxE-minE+1) * 10^rep(minE:maxE, each=9))
         if (maxE >= 0) ymn <- c(ymn, 10^(maxE+1))
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, minor_breaks = ymn,
                                labels = y_labs, guide = guide_prism_minor())
+        }
       } else {
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs)
       }
@@ -3812,10 +3904,7 @@ server <- function(input, output, session) {
                  resolve_aesthetics(input$selected_samples)),
       error = function(e) {
         # Return a blank ggplot with the error message rather than crashing the session
-        ggplot() +
-          annotate("text", x = 0.5, y = 0.5, label = paste("Plot error:", conditionMessage(e)),
-                   color = "red", size = 4, hjust = 0.5) +
-          theme_void()
+        plot_error_figure(friendly_error_message(e))
       }
     )
   }
@@ -3846,10 +3935,40 @@ server <- function(input, output, session) {
   # ── Export size (v2.10): one source of truth, in inches ─────────────────────
   # Every export path (image, reports, PPTX, true-size preview) reads this, so a
   # journal preset given in mm cannot drift from what the reports embed.
+  # v2.14.1: a notification that replaces its predecessor with the same id (so a render that
+  # repeats does not stack banners); never lets a notification failure break a render.
+  guard_notify <- function(id, msg, type = "warning")
+    tryCatch(showNotification(msg, id = id, type = type, duration = 10), error = function(e) invisible(NULL))
+  # v2.14.1: every raster render goes through this: the requested dpi, reduced when the pixel
+  # count would exceed 40 megapixels (with a notification saying so).
+  raster_dpi <- function(width_in, height_in, dpi) {
+    if (!is.numeric(dpi) || length(dpi) != 1 || !is.finite(dpi) || dpi <= 0) dpi <- 96
+    r <- safe_raster_dpi(width_in, height_in, dpi, RASTER_MAX_PIXELS)
+    if (isTRUE(attr(r, "capped")))
+      guard_notify("raster_cap", sprintf("Raster reduced to %s dpi to stay within memory (%s x %s px).",
+                                         r, round(width_in * r), round(height_in * r)))
+    as.numeric(r)
+  }
+  # the dpi for an image download: raster formats are capped, vector formats ignore it
+  export_dpi_for <- function(fmt, width_in, height_in) {
+    d <- input$export_dpi
+    if (fmt %in% c("png", "tiff", "jpeg")) raster_dpi(width_in, height_in, d)
+    else if (is.numeric(d) && length(d) == 1 && is.finite(d)) d else 300
+  }
   export_size_in <- function() {
+    mm <- identical(input$export_units, "mm")
     w <- input$export_width  %||% 10
     h <- input$export_height %||% 8
-    if (identical(input$export_units, "mm")) c(w, h) / 25.4 else c(w, h)
+    # an emptied or nonsensical box falls back to the standard size; huge values are clamped
+    if (!is.numeric(w) || length(w) != 1 || !is.finite(w) || w <= 0) w <- if (mm) 89 else 89 / 25.4
+    if (!is.numeric(h) || length(h) != 1 || !is.finite(h) || h <= 0) h <- if (mm) 65 else 65 / 25.4
+    mx <- if (mm) SIZE_MAX_IN * 25.4 else SIZE_MAX_IN
+    if (w > mx || h > mx) {
+      guard_notify("size_clamp", sprintf("Export size limited to %s x %s: each side is at most %s %s.",
+                                         round(min(w, mx), 1), round(min(h, mx), 1), round(mx), if (mm) "mm" else "in"))
+      w <- min(w, mx); h <- min(h, mx)
+    }
+    if (mm) c(w, h) / 25.4 else c(w, h)
   }
   
   # Switching units converts the current numbers so the physical size is kept
@@ -3912,9 +4031,14 @@ server <- function(input, output, session) {
   preview_zoom_value <- function(width_in) {
     pw <- input$main_panel_width
     if (isTRUE(input$preview_zoom_auto %||% TRUE) && is.numeric(pw) && length(pw) == 1 && is.finite(pw) &&
-        pw > 0 && is.finite(width_in) && width_in > 0)
+        pw > 0 && is.finite(width_in) && width_in > 0) {
+      pw <- min(max(pw, 200), 8000)                      # v2.14.1: a sane page width
       min(max(floor((pw - 24) / (width_in * 96) * 4) / 4, 0.5), 4)
-    else input$preview_zoom %||% 2
+    } else {
+      z <- input$preview_zoom %||% 2
+      if (!is.numeric(z) || length(z) != 1 || !is.finite(z)) z <- 2
+      min(max(z, 0.5), 4)
+    }
   }
   preview_container <- function(plot_id, img_id, size_fun = export_size_in) {
     sz <- size_fun()
@@ -3925,9 +4049,10 @@ server <- function(input, output, session) {
                   height = paste0(round(sz[2] * 96 * z), "px"))
     } else {
       # canvas mode: the pixel width is the user's, the height keeps the figure's aspect ratio
+      pwid <- min(max(input$plot_width %||% 820, 200), 4000)   # v2.14.1: a sane canvas width
       plotOutput(plot_id,
-                 height = paste0(round(input$plot_width * sz[2] / sz[1]), "px"),
-                 width  = paste0(input$plot_width,  "px"))
+                 height = paste0(round(pwid * sz[2] / sz[1]), "px"),
+                 width  = paste0(pwid,  "px"))
     }
   }
   # True-size preview (v2.10): the figure goes through the same ggsave path as
@@ -3937,15 +4062,30 @@ server <- function(input, output, session) {
   register_preview <- function(plot_id, img_id, plot_fun, size_fun = export_size_in) {
     output[[plot_id]] <- renderPlot({
       plot_inputs_debounced()   # take debounced dependency
-      plot_fun()
+      # v2.14.1: a failing render shows the error figure instead of ending the session
+      tryCatch(plot_fun(), error = function(e) {
+        if (inherits(e, "shiny.silent.error")) stop(e)
+        plot_error_figure(friendly_error_message(e))
+      })
     }, res = 96)
     output[[img_id]] <- renderImage({
       plot_inputs_debounced()
       sz <- size_fun(); z <- preview_zoom_value(sz[1])
       pr <- session$clientData$pixelratio %||% 1
+      pr <- if (is.numeric(pr) && length(pr) == 1 && is.finite(pr)) min(max(pr, 1), 3) else 1
       f  <- tempfile(fileext = ".png")
-      ggsave(f, plot = plot_fun(), device = export_device("png"),
-             width = sz[1], height = sz[2], units = "in", dpi = 96 * z * pr, bg = "white")
+      dpi <- raster_dpi(sz[1], sz[2], 96 * z * pr)
+      tryCatch(
+        ggsave(f, plot = plot_fun(), device = export_device("png"),
+               width = sz[1], height = sz[2], units = "in", dpi = dpi, bg = "white", limitsize = FALSE),
+        error = function(e) {
+          if (inherits(e, "shiny.silent.error")) stop(e)
+          msg <- friendly_error_message(e)
+          guard_notify("render_error", paste("Preview failed:", msg), "error")
+          # the placeholder figure, written small, in place of the failed preview
+          ggsave(f, plot = plot_error_figure(msg), device = export_device("png"),
+                 width = min(sz[1], 6), height = min(sz[2], 4), units = "in", dpi = 96, bg = "white")
+        })
       list(src = f, contentType = "image/png",
            width = round(sz[1] * 96 * z), height = round(sz[2] * 96 * z),
            alt = "Figure preview at export size")
@@ -4027,7 +4167,7 @@ server <- function(input, output, session) {
       fmt  <- input$export_format
       args <- list(filename = file, plot = generate_plot(), device = export_device(fmt),
                    width = sz[1], height = sz[2],
-                   units = "in", dpi = input$export_dpi, bg = "white")
+                   units = "in", dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
       # Journals require lossless compression for TIFF; the arg is only valid
       # for the tiff device so it must be added conditionally.
       if (identical(fmt, "tiff")) args$compression <- "lzw"
@@ -4422,7 +4562,7 @@ server <- function(input, output, session) {
     content  = function(file) {
       sz   <- export_size_in(); fmt <- input$export_format
       args <- list(filename = file, plot = generate_analysis_plot(), device = export_device(fmt),
-                   width = sz[1], height = sz[2], units = "in", dpi = input$export_dpi, bg = "white")
+                   width = sz[1], height = sz[2], units = "in", dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
       if (identical(fmt, "tiff")) args$compression <- "lzw"
       do.call(ggsave, args)
     }
@@ -4530,7 +4670,7 @@ server <- function(input, output, session) {
       fmt  <- input$export_format
       args <- list(filename = file, plot = i$plot, device = export_device(fmt),
                    width = i$width_mm, height = i$height_mm, units = "mm",
-                   dpi = input$export_dpi, bg = "white")
+                   dpi = export_dpi_for(fmt, i$width_mm / 25.4, i$height_mm / 25.4), bg = "white", limitsize = FALSE)
       if (identical(fmt, "tiff")) args$compression <- "lzw"
       do.call(ggsave, args)
     }
@@ -4632,9 +4772,14 @@ server <- function(input, output, session) {
     legend.key.size = unit(4, "mm"))
   dash_plot <- function(fun) renderPlot({
     req(rv$data, input$selected_samples)
+    if (dashboard_too_big()) { plot.new(); return(invisible(NULL)) }   # see dash_size_note
     p <- tryCatch(fun(), error = function(e) NULL)
     if (is.null(p)) { plot.new(); return(invisible(NULL)) }
-    print(p + labs(tag = NULL, caption = NULL) + dash_theme)
+    tryCatch(print(p + labs(tag = NULL, caption = NULL) + dash_theme),
+             error = function(e) {
+               if (inherits(e, "shiny.silent.error")) stop(e)
+               plot.new(); text(0.5, 0.5, paste(strwrap(friendly_error_message(e), 40), collapse = "\n"), col = "red", cex = 0.8)
+             })
   }, res = 96, bg = "white")
   output$dash_fig_main    <- dash_plot(function() generate_plot())
   output$dash_fig_rate    <- dash_plot(function() generate_analysis_plot("growth_rate"))
@@ -4761,7 +4906,8 @@ server <- function(input, output, session) {
                   "Export size", "Export DPI",
                   "Blank/media OD subtracted",
                   "μmax smoothing window", "Peak-detection smoothing window",
-                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Reference sample"),
+                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Reference sample",
+                  "R vector memory limit", "Figure raster size"),
       value = c(input$x_scale_type, input$y_scale_type,
                 input$x_axis_label, input$y_axis_label, input$color_palette,
                 input$line_thickness, input$show_points, input$shape_size,
@@ -4775,7 +4921,18 @@ server <- function(input, output, session) {
                   "first peak before a > 10 % decline" else "global maximum",
                 input$metrics_lysis_threshold_pct %||% 5,
                 if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample
-                else "none (infection metrics omitted)"),
+                else "none (infection metrics omitted)",
+                # v2.14.1 memory diagnostics: the limit R runs under and the pixel sizes used
+                tryCatch({
+                  mv <- if (exists("mem.maxVSize", mode = "function")) mem.maxVSize() else NA_real_
+                  if (!is.finite(mv)) "unlimited (or not reported)" else sprintf("%s MB", format(round(mv), big.mark = ","))
+                }, error = function(e) "not available"),
+                tryCatch({
+                  sz <- export_size_in(); dp <- as.numeric(safe_raster_dpi(sz[1], sz[2], input$export_dpi %||% 300))
+                  rp <- as.numeric(safe_raster_dpi(sz[1], sz[2], if (sz[1] < 6) 300 else 150))
+                  sprintf("export %s x %s px at %s dpi; report figures %s x %s px at %s dpi",
+                          round(sz[1] * dp), round(sz[2] * dp), dp, round(sz[1] * rp), round(sz[2] * rp), rp)
+                }, error = function(e) "not available")),
       stringsAsFactors = FALSE)
     # ── Experiment notebook: collect non-empty fields ─────────────────────────
     nb_pairs <- list(
@@ -4837,7 +4994,7 @@ server <- function(input, output, session) {
     sz <- size_in %||% export_size_in()
     ggsave(tmp_png, plot = p, device = export_device("png"),
            width = sz[1], height = sz[2],
-           units = "in", dpi = if (sz[1] < 6) 300 else 150, bg = "white")
+           units = "in", dpi = raster_dpi(sz[1], sz[2], if (sz[1] < 6) 300 else 150), bg = "white", limitsize = FALSE)
     base64enc::base64encode(tmp_png)
   }
 
@@ -5047,9 +5204,10 @@ server <- function(input, output, session) {
         samps  <- input$selected_samples
         aes_v  <- resolve_aesthetics(samps)
         pd_all <- prepare_plot_data(samples = samps)
-        w_px   <- max(as.integer(input$gif_width),  200L)
-        h_px   <- max(as.integer(input$gif_height), 150L)
-        fps    <- max(input$gif_fps, 0.2)
+        px_in  <- function(x, lo, def) { x <- suppressWarnings(as.integer(x)); if (!is.finite(x)) def else min(max(x, lo), 4000L) }
+        w_px   <- px_in(input$gif_width,  200L, 800L)       # v2.14.1: bounded, NA-safe
+        h_px   <- px_in(input$gif_height, 150L, 600L)
+        fps    <- max(suppressWarnings(as.numeric(input$gif_fps %||% 1)), 0.2, na.rm = TRUE)
         
         tmp_dir <- tempfile(); dir.create(tmp_dir)
         on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
@@ -5075,7 +5233,7 @@ server <- function(input, output, session) {
           fpath <- file.path(tmp_dir, sprintf("frame_%03d.png", k))
           ggsave(fpath, plot = p_k, device = "png",
                  width = w_px / 96, height = h_px / 96,
-                 units = "in", dpi = 96)
+                 units = "in", dpi = raster_dpi(w_px / 96, h_px / 96, 96))
           frame_files[k] <- fpath
         }
         

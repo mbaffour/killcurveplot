@@ -809,6 +809,99 @@ testServer(app, {
   check("preview_zoom_auto has an APP_DEFAULTS entry (TRUE)", isTRUE(env$APP_DEFAULTS$preview_zoom_auto))
 })
 
+cat("\n--- v2.14.1: memory guards ---\n")
+r_ok <- env$safe_raster_dpi(89 / 25.4, 65 / 25.4, 600)
+check("safe_raster_dpi: 89 x 65 mm at 600 dpi is uncapped (600)", identical(as.numeric(r_ok), 600) && isFALSE(attr(r_ok, "capped")))
+r_big <- env$safe_raster_dpi(89, 65, 600)   # 89 in x 65 in: the wrong-unit case
+check("safe_raster_dpi: 89 x 65 INCHES at 600 dpi is capped and fits 40 megapixels",
+      isTRUE(attr(r_big, "capped")) && as.numeric(r_big) < 600 && 89 * 65 * as.numeric(r_big)^2 <= 40e6 &&
+      as.numeric(r_big) == floor(as.numeric(r_big)))
+check("safe_raster_dpi: never below 36 dpi, capped flag set", as.numeric(env$safe_raster_dpi(1000, 1000, 600)) == 36 &&
+      isTRUE(attr(env$safe_raster_dpi(1000, 1000, 600), "capped")))
+check("friendly_error_message appends the hint to memory errors only",
+      grepl("Reduce DPI, export size, zoom or the number of points.",
+            env$friendly_error_message(simpleError("vector memory limit of 16.0 Gb reached, see mem.maxVSize()")), fixed = TRUE) &&
+      grepl("cannot allocate vector", env$friendly_error_message(simpleError("cannot allocate vector of size 8 Gb")), fixed = TRUE) &&
+      !grepl("Reduce DPI", env$friendly_error_message(simpleError("object 'x' not found")), fixed = TRUE))
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected")
+  session$setInputs(export_units = "in", export_width = 500, export_height = 8)
+  check("export_size_in clamps 500 in to 60 in (and leaves the other side alone)", near(export_size_in()[1], 60) && near(export_size_in()[2], 8))
+  session$setInputs(export_units = "mm", export_width = 5000, export_height = 65)
+  check("export_size_in clamps 5000 mm to 1524 mm (60 in)", near(export_size_in()[1] * 25.4, 1524) && near(export_size_in()[2] * 25.4, 65))
+  session$setInputs(export_units = "mm", export_width = NA, export_height = 0)
+  check("an emptied or zero size box falls back to the standard 89 x 65 mm", near(export_size_in()[1] * 25.4, 89) && near(export_size_in()[2] * 25.4, 65))
+  # preview zoom and page width clamps
+  session$setInputs(export_units = "mm", export_width = 89, export_height = 65, preview_zoom_auto = FALSE, preview_zoom = 40)
+  check("preview zoom is clamped to 4x", near(preview_zoom_value(3.5), 4))
+  session$setInputs(preview_zoom = -3); check("preview zoom is clamped to 0.5x", near(preview_zoom_value(3.5), 0.5))
+  session$setInputs(preview_zoom_auto = TRUE, main_panel_width = 1e9)
+  check("page width is clamped to 8000 px (zoom <= 4)", near(preview_zoom_value(3.5), 4))
+  session$setInputs(main_panel_width = 5)
+  check("page width is clamped to >= 200 px (zoom 0.5)", near(preview_zoom_value(3.5), 0.5))
+  session$setInputs(main_panel_width = NULL)
+  # tick guards: manual x interval of 0.001 over a 180 min axis would be 180k major breaks
+  session$setInputs(x_tick_interval = 0.001)
+  p_t <- generate_plot(); real_plot("a manual x tick interval of 0.001 still renders a real figure", p_t)
+  xs <- p_t$scales$get_scales("x")
+  check("...with ggplot's default breaks (no break vector was built)", inherits(xs$breaks, "waiver"))
+  check("...and a normal render has few ticks", length(ggplot_build(p_t)$layout$panel_params[[1]]$x$breaks) < 60)
+  session$setInputs(x_tick_interval = 30)
+  p_n <- generate_plot(); check("a sane manual interval still sets explicit breaks", !inherits(p_n$scales$get_scales("x")$breaks, "waiver"))
+  session$setInputs(x_tick_interval = NA, y_log_min_exponent = -400, y_log_max_exponent = 400)
+  real_plot("an absurd log exponent range renders (default minor breaks)", generate_plot())
+  session$setInputs(y_log_min_exponent = -2, y_log_max_exponent = 0)
+  # the preview of an enormous (wrong-unit) size still produces a PNG, capped
+  session$setInputs(export_units = "in", export_width = 89, export_height = 65, preview_mode = "wysiwyg",
+                    preview_zoom_auto = FALSE, preview_zoom = 2)
+  img <- output$od_plot_img
+  check("renderImage with 89 x 65 INCHES still yields an existing PNG (capped dpi), not an error",
+        is.list(img) && grepl("^data:image/png;base64,iVBOR", img$src) && nchar(img$src) > 500)
+  check("the capped preview stays within the pixel budget (89 x 65 in)",
+        { r <- env$safe_raster_dpi(60, 60, 96 * 2); 60 * 60 * as.numeric(r)^2 <= 40e6 })
+  # a failing figure becomes the placeholder in the preview instead of an error
+  session$setInputs(export_units = "mm", export_width = 89, export_height = 65, analysis_type = "dose_response",
+                    selected_samples = c("Uninfected", "Phage MOI 10"))
+  img2 <- output$analysis_img
+  check("the analysis preview of an unavailable figure still yields a PNG", is.list(img2) && grepl("^data:image/png;base64,iVBOR", img2$src))
+  # reports carry the memory diagnostics
+  ms <- report_meta()$settings_df
+  check("report provenance has the memory limit and figure raster size rows",
+        all(c("R vector memory limit", "Figure raster size") %in% ms$setting) &&
+        grepl("dpi", ms$value[ms$setting == "Figure raster size"], fixed = TRUE))
+})
+# downloads fail with a readable message and a hint, not an opaque error
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", export_format = "png",
+                    export_units = "mm", export_width = 89, export_height = 65, export_dpi = 600)
+  dl <- tryCatch(output$downloadPlot, error = function(e) NULL)
+  check("a 600 dpi PNG at 89 x 65 mm downloads normally (uncapped)", !is.null(dl) && file.exists(dl) && file.size(dl) > 1000)
+  session$setInputs(export_units = "in", export_width = 89, export_height = 65, export_dpi = 600)
+  dl2 <- tryCatch(output$downloadPlot, error = function(e) NULL)
+  check("a wrong-unit 89 x 65 INCH PNG at 600 dpi is clamped and capped, and still downloads", !is.null(dl2) && file.exists(dl2) && file.size(dl2) > 1000)
+})
+# data-size sanity
+testServer(app, {
+  big <- data.frame(Time = seq_len(6000), A = runif(6000), B = runif(6000), C = runif(6000))
+  ingest_data(big, "big.csv")
+  html <- output$data_summary_ui$html
+  check("more than 5000 time points: a persistent warning in the data summary",
+        grepl("Large data set", html, fixed = TRUE) && grepl("may be slow", html, fixed = TRUE))
+  check("6000 x 3 x 1 values is within the dashboard limit", !dashboard_too_big())
+})
+testServer(app, {
+  wide <- data.frame(Time = seq_len(2500), matrix(runif(2500 * 900), 2500, 900, dimnames = list(NULL, paste0("S", 1:900))))
+  ingest_data(wide, "wide.csv")
+  html <- output$data_summary_ui$html
+  check("more than 200 samples: the data-size warning appears", grepl("Large data set", html, fixed = TRUE))
+  check("2500 time points x 900 samples exceeds 2,000,000 values: dashboard figures skipped", dashboard_too_big())
+  check("...with a note explaining it", grepl("skipped", output$dash_size_note$html, fixed = TRUE))
+})
+
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (nzchar(render_dir)) cat("renders in:", render_dir, "\n")
 if (fail > 0) quit(status = 1)
