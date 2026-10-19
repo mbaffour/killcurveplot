@@ -1,6 +1,17 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.15.0 -- Square panels: "fixed panel size" is the new standard (panel_size_mode):
+#   the plotting panel is exactly panel_width_mm x panel_height_mm (65 x 65 mm by default) and the
+#   figure is sized AROUND it (axes, labels and an outside legend make it wider), via
+#   fixed_panel_grob(). The size bar, previews, file names, exports, reports and the composer
+#   all use the computed figure size. "fit" (the Legacy look) keeps the old behaviour: the panel
+#   fills export_width x export_height.
+#
+# v2.14.1 -- Hardening: one raster guard (safe_raster_dpi, 40 megapixel cap) on every raster
+#   render, size/zoom clamps, tick-count guards, render and download errors shown instead of
+#   fatal (with a hint for memory errors), data-size warnings, memory line in the report.
+#
 # v2.14.0 -- Journal standard by default (a deliberate change of default output):
 #   STARTUP STATE     -- APP_DEFAULTS = journal_preset_settings(89, 65, "a"): Nature single
 #                        column, Arial 6-8 pt, SVG, true-size preview. The pre-v2.14 look is
@@ -199,7 +210,7 @@ has_patchwork <- requireNamespace("patchwork", quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.14.0"
+APP_VERSION <- "2.15.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -913,7 +924,12 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
   }
 
   # ── Figure page ──
-  print(plot_obj)
+  if (inherits(plot_obj, "gtable") && !is.null(attr(plot_obj, "size_mm"))) {   # v2.15: fixed-panel figure at its size
+    grid::grid.newpage()
+    sz <- attr(plot_obj, "size_mm")
+    grid::pushViewport(grid::viewport(width = grid::unit(sz[1], "mm"), height = grid::unit(sz[2], "mm")))
+    grid::grid.draw(plot_obj); grid::popViewport()
+  } else print(plot_obj)
 
   # ── Analysis figure pages (v2.11.1): title, figure, caption; one per page ──
   text_page <- function(title, paragraphs, wrap = 95) {
@@ -930,14 +946,18 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
       drawn <- tryCatch({
         grid::grid.newpage()
         grid::grid.text(f$title, y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
-        vp <- if (is.null(f$aspect)) grid::viewport(y = 0.53, height = 0.82) else {
+        vp <- if (inherits(f$plot, "gtable") && !is.null(attr(f$plot, "size_mm"))) {
+          # fixed-panel figures are absolute-size: drawn at their physical size, centred in the page area
+          grid::viewport(y = 0.53, width = grid::unit(attr(f$plot, "size_mm")[1], "mm"),
+                         height = grid::unit(attr(f$plot, "size_mm")[2], "mm"))
+        } else if (is.null(f$aspect)) grid::viewport(y = 0.53, height = 0.82) else {
           # a composed figure keeps its own aspect ratio inside the page area
           pg <- grDevices::dev.size("in"); bw <- 0.95 * pg[1]; bh <- 0.82 * pg[2]
           if (f$aspect * bw <= bh) grid::viewport(y = 0.53, width = grid::unit(bw, "in"), height = grid::unit(f$aspect * bw, "in"))
           else grid::viewport(y = 0.53, width = grid::unit(bh / f$aspect, "in"), height = grid::unit(bh, "in"))
         }
         grid::pushViewport(vp)
-        print(f$plot, newpage = FALSE)
+        if (inherits(f$plot, "gtable")) grid::grid.draw(f$plot) else print(f$plot, newpage = FALSE)
         grid::popViewport()
         if (nzchar(f$caption %||% ""))
           grid::grid.text(paste(strwrap(f$caption, 110), collapse = "\n"), y = 0.08, just = "top",
@@ -1215,7 +1235,9 @@ journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_ran
     color_palette = "colorblind",
     show_major_gridlines = FALSE, show_minor_gridlines = FALSE,
     show_error_caption = FALSE,   # the Figure Legend Text box carries measure + n instead
-    custom_aspect_ratio = FALSE
+    custom_aspect_ratio = FALSE,
+    # v2.15: the panel itself has the fixed size; the figure grows around it
+    panel_size_mode = "fixed", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE
   )
   # v2.12: caps as a fraction of the x range, so the look is the same whether
   # time is in minutes or hours (x_range kept for callers; no longer needed)
@@ -1251,6 +1273,113 @@ export_device <- function(format) {
          tiff = if (has_ragg) ragg::agg_tiff else "tiff",
          jpeg = if (has_ragg) ragg::agg_jpeg else "jpeg",
          format)
+}
+
+# ── v2.14.1: guards against oversized allocations ────────────────────────────
+# Largest dpi <= `dpi` for which width_in x height_in x dpi^2 stays within max_pixels (floored to
+# an integer, never below 36). attr(, "capped") is TRUE when the dpi was reduced. A size in the
+# wrong unit (89 in instead of 89 mm) at 600 dpi would otherwise ask for ~2 gigapixels.
+safe_raster_dpi <- function(width_in, height_in, dpi, max_pixels = 40e6) {
+  out <- dpi; capped <- FALSE
+  area <- width_in * height_in
+  if (is.finite(area) && area > 0 && is.finite(dpi) && area * dpi^2 > max_pixels) {
+    out <- max(36, floor(sqrt(max_pixels / area))); capped <- TRUE
+  }
+  attr(out, "capped") <- capped
+  out
+}
+RASTER_MAX_PIXELS <- 40e6
+SIZE_MAX_IN <- 60                       # each export dimension, inches (1524 mm)
+TICK_MAX_BREAKS <- 500                  # more breaks than this -> ggplot's default breaks
+# A readable message for a failed render; memory errors get a hint.
+friendly_error_message <- function(e) {
+  msg <- conditionMessage(e)
+  if (grepl("vector memory limit|cannot allocate (vector|memory)|memory limit", msg, ignore.case = TRUE))
+    msg <- paste0(msg, " Reduce DPI, export size, zoom or the number of points.")
+  msg
+}
+# The placeholder figure every failed plot render shows.
+plot_error_figure <- function(msg)
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = paste("Plot error:", msg),
+             color = "red", size = 4, hjust = 0.5) +
+    theme_void()
+
+# ── v2.15: fixed panel size ──────────────────────────────────────────────────
+# The size, in mm, of a gtable whose panel cells are absolute. Everything left (axis text, titles,
+# legends) is measured on a scratch SVG device so font metrics resolve; the panels are absolute
+# already, so the result does not depend on the device size.
+figure_size_mm <- function(g) {
+  measure <- function(open_dev) {
+    old <- grDevices::dev.cur()
+    open_dev()
+    on.exit({ grDevices::dev.off(); if (old > 1) tryCatch(grDevices::dev.set(old), error = function(e) NULL) }, add = TRUE)
+    c(grid::convertWidth(sum(g$widths), "mm", valueOnly = TRUE),
+      grid::convertHeight(sum(g$heights), "mm", valueOnly = TRUE))
+  }
+  f <- tempfile(fileext = ".svg"); fp <- tempfile(fileext = ".png")
+  on.exit(unlink(c(f, fp)), add = TRUE)
+  sizes <- list(
+    if (requireNamespace("svglite", quietly = TRUE))
+      tryCatch(measure(function() svglite::svglite(f, width = 400 / 25.4, height = 400 / 25.4)), error = function(e) NULL),
+    if (requireNamespace("ragg", quietly = TRUE))
+      tryCatch(measure(function() ragg::agg_png(fp, width = 400, height = 400, units = "mm", res = 72)), error = function(e) NULL))
+  sizes <- Filter(Negate(is.null), sizes)
+  if (!length(sizes)) sizes <- list(measure(function() grDevices::pdf(NULL, width = 400 / 25.4, height = 400 / 25.4)))
+  # text metrics differ by a fraction of a mm between devices; the larger of the two fits both
+  c(max(vapply(sizes, `[`, 0, 1)), max(vapply(sizes, `[`, 0, 2)))
+}
+# A ggplot as a gtable whose panel area is exactly panel_w_mm x panel_h_mm (split evenly over the
+# panel columns / rows of a facet figure), with attr(, "size_mm") = the whole figure's size. Only
+# the panels' null units are replaced; every other null unit is zeroed so the size is absolute.
+fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
+  g   <- ggplot2::ggplotGrob(p)
+  lay <- g$layout[grepl("^panel", g$layout$name), , drop = FALSE]
+  cols <- sort(unique(unlist(Map(seq, lay$l, lay$r))))
+  rows <- sort(unique(unlist(Map(seq, lay$t, lay$b))))
+  cols <- cols[grid::unitType(g$widths)[cols]  == "null"]
+  rows <- rows[grid::unitType(g$heights)[rows] == "null"]
+  for (i in cols) g$widths[i]  <- grid::unit(panel_w_mm / length(cols), "mm")
+  for (i in rows) g$heights[i] <- grid::unit(panel_h_mm / length(rows), "mm")
+  for (i in which(grid::unitType(g$widths)  == "null")) g$widths[i]  <- grid::unit(0, "mm")
+  for (i in which(grid::unitType(g$heights) == "null")) g$heights[i] <- grid::unit(0, "mm")
+  g$respect <- FALSE
+  attr(g, "size_mm") <- figure_size_mm(g)
+  g
+}
+# Panels laid out as an ncol-column grid of fixed-panel gtables (each placed top-left in a cell as
+# wide / tall as the largest one), with a, b, c tags at each cell's top-left corner.
+compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a") {
+  n <- length(items); ncol <- max(1, min(ncol, n)); nrow <- ceiling(n / ncol)
+  sz <- vapply(items, function(g) attr(g, "size_mm"), numeric(2))
+  cw <- max(sz[1, ]); ch <- max(sz[2, ])
+  master <- gtable::gtable(widths = grid::unit(rep(cw, ncol), "mm"), heights = grid::unit(rep(ch, nrow), "mm"))
+  tags <- if (identical(tag_case, "A")) LETTERS else letters
+  for (i in seq_len(n)) {
+    r <- (i - 1) %/% ncol + 1; cc <- (i - 1) %% ncol + 1
+    cell <- grid::gTree(children = grid::gList(items[[i]]),
+                        vp = grid::viewport(x = 0, y = 1, width = grid::unit(sz[1, i], "mm"),
+                                            height = grid::unit(sz[2, i], "mm"), just = c("left", "top")))
+    master <- gtable::gtable_add_grob(master, cell, t = r, l = cc, name = paste0("cell-", i), clip = "off")
+    tag <- grid::textGrob(tags[i], x = grid::unit(0.5, "mm"), y = grid::unit(1, "npc") - grid::unit(0.5, "mm"),
+                          hjust = 0, vjust = 1,
+                          gp = grid::gpar(fontsize = tag_size, fontface = "bold", fontfamily = font))
+    master <- gtable::gtable_add_grob(master, tag, t = r, l = cc, name = paste0("tag-", i), clip = "off", z = Inf)
+  }
+  attr(master, "size_mm") <- c(cw * ncol, ch * nrow)
+  master
+}
+# The fit indicator of the size bar: which column layouts a figure of width W (mm) fits in the
+# chosen journal family ("single column", "two across double column", "three across ...").
+figure_fit_text <- function(w_mm, jp) {
+  single <- jp$single %||% NA; double <- jp$double %||% NA
+  if (!is.finite(single) && !is.finite(double)) return(NULL)
+  ok <- c(if (is.finite(single) && w_mm <= single + 0.05) "single column",
+          if (is.finite(double) && 2 * w_mm + 5 <= double + 0.05) "two across double column",
+          if (is.finite(double) && 3 * w_mm + 10 <= double + 0.05) "three across double column")
+  list(fits = length(ok) > 0,
+       text = if (length(ok)) paste0("fits: ", paste(ok, collapse = " \u00b7 "))
+              else sprintf("exceeds %s mm column", if (is.finite(single)) single else double))
 }
 
 # ── v2.11: analysis figures, replicate statistics, MOI ───────────────────────
@@ -1530,6 +1659,7 @@ LEGACY_BASE <- list(
   export_units = "in", preview_mode = "canvas", preview_zoom = 2,
   axis_line_pt = 1.07, tick_length_mm = 1.5, legend_position = "right",
   legend_box_border = TRUE, legend_key_mm = 0, panel_label = "", panel_label_size = 8,
+  panel_size_mode = "fit", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE,   # v2.15
   theme_base_pt = 0, y_tick_label_style = "legacy",
   # v2.11 analysis / dashboard inputs
   analysis_type = "metric_summary", analysis_metrics = c("lysis_time", "od_drop"),
@@ -1855,6 +1985,24 @@ ui <- fluidPage(
                        fluidRow(
                          column(6, textInput("panel_label", "Panel label:", APP_DEFAULTS$panel_label, placeholder = "a")),
                          column(6, numericInput("panel_label_size", "Panel label (pt):", APP_DEFAULTS$panel_label_size, 5, 20, 0.5))
+                       ),
+                       # v2.15: the panel (the plotting area) has a fixed size and the figure grows around it
+                       h5("Panel size", style = "margin-top:12px;"),
+                       radioButtons("panel_size_mode", NULL,
+                                    choices = c("Fixed panel size: the figure grows around it (axes, labels, outside legend)" = "fixed",
+                                                "Fit the export size (legacy: the panel fills width x height)" = "fit"),
+                                    selected = APP_DEFAULTS$panel_size_mode),
+                       conditionalPanel(condition = "input.panel_size_mode == 'fixed'",
+                                        fluidRow(
+                                          column(6, numericInput("panel_width_mm", "Panel width (mm):", APP_DEFAULTS$panel_width_mm, 10, 400, 1)),
+                                          column(6, conditionalPanel(condition = "input.panel_square == false",
+                                                                     numericInput("panel_height_mm", "Panel height (mm):", APP_DEFAULTS$panel_height_mm, 10, 400, 1)))
+                                        ),
+                                        checkboxInput("panel_square", "Square panel (curve figures: height = width)", APP_DEFAULTS$panel_square),
+                                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                                          "The size is that of the plotting area itself; the figure is sized around it. ",
+                                          "The heatmap and the metric summary use the width and height above (the square ",
+                                          "option is for the curve figures).")
                        )
                    )
                  ),
@@ -2083,10 +2231,11 @@ ui <- fluidPage(
                        radioButtons("export_units", "Size units:",
                                     choices = c("inches" = "in", "mm" = "mm"),
                                     selected = APP_DEFAULTS$export_units, inline = TRUE),
-                       fluidRow(
-                         column(6, numericInput("export_width",  paste0("Width (", APP_DEFAULTS$export_units, "):"),  APP_DEFAULTS$export_width, 0.5, 400)),
-                         column(6, numericInput("export_height", paste0("Height (", APP_DEFAULTS$export_units, "):"), APP_DEFAULTS$export_height,  0.5, 400))
-                       ),
+                       conditionalPanel(condition = "input.panel_size_mode != 'fixed'",
+                         fluidRow(
+                           column(6, numericInput("export_width",  paste0("Width (", APP_DEFAULTS$export_units, "):"),  APP_DEFAULTS$export_width, 0.5, 400)),
+                           column(6, numericInput("export_height", paste0("Height (", APP_DEFAULTS$export_units, "):"), APP_DEFAULTS$export_height,  0.5, 400))
+                         )),
                        uiOutput("export_size_note"),
                        numericInput("export_dpi", "DPI (raster formats):", APP_DEFAULTS$export_dpi, 72, 1200),
                        downloadButton("downloadPlot", "Download Image"),
@@ -2373,6 +2522,7 @@ ui <- fluidPage(
               column(4,
                 radioButtons("compose_ncol", "Columns:", choices = c("1" = "1", "2" = "2"),
                              selected = "2", inline = TRUE),
+                conditionalPanel("input.panel_size_mode != 'fixed'",
                 selectInput("compose_width", "Figure width:",
                             choices = c("Double column of Nature family (183 mm)" = "double",
                                         "Single column of Nature family (89 mm)"  = "single",
@@ -2381,6 +2531,8 @@ ui <- fluidPage(
                 conditionalPanel("input.compose_width == 'custom'",
                                  numericInput("compose_width_mm", "Width (mm):", 183, 20, 300, 1)),
                 numericInput("compose_panel_height_mm", "Height of each panel row (mm):", 60, 20, 250, 1)),
+                conditionalPanel("input.panel_size_mode == 'fixed'",
+                  p(style = "font-size:.8em;color:#777;", "Fixed panel size: every panel keeps its panel size and the composed figure is as wide and tall as the grid of cells needs."))),
               column(4,
                 numericInput("compose_tag_size", "Panel label size (pt):", 8, 4, 20, 0.5),
                 radioButtons("compose_tag_case", "Panel labels:",
@@ -2403,6 +2555,7 @@ ui <- fluidPage(
             "From the mean curve; lysis onset and OD drop also show \u00b1 SD across replicates. ",
             "Full tables: Stats & Reports \u2192 CSV downloads."),
           tableOutput("dash_metrics_table"),
+          uiOutput("dash_size_note"),
           fluidRow(
             column(6, h5("Lysis curve"),           plotOutput("dash_fig_main",    height = "280px")),
             column(6, h5("Specific growth rate"),  plotOutput("dash_fig_rate",    height = "280px"))
@@ -2425,6 +2578,20 @@ ui <- fluidPage(
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server <- function(input, output, session) {
+  
+  # v2.14.1: every download in this server fails with a readable message (and a notification)
+  # instead of an opaque error; memory errors get a hint. Shadows shiny::downloadHandler locally.
+  guarded_content <- function(fn) function(file) {
+    tryCatch(fn(file), error = function(e) {
+      if (inherits(e, "shiny.silent.error")) stop(e)
+      msg <- friendly_error_message(e)
+      guard_notify("download_error", paste("Download failed:", msg), "error")
+      stop(msg, call. = FALSE)
+    })
+  }
+  downloadHandler <- function(filename, content, contentType = NULL, outputArgs = list())
+    shiny::downloadHandler(filename = filename, content = guarded_content(content),
+                           contentType = contentType, outputArgs = outputArgs)
   
   rv <- reactiveValues(
     data              = NULL,
@@ -2644,6 +2811,26 @@ server <- function(input, output, session) {
   })
 
   # ── Data summary (what the app detected) ─────────────────────────────────────
+  # v2.14.1: how big the loaded data is (time points, samples, replicates per sample)
+  data_size_info <- function() {
+    ntp <- length(rv$all_timepoints); ns <- length(rv$od_vars)
+    nrep <- if (isTRUE(rv$is_long_format)) max(1, round(nrow(rv$data) / max(1, ntp * ns)))
+            else max(1, lengths(rv$col_map))
+    list(ntp = ntp, ns = ns, nrep = nrep, cells = as.numeric(ntp) * ns * nrep)
+  }
+  DATA_WARN_TIMEPOINTS <- 5000; DATA_WARN_SAMPLES <- 200; DASHBOARD_MAX_CELLS <- 2e6
+  dashboard_too_big <- function() {
+    if (is.null(rv$data)) return(FALSE)
+    isTRUE(data_size_info()$cells > DASHBOARD_MAX_CELLS)
+  }
+  output$dash_size_note <- renderUI({
+    if (!dashboard_too_big()) return(NULL)
+    i <- data_size_info()
+    div(class = "settings-status warn", style = "margin:8px 0;",
+        sprintf("The dashboard figures are skipped for data this large (%s time points x %s samples x %s replicates = %s values, limit %s). Use the Analysis figures tab or reduce the selection / time window.",
+                i$ntp, i$ns, i$nrep, format(i$cells, big.mark = ",", scientific = FALSE),
+                format(DASHBOARD_MAX_CELLS, big.mark = ",", scientific = FALSE)))
+  })
   output$data_summary_ui <- renderUI({
     req(rv$data)
     rep_txt <- if (rv$is_long_format) {
@@ -2656,13 +2843,19 @@ server <- function(input, output, session) {
              ifelse(lengths(rv$col_map) > 1, " replicate cols)", " col)"),
              collapse = ", ")
     }
-    div(class = "settings-status ok", style = "margin-bottom:10px;",
-        HTML(paste0(
-          "<b>", html_escape(rv$data_source %||% "data"), "</b><br/>",
-          "Format: <b>", if (rv$is_long_format) "long" else "wide", "</b> &middot; ",
-          "Time column: <b>", html_escape(rv$time_col), "</b> &middot; ",
-          length(rv$all_timepoints), " time points<br/>",
-          "Samples: ", html_escape(rep_txt))))
+    di <- data_size_info()
+    big <- if (di$ntp > DATA_WARN_TIMEPOINTS || di$ns > DATA_WARN_SAMPLES)
+      div(class = "settings-status warn", style = "margin-top:6px;",
+          sprintf("Large data set (%s time points, %s samples): analysis figures and statistics may be slow.", di$ntp, di$ns))
+    div(style = "margin-bottom:10px;",
+        div(class = "settings-status ok",
+            HTML(paste0(
+              "<b>", html_escape(rv$data_source %||% "data"), "</b><br/>",
+              "Format: <b>", if (rv$is_long_format) "long" else "wide", "</b> &middot; ",
+              "Time column: <b>", html_escape(rv$time_col), "</b> &middot; ",
+              length(rv$all_timepoints), " time points<br/>",
+              "Samples: ", html_escape(rep_txt)))),
+        big)
   })
   
   # ── Settings: Save ───────────────────────────────────────────────────────────
@@ -3712,7 +3905,17 @@ server <- function(input, output, session) {
         is.numeric(manual_interval) &&
         manual_interval > 0
       
-      if (use_manual) {
+      # v2.14.1: count the breaks BEFORE building them: an interval of 0.0001 over a 6-hour axis
+      # (or a huge time range) would otherwise allocate millions of break positions.
+      iv_est   <- if (use_manual) manual_interval else if (mt2 <= 60) 10 else if (mt2 <= 120) 30 else 60
+      minor_st <- if (use_manual) manual_interval / 2 else if (mt2 <= 60) 5 else if (mt2 <= 120) 10 else 30
+      n_major_est <- (mt2 - x0) / iv_est + 1; n_minor_est <- (mt2 - x0) / minor_st + 1
+      ticks_ok <- all(is.finite(c(n_major_est, n_minor_est))) && max(n_major_est, n_minor_est) <= TICK_MAX_BREAKS
+      if (!ticks_ok) {
+        guard_notify("tick_guard", sprintf("The x tick interval would draw about %s ticks; ggplot's default breaks are used instead.",
+                                           format(round(max(n_major_est, n_minor_est)), big.mark = ",", scientific = FALSE)))
+        mjb <- NULL; mnb <- NULL
+      } else if (use_manual) {
         iv  <- manual_interval
         mjb <- seq(x0, ceiling((mt2 - x0) / iv) * iv + x0, by = iv)
         # Always include the actual data endpoint if it isn't already a break
@@ -3730,11 +3933,12 @@ server <- function(input, output, session) {
       }
       
       # Union in any extra positions the user explicitly requested
-      if (length(extra_ticks) > 0)
+      if (!is.null(mjb) && length(extra_ticks) > 0)
         mjb <- sort(unique(c(mjb, extra_ticks)))
       
-      p <- p + scale_x_continuous(limits = x_lims, expand = x_exp, breaks = mjb,
-                                  minor_breaks = mnb, guide = guide_prism_minor())
+      p <- p + if (is.null(mjb)) scale_x_continuous(limits = x_lims, expand = x_exp, guide = guide_prism_minor())
+               else scale_x_continuous(limits = x_lims, expand = x_exp, breaks = mjb,
+                                       minor_breaks = mnb, guide = guide_prism_minor())
     } else {
       p <- p + scale_x_continuous(limits = x_lims, expand = x_exp)
     }
@@ -3744,10 +3948,16 @@ server <- function(input, output, session) {
       if (isTRUE(input$use_advanced_ticks)) {
         minE <- input$y_log_min_exponent; maxE <- input$y_log_max_exponent
         if (is.null(y_lims)) y_lims <- c(10^minE, if (maxE >= 0) 10^(maxE+1) else 10^maxE)
+        if (!is.finite(maxE - minE) || maxE < minE || maxE - minE > 20) {
+          # v2.14.1: a nonsensical or enormous exponent range: default minor breaks
+          guard_notify("tick_guard", "The log axis exponent range is too wide (or reversed) for minor ticks; default breaks are used.")
+          p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs, guide = guide_prism_minor())
+        } else {
         ymn <- c(rep(1:9, maxE-minE+1) * 10^rep(minE:maxE, each=9))
         if (maxE >= 0) ymn <- c(ymn, 10^(maxE+1))
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, minor_breaks = ymn,
                                labels = y_labs, guide = guide_prism_minor())
+        }
       } else {
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs)
       }
@@ -3812,10 +4022,7 @@ server <- function(input, output, session) {
                  resolve_aesthetics(input$selected_samples)),
       error = function(e) {
         # Return a blank ggplot with the error message rather than crashing the session
-        ggplot() +
-          annotate("text", x = 0.5, y = 0.5, label = paste("Plot error:", conditionMessage(e)),
-                   color = "red", size = 4, hjust = 0.5) +
-          theme_void()
+        plot_error_figure(friendly_error_message(e))
       }
     )
   }
@@ -3846,10 +4053,82 @@ server <- function(input, output, session) {
   # ── Export size (v2.10): one source of truth, in inches ─────────────────────
   # Every export path (image, reports, PPTX, true-size preview) reads this, so a
   # journal preset given in mm cannot drift from what the reports embed.
+  # v2.14.1: a notification that replaces its predecessor with the same id (so a render that
+  # repeats does not stack banners); never lets a notification failure break a render.
+  guard_notify <- function(id, msg, type = "warning")
+    tryCatch(showNotification(msg, id = id, type = type, duration = 10), error = function(e) invisible(NULL))
+  # v2.14.1: every raster render goes through this: the requested dpi, reduced when the pixel
+  # count would exceed 40 megapixels (with a notification saying so).
+  raster_dpi <- function(width_in, height_in, dpi) {
+    if (!is.numeric(dpi) || length(dpi) != 1 || !is.finite(dpi) || dpi <= 0) dpi <- 96
+    r <- safe_raster_dpi(width_in, height_in, dpi, RASTER_MAX_PIXELS)
+    if (isTRUE(attr(r, "capped")))
+      guard_notify("raster_cap", sprintf("Raster reduced to %s dpi to stay within memory (%s x %s px).",
+                                         r, round(width_in * r), round(height_in * r)))
+    as.numeric(r)
+  }
+  # the dpi for an image download: raster formats are capped, vector formats ignore it
+  export_dpi_for <- function(fmt, width_in, height_in) {
+    d <- input$export_dpi
+    if (fmt %in% c("png", "tiff", "jpeg")) raster_dpi(width_in, height_in, d)
+    else if (is.numeric(d) && length(d) == 1 && is.finite(d)) d else 300
+  }
+  # ── Fixed panel size (v2.15) ────────────────────────────────────────────────
+  fixed_mode <- function() identical(input$panel_size_mode, "fixed")
+  CURVE_KINDS <- c("main", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response")
+  # Panel (plotting area) size in mm for a figure kind: curve figures are square when
+  # panel_square is on; the metric summary and heatmap use width x height as given.
+  panel_dims_mm <- function(kind = "main") {
+    cl <- function(x, d) if (is.numeric(x) && length(x) == 1 && is.finite(x)) min(max(x, 10), 400) else d
+    w  <- cl(input$panel_width_mm, 65)
+    h  <- cl(input$panel_height_mm, w)
+    if (kind %in% CURVE_KINDS && isTRUE(input$panel_square %||% TRUE)) h <- w
+    c(w, h)
+  }
+  fixed_figure <- function(p, kind = "main") {
+    d <- panel_dims_mm(kind)
+    fixed_panel_grob(p, d[1], d[2])
+  }
+  main_fixed_info    <- reactive(fixed_figure(generate_plot(), "main"))
+  analysis_fixed_info <- reactive(fixed_figure(generate_analysis_plot(input$analysis_type %||% "metric_summary"),
+                                               input$analysis_type %||% "metric_summary"))
+  # what the main / analysis figure is drawn as: the fixed-panel gtable, or the plain ggplot (fit mode)
+  main_plot_obj     <- function() if (fixed_mode()) main_fixed_info() else generate_plot()
+  analysis_plot_obj <- function() if (fixed_mode()) analysis_fixed_info()
+                                  else generate_analysis_plot(input$analysis_type %||% "metric_summary")
+  size_from_grob <- function(g, kind) {
+    sz <- tryCatch(attr(g, "size_mm"), error = function(e) NULL)
+    if (is.null(sz)) { d <- panel_dims_mm(kind); sz <- d + c(13, 12) }
+    sz / 25.4
+  }
+  # the figure size when a ggplot cannot be built yet (no data): the panel plus a typical margin
+  fixed_fallback_in <- function(kind = "main") (panel_dims_mm(kind) + c(13, 12)) / 25.4
+  analysis_size_in <- function() {
+    if (!fixed_mode()) return(export_size_in())
+    tryCatch(size_from_grob(analysis_fixed_info(), input$analysis_type %||% "metric_summary"),
+             error = function(e) { if (inherits(e, "shiny.silent.error")) fixed_fallback_in("metric_summary") else stop(e) })
+  }
   export_size_in <- function() {
+    if (fixed_mode()) {
+      sz <- tryCatch(size_from_grob(main_fixed_info(), "main"),
+                     error = function(e) { if (inherits(e, "shiny.silent.error")) fixed_fallback_in("main") else stop(e) })
+      mx <- SIZE_MAX_IN
+      if (any(sz > mx)) { guard_notify("size_clamp", sprintf("Figure size limited to %s in per side.", mx)); sz <- pmin(sz, mx) }
+      return(sz)
+    }
+    mm <- identical(input$export_units, "mm")
     w <- input$export_width  %||% 10
     h <- input$export_height %||% 8
-    if (identical(input$export_units, "mm")) c(w, h) / 25.4 else c(w, h)
+    # an emptied or nonsensical box falls back to the standard size; huge values are clamped
+    if (!is.numeric(w) || length(w) != 1 || !is.finite(w) || w <= 0) w <- if (mm) 89 else 89 / 25.4
+    if (!is.numeric(h) || length(h) != 1 || !is.finite(h) || h <= 0) h <- if (mm) 65 else 65 / 25.4
+    mx <- if (mm) SIZE_MAX_IN * 25.4 else SIZE_MAX_IN
+    if (w > mx || h > mx) {
+      guard_notify("size_clamp", sprintf("Export size limited to %s x %s: each side is at most %s %s.",
+                                         round(min(w, mx), 1), round(min(h, mx), 1), round(mx), if (mm) "mm" else "in"))
+      w <- min(w, mx); h <- min(h, mx)
+    }
+    if (mm) c(w, h) / 25.4 else c(w, h)
   }
   
   # Switching units converts the current numbers so the physical size is kept
@@ -3898,6 +4177,12 @@ server <- function(input, output, session) {
     sz <- export_size_in()
     if (!all(is.finite(sz))) return(NULL)
     mm <- round(sz * 25.4, 1)
+    if (fixed_mode()) {
+      pd <- panel_dims_mm("main")
+      return(p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+               sprintf("Figure size follows the panel (%s x %s mm): %s x %s mm (%s x %s in). PDF/SVG are vector; DPI applies to PNG/TIFF/JPEG.",
+                       pd[1], pd[2], mm[1], mm[2], round(sz[1], 2), round(sz[2], 2))))
+    }
     p(style = "font-size:.8em;color:#777;margin-top:-6px;",
       sprintf("= %s x %s mm (%s x %s in). PDF/SVG are vector; DPI applies to PNG/TIFF/JPEG.",
               mm[1], mm[2], round(sz[1], 2), round(sz[2], 2)))
@@ -3912,9 +4197,14 @@ server <- function(input, output, session) {
   preview_zoom_value <- function(width_in) {
     pw <- input$main_panel_width
     if (isTRUE(input$preview_zoom_auto %||% TRUE) && is.numeric(pw) && length(pw) == 1 && is.finite(pw) &&
-        pw > 0 && is.finite(width_in) && width_in > 0)
+        pw > 0 && is.finite(width_in) && width_in > 0) {
+      pw <- min(max(pw, 200), 8000)                      # v2.14.1: a sane page width
       min(max(floor((pw - 24) / (width_in * 96) * 4) / 4, 0.5), 4)
-    else input$preview_zoom %||% 2
+    } else {
+      z <- input$preview_zoom %||% 2
+      if (!is.numeric(z) || length(z) != 1 || !is.finite(z)) z <- 2
+      min(max(z, 0.5), 4)
+    }
   }
   preview_container <- function(plot_id, img_id, size_fun = export_size_in) {
     sz <- size_fun()
@@ -3925,9 +4215,10 @@ server <- function(input, output, session) {
                   height = paste0(round(sz[2] * 96 * z), "px"))
     } else {
       # canvas mode: the pixel width is the user's, the height keeps the figure's aspect ratio
+      pwid <- min(max(input$plot_width %||% 820, 200), 4000)   # v2.14.1: a sane canvas width
       plotOutput(plot_id,
-                 height = paste0(round(input$plot_width * sz[2] / sz[1]), "px"),
-                 width  = paste0(input$plot_width,  "px"))
+                 height = paste0(round(pwid * sz[2] / sz[1]), "px"),
+                 width  = paste0(pwid,  "px"))
     }
   }
   # True-size preview (v2.10): the figure goes through the same ggsave path as
@@ -3937,15 +4228,32 @@ server <- function(input, output, session) {
   register_preview <- function(plot_id, img_id, plot_fun, size_fun = export_size_in) {
     output[[plot_id]] <- renderPlot({
       plot_inputs_debounced()   # take debounced dependency
-      plot_fun()
+      # v2.14.1: a failing render shows the error figure instead of ending the session
+      obj <- tryCatch(plot_fun(), error = function(e) {
+        if (inherits(e, "shiny.silent.error")) stop(e)
+        plot_error_figure(friendly_error_message(e))
+      })
+      # a fixed-panel figure is a gtable: draw it (print() of a gtable only prints its layout)
+      if (inherits(obj, "gtable")) { grid::grid.newpage(); grid::grid.draw(obj); invisible(NULL) } else obj
     }, res = 96)
     output[[img_id]] <- renderImage({
       plot_inputs_debounced()
       sz <- size_fun(); z <- preview_zoom_value(sz[1])
       pr <- session$clientData$pixelratio %||% 1
+      pr <- if (is.numeric(pr) && length(pr) == 1 && is.finite(pr)) min(max(pr, 1), 3) else 1
       f  <- tempfile(fileext = ".png")
-      ggsave(f, plot = plot_fun(), device = export_device("png"),
-             width = sz[1], height = sz[2], units = "in", dpi = 96 * z * pr, bg = "white")
+      dpi <- raster_dpi(sz[1], sz[2], 96 * z * pr)
+      tryCatch(
+        ggsave(f, plot = plot_fun(), device = export_device("png"),
+               width = sz[1], height = sz[2], units = "in", dpi = dpi, bg = "white", limitsize = FALSE),
+        error = function(e) {
+          if (inherits(e, "shiny.silent.error")) stop(e)
+          msg <- friendly_error_message(e)
+          guard_notify("render_error", paste("Preview failed:", msg), "error")
+          # the placeholder figure, written small, in place of the failed preview
+          ggsave(f, plot = plot_error_figure(msg), device = export_device("png"),
+                 width = min(sz[1], 6), height = min(sz[2], 4), units = "in", dpi = 96, bg = "white")
+        })
       list(src = f, contentType = "image/png",
            width = round(sz[1] * 96 * z), height = round(sz[2] * 96 * z),
            alt = "Figure preview at export size")
@@ -3957,7 +4265,11 @@ server <- function(input, output, session) {
     x <- gsub("[^A-Za-z0-9._-]+", "_", trimws(x %||% ""))
     if (nzchar(x)) x else fallback
   }
-  export_size_tag <- function() {
+  export_size_tag <- function(sz_in = NULL) {
+    if (fixed_mode() || !is.null(sz_in)) {     # fixed panels: the computed figure size, always in mm
+      mm <- (sz_in %||% export_size_in()) * 25.4
+      return(sprintf("%dx%dmm", as.integer(round(mm[1])), as.integer(round(mm[2]))))
+    }
     u <- input$export_units %||% "mm"; w <- input$export_width %||% 89; h <- input$export_height %||% 65
     if (identical(u, "mm")) sprintf("%dx%dmm", as.integer(round(w)), as.integer(round(h)))
     else sprintf("%.1fx%.1fin", w, h)
@@ -3966,7 +4278,7 @@ server <- function(input, output, session) {
     paste0("lysis_curve_", file_label(input$panel_label, "main"), "_", export_size_tag(), ".", input$export_format %||% "svg")
   analysis_download_name <- function() {
     ty <- input$analysis_type %||% "figure"
-    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(), ".", input$export_format %||% "svg")
+    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(if (fixed_mode()) analysis_size_in()), ".", input$export_format %||% "svg")
   }
   composed_download_name <- function() {
     sz <- tryCatch({ i <- compose_info(); c(i$width_mm, i$height_mm) }, error = function(e) NULL)
@@ -3978,8 +4290,14 @@ server <- function(input, output, session) {
   # One line above the tabs, always visible: what the export will be, from the live inputs, and a
   # warning (with a one-click fix) when the state is not journal-standard.
   output$figure_standard_bar <- renderUI({
-    u  <- input$export_units %||% "mm"
-    w  <- input$export_width; h <- input$export_height
+    fx <- fixed_mode()
+    if (fx) {                       # v2.15: the figure size is the computed one, in mm
+      szm <- export_size_in() * 25.4
+      u <- "mm"; w <- szm[1]; h <- szm[2]
+    } else {
+      u  <- input$export_units %||% "mm"
+      w  <- input$export_width; h <- input$export_height
+    }
     if (!is.numeric(w) || !is.numeric(h) || !is.finite(w) || !is.finite(h)) return(NULL)
     w_mm <- if (identical(u, "mm")) w else w * 25.4
     names_short <- function(jp) sub(" family$", "", sub(" \\(.*$", "", jp$label))
@@ -4002,9 +4320,22 @@ server <- function(input, output, session) {
     al   <- input$axis_label_font_size %||% 7; at <- input$axis_text_font_size %||% 6
     dl   <- lw2pt(input$line_thickness %||% 0.35); xl <- input$axis_line_pt %||% 0.5
     g    <- function(x) format(round(x, 2), nsmall = 0)
+    fit <- NULL
+    if (fx) {
+      pd  <- panel_dims_mm("main")
+      jp0 <- JOURNAL_PRESETS[[fam]]
+      fit <- if (!is.null(jp0)) figure_fit_text(w_mm, jp0)
+      fit_txt <- if (is.null(fit)) NULL
+                 else if (fit$fits) paste0(fit$text, " (", names_short(jp0), ")")
+                 else paste0(fit$text, " (", names_short(jp0), "): smaller panel or legend inside")
+      txt <- sprintf("Panel %s \u00d7 %s mm \u00b7 figure %s \u00d7 %s mm%s \u00b7 %s %s / %s pt \u00b7 lines %s / %s pt \u00b7 %s",
+                     round(pd[1], 1), round(pd[2], 1), round(w), round(h),
+                     if (!is.null(fit_txt)) paste0(" \u00b7 ", fit_txt) else "",
+                     fnt, g(al), g(at), g(dl), g(xl), toupper(input$export_format %||% "svg"))
+    } else
     txt  <- sprintf("Export: %s \u00b7 %s \u00b7 %s %s / %s pt \u00b7 lines %s / %s pt \u00b7 %s",
                     size_txt, jname, fnt, g(al), g(at), g(dl), g(xl), toupper(input$export_format %||% "svg"))
-    standard <- identical(u, "mm") && al <= 8 && al >= 5 && at <= 8 && at >= 5 &&
+    standard <- (fx || identical(u, "mm")) && al <= 8 && al >= 5 && at <= 8 && at >= 5 &&
       fnt %in% c("Arial", "Helvetica", "sans") && dl <= 1.5
     comp <- NULL
     if (identical(input$main_tabs, "Compose figure") && has_patchwork) {
@@ -4012,22 +4343,24 @@ server <- function(input, output, session) {
       if (!is.null(i)) comp <- sprintf("  |  Composed: %s \u00d7 %s mm, %s column%s", round(i$width_mm), round(i$height_mm),
                                        i$ncol, if (i$ncol == 1) "" else "s")
     }
-    if (standard) div(class = "fig-bar", txt, comp)
+    too_wide <- fx && !is.null(fit) && !fit$fits
+    if (standard && !too_wide) div(class = "fig-bar", txt, comp)
+    else if (standard) div(class = "fig-bar warn", txt, comp)
     else div(class = "fig-bar warn", txt, comp, " \u2014 not journal-standard \u2014 ",
              actionButton("apply_journal_preset_bar", "Apply journal preset", class = "btn btn-default btn-xs"))
   })
 
   output$plot_container <- renderUI(preview_container("od_plot", "od_plot_img"))
-  register_preview("od_plot", "od_plot_img", generate_plot)
+  register_preview("od_plot", "od_plot_img", main_plot_obj)
   
   output$downloadPlot <- downloadHandler(
     filename = function() main_download_name(),
     content  = function(file) {
       sz   <- export_size_in()
       fmt  <- input$export_format
-      args <- list(filename = file, plot = generate_plot(), device = export_device(fmt),
+      args <- list(filename = file, plot = main_plot_obj(), device = export_device(fmt),
                    width = sz[1], height = sz[2],
-                   units = "in", dpi = input$export_dpi, bg = "white")
+                   units = "in", dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
       # Journals require lossless compression for TIFF; the arg is only valid
       # for the tiff device so it must be added conditionally.
       if (identical(fmt, "tiff")) args$compression <- "lzw"
@@ -4414,15 +4747,15 @@ server <- function(input, output, session) {
         theme_void()
     })
   }
-  output$analysis_container <- renderUI(preview_container("analysis_plot", "analysis_img"))
-  register_preview("analysis_plot", "analysis_img", generate_analysis_plot)
+  output$analysis_container <- renderUI(preview_container("analysis_plot", "analysis_img", analysis_size_in))
+  register_preview("analysis_plot", "analysis_img", analysis_plot_obj, analysis_size_in)
   
   output$downloadAnalysisPlot <- downloadHandler(
     filename = function() analysis_download_name(),
     content  = function(file) {
-      sz   <- export_size_in(); fmt <- input$export_format
-      args <- list(filename = file, plot = generate_analysis_plot(), device = export_device(fmt),
-                   width = sz[1], height = sz[2], units = "in", dpi = input$export_dpi, bg = "white")
+      sz   <- analysis_size_in(); fmt <- input$export_format
+      args <- list(filename = file, plot = analysis_plot_obj(), device = export_device(fmt),
+                   width = sz[1], height = sz[2], units = "in", dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
       if (identical(fmt, "tiff")) args$compression <- "lzw"
       do.call(ggsave, args)
     }
@@ -4483,7 +4816,14 @@ server <- function(input, output, session) {
     rows    <- if (n) ceiling(n / ncol) else 0L
     w_mm    <- compose_width_mm_value()
     h_mm    <- max(rows, 1L) * (input$compose_panel_height_mm %||% 60)
-    fig <- if (n >= 1)
+    fig <- if (n >= 1 && fixed_mode()) {
+      # v2.15: every panel keeps its fixed panel size; the grid is as wide / tall as its cells need
+      items <- lapply(names(plots), function(ty) fixed_figure(plots[[ty]] + labs(tag = NULL), ty))
+      g <- compose_fixed_figure(items, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
+                                font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a")
+      w_mm <- attr(g, "size_mm")[1]; h_mm <- attr(g, "size_mm")[2]
+      g
+    } else if (n >= 1)
       compose_figure(plots, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
                      font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a")
     else NULL
@@ -4530,7 +4870,7 @@ server <- function(input, output, session) {
       fmt  <- input$export_format
       args <- list(filename = file, plot = i$plot, device = export_device(fmt),
                    width = i$width_mm, height = i$height_mm, units = "mm",
-                   dpi = input$export_dpi, bg = "white")
+                   dpi = export_dpi_for(fmt, i$width_mm / 25.4, i$height_mm / 25.4), bg = "white", limitsize = FALSE)
       if (identical(fmt, "tiff")) args$compression <- "lzw"
       do.call(ggsave, args)
     }
@@ -4632,9 +4972,14 @@ server <- function(input, output, session) {
     legend.key.size = unit(4, "mm"))
   dash_plot <- function(fun) renderPlot({
     req(rv$data, input$selected_samples)
+    if (dashboard_too_big()) { plot.new(); return(invisible(NULL)) }   # see dash_size_note
     p <- tryCatch(fun(), error = function(e) NULL)
     if (is.null(p)) { plot.new(); return(invisible(NULL)) }
-    print(p + labs(tag = NULL, caption = NULL) + dash_theme)
+    tryCatch(print(p + labs(tag = NULL, caption = NULL) + dash_theme),
+             error = function(e) {
+               if (inherits(e, "shiny.silent.error")) stop(e)
+               plot.new(); text(0.5, 0.5, paste(strwrap(friendly_error_message(e), 40), collapse = "\n"), col = "red", cex = 0.8)
+             })
   }, res = 96, bg = "white")
   output$dash_fig_main    <- dash_plot(function() generate_plot())
   output$dash_fig_rate    <- dash_plot(function() generate_analysis_plot("growth_rate"))
@@ -4761,7 +5106,8 @@ server <- function(input, output, session) {
                   "Export size", "Export DPI",
                   "Blank/media OD subtracted",
                   "μmax smoothing window", "Peak-detection smoothing window",
-                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Reference sample"),
+                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Reference sample",
+                  "R vector memory limit", "Figure raster size"),
       value = c(input$x_scale_type, input$y_scale_type,
                 input$x_axis_label, input$y_axis_label, input$color_palette,
                 input$line_thickness, input$show_points, input$shape_size,
@@ -4775,7 +5121,18 @@ server <- function(input, output, session) {
                   "first peak before a > 10 % decline" else "global maximum",
                 input$metrics_lysis_threshold_pct %||% 5,
                 if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample
-                else "none (infection metrics omitted)"),
+                else "none (infection metrics omitted)",
+                # v2.14.1 memory diagnostics: the limit R runs under and the pixel sizes used
+                tryCatch({
+                  mv <- if (exists("mem.maxVSize", mode = "function")) mem.maxVSize() else NA_real_
+                  if (!is.finite(mv)) "unlimited (or not reported)" else sprintf("%s MB", format(round(mv), big.mark = ","))
+                }, error = function(e) "not available"),
+                tryCatch({
+                  sz <- export_size_in(); dp <- as.numeric(safe_raster_dpi(sz[1], sz[2], input$export_dpi %||% 300))
+                  rp <- as.numeric(safe_raster_dpi(sz[1], sz[2], if (sz[1] < 6) 300 else 150))
+                  sprintf("export %s x %s px at %s dpi; report figures %s x %s px at %s dpi",
+                          round(sz[1] * dp), round(sz[2] * dp), dp, round(sz[1] * rp), round(sz[2] * rp), rp)
+                }, error = function(e) "not available")),
       stringsAsFactors = FALSE)
     # ── Experiment notebook: collect non-empty fields ─────────────────────────
     nb_pairs <- list(
@@ -4837,7 +5194,7 @@ server <- function(input, output, session) {
     sz <- size_in %||% export_size_in()
     ggsave(tmp_png, plot = p, device = export_device("png"),
            width = sz[1], height = sz[2],
-           units = "in", dpi = if (sz[1] < 6) 300 else 150, bg = "white")
+           units = "in", dpi = raster_dpi(sz[1], sz[2], if (sz[1] < 6) 300 else 150), bg = "white", limitsize = FALSE)
     base64enc::base64encode(tmp_png)
   }
 
@@ -4900,7 +5257,11 @@ server <- function(input, output, session) {
         f$error <- conditionMessage(p); return(f)
       }
       f$plot <- p
-      if (render_png) f$b64 <- report_png_b64(p)
+      if (fixed_mode()) {          # v2.15: drawn with its fixed panel, at its own computed size (HTML and PDF)
+        fg <- fixed_figure(p, ty)
+        f$plot <- fg
+        if (render_png) f$b64 <- report_png_b64(fg, size_in = size_from_grob(fg, ty))
+      } else if (render_png) f$b64 <- report_png_b64(p)
       f
     })
     figs <- Filter(Negate(is.null), figs)
@@ -4928,14 +5289,14 @@ server <- function(input, output, session) {
   html_report_string <- function(meta = report_meta()) {
     req(rv$data, input$selected_samples)
     metrics <- curve_metrics_current()
-    img_b64 <- report_png_b64(generate_plot())
+    img_b64 <- report_png_b64(main_plot_obj())
     build_html_report(meta, img_b64, stats_table_export(), metrics,
                       analysis = report_analysis_payload(render_png = TRUE))
   }
   pdf_report_file <- function(file, meta = report_meta()) {
     req(rv$data, input$selected_samples)
     metrics <- curve_metrics_current()
-    build_pdf_report(file, meta, generate_plot(),
+    build_pdf_report(file, meta, main_plot_obj(),
                      stats_table_export(), metrics,
                      width  = max(export_size_in()[1], 8),
                      height = max(export_size_in()[2], 6),
@@ -5047,9 +5408,10 @@ server <- function(input, output, session) {
         samps  <- input$selected_samples
         aes_v  <- resolve_aesthetics(samps)
         pd_all <- prepare_plot_data(samples = samps)
-        w_px   <- max(as.integer(input$gif_width),  200L)
-        h_px   <- max(as.integer(input$gif_height), 150L)
-        fps    <- max(input$gif_fps, 0.2)
+        px_in  <- function(x, lo, def) { x <- suppressWarnings(as.integer(x)); if (!is.finite(x)) def else min(max(x, lo), 4000L) }
+        w_px   <- px_in(input$gif_width,  200L, 800L)       # v2.14.1: bounded, NA-safe
+        h_px   <- px_in(input$gif_height, 150L, 600L)
+        fps    <- max(suppressWarnings(as.numeric(input$gif_fps %||% 1)), 0.2, na.rm = TRUE)
         
         tmp_dir <- tempfile(); dir.create(tmp_dir)
         on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
@@ -5075,7 +5437,7 @@ server <- function(input, output, session) {
           fpath <- file.path(tmp_dir, sprintf("frame_%03d.png", k))
           ggsave(fpath, plot = p_k, device = "png",
                  width = w_px / 96, height = h_px / 96,
-                 units = "in", dpi = 96)
+                 units = "in", dpi = raster_dpi(w_px / 96, h_px / 96, 96))
           frame_files[k] <- fpath
         }
         

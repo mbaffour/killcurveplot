@@ -104,6 +104,7 @@ pdf_embeds_font <- function(f) {
 testServer(app, {
   ingest_data(env$make_demo_data(), "Demo data (built-in)")
   seed_defaults(session)
+  session$setInputs(panel_size_mode = "fit")     # these sections test the fit-the-export-size geometry
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "")
 
   cat("\n--- export_size_in(): one source of truth ---\n")
@@ -144,7 +145,7 @@ testServer(app, {
 
   cat("\n--- journal preset: 89 x 65 mm Nature single column ---\n")
   pd <- prepare_plot_data()
-  vals <- env$journal_preset_settings(89, 65, "a", diff(range(pd$time)))
+  vals <- modifyList(env$journal_preset_settings(89, 65, "a", diff(range(pd$time))), list(panel_size_mode = "fit"))
   do.call(session$setInputs, vals)
   p_j <- generate_plot()
   real_plot("preset plot renders (not the error placeholder)", p_j)
@@ -279,13 +280,16 @@ testServer(app, {
   ingest_data(env$make_demo_data(), "Demo data (built-in)")
   do.call(session$setInputs, env$APP_DEFAULTS)          # NO preset applied: the startup state
   session$setInputs(selected_samples = rv$od_vars, exclude_timepoints = "")
-  p <- generate_plot(); real_plot("startup state renders a real main figure", p)
+  check("startup state is the fixed panel size (v2.15)", identical(input$panel_size_mode, "fixed"))
+  g0 <- main_plot_obj(); real_plot("startup state renders a real main figure", generate_plot())
   sz <- export_size_in()
   svg0 <- of("startup_default.svg")
-  quiet(ggsave(svg0, p, device = env$export_device(input$export_format), width = sz[1], height = sz[2], units = "in", bg = "white"))
+  quiet(ggsave(svg0, g0, device = env$export_device(input$export_format), width = sz[1], height = sz[2], units = "in", bg = "white", limitsize = FALSE))
   x0 <- readLines(svg0); t0 <- grep("<text", x0, value = TRUE)
   s0 <- as.numeric(sub('.*font-size: ([0-9.]+)px.*', '\\1', t0))
-  check("startup export is an 89 mm wide SVG", grepl("width='252.28pt'", grep("<svg", x0, value = TRUE)[1]))
+  w_pt <- as.numeric(sub(".*width='([0-9.]+)pt'.*", "\\1", grep("<svg", x0, value = TRUE)[1]))
+  check("startup export: SVG width equals the computed figure width (panel 65 mm + axes), not a fixed 89 mm",
+        abs(w_pt / 72 * 25.4 - sz[1] * 25.4) < 0.1 && sz[1] * 25.4 > 65 && sz[1] * 25.4 < 100)
   check("startup export: all text 6-8 pt Arial, no textLength",
         length(t0) > 5 && all(grepl('font-family: "Arial"', t0)) && all(s0 >= 6 - 1e-6 & s0 <= 8 + 1e-6) && !any(grepl("textLength", t0)))
 })
