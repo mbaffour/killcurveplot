@@ -145,6 +145,27 @@ check("sig_stars thresholds", identical(env$sig_stars(c(0.0001, 0.005, 0.03, 0.2
 check("time unit from label", identical(env$time_unit_from_label("Time (minutes)"), "min") &&
         identical(env$time_unit_from_label("Time (h)"), "h"))
 
+cat("\n--- v2.12.1: demo scenarios ---\n")
+check("make_demo_data() with no argument is identical to make_demo_data('lysis')",
+      identical(env$make_demo_data(), env$make_demo_data("lysis")))
+for (sc in c("lysis", "moi_series", "resistance", "hours", "two_phages")) {
+  d <- env$make_demo_data(sc)
+  cn <- colnames(d)[-1]
+  check(sprintf("demo '%s': data.frame with Time first", sc),
+        is.data.frame(d) && identical(colnames(d)[1], "Time"))
+  check(sprintf("demo '%s': exactly 3 replicate columns per sample name", sc),
+        length(cn) > 0 && all(table(cn) == 3))
+  check(sprintf("demo '%s': Time finite; every OD value finite and > 0", sc),
+        all(is.finite(d$Time)) && all(is.finite(as.matrix(d[-1]))) && all(as.matrix(d[-1]) > 0))
+  if (sc == "moi_series") {
+    moi <- env$parse_moi(unique(cn))
+    check("demo 'moi_series': parse_moi gives 5 finite MOIs (Uninfected has none)",
+          sum(is.finite(moi)) == 5 && length(unique(moi[is.finite(moi)])) == 5)
+  }
+  if (sc == "hours")
+    check("demo 'hours': Time runs 0-8 h", min(d$Time) == 0 && max(d$Time) == 8)
+}
+
 # ── Through the real server ──────────────────────────────────────────────────
 out_dir <- tempfile("v211_"); dir.create(out_dir)
 of <- function(x) file.path(out_dir, x)
@@ -330,6 +351,19 @@ testServer(app, {
           n_pages(pdf_on) >= n_pages(pdf_off) + 5)
     session$setInputs(report_include_analysis = TRUE)
   } else skip <<- skip + 1L
+})
+
+cat("\n--- v2.12.1: MOI-series demo through the server ---\n")
+testServer(app, {
+  ingest_data(env$make_demo_data("moi_series"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time")
+  real_plot("moi_series demo: main figure renders", generate_plot())
+  p_dr <- generate_analysis_plot("dose_response")
+  real_plot("moi_series demo: dose-response renders a real figure", p_dr)
+  check("moi_series demo: dose-response data has 5 distinct MOI values",
+        length(unique(p_dr$data$moi)) == 5)
 })
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))

@@ -22,7 +22,17 @@ This is an interactive tool for visualizing Optical Density (OD) time-series dat
 
 You can export your plots as PDF, PNG, JPEG, SVG, TIFF, PowerPoint, or animated GIF — and (new in v2.8) export the underlying summary statistics and curve metrics as CSV, or generate a complete single-file **HTML or PDF analysis report** containing the figure, statistics tables, metric definitions, data provenance, and session info.
 
-Not sure where to start? Click **"Load Demo Data"** under the file picker to explore the app with a built-in example dataset (3 samples × 3 replicates).
+Not sure where to start? Pick a scenario next to **"Load Demo Data"** under the file picker to explore the app with a built-in example dataset (every scenario has 3 replicates per sample). There are five:
+
+| Scenario | What it shows |
+|---|---|
+| Lysis curve (3 samples) | Uninfected, Phage MOI 10 and Phage MOI 0.1: the basic growth-and-lysis curve (default) |
+| MOI series (dose-response) | Uninfected plus MOI 0.01 to 100, with lysis onset and rate depending on MOI: the dose-response figure |
+| Resistant regrowth | MOI 1 lyses and stays down; "+ resistant" lyses then regrows to about 60% of the control: lysis followed by regrowth |
+| Time in hours | The lysis curve on a 0 to 8 h axis: the "Time (hours)" label and time-unit handling |
+| Two phages x two MOIs | Phages A and B at MOI 1 and 10; B lyses later and less completely: comparing phages |
+
+Loading a scenario also sets the x-axis label and the reference sample (the uninfected/control sample).
 
 ---
 
@@ -286,7 +296,7 @@ All of these show the **same error measure as the main figure** (SD, SEM or
 95% CI from the Error Bars panel) and the same sample order. A rendered set of
 every figure from the demo data, through the journal preset, is in
 [docs/gallery/gallery.png](docs/gallery/gallery.png)
-(`Rscript tools/render_gallery.R` regenerates it).
+(`Rscript tools/render_gallery.R` regenerates it, and also renders every demo scenario into `docs/gallery/<scenario>/`).
 
 Below the figure, **Replicate statistics** compares the tested metric between
 samples on the per-replicate values: Welch's t-test (or Mann-Whitney) for each

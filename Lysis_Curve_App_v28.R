@@ -152,7 +152,7 @@ has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.12.0"
+APP_VERSION <- "2.12.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -909,26 +909,84 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
   invisible(file)
 }
 
-# ── Demo dataset (used by the "Load Demo Data" button) ───────────────────────
-make_demo_data <- function() {
+# ── Demo datasets (used by the "Load Demo Data" button) ──────────────────────
+# v2.12.1: `scenario` picks one of five built-in examples so every figure has a
+# meaningful demo. All share one style: logistic growth, exponential lysis,
+# ~4% multiplicative noise, 3 replicates as duplicated column names.
+# "lysis" (the default) is the original v2.8 dataset, unchanged.
+DEMO_SCENARIOS <- c("lysis", "moi_series", "resistance", "hours", "two_phages")
+make_demo_data <- function(scenario = "lysis") {
+  scenario <- match.arg(scenario, DEMO_SCENARIOS)
   set.seed(42)
-  times <- seq(0, 180, by = 15)
   grow  <- function(t, k = 0.028, y0 = 0.05, cap = 1.4)
     cap / (1 + ((cap - y0) / y0) * exp(-k * t))
-  lyse  <- function(t, t_lysis, y_pre, rate = 0.06)
-    ifelse(t < t_lysis, y_pre(t), pmax(y_pre(t_lysis) * exp(-rate * (t - t_lysis)), 0.02))
+  # exponential decline after t_lysis; `resid` (optional) is the fraction of the
+  # pre-lysis OD that survives, i.e. an incomplete lysis
+  lyse  <- function(t, t_lysis, y_pre, rate = 0.06, resid = NULL) {
+    lo <- if (is.null(resid)) 0.02 else pmax(resid * y_pre(t_lysis), 0.02)
+    ifelse(t < t_lysis, y_pre(t), pmax(y_pre(t_lysis) * exp(-rate * (t - t_lysis)), lo))
+  }
   noisy <- function(y) pmax(y * (1 + rnorm(length(y), 0, 0.04)), 0.01)
-  wt   <- function(t) grow(t)
-  ph1  <- function(t) lyse(t, 60,  wt)
-  ph2  <- function(t) lyse(t, 105, wt)
+  wt    <- function(t) grow(t)
   # build with duplicate column names (replicates), as documented
-  reps <- function(f) replicate(3, noisy(f(times)))
-  m <- cbind(reps(wt), reps(ph1), reps(ph2))
-  # higher MOI infects more cells at once -> earlier lysis (ph1 lyses at t=60)
-  colnames(m) <- rep(c("Uninfected", "Phage MOI 10", "Phage MOI 0.1"), each = 3)
-  df <- data.frame(Time = times, check.names = FALSE)
-  df <- cbind(df, as.data.frame(m, check.names = FALSE))
-  df
+  build <- function(times, defs) {
+    m <- do.call(cbind, lapply(defs, function(f) replicate(3, noisy(f(times)))))
+    colnames(m) <- rep(names(defs), each = 3)
+    cbind(data.frame(Time = times, check.names = FALSE), as.data.frame(m, check.names = FALSE))
+  }
+
+  switch(scenario,
+    lysis = {
+      # higher MOI infects more cells at once -> earlier lysis (ph1 lyses at t=60)
+      build(seq(0, 180, by = 15), list(
+        "Uninfected"    = wt,
+        "Phage MOI 10"  = function(t) lyse(t, 60,  wt),
+        "Phage MOI 0.1" = function(t) lyse(t, 105, wt)))
+    },
+    moi_series = {
+      # lysis onset falls and lysis rate rises with log10(MOI)
+      onset <- c(150, 120, 90, 60, 45)
+      rate  <- c(0.03, 0.04, 0.05, 0.06, 0.08)
+      moi   <- c("0.01", "0.1", "1", "10", "100")
+      defs  <- list("Uninfected" = wt)
+      for (i in seq_along(moi)) local({
+        j <- i
+        defs[[paste("Phage MOI", moi[j])]] <<- function(t) lyse(t, onset[j], wt, rate[j])
+      })
+      build(seq(0, 240, by = 15), defs)
+    },
+    resistance = {
+      # both infected samples lyse at 90 min; the second regrows from 150 min
+      # (resistant mutants) towards ~60% of the uninfected plateau
+      y_cap <- 0.6 * 1.4
+      lysed <- function(t) lyse(t, 90, wt, 0.05)
+      regrow <- function(t) {
+        y0 <- lysed(150)
+        ifelse(t < 150, lysed(t),
+               y_cap / (1 + ((y_cap - y0) / y0) * exp(-0.035 * (t - 150))))
+      }
+      build(seq(0, 360, by = 15), list(
+        "Uninfected"              = wt,
+        "Phage MOI 1"             = lysed,
+        "Phage MOI 1 + resistant" = regrow))
+    },
+    hours = {
+      # the "lysis" shapes on a 0-8 h axis (1 h = 22.5 min of the original)
+      to_min <- 22.5
+      build(seq(0, 8, by = 0.5), list(
+        "Control"       = function(t) wt(t * to_min),
+        "Phage A MOI 5" = function(t) lyse(t * to_min, 60,  wt),
+        "Phage B MOI 5" = function(t) lyse(t * to_min, 105, wt)))
+    },
+    two_phages = {
+      # phage B lyses later and less completely than phage A
+      build(seq(0, 240, by = 15), list(
+        "Uninfected"     = wt,
+        "Phage A MOI 1"  = function(t) lyse(t, 90,  wt, 0.05),
+        "Phage B MOI 1"  = function(t) lyse(t, 150, wt, 0.025, resid = 0.4),
+        "Phage A MOI 10" = function(t) lyse(t, 60,  wt, 0.06),
+        "Phage B MOI 10" = function(t) lyse(t, 105, wt, 0.04,  resid = 0.25)))
+    })
 }
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -1250,6 +1308,7 @@ APP_DEFAULTS <- list(
   custom_y_limits       = FALSE,      x_expand_left          = 0,
   x_expand_right        = 0.05,       y_expand_bottom        = 0,
   y_expand_top          = 0.05,       x_axis_label           = "Time (minutes)",
+  demo_scenario         = "lysis",
   y_axis_label          = "A550",     plot_title             = "",
   plot_subtitle         = "",         show_major_gridlines   = FALSE,
   show_minor_gridlines  = FALSE,      font_family            = "sans",
@@ -1402,8 +1461,18 @@ ui <- fluidPage(
                    "reading before plotting, statistics, and curve metrics, and noted in the ",
                    "report provenance. Small negative values after subtraction are expected and ",
                    "handled correctly (see the μmax non-positive-OD note above)."),
-                 actionButton("load_demo", "Load Demo Data", icon = icon("flask"),
-                              style = "width:100%;margin:-8px 0 10px 0;font-size:.85em;"),
+                 div(style = "display:flex;gap:6px;align-items:flex-start;margin:-8px 0 10px 0;",
+                     div(class = "demo-pick", style = "flex:1 1 55%;min-width:0;font-size:.85em;",
+                         selectInput("demo_scenario", NULL, width = "100%",
+                                     choices = c("Lysis curve (3 samples)"      = "lysis",
+                                                 "MOI series (dose-response)"   = "moi_series",
+                                                 "Resistant regrowth"           = "resistance",
+                                                 "Time in hours"                = "hours",
+                                                 "Two phages x two MOIs"        = "two_phages"),
+                                     selected = "lysis"),
+                         tags$style(".demo-pick .form-group{margin-bottom:0;}")),
+                     actionButton("load_demo", "Load Demo Data", icon = icon("flask"),
+                                  style = "flex:1 1 45%;font-size:.85em;")),
                  uiOutput("data_summary_ui"),
 
                  # ── Settings ─────────────────────────────────────────────────────────────
@@ -2299,7 +2368,19 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$load_demo, {
-    ingest_data(make_demo_data(), "Demo data (built-in)")
+    sc <- input$demo_scenario %||% "lysis"
+    if (!sc %in% DEMO_SCENARIOS) sc <- "lysis"
+    d  <- make_demo_data(sc)
+    ingest_data(d, if (sc == "lysis") "Demo data (built-in)" else paste0("Demo data (built-in: ", sc, ")"))
+    updateTextInput(session, "x_axis_label",
+                    value = if (sc == "hours") "Time (hours)" else "Time (minutes)")
+    # reference sample = the uninfected / control sample (sent after ingest's own
+    # choices update, so it wins)
+    smp <- setdiff(colnames(d), "Time")
+    ref <- unique(smp[grepl("^(uninfected|control)", smp, ignore.case = TRUE)])
+    updateSelectInput(session, "metrics_ref_sample",
+                      choices = c("None" = "", setNames(unique(smp), unique(smp))),
+                      selected = if (length(ref)) ref[1] else "")
   })
 
   # ── Data summary (what the app detected) ─────────────────────────────────────

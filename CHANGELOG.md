@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.12.1 — 2026-10-19
+
+Five demo scenarios, so every figure has a meaningful example. The default
+demo (and `make_demo_data()` with no argument) is unchanged.
+
+- **Demo scenarios**: `make_demo_data(scenario)` and a picker next to
+  **Load Demo Data**. `lysis` (the original 3 samples), `moi_series`
+  (uninfected plus MOI 0.01 to 100, lysis onset 150 to 45 min, rate rising
+  with MOI: feeds the dose-response), `resistance` (MOI 1 lyses at 90 min and
+  stays down; "+ resistant" regrows from 150 min to about 60% of the
+  uninfected plateau), `hours` (the lysis shapes on a 0 to 8 h axis, to
+  exercise the time-unit logic) and `two_phages` (phages A and B at MOI 1 and
+  10; B lyses later and less completely). Loading a scenario also sets the
+  x-axis label ("Time (hours)" for `hours`, otherwise "Time (minutes)") and
+  the reference sample to the uninfected/control sample.
+- **Per-scenario gallery**: `tools/render_gallery.R` now renders all five
+  scenarios into `<out_dir>/<scenario>/` (8 SVG + 8 PNG, `gallery.png`,
+  `gallery.svg`, `legend_and_stats.txt` each) and still copies the `lysis`
+  gallery to `docs/gallery/gallery.png` for the README.
+- Tests: every scenario's shape, MOI parsing and the dose-response figure on
+  the MOI series.
+
 ## v2.12.0 — 2026-10-19
 
 Error display, sample order and a landmarks figure. Default main-figure
