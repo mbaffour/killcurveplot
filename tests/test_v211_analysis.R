@@ -396,6 +396,19 @@ check("auto_legend_corner (corner box): a rising log curve -> top-left; box = NU
       identical(env$auto_legend_corner(c(0, 10), c(0, 0), box = NULL), "top-left"))
 check("auto_legend_corner (corner box): empty vector -> top-left",
       identical(env$auto_legend_corner(numeric(0), numeric(0), box = env$inside_legend_box(3)), "top-left"))
+check("inside legends allow at most 4 entries", env$INSIDE_LEGEND_MAX_ENTRIES == 4)
+# collision fallback: data in every corner box -> every corner holds >= 2 points, so no inside position is free
+gx <- rep(seq(0, 10, length.out = 12), each = 12); gy <- rep(seq(0, 10, length.out = 12), 12)
+cnt_g <- env$legend_corner_counts(gx, gy, FALSE, env$inside_legend_box(3))
+check("legend_corner_counts: a filled panel has >= 2 points in every corner box (fallback case)",
+      all(cnt_g >= env$INSIDE_LEGEND_MAX_POINTS) && identical(names(cnt_g)[which.min(cnt_g)], env$auto_legend_corner(gx, gy, FALSE, env$inside_legend_box(3))))
+dz <- env$densify_xy(c(0, 10, 0, 10), c(0, 10, 10, 0), c("a", "a", "b", "b"), k = 5)
+check("densify_xy: k points per segment, endpoints kept, per series", nrow(dz) == 2 * 6 && all(c(0, 10) %in% dz$x) && sum(dz$x == 10) == 2)
+check("densify_xy: a steep line between two sparse points counts in a corner box it crosses",
+      env$legend_corner_counts(c(0, 10), c(0, 10), FALSE, c(0.45, 0.35))[["bottom-left"]] == 1 &&
+      env$legend_corner_counts(dz$x[dz$y >= 0][1:6], dz$y[1:6], FALSE, c(0.45, 0.35))[["top-right"]] >= 2)
+check("legend_corner_counts: an empty corner box counts 0 (no fallback)",
+      min(env$legend_corner_counts(cx, cy, TRUE, box = env$inside_legend_box(3))) == 0)
 check("journal preset uses inside-auto", identical(env$journal_preset_settings(89, 65)$legend_position, "inside-auto"))
 check("inside legends use a compact key",
       isTRUE(all.equal(as.numeric(env$inside_legend_theme("top-left")$legend.key.spacing.y), 1)) &&
@@ -448,6 +461,26 @@ testServer(app, {
         !is.null(e1) && grepl("Dose-response needs at least two MOI levels; this selection has one.", gsub("\n", " ", e1), fixed = TRUE))
 })
 testServer(app, {
+  ingest_data(env$make_demo_data("resistance"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected", legend_position = "inside-auto")
+  check("collision fallback: resistance main figure (curves cross every corner box) gets a right legend",
+        identical(generate_plot()$theme$legend.position, "right"))
+  check("collision fallback: resistance normalized figure gets a right legend",
+        identical(generate_analysis_plot("normalized")$theme$legend.position, "right"))
+  check("collision fallback does not trigger when a corner is clear (resistance growth rate keeps an inside legend)",
+        identical(generate_analysis_plot("growth_rate")$theme$legend.position, "inside"))
+})
+testServer(app, {
+  ingest_data(env$make_demo_data("two_phages"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected", legend_position = "inside-auto")
+  check("inside-auto: 5 samples (two_phages) fall back to a right legend",
+        identical(generate_plot()$theme$legend.position, "right"))
+})
+testServer(app, {
   ingest_data(env$make_demo_data("two_phages"), "demo")
   do.call(session$setInputs, env$APP_DEFAULTS)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
@@ -472,6 +505,13 @@ check("peak mode first_local: peak at t = 60, finite lysis_time and od_drop",
 check("peak mode default equals 'global'", identical(env$compute_one_curve_metrics(tt_r, od_r, "R"), mg))
 check("first_local falls back to the global maximum when no decline follows",
       env$compute_one_curve_metrics(1:5, c(0.05, 0.1, 0.3, 0.6, 0.9), "M", peak_mode = "first_local")$time_max_od == 5)
+# plateau noise: a single 6 % dip is not a decline, a 15 % dip is
+pl_t <- 0:8
+plat <- function(dip) c(0.05, 0.2, 0.5, 0.8, 1.0, 1.0 * (1 - dip), 1.05, 1.1, 1.15)
+check("first_local: a plateau with a single 6 % dip is NOT taken as the peak (global maximum kept)",
+      env$compute_one_curve_metrics(pl_t, plat(0.06), "P", peak_mode = "first_local")$time_max_od == 8)
+check("first_local: a 15 % dip IS taken as the peak (t = 4)",
+      env$compute_one_curve_metrics(pl_t, plat(0.15), "P", peak_mode = "first_local")$time_max_od == 4)
 lys <- c(0.05, 0.2, 0.5, 0.8, 0.4, 0.1, 0.03)   # the trough is below the inoculum: t = 0 must not count as "the peak"
 check("first_local on an ordinary lysis curve equals the global peak",
       identical(env$compute_one_curve_metrics(0:6, lys, "L", peak_mode = "first_local"),
@@ -506,6 +546,15 @@ testServer(app, {
   pk <- layer_data(pl, which(gl == "GeomPoint")[1])
   check("landmarks mark the first peak (shape 16 at t = 90 for the regrowth curve)",
         any(pk$shape == 16 & abs(pk$x - 90) < 1e-9))
+  session$setInputs(metrics_peak_smooth_window = 3)
+  rr3 <- replicate_metric_rows_current()
+  # (a replicate whose global plateau maximum is followed by a > 5 % dip still reports the engine's own lysis onset; the
+  # peak mode only decides WHICH peak, so what must hold is that no early false peak is chosen)
+  check("resistance demo, first_local + 3-point smoothing: Uninfected replicates keep their plateau peak (t >= 270), not an early false one",
+        all(rr3$time_max_od[rr3$sample == "Uninfected"] >= 270))
+  check("resistance demo, first_local + 3-point smoothing: the resistant replicates still find the lysis",
+        all(is.finite(rr3$lysis_time[rr3$sample == "Phage MOI 1 + resistant"])))
+  session$setInputs(metrics_peak_smooth_window = 1)
   check("metrics_peak_mode has an APP_DEFAULTS entry", identical(env$APP_DEFAULTS$metrics_peak_mode, "global"))
 })
 

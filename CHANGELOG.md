@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.12.3 — 2026-10-19
+
+Review round 3. Default main-figure output unchanged; everything is opt-in.
+
+- **Legend fallback**: `inside-auto` now falls back to a right legend above
+  4 entries (was 5) and also when the emptiest corner box still holds the
+  equivalent of 2 or more data points. Points are counted along the lines
+  (8 interpolated points per segment, divided back to data-point equivalents),
+  so a steep segment crossing the corner between two sparse points counts.
+  Corner box: 9 % of the panel height per entry, 22 % + 1.7 % per label
+  character of the width.
+- **First-peak threshold**: peak mode `first_local` needs a decline of more
+  than 10 % (was 5 %); 4 % plateau noise no longer counts as a peak followed
+  by lysis. Label, definitions, README and METRICS_REFERENCE updated; a 3-point
+  peak-detection smoothing window is recommended with it (the gallery sets it
+  for `resistance`). A replicate whose own plateau maximum is followed by a
+  > 5 % dip still reports the engine's lysis onset: peak mode chooses the
+  peak, not the lysis definition.
+- **Gallery alignment**: every panel is wrapped in `patchwork::free()`, so the
+  45-degree labels of the metric summary no longer open a gap under the x axis
+  of the panels beside it, and outside-legend panels no longer squeeze the
+  panels beside them.
+- **docs**: METRICS_REFERENCE notes that μmax is the maximum rolling slope
+  anywhere on the curve (on a regrowth curve it can come from the regrowth).
+- Tests: collision fallback, interpolation, 5-entry fallback, 6 % vs 15 %
+  plateau dip, replicate peaks on the resistance demo with smoothing.
+
 ## v2.12.2 — 2026-10-19
 
 Review round on the gallery figures. All changes are opt-in or limited to

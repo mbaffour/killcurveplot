@@ -34,7 +34,8 @@ for (sc in c("lysis", "moi_series", "resistance", "hours", "two_phages")) {
                       nb_temperature = "37", nb_replicate = "3 biological replicates")
     do.call(session$setInputs, env$journal_preset_settings(89, 60, "a"))
     # the resistance curve regrows above its first peak: anchor the lysis metrics on the first peak
-    if (sc == "resistance") session$setInputs(metrics_peak_mode = "first_local")
+    # (a 3-point peak smoothing window keeps plateau noise from being read as a decline)
+    if (sc == "resistance") session$setInputs(metrics_peak_mode = "first_local", metrics_peak_smooth_window = 3)
     session$setInputs(x_axis_label = if (sc == "hours") "Time (hours)" else "Time (minutes)")
     session$setInputs(analysis_metrics = c("lysis_time", "od_drop", "mu_max", "infection_strength"),
                       analysis_dose_metric = "lysis_time")   # MOI parses from the sample names; no override box
@@ -55,7 +56,11 @@ for (sc in c("lysis", "moi_series", "resistance", "hours", "two_phages")) {
     }
     # two-column gallery at a full Nature double column (183 mm): panels keep
     # their native 89 mm size, which is exactly how they would be assembled
-    g <- wrap_plots(lapply(plots, function(p) p + labs(tag = NULL)), ncol = 2) +
+    # free() stops patchwork from aligning panels to each other: the metric summary has rotated
+    # 45-degree x labels (a gap under its row-mates' x axis otherwise), and panels with an outside
+    # legend would squeeze the inside-legend panels in their column to a fraction of their 89 mm
+    panels <- lapply(plots, function(p) patchwork::free(p + labs(tag = NULL)))
+    g <- wrap_plots(panels, ncol = 2) +
       plot_annotation(tag_levels = "a") &
       theme(plot.tag = element_text(size = 8, face = "bold", family = "Arial"))
     quiet(ggsave(file.path(sc_out, "gallery.png"), g, device = env$export_device("png"),

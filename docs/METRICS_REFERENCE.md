@@ -34,15 +34,20 @@ A curve that lyses and then regrows above its first peak (resistant mutants)
 has its global maximum at the end, so `lysis_time`, `od_drop`,
 `t_half_max_decline` and the other peak-anchored metrics are NA, and the
 landmarks figure marks the wrong peak. With **Peak used for lysis metrics =
-First peak before a > 5 % decline** (`peak_mode = "first_local"`), `max_idx`
+First peak before a > 10 % decline** (`peak_mode = "first_local"`), `max_idx`
 is the first index `i` such that `peak_vec[i]` is the running maximum, a later
-point falls below 95 % of `peak_vec[i]`, and the curve has not risen above
+point falls below 90 % of `peak_vec[i]`, and the curve has not risen above
 `peak_vec[i]` before that decline (without this last condition every point on
 the way up would qualify whenever the post-lysis trough is below the
 inoculum). If there is no such point the global maximum is used. Every
 downstream metric (lysis, `od_drop`, residual, recovery, `t_half_max_decline`)
 then uses that index unchanged, and `max_od` / `time_max_od` report it.
 `peak_vec` is the raw or smoothed curve exactly as for the smoothing option.
+The threshold is 10 %, not 5 %: replicate noise of about 4 % on a plateau
+produces single-point dips of more than 5 %, which at 5 % made the Uninfected
+replicates report a "lysis onset" late in the run. Combine the mode with a
+3-point peak-detection smoothing window (the gallery does for the resistance
+scenario).
 
 ## Curve metrics (per sample)
 
@@ -53,7 +58,7 @@ then uses that index unchanged, and `max_od` / `time_max_od` report it.
 | `max_od`, `time_max_od` | Peak and its time |
 | `global_min_od`, `time_global_min_od` | The curve's global minimum and its time — usually the inoculum, near `t_start`. **Not** the post-lysis floor; see `residual_od` for that. |
 | `auc` | Trapezoidal area under the mean curve |
-| `mu_max` | Largest centered rolling-window regression slope of ln(mean) vs time (window = smoothing setting, default 5 points; slopes must exceed 1e-10 so flat curves report NA). Any window touching a non-positive OD reading is excluded rather than clamped — see `n_nonpositive_od` below. |
+| `mu_max` | Largest centered rolling-window regression slope of ln(mean) vs time (window = smoothing setting, default 5 points; slopes must exceed 1e-10 so flat curves report NA). Any window touching a non-positive OD reading is excluded rather than clamped — see `n_nonpositive_od` below. It is the maximum anywhere on the curve, so on a regrowth curve it can come from the regrowth phase rather than the first growth (the resistant demo curve shows μmax at about 180 min); the landmarks figure draws it where it was found. |
 | `n_nonpositive_od` | Count of time points with OD ≤ 0 (e.g. a blank-subtraction artefact). Windows touching one of these contribute no `mu_max` slope; `mu_max`/`doubling_time`/`lag_phase` may be NA or based on fewer windows when this is > 0. |
 | `doubling_time` | `ln(2)/mu_max`; NA without growth |
 | `lag_phase` | First time the rolling ln-slope reaches 10% of `mu_max` |

@@ -20,7 +20,7 @@ manuscript without re-editing every figure.
 | Points | 1.2 (≈1 mm) | legible at 89 mm without hiding error bars |
 | Tick length | 1.2 mm | compact, proportionate to 6 pt labels |
 | Colours | Okabe–Ito (Black, Orange, Sky blue, Bluish green, Yellow, Blue, Vermillion, Reddish purple) | the exact palette Nature's figure guide lists as colour-blind friendly |
-| Legend | inside the panel in the emptiest corner (auto), no box border; outside right when there are more than 5 entries | journal panels rarely spend column width on an outside key; the corner with the fewest plotted points keeps the key off the data (top-left for a typical growth/lysis plot) |
+| Legend | inside the panel in the emptiest corner (auto), no box border; outside right when there are more than 4 entries or the emptiest corner still overlaps data | journal panels rarely spend column width on an outside key; the corner with the fewest plotted points keeps the key off the data (top-left for a typical growth/lysis plot) |
 | Spacing base size | 7 pt | margins and gaps scale with the theme's base size; the default 14 pt looks oversized next to 6–7 pt text |
 | Y tick labels | 0.01, 0.1, 1 (trailing zeros trimmed) | reads like a published log axis |
 | Error caption on the artwork | off | the measure and *n* go in the **Figure Legend Text** box (and the manuscript legend), not on the panel |

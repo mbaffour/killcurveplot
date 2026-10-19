@@ -1,17 +1,22 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.12.3 -- Review round 3 (opt-in; default main figure unchanged):
+#   Inside legends fall back to "right" above 4 entries, or when the emptiest
+#   corner box still holds 2+ points. Peak mode "first_local" now needs a > 10 %
+#   decline (4 % plateau noise no longer counts as lysis).
+#
 # v2.12.2 -- Review round (all opt-in; the default main figure is unchanged):
 #   LEGEND AUTO CORNER -- legend position "Inside: emptiest corner (auto)" puts
 #                         the key in the quadrant with the fewest plotted points
-#                         (auto_legend_corner); > 5 entries fall back to "right".
+#                         (auto_legend_corner); > 4 entries fall back to "right".
 #                         Inside keys are more compact. The journal preset uses it.
 #   LABELS             -- shorter metric facet titles, 45-degree x labels for 5+
 #                         samples, plain-number MOI axis labels.
 #   DOSE-RESPONSE      -- one line + end label per phage (MOI stripped from the
 #                         sample label); a single MOI level shows a message.
 #   PEAK MODE          -- metrics_peak_mode "first_local": lysis metrics anchored
-#                         on the first peak followed by a > 5 % decline, for
+#                         on the first peak followed by a > 10 % decline, for
 #                         regrowth / resistance curves (default "global").
 #
 # v2.11 -- Analysis figures, replicate statistics, dashboard:
@@ -165,7 +170,7 @@ has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.12.2"
+APP_VERSION <- "2.12.3"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -299,7 +304,9 @@ moving_average <- function(y, w) {
 # the peak. "first_local" is for regrowth / resistance curves, where the global
 # maximum is the late regrowth and every lysis metric would be NA: the peak is
 # the first point that is the running maximum AND is followed by a decline of
-# more than 5 % before the curve rises above it again (see first_local_peak_index).
+# more than 10 % (v2.12.3; was 5 %, which 4 % replicate noise on a plateau can
+# trigger) before the curve rises above it again (see first_local_peak_index).
+PEAK_DECLINE_FRACTION <- 0.10
 first_local_peak_index <- function(peak_vec) {
   n <- length(peak_vec)
   run_max <- -Inf
@@ -308,8 +315,8 @@ first_local_peak_index <- function(peak_vec) {
     if (!is.finite(v) || v < run_max) next      # not a running maximum
     run_max <- v
     later <- peak_vec[(i + 1):n]
-    j <- which(later < 0.95 * v)[1]             # first decline of more than 5 %
-    # The spec'd rule is "some later point is below 95 % of peak_vec[i]". Taken
+    j <- which(later < (1 - PEAK_DECLINE_FRACTION) * v)[1]   # first decline of more than 10 %
+    # The rule as first specified is "some later point is below the threshold". Taken
     # literally it also accepts every point on the way UP (a later lysis trough
     # is lower than the inoculum, so t = 0 would be "the peak"). Requiring that
     # the curve has not exceeded v by the time it first declines keeps the rule
@@ -590,8 +597,8 @@ METRIC_DEFINITIONS <- c(
   t_start         = "First time point plotted",
   t_end           = "Last time point plotted",
   initial_od      = "Mean value at the first time point",
-  max_od          = "Maximum (peak) of the mean curve or, with peak mode 'first_local', the first peak followed by a > 5 % decline",
-  time_max_od     = "Time at which the peak occurs (global maximum or, with peak mode 'first_local', the first peak followed by a > 5 % decline)",
+  max_od          = "Maximum (peak) of the mean curve or, with peak mode 'first_local', the first peak followed by a > 10 % decline",
+  time_max_od     = "Time at which the peak occurs (global maximum or, with peak mode 'first_local', the first peak followed by a > 10 % decline)",
   global_min_od      = "Global minimum of the mean curve (usually the inoculum, near t_start) -- NOT the post-lysis floor; see residual_od for that",
   time_global_min_od = "Time at which the global minimum occurs",
   final_od        = "Mean value at the last time point",
@@ -1090,11 +1097,30 @@ inside_legend_theme <- function(corner = "top-left") {
 # the figures use it because a whole quadrant can look empty while the thin band
 # of data along its edge is exactly where a legend box lands.
 auto_legend_corner <- function(x, y, log_y = FALSE, box = NULL) {
+  n <- legend_corner_counts(x, y, log_y, box)
+  names(n)[which.min(n)]
+}
+# Points along the polylines, k per segment, so a steep line that crosses a
+# corner box between two sparse data points still counts as being there.
+# x, y and g (series id) are parallel vectors; y is interpolated as given.
+densify_xy <- function(x, y, g, k = 8) {
+  parts <- lapply(split(seq_along(x), g, drop = TRUE), function(ix) {
+    ix <- ix[is.finite(x[ix]) & is.finite(y[ix])]
+    ix <- ix[order(x[ix])]
+    if (length(ix) < 2) return(data.frame(x = x[ix], y = y[ix]))
+    t <- seq(0, 1, length.out = k + 1)[-(k + 1)]
+    data.frame(x = c(unlist(lapply(seq_len(length(ix) - 1), function(i) x[ix[i]] + t * (x[ix[i + 1]] - x[ix[i]]))), x[ix[length(ix)]]),
+               y = c(unlist(lapply(seq_len(length(ix) - 1), function(i) y[ix[i]] + t * (y[ix[i + 1]] - y[ix[i]]))), y[ix[length(ix)]]))
+  })
+  do.call(rbind, c(parts, list(make.row.names = FALSE)))
+}
+# Points per corner (named, in tie-break order); all zero for no finite points.
+legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL) {
   corners <- c("top-left", "top-right", "bottom-left", "bottom-right")
   ok <- is.finite(x) & is.finite(y)
   if (isTRUE(log_y)) ok <- ok & y > 0
   x <- x[ok]; y <- y[ok]
-  if (!length(x)) return(corners[1])
+  if (!length(x)) return(setNames(rep(0L, 4), corners))
   if (isTRUE(log_y)) y <- log10(y)
   if (is.null(box)) {
     right <- x > mean(range(x)); top <- y > mean(range(y))
@@ -1105,16 +1131,19 @@ auto_legend_corner <- function(x, y, log_y = FALSE, box = NULL) {
     l <- u <= box[1]; r <- u >= 1 - box[1]; t <- v >= 1 - box[2]; b <- v <= box[2]
     n <- c(sum(l & t), sum(r & t), sum(l & b), sum(r & b))
   }
-  corners[which.min(n)]
+  setNames(as.integer(n), corners)
 }
 # More legend entries than this and an inside key is taller than the empty
 # corner of any panel: "inside-auto" falls back to an outside (right) legend.
-INSIDE_LEGEND_MAX_ENTRIES <- 5
-# Corner box a legend occupies, as fractions of the panel (x, y): about 10 % of
-# the height per entry, and 20 % + 1.6 % per label character of the width
+# It also falls back when even the emptiest corner box holds this many points
+# or more: a key that overlaps data is worse than an outside key.
+INSIDE_LEGEND_MAX_POINTS <- 2
+INSIDE_LEGEND_MAX_ENTRIES <- 4
+# Corner box a legend occupies, as fractions of the panel (x, y): about 9 % of
+# the height per entry, and 22 % + 1.7 % per label character of the width
 # (measured on 89 x 60 mm journal panels at 6 pt).
 inside_legend_box <- function(n_entries, label_chars = 12)
-  c(min(0.7, 0.2 + 0.016 * label_chars), min(0.9, 0.1 * n_entries + 0.05))
+  c(min(0.7, 0.22 + 0.017 * label_chars), min(0.9, 0.09 * n_entries + 0.02))
 
 # Everything a journal preset pushes into the UI. Each is an ordinary input
 # afterwards, so Save Settings captures it and the user can still adjust it.
@@ -2098,13 +2127,13 @@ ui <- fluidPage(
                          "WHERE the peak is."),
                        selectInput("metrics_peak_mode", "Peak used for lysis metrics:",
                                    choices = c("Global maximum (default)" = "global",
-                                               "First peak before a > 5 % decline (regrowth / resistance curves)" = "first_local"),
+                                               "First peak before a > 10 % decline (regrowth / resistance curves)" = "first_local"),
                                    selected = "global"),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
                          "A curve that lyses and then regrows above its first peak has its global ",
                          "maximum at the end, so lysis onset, OD drop and time to half peak come out NA. ",
                          "“First peak” anchors them on the first peak that is followed by a ",
-                         "decline of more than 5 % instead (falls back to the global maximum if there is none)."),
+                         "decline of more than 10 % instead (falls back to the global maximum if there is none)."),
                        selectInput("metrics_ref_sample",
                                    "Reference sample (infection metrics):",
                                    choices = c("None" = "")),
@@ -3249,12 +3278,20 @@ server <- function(input, output, session) {
     # just inside a panel corner (journal panels rarely spend column width on
     # an outside key).
     if (identical(leg_pos, "inside-auto")) {
-      # emptiest corner of the plotted data; too many entries -> outside right
-      if (n_entries > INSIDE_LEGEND_MAX_ENTRIES) {
+      # emptiest corner of the plotted data; too many entries, or a corner that
+      # still holds data -> outside right
+      if (!is.null(xy) && !is.null(xy$g)) {      # count along the lines, not just at the data points
+        yy <- if (log_y) log10(ifelse(xy$y > 0, xy$y, NA_real_)) else xy$y
+        dd <- densify_xy(xy$x, yy, xy$g, k = 8)
+        xy <- list(x = dd$x, y = if (log_y) 10^dd$y else dd$y, per_point = 8)
+      }
+      cnt <- if (is.null(xy)) c("top-left" = 0L)
+             else legend_corner_counts(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars))
+      if (!is.null(xy$per_point)) cnt <- cnt / xy$per_point   # interpolated points -> data-point equivalents
+      if (n_entries > INSIDE_LEGEND_MAX_ENTRIES || min(cnt) >= INSIDE_LEGEND_MAX_POINTS) {
         layers <- c(layers, list(theme(legend.position = "right")))
       } else {
-        corner <- if (is.null(xy)) "top-left" else auto_legend_corner(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars))
-        layers <- c(layers, list(inside_legend_theme(corner)))
+        layers <- c(layers, list(inside_legend_theme(names(cnt)[which.min(cnt)])))
       }
     } else if (startsWith(leg_pos, "inside-")) {
       layers <- c(layers, list(inside_legend_theme(sub("^inside-", "", leg_pos))))
@@ -3601,7 +3638,7 @@ server <- function(input, output, session) {
     
     bs     <- input$theme_base_pt %||% 0
     pl_lab <- trimws(input$panel_label %||% "")
-    p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value),
+    p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value, g = plot_data$variable),
                                  n_entries = n_vars, log_y = identical(input$y_scale_type, "log"),
                                  label_chars = max(nchar(unname(leg_labels)), 1))
     
@@ -3983,7 +4020,7 @@ server <- function(input, output, session) {
         gr$mu_sd <- if (et == "none") NA_real_ else em * switch(et,
           sd = gr$mu_sd, sem = gr$mu_sd / sqrt(gr$n),
           ci95 = qt(0.975, df = pmax(gr$n - 1, 1)) * gr$mu_sd / sqrt(gr$n), gr$mu_sd)
-        leg_xy <- list(x = gr$time, y = gr$mu_mean)
+        leg_xy <- list(x = gr$time, y = gr$mu_mean, g = gr$variable)
         g <- ggplot(gr, aes(x = time, y = mu_mean, color = variable, linetype = variable, group = variable)) +
           geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed")
         if (any(is.finite(gr$mu_sd)))
@@ -4000,7 +4037,7 @@ server <- function(input, output, session) {
           "Pick the uninfected reference sample under Stats & Reports first." else "No data.")
         nd$variable <- factor(nd$variable, levels = sample_levels(samps))
         ref_lab <- if (mode == "reference") unname(labs_v[ref]) else "t = 0"
-        leg_xy <- list(x = nd$time, y = nd$ratio)
+        leg_xy <- list(x = nd$time, y = nd$ratio, g = nd$variable)
         ggplot(nd, aes(x = time, y = ratio, color = variable, linetype = variable,
                        shape = variable, group = variable)) +
           geom_hline(yintercept = 1, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
@@ -4012,7 +4049,7 @@ server <- function(input, output, session) {
         rp <- prepare_replicate_data(); pd <- prepare_plot_data()
         rp$variable <- factor(rp$variable, levels = sample_levels(samps)); pd$variable <- factor(pd$variable, levels = sample_levels(samps))
         rp$curve <- interaction(rp$variable, rp$replicate)
-        leg_xy <- list(x = rp$time, y = rp$value); leg_log_y <- identical(input$y_scale_type, "log")
+        leg_xy <- list(x = rp$time, y = rp$value, g = rp$curve); leg_log_y <- identical(input$y_scale_type, "log")
         g <- ggplot() +
           geom_line(data = rp, aes(x = time, y = value, color = variable, group = curve),
                     linewidth = lw * 0.5, alpha = 0.45) +
@@ -4400,7 +4437,7 @@ server <- function(input, output, session) {
                 paste0(input$metrics_peak_smooth_window %||% 1,
                        if (identical(input$metrics_peak_smooth_window %||% 1, 1)) " (off)" else ""),
                 if (identical(input$metrics_peak_mode %||% "global", "first_local"))
-                  "first peak before a > 5 % decline" else "global maximum",
+                  "first peak before a > 10 % decline" else "global maximum",
                 if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample
                 else "none (infection metrics omitted)"),
       stringsAsFactors = FALSE)
