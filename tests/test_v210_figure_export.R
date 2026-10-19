@@ -38,7 +38,7 @@ real_plot <- function(desc, p) {
 env <- new.env()
 app <- source("Lysis_Curve_App_v28.R", local = env)$value
 check("app sources cleanly -> shiny.appobj", inherits(app, "shiny.appobj"))
-check("APP_VERSION is 2.10.0", identical(env$APP_VERSION, "2.10.0"))
+check("APP_VERSION is 2.10.0 or later", package_version(env$APP_VERSION) >= "2.10.0")
 check("APP_DEFAULTS exists with the UI defaults", is.list(env$APP_DEFAULTS) && identical(env$APP_DEFAULTS$y_scale_type, "log"))
 # A bare testServer session has NO input values (no browser sends the widget
 # defaults), so every plot test seeds the session with APP_DEFAULTS first.

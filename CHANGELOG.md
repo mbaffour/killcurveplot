@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.11.0 — 2026-10-18 (in progress; code and tests complete, docs pending)
+
+Analysis figures, replicate statistics and a dashboard. All new figures use
+the main figure's theme (fonts, line weights, legend, journal preset) through
+one shared `figure_theme_layers()`, so panels assemble without rescaling.
+Default main-figure output remains byte-identical to v2.9.0.
+
+- **Analysis figures** tab: metric summary (per-replicate points, mean ± SD,
+  faceted by metric, significance marks vs the reference), specific growth
+  rate μ(t) vs time (same rolling regression as μmax), normalized OD (vs the
+  reference or t0), replicate overlay, MOI dose-response (MOI read from sample
+  names or a `sample = MOI` box), OD heatmap. Own panel label; same export
+  devices and size as the main figure.
+- **Replicate statistics**: Welch t (or Mann-Whitney) per pair or vs the
+  reference, Holm-adjusted p, Hedges' g, 95% CI; one-way ANOVA + Tukey (or
+  Kruskal-Wallis) for ≥ 3 groups; explicit low-n warnings; CSV export.
+- **Dashboard** tab: data cards, key metrics per sample (± SD across
+  replicates), four small-multiple figures, statistics, notebook summary.
+- Internal: `compute_replicate_metric_rows()` (per-replicate rows, with
+  reference-normalised metrics), `compute_growth_rate_curves()`,
+  `compute_normalized_curves()`, `compare_replicate_metric()`, `parse_moi()`.
+  New suite `tests/test_v211_analysis.R` (63 checks).
+
 ## v2.10.0 — 2026-10-18
 
 Journal-standard figure export. Opt-in: a figure made with the default
