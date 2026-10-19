@@ -175,3 +175,6 @@ or present but its function signature has drifted, the suite now **fails**
 by default (KC-5 — it used to silently exit 0) with a message naming the
 cause; set `ALLOW_SKIP=1` to downgrade that to a visibly-printed skip
 instead.
+
+
+**Series ending in a crash.** If the decline after the peak exceeds half of the peak, lysis onset is reported even when fewer than two post-peak points exist (a sample read only until it lysed). The sustained-run rule exists to reject noise, not an unambiguous collapse.

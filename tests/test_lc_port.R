@@ -59,8 +59,10 @@ check("the same dip inside 3 x noise SD is not lysis (and all lysis metrics are 
 single <- c(0.05, 0.2, 0.5, 0.8, rep(1.0, 10), 0.90, rep(1.0, 10))
 check("a lone 10 % one-point dip (not sustained for 2 points) is not lysis",
       is.na(env$compute_one_curve_metrics(seq_along(single) - 1, single, "P")$lysis_time))
-check("a curve with a single post-peak point cannot sustain a decline (documented consequence)",
-      is.na(env$compute_one_curve_metrics(c(0, 10, 20), c(0.1, 0.5, 0.1), "P")$lysis_time))
+check("a curve with a single modest post-peak point (< 50 % drop) cannot sustain a decline",
+      is.na(env$compute_one_curve_metrics(c(0, 10, 20, 30), c(0.1, 0.5, 1.0, 0.85), "P")$lysis_time))
+check("but a single post-peak point that drops by more than half the peak is lysis (series ended at the crash)",
+      is.finite(env$compute_one_curve_metrics(c(0, 10, 20, 30), c(0.1, 0.5, 1.0, 0.3), "P")$lysis_time))
 
 cat("\n--- LC-9: lysis_time is interpolated, not the first sampled point past the threshold ---\n")
 # rise linearly 0.05 -> 1.0 over t = 0..60, peak 1.0 at t = 60, then fall 0.02 per time unit.
@@ -376,4 +378,14 @@ testServer(app, {
 })
 
 cat("\n============ SUMMARY:", pass, "passed /", fail, "failed ============\n")
+if (fail > 0) quit(status = 1)
+
+cat("\n--- single-point crash at the end of a series still counts as lysis ---\n")
+m_end <- env$compute_one_curve_metrics(c(0, 10, 20, 30, 40), c(0.194, 0.255, 0.321, 0.371, 0.086), "end")
+check("a > 50 % drop on the last point reports a lysis onset (interpolated between 30 and 40)",
+      is.finite(m_end$lysis_time) && m_end$lysis_time > 30 && m_end$lysis_time < 40)
+check("... and od_drop / residual_od are reported", is.finite(m_end$od_drop) && is.finite(m_end$residual_od))
+m_small <- env$compute_one_curve_metrics(c(0, 10, 20, 30, 40), c(0.194, 0.255, 0.321, 0.371, 0.340), "dip")
+check("a single-point 8 % dip at the end is still NOT lysis", is.na(m_small$lysis_time))
+cat(sprintf("\n============ SUMMARY (addendum): %d passed / %d failed ============\n", pass, fail))
 if (fail > 0) quit(status = 1)

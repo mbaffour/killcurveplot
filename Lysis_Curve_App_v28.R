@@ -840,6 +840,13 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
                        function(i) all(below[i:(i + need - 1L)]), logical(1))
         if (any(runs)) onset <- which(runs)[1]
       }
+      # A decline of more than half the peak is lysis even when the series ends
+      # right after it (e.g. a sample read only until it lysed): the sustained-
+      # run rule guards against noise, not against an unambiguous crash.
+      if (is.na(onset)) {
+        big <- is.finite(od_decline) & od_decline > 0.5 * max_od
+        if (any(big)) onset <- which(big)[1]
+      }
       if (!is.na(onset)) {
         # the report level is crossed at or before the sustained run starts
         cross   <- which(is.finite(od_decline) & od_decline > report_thr &
