@@ -82,8 +82,9 @@ check("preset axis line 0.5 pt, tick 1.2 mm", ps$axis_line_pt == 0.5 && ps$tick_
 check("preset uses Arial, Okabe-Ito palette, SVG, 600 dpi",
       ps$font_family == "Arial" && ps$color_palette == "colorblind" && ps$export_format == "svg" && ps$export_dpi == 600)
 check("preset legend inside the panel, no border", startsWith(ps$legend_position, "inside-") && isFALSE(ps$legend_box_border))
-check("preset error-bar cap width = 1.5 % of x span", near(ps$error_bar_width, round(180 * 0.015, 2)))
-check("preset without data leaves error_bar_width alone", is.null(env$journal_preset_settings(89, 65)$error_bar_width))
+check("preset error-bar caps = 1.5 % of the x range (relative mode)",
+      isTRUE(ps$error_cap_relative) && ps$error_bar_width == 1.5)
+check("preset keeps sample-coloured bars", identical(ps$error_bar_color, "sample"))
 check("preset carries the panel label", ps$panel_label == "a")
 
 cat("\n--- export device resolver ---\n")

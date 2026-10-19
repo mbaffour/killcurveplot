@@ -278,6 +278,15 @@ without rescaling. Pick a figure, set its panel label (default `b`) and use
   mean ± SD. MOI is read from names like `Phage MOI 10`, or typed as
   `sample = MOI` lines in the box.
 - **OD heatmap** — samples × time, for screens with many samples.
+- **Curve landmarks** — lag end, μmax window centre, peak, lysis onset, half
+  of peak and trough drawn on each mean curve, so every number in the Curve
+  Metrics CSV can be checked by eye before it is reported.
+
+All of these show the **same error measure as the main figure** (SD, SEM or
+95% CI from the Error Bars panel) and the same sample order. A rendered set of
+every figure from the demo data, through the journal preset, is in
+[docs/gallery/gallery.png](docs/gallery/gallery.png)
+(`Rscript tools/render_gallery.R` regenerates it).
 
 Below the figure, **Replicate statistics** compares the tested metric between
 samples on the per-replicate values: Welch's t-test (or Mann-Whitney) for each
@@ -320,6 +329,16 @@ Fill in an optional title, author, and notes, then click:
 - **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the experiment notebook record, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis. With **Include analysis figures and statistics** (on by default) it also carries the v2.11 analysis figures — metric summary, specific growth rate, normalized OD (or the replicate overlay when no reference sample is set) and, when any sample has an MOI, the dose-response — each at the export size, plus the replicate statistics (pairwise, omnibus and post-hoc tables, their warnings, and a definitions paragraph for Welch t / Holm / Hedges' g / ANOVA + Tukey / Mann-Whitney / Kruskal-Wallis); untick it for the figure-and-tables-only report.
 - **PDF Report** — the same content as a multi-page PDF (title/provenance page, notebook page, figure page, one page per analysis figure, paginated tables, replicate statistics). No LaTeX or pandoc required.
 - **Report base font size** — scales all report text and tables in both formats.
+
+### Showing error honestly
+
+The **Error Bars / Shadow** panel has, besides SD / SEM / 95% CI and bars vs
+ribbon: *individual replicate values* as open circles behind the mean (what
+reviewers ask for at n = 3), error colour (sample colour, black or grey), cap
+width as a percentage of the x range, and, on a log axis, bars whose lower
+bound crosses zero are drawn down to the axis minimum instead of vanishing.
+Single-replicate points never get a bar (SD is undefined), and the caption /
+legend text states the measure and n.
 
 ### Everything stays editable
 

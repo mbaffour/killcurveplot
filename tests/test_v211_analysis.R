@@ -206,6 +206,45 @@ testServer(app, {
                    width = sz[1], height = sz[2], units = "in", dpi = 300, bg = "white"))
   }
 
+  cat("\n--- v2.12: error display options and curve landmarks ---\n")
+  real_plot("curve landmarks figure renders", generate_analysis_plot("landmarks"))
+  layer_names <- function(p) vapply(p$layers, function(l) class(l$geom)[1], "")
+  n_pts_before <- sum(layer_names(generate_plot()) == "GeomPoint")
+  session$setInputs(show_replicate_points = TRUE)
+  p_rp <- generate_plot(); real_plot("replicate points option renders", p_rp)
+  check("replicate points add a GeomPoint layer behind the mean", sum(layer_names(p_rp) == "GeomPoint") == n_pts_before + 1)
+  session$setInputs(show_replicate_points = FALSE, error_bar_color = "black", error_cap_relative = TRUE, error_bar_width = 1.5)
+  p_bk <- generate_plot(); real_plot("black bars with relative caps render", p_bk)
+  eb <- p_bk$layers[[which(layer_names(p_bk) == "GeomErrorbar")[1]]]
+  check("black error bars carry a fixed colour, not the sample colour", identical(eb$aes_params$colour, "black"))
+  session$setInputs(error_bar_color = "sample", error_cap_relative = FALSE, error_bar_width = 1)
+  session$setInputs(error_type = "sd", error_multiplier = 15)  # SD x 15 crosses zero on the log axis (x 5 does not for the demo data)
+  p_fl <- generate_plot(); real_plot("log-floor bars render", p_fl)
+  eb_d <- layer_data(p_fl, which(layer_names(p_fl) == "GeomErrorbar")[1])
+  check("bars that cross zero are floored at the axis minimum (10^-2), not dropped",
+        nrow(eb_d) > 0 && all(eb_d$ymin >= log10(0.01) - 1e-9) && any(abs(eb_d$ymin - log10(0.01)) < 1e-9))
+  session$setInputs(error_log_floor = FALSE)
+  eb_d2 <- layer_data(generate_plot(), which(layer_names(generate_plot()) == "GeomErrorbar")[1])
+  check("with the floor off, those bars are dropped (old behaviour)",
+        sum(is.finite(eb_d2$ymin)) < sum(is.finite(eb_d$ymin)))
+  session$setInputs(error_log_floor = TRUE, error_multiplier = 1, error_type = "sem")
+  session$setInputs(legend_order = "selected")
+  p_ord <- generate_plot()
+  check("sample order 'selected' keeps the file order in the main figure (Uninfected first)",
+        identical(levels(layer_data(p_ord, 1)$group %>% factor()), c("1", "2", "3")) &&
+        identical(as.character(levels(p_ord$data$variable))[1], "Uninfected"))
+  ms <- generate_analysis_plot("metric_summary")
+  check("analysis figures follow the same order", identical(levels(ms$data$sample)[1], "Uninfected"))
+  session$setInputs(legend_order = "alpha")
+  check("journal preset switches the order to 'selected' and relative caps",
+        identical(env$journal_preset_settings(89, 65)$legend_order, "selected") &&
+        isTRUE(env$journal_preset_settings(89, 65)$error_cap_relative))
+  session$setInputs(error_type = "none")
+  ms0 <- generate_analysis_plot("metric_summary")
+  check("error type 'none' draws no whiskers on the metric summary",
+        all(is.na(layer_data(ms0, which(layer_names(ms0) == "GeomErrorbar")[1])$ymin)))
+  session$setInputs(error_type = "sem")
+
   cat("\n--- statistics outputs ---\n")
   st <- analysis_stats_current()
   check("stats use the first selected metric (lysis_time)", identical(st$metric, "lysis_time"))

@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.12.0 — 2026-10-19
+
+Error display, sample order and a landmarks figure. Default main-figure
+output is still byte-identical to v2.9.0 except where noted (log floor).
+
+- **Error display** (Error Bars panel): individual replicate values as
+  open circles behind the mean; error colour (sample / black / grey); cap
+  width as % of the x range so caps look the same at any time scale; and
+  on a log axis a bar whose lower bound crosses zero is now drawn down to
+  the axis minimum instead of being dropped silently (switchable).
+- **Analysis figures show the main figure's error measure** (SD / SEM /
+  95% CI, with the multiplier): metric-summary whiskers, growth-rate band,
+  dose-response whiskers. "None" draws no whiskers.
+- **Sample order** control (Figure Layout): alphabetical (legacy) or as
+  selected / as in the file, applied to the legend, every analysis panel
+  and the facets, so a multi-panel figure reads in one order. The journal
+  preset uses the file order (control first) and relative caps.
+- **Curve landmarks** figure: lag end, μmax window centre, peak, lysis
+  onset, half of peak and trough drawn on each mean curve, to audit the
+  Curve Metrics by eye before reporting them.
+- `tools/render_gallery.R` renders every figure from the demo data with the
+  journal preset (one SVG + PNG each and a 183 mm two-column gallery) through
+  the real app code; `docs/gallery/gallery.png` is its output.
+- Figure Legend Text mentions the replicate points when shown.
+
 ## v2.11.1 — 2026-10-19
 
 The HTML and PDF reports now double as a complete record of the v2.11

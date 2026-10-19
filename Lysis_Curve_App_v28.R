@@ -152,7 +152,7 @@ has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.11.1"
+APP_VERSION <- "2.12.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -986,14 +986,18 @@ journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_ran
     axis_line_pt = 0.5, tick_length_mm = 1.2,
     theme_base_pt = 7, y_tick_label_style = "trim",
     legend_position = "inside-top-left", legend_box_border = FALSE, legend_key_mm = 4,
+    legend_order = "selected",   # control first, as listed in the file; same order in every panel
     panel_label = panel_label, panel_label_size = 8,
     color_palette = "colorblind",
     show_major_gridlines = FALSE, show_minor_gridlines = FALSE,
     show_error_caption = FALSE,   # the Figure Legend Text box carries measure + n instead
     custom_aspect_ratio = FALSE
   )
-  if (!is.null(x_range) && is.numeric(x_range) && is.finite(x_range) && x_range > 0)
-    s$error_bar_width <- round(x_range * 0.015, 2)   # cap width ~1.5 % of the x span
+  # v2.12: caps as a fraction of the x range, so the look is the same whether
+  # time is in minutes or hours (x_range kept for callers; no longer needed)
+  s$error_cap_relative <- TRUE
+  s$error_bar_width    <- 1.5
+  s$error_bar_color    <- "sample"
   s
 }
 
@@ -1285,6 +1289,10 @@ APP_DEFAULTS <- list(
   analysis_type = "metric_summary", analysis_metrics = c("lysis_time", "od_drop"),
   analysis_dose_metric = "lysis_time", analysis_norm_mode = "reference",
   analysis_panel_label = "b", stats_method = "welch", stats_mark = TRUE, moi_override = "",
+  # v2.12 error display
+  error_bar_color = "sample", show_replicate_points = FALSE, error_log_floor = TRUE,
+  error_cap_relative = FALSE,
+  legend_order = "alpha",
   journal_family = "nature", journal_columns = "single", journal_custom_width_mm = 89,
   journal_height_mm = 65, journal_panel_label = "",
   nb_exp_id = "", nb_experimenter = "", nb_project = "", nb_institution = "",
@@ -1546,6 +1554,10 @@ ui <- fluidPage(
                                                "None"                 = "none"),
                                    selected = "right"),
                        checkboxInput("legend_box_border", "Legend box border", TRUE),
+                       selectInput("legend_order", "Sample order (legend, panels, facets):",
+                                   choices = c("Alphabetical (legacy)" = "alpha",
+                                               "As selected / as in the file" = "selected"),
+                                   selected = "alpha"),
                        numericInput("legend_key_mm", "Legend key size (mm; 0 = auto):", 0, 0, 20, 0.5),
                        fluidRow(
                          column(6, numericInput("axis_line_pt",   "Axis / tick line (pt):", 1.07, 0.1, 4, 0.05)),
@@ -1674,13 +1686,24 @@ ui <- fluidPage(
                                                     selected = "bars"),
                                         numericInput("error_multiplier", "Error Multiplier:", 1, 0.1, 5, 0.1),
                                         checkboxInput("asymmetric_error", "Floor errors at zero", FALSE),
+                                        selectInput("error_bar_color", "Error colour:",
+                                                    choices = c("Sample colour" = "sample", "Black" = "black", "Grey" = "grey50"),
+                                                    selected = "sample"),
+                                        checkboxInput("show_replicate_points",
+                                                      "Show individual replicate values (open circles behind the mean)", FALSE),
+                                        checkboxInput("error_log_floor",
+                                                      "On a log axis, draw bars that cross zero down to the axis minimum", TRUE),
+                                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                                          "Off, such a bar is dropped silently (the old behaviour). ",
+                                          "The lower whisker is then shown as a bar reaching the axis floor."),
                                         conditionalPanel(condition = "input.error_display_mode == 'bars'",
                                                          selectInput("error_bar_style", "Bar Style:",
                                                                      choices  = c("T-shaped"     = "T",
                                                                                   "Solid lines"  = "solid",
                                                                                   "Dashed lines" = "dashed"),
                                                                      selected = "T"),
-                                                         sliderInput("error_bar_width",     "Bar Width (x data units):", 0.01, 50, 1, 0.01),
+                                                         sliderInput("error_bar_width",     "Cap width:", 0.01, 50, 1, 0.01),
+                                                         checkboxInput("error_cap_relative", "Cap width is % of the x range (same look at any time scale)", FALSE),
                                                          sliderInput("error_bar_thickness", "Bar Thickness (1 = 2.1 pt):", 0.1,  2, 0.8, 0.05),
                                                          selectInput("error_bar_position", "Position:",
                                                                      choices  = c("Middle" = "middle", "Dodge" = "dodge"),
@@ -1968,6 +1991,7 @@ ui <- fluidPage(
                                         "Specific growth rate vs time"              = "growth_rate",
                                         "Normalized OD vs time"                     = "normalized",
                                         "Replicate overlay"                         = "replicate_overlay",
+                                        "Curve landmarks (metrics drawn on the curves)" = "landmarks",
                                         "MOI dose-response"                         = "dose_response",
                                         "OD heatmap (samples \u00d7 time)"           = "heatmap"),
                             selected = "metric_summary"),
@@ -2006,6 +2030,11 @@ ui <- fluidPage(
                   p(style = "font-size:.78em;color:#777;",
                     "Every replicate curve (thin) with the mean (bold): the variance the error ",
                     "bars summarise.")),
+                conditionalPanel("input.analysis_type == 'landmarks'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "Every number in the Curve Metrics CSV, placed where it was measured: lag end, ",
+                    "\u03bcmax window centre, peak, lysis onset, half of peak, trough. Use it to check ",
+                    "the metrics (and the smoothing windows) before you report them.")),
                 conditionalPanel("input.analysis_type == 'heatmap'",
                   p(style = "font-size:.78em;color:#777;",
                     "Mean OD per sample and time point; for screens with many samples."))
@@ -3059,12 +3088,22 @@ server <- function(input, output, session) {
            waiver())
   }
   
+  # v2.12: one sample order for every figure. "alpha" is ggplot2's default
+  # factor order (what the main figure always did); "selected" keeps the
+  # selection / file order so the control comes first and every panel agrees.
+  sample_levels <- function(samples) {
+    if (identical(input$legend_order, "selected")) samples else sort(samples)
+  }
+  
   # ── Core plot builder ────────────────────────────────────────────────────────
   # highlight_samples: if non-NULL, all other samples are greyed out (not removed)
   build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL) {
     shapes     <- aes_vals$shapes;     colors     <- aes_vals$colors
     line_types <- aes_vals$line_types; leg_labels <- aes_vals$leg_labels
     filled_map <- aes_vals$filled_map; n_vars     <- length(samples)
+    
+    if (identical(input$legend_order, "selected"))
+      plot_data$variable <- factor(as.character(plot_data$variable), levels = samples)
     
     # Grey out non-highlighted samples while keeping axis scale stable
     display_colors <- colors
@@ -3130,8 +3169,18 @@ server <- function(input, output, session) {
       # zero-height bar for a single replicate.
       err_vals <- plot_data[[ec]]
 
-      lo_val <- if (input$y_scale_type == "log")
-        pmax(plot_data$mean_value - err_vals * em, 1e-9)
+      # v2.12: on a log axis a lower bound <= 0 cannot be drawn. The old code
+      # clamped it to 1e-9, which the scale limits then censored, so the whole
+      # bar vanished silently. Now (default) it is floored at the axis minimum,
+      # so the bar visibly runs to the floor.
+      lo_val <- if (input$y_scale_type == "log") {
+        if (isTRUE(input$error_log_floor %||% TRUE)) {
+          y_floor <- if (isTRUE(input$custom_y_limits)) input$y_min
+                     else if (isTRUE(input$use_advanced_ticks)) 10^(input$y_log_min_exponent %||% -2)
+                     else min(plot_data$mean_value[plot_data$mean_value > 0], na.rm = TRUE) / 2
+          pmax(plot_data$mean_value - err_vals * em, y_floor)
+        } else pmax(plot_data$mean_value - err_vals * em, 1e-9)
+      }
       else if (isTRUE(input$asymmetric_error))
         pmax(plot_data$mean_value - err_vals * em, 0)
       else
@@ -3154,17 +3203,38 @@ server <- function(input, output, session) {
         pos <- if (!is.null(input$error_bar_position) && input$error_bar_position == "dodge")
           position_dodge(0.2) else position_identity()
         blt <- if (!is.null(input$error_bar_style) && input$error_bar_style == "dashed") "dashed" else "solid"
+        # v2.12: cap width as % of the x range, and a fixed bar colour (black /
+        # grey bars are the journal convention when the lines carry the colour)
+        cap_w <- if (isTRUE(input$error_cap_relative))
+          diff(range(plot_data$time, na.rm = TRUE)) * input$error_bar_width / 100 else input$error_bar_width
+        eb_col <- input$error_bar_color %||% "sample"
+        eb_aes <- if (eb_col == "sample") aes(x = time, ymin = err_lo, ymax = err_hi, color = variable)
+                  else aes(x = time, ymin = err_lo, ymax = err_hi, group = variable)
+        eb_fixed <- if (eb_col == "sample") list() else list(color = eb_col)
         if (!is.null(input$error_bar_style) && input$error_bar_style == "T") {
-          p <- p + geom_errorbar(data = eb_data,
-                                 aes(x = time, ymin = err_lo, ymax = err_hi, color = variable),
-                                 width = input$error_bar_width, linewidth = input$error_bar_thickness,
-                                 linetype = blt, position = pos, inherit.aes = FALSE)
+          p <- p + do.call(geom_errorbar, c(list(data = eb_data, mapping = eb_aes,
+                                 width = cap_w, linewidth = input$error_bar_thickness,
+                                 linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed))
         } else {
-          p <- p + geom_linerange(data = eb_data,
-                                  aes(x = time, ymin = err_lo, ymax = err_hi, color = variable),
+          p <- p + do.call(geom_linerange, c(list(data = eb_data, mapping = eb_aes,
                                   linewidth = input$error_bar_thickness,
-                                  linetype = blt, position = pos, inherit.aes = FALSE)
+                                  linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed))
         }
+      }
+    }
+    
+    # v2.12: individual replicate values behind the mean (mean +/- error with
+    # the raw observations is what reviewers ask for at n = 3)
+    if (isTRUE(input$show_replicate_points)) {
+      rp <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
+      if (!is.null(rp) && nrow(rp) > 0) {
+        if (input$y_scale_type == "log") rp <- rp[rp$value > 0, , drop = FALSE]
+        jit <- diff(range(plot_data$time, na.rm = TRUE)) * 0.006
+        p <- p + geom_point(data = rp, aes(x = time, y = value, color = variable),
+                            shape = 1, size = input$shape_size * 0.5, alpha = 0.55,
+                            stroke = max(0.2, input$point_stroke * 0.8),
+                            position = position_jitter(width = jit, height = 0, seed = 1),
+                            inherit.aes = FALSE, show.legend = FALSE)
       }
     }
     
@@ -3598,6 +3668,7 @@ server <- function(input, output, session) {
                    " indicate ", if (is.numeric(mult) && mult != 1) paste0(mult, " × ") else "", err,
                    if (any(pd$n < 2, na.rm = TRUE)) " (omitted where n = 1)" else "") else "")
     s3 <- paste0(sub("\\.$", "", s3), ".")   # "s.e.m." already ends with a period
+    if (isTRUE(input$show_replicate_points)) s3 <- paste(s3, "Open circles show the individual replicate values.")
     s4 <- if (identical(input$y_scale_type, "log")) "The y axis is log10-scaled." else NULL
     blank <- input$blank_od %||% 0
     s5 <- if (is.numeric(blank) && is.finite(blank) && blank != 0)
@@ -3623,9 +3694,25 @@ server <- function(input, output, session) {
                              method     = input$stats_method %||% "welch")
   }
   
+  # The analysis figures show the SAME error measure as the main figure
+  # (Error Bars panel): SD, SEM or 95% CI of the per-replicate values; none
+  # draws no whiskers. Returns a function(values) -> half-width.
+  error_half_width <- function() {
+    et <- input$error_type %||% "sem"; em <- input$error_multiplier %||% 1
+    function(v) {
+      v <- v[is.finite(v)]; n <- length(v)
+      if (et == "none" || n < 2) return(NA_real_)
+      s <- sd(v)
+      em * switch(et, sd = s, sem = s / sqrt(n), ci95 = qt(0.975, df = n - 1) * s / sqrt(n), s)
+    }
+  }
+  
   # One builder for every analysis figure. Each returns a ggplot that then gets
   # figure_theme_layers(), so it matches the main figure exactly.
   build_analysis_plot <- function(type) {
+    dose_no_legend <- FALSE
+    ehw    <- error_half_width()
+    eb_col <- input$error_bar_color %||% "sample"
     samps  <- input$selected_samples
     aes_v  <- resolve_aesthetics(samps)
     cols   <- setNames(aes_v$colors, samps); labs_v <- aes_v$leg_labels
@@ -3650,20 +3737,25 @@ server <- function(input, output, session) {
         if (nrow(long) == 0) stop("The selected metrics are NA for every replicate (a relative metric needs a reference sample).")
         long$metric <- factor(long$metric, levels = mets,
                               labels = vapply(mets, metric_axis_label, "", tunit = tunit, ylab = input$y_axis_label %||% "OD"))
-        long$sample <- factor(long$sample, levels = samps, labels = unname(labs_v[samps]))
+        long$sample <- factor(long$sample, levels = sample_levels(samps), labels = unname(labs_v[sample_levels(samps)]))
         x_guide <- if (as.numeric(input$axis_text_angle %||% "0") == 0 && max(nchar(levels(long$sample))) > 6)
           guide_axis(n.dodge = 2) else waiver()   # long sample names: two staggered rows
         summ <- long %>% group_by(metric, sample) %>%
-          summarise(mean = mean(value), sd = if (n() >= 2) sd(value) else NA_real_, n = n(), .groups = "drop")
-        g <- ggplot(long, aes(x = sample, y = value)) +
-          geom_errorbar(data = summ, aes(x = sample, ymin = mean - sd, ymax = mean + sd, color = sample),
-                        width = 0.3, linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE) +
+          summarise(mean = mean(value), sd = ehw(value), n = n(), .groups = "drop")
+        g <- ggplot(long, aes(x = sample, y = value))
+        if (eb_col == "sample")
+          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = mean - sd, ymax = mean + sd, color = sample),
+                                 width = 0.3, linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)
+        else
+          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = mean - sd, ymax = mean + sd),
+                                 color = eb_col, width = 0.3, linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)
+        g <- g +
           geom_crossbar(data = summ, aes(x = sample, y = mean, ymin = mean, ymax = mean, color = sample),
                         width = 0.5, linewidth = pt2lw(0.75), inherit.aes = FALSE) +
           geom_point(aes(color = sample), shape = 21, fill = "white", size = ptsz * 0.6,
                      stroke = pt2lw(0.5), position = position_jitter(width = 0.12, height = 0, seed = 1)) +
           facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 22)) +
-          scale_color_manual(values = setNames(unname(cols[samps]), unname(labs_v[samps])), guide = "none") +
+          scale_color_manual(values = setNames(unname(cols), unname(labs_v[names(cols)])), guide = "none") +
           scale_x_discrete(guide = x_guide) +
           scale_y_continuous(expand = expansion(mult = c(0.08, 0.18))) +   # headroom for marks
           labs(x = NULL, y = NULL)
@@ -3689,7 +3781,12 @@ server <- function(input, output, session) {
       growth_rate = {
         gr <- compute_growth_rate_curves(prepare_replicate_data(), window = input$metrics_smooth_window %||% 5)
         if (is.null(gr)) stop("Growth rate needs at least 3 positive OD points per curve.")
-        gr$variable <- factor(gr$variable, levels = samps)
+        gr$variable <- factor(gr$variable, levels = sample_levels(samps))
+        # band = the main figure's error measure (compute_growth_rate_curves gives SD and n)
+        et <- input$error_type %||% "sem"; em <- input$error_multiplier %||% 1
+        gr$mu_sd <- if (et == "none") NA_real_ else em * switch(et,
+          sd = gr$mu_sd, sem = gr$mu_sd / sqrt(gr$n),
+          ci95 = qt(0.975, df = pmax(gr$n - 1, 1)) * gr$mu_sd / sqrt(gr$n), gr$mu_sd)
         g <- ggplot(gr, aes(x = time, y = mu_mean, color = variable, linetype = variable, group = variable)) +
           geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed")
         if (any(is.finite(gr$mu_sd)))
@@ -3704,7 +3801,7 @@ server <- function(input, output, session) {
         nd   <- compute_normalized_curves(prepare_plot_data(), ref, mode)
         if (is.null(nd)) stop(if (mode == "reference")
           "Pick the uninfected reference sample under Stats & Reports first." else "No data.")
-        nd$variable <- factor(nd$variable, levels = samps)
+        nd$variable <- factor(nd$variable, levels = sample_levels(samps))
         ref_lab <- if (mode == "reference") unname(labs_v[ref]) else "t = 0"
         ggplot(nd, aes(x = time, y = ratio, color = variable, linetype = variable,
                        shape = variable, group = variable)) +
@@ -3715,7 +3812,7 @@ server <- function(input, output, session) {
       },
       replicate_overlay = {
         rp <- prepare_replicate_data(); pd <- prepare_plot_data()
-        rp$variable <- factor(rp$variable, levels = samps); pd$variable <- factor(pd$variable, levels = samps)
+        rp$variable <- factor(rp$variable, levels = sample_levels(samps)); pd$variable <- factor(pd$variable, levels = sample_levels(samps))
         rp$curve <- interaction(rp$variable, rp$replicate)
         g <- ggplot() +
           geom_line(data = rp, aes(x = time, y = value, color = variable, group = curve),
@@ -3736,8 +3833,9 @@ server <- function(input, output, session) {
         names(d)[4] <- "value"
         if (nrow(d) == 0) stop("No sample has a positive MOI for this metric. Put the MOI in the sample name ('Phage MOI 10') or in the MOI box as 'sample = MOI'.")
         summ <- d %>% group_by(sample, moi) %>%
-          summarise(mean = mean(value), sd = if (n() >= 2) sd(value) else NA_real_, .groups = "drop")
-        d$sample <- factor(d$sample, levels = samps); summ$sample <- factor(summ$sample, levels = samps)
+          summarise(mean = mean(value), sd = ehw(value), .groups = "drop")
+        d$sample <- factor(d$sample, levels = sample_levels(samps)); summ$sample <- factor(summ$sample, levels = sample_levels(samps))
+        dose_no_legend <- all(grepl("MOI", unname(labs_v[unique(as.character(d$sample))]), ignore.case = TRUE))
         ggplot(summ, aes(x = moi, y = mean)) +
           geom_line(color = "grey40", linewidth = pt2lw(0.5)) +
           geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, color = sample),
@@ -3749,9 +3847,54 @@ server <- function(input, output, session) {
           scale_x_log10() +
           labs(x = "MOI", y = metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD"))
       },
+      landmarks = {
+        # The computed metrics drawn where they come from on each mean curve:
+        # lag end, the mu_max window centre, peak, lysis onset, half of peak,
+        # trough. Makes every number in the Curve Metrics CSV auditable by eye.
+        pd <- prepare_plot_data(); m <- curve_metrics_current()
+        if (is.null(m) || nrow(m) == 0) stop("No metrics available.")
+        win <- input$metrics_smooth_window %||% 5
+        lm_df <- do.call(rbind, lapply(seq_len(nrow(m)), function(i) {
+          s <- m$sample[i]; g <- pd[pd$variable == s, , drop = FALSE]; g <- g[order(g$time), ]
+          od_at <- function(t) if (is.finite(t) && nrow(g)) g$mean_value[which.min(abs(g$time - t))] else NA_real_
+          # mu_max window centre: same rolling regression as the metric
+          t_mu <- NA_real_
+          if (nrow(g) >= max(3, min(win, nrow(g)))) {
+            pos <- g$mean_value > 0; lo <- rep(NA_real_, nrow(g)); lo[pos] <- log(g$mean_value[pos])
+            sl  <- tryCatch(rolling_slope(g$time, lo, min(win, nrow(g))), error = function(e) NULL)
+            if (!is.null(sl) && any(is.finite(sl) & sl > 1e-10)) t_mu <- g$time[which.max(ifelse(is.finite(sl), sl, -Inf))]
+          }
+          pk <- which.max(g$mean_value)
+          t_trough <- if (pk < nrow(g)) g$time[pk + which.min(g$mean_value[(pk + 1):nrow(g)])] else NA_real_
+          data.frame(variable = s,
+                     landmark = c("Lag end", "\u03bcmax", "Peak", "Lysis onset", "Half of peak", "Trough"),
+                     time = c(m$lag_phase[i], t_mu, m$time_max_od[i], m$lysis_time[i], m$t_half_max_decline[i], t_trough),
+                     od   = c(od_at(m$lag_phase[i]), od_at(t_mu), m$max_od[i], od_at(m$lysis_time[i]),
+                              if (is.finite(m$t_half_max_decline[i])) m$max_od[i] / 2 else NA_real_, od_at(t_trough)),
+                     stringsAsFactors = FALSE)
+        }))
+        lm_df <- lm_df[is.finite(lm_df$time) & is.finite(lm_df$od), , drop = FALSE]
+        lm_df$landmark <- factor(lm_df$landmark, levels = c("Lag end", "\u03bcmax", "Peak", "Lysis onset", "Half of peak", "Trough"))
+        lm_df$variable <- factor(lm_df$variable, levels = sample_levels(samps)); pd$variable <- factor(pd$variable, levels = sample_levels(samps))
+        if (identical(input$y_scale_type, "log")) lm_df <- lm_df[lm_df$od > 0, , drop = FALSE]
+        g <- ggplot() +
+          geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable, group = variable),
+                    linewidth = lw) +
+          geom_point(data = lm_df, aes(x = time, y = od, shape = landmark, fill = variable, color = variable),
+                    size = ptsz * 1.1, stroke = pt2lw(0.6)) +
+          base_scales +
+          scale_shape_manual(values = c("Lag end" = 1, "\u03bcmax" = 2, "Peak" = 16, "Lysis onset" = 25,
+                                        "Half of peak" = 4, "Trough" = 15),
+                             name = NULL, drop = TRUE) +
+          guides(fill = "none", color = guide_legend(order = 1, override.aes = list(shape = NA)),
+                 linetype = guide_legend(order = 1),
+                 shape = guide_legend(order = 2, override.aes = list(color = "black", fill = "grey60"))) +
+          labs(x = input$x_axis_label, y = input$y_axis_label)
+        if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels()) else g
+      },
       heatmap = {
         pd <- prepare_plot_data()
-        pd$variable <- factor(pd$variable, levels = rev(samps), labels = rev(unname(labs_v[samps])))
+        pd$variable <- factor(pd$variable, levels = rev(sample_levels(samps)), labels = rev(unname(labs_v[sample_levels(samps)])))
         logit <- identical(input$y_scale_type, "log")
         pd$fillv <- if (logit) log10(pmax(pd$mean_value, 1e-6)) else pd$mean_value
         ggplot(pd, aes(x = time, y = variable, fill = fillv)) + geom_tile() +
@@ -3765,8 +3908,10 @@ server <- function(input, output, session) {
                      strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
                      strip.background = element_blank())
     if (type == "heatmap")        p <- p + theme(legend.position = "right")
-    if (type == "dose_response" && all(grepl("MOI", unname(labs_v[samps]), ignore.case = TRUE)))
+    if (type == "dose_response" && isTRUE(dose_no_legend))
       p <- p + theme(legend.position = "none")   # x axis already says it; the key would hide points
+    if (type == "landmarks")   # nine legend entries: outside, never over the curves
+      p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
     if (isTRUE(input$custom_aspect_ratio)) p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
     p + coord_cartesian(clip = "off") + labs(tag = if (nzchar(tag)) tag else NULL)
   }
