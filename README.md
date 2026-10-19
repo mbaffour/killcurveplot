@@ -251,6 +251,53 @@ Set the frames per second and GIF dimensions, then click **"Download Animated GI
 
 ---
 
+## Analysis figures and dashboard (new in v2.11)
+
+The main panel has three tabs. **Lysis curve** is the figure described above.
+
+**Analysis figures** draws the companion panels a lysis-curve paper usually
+needs, in exactly the same style (fonts, line weights, legend, colours, export
+size and journal preset) as the main figure, so they assemble in Inkscape
+without rescaling. Pick a figure, set its panel label (default `b`) and use
+**Download figure**:
+
+- **Metric summary** — one facet per chosen metric (lysis onset, OD drop,
+  μmax, AUC, infection strength, ...); open circles are individual replicates,
+  the bar is the mean, whiskers ± SD. With a reference sample set (Stats &
+  Reports) and *Mark significance* ticked, Holm-adjusted stars appear above
+  each sample.
+- **Specific growth rate vs time** — μ(t) = d ln(OD)/dt per replicate by the
+  same rolling regression as μmax, shown as mean ± SD band. Lysis is a
+  negative rate, so onset and lysis rate are visible rather than inferred.
+- **Normalized OD vs time** — each mean curve divided by the uninfected
+  reference at every time point (the infection-strength metric drawn out), or
+  by its own t = 0 value.
+- **Replicate overlay** — every replicate curve (thin) with the mean (bold):
+  the variance the error bars summarise, which reviewers ask to see at n = 3.
+- **MOI dose-response** — a metric against log10 MOI, with replicates and
+  mean ± SD. MOI is read from names like `Phage MOI 10`, or typed as
+  `sample = MOI` lines in the box.
+- **OD heatmap** — samples × time, for screens with many samples.
+
+Below the figure, **Replicate statistics** compares the tested metric between
+samples on the per-replicate values: Welch's t-test (or Mann-Whitney) for each
+sample vs the reference (all pairs when no reference is set), Holm-adjusted
+p, Hedges' g and the 95% CI of the difference; one-way ANOVA with Tukey HSD
+(or Kruskal-Wallis) when there are three or more samples. Groups with fewer
+than two values are excluded, and any n < 3 is flagged: three biological
+replicates give little power, so a non-significant result is not evidence of
+no difference. **Download statistics (CSV)** saves the tables with the metric,
+method and reference recorded.
+
+**Dashboard** shows the loaded experiment at a glance while you work: sample,
+replicate and time-point counts, the error measure and reference, the current
+figure size and font; key metrics per sample (± SD across replicates); the
+lysis curve, growth rate, normalized OD (or replicate overlay) and metric
+summary as small multiples; the statistics; and the Experiment Notebook
+fields you have filled in.
+
+---
+
 ## Stats & Reports (new in v2.8)
 
 Expand the **Stats & Reports** section in the sidebar. Everything here reflects the *current* sample selection and time filtering — exactly what the plot shows.

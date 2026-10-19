@@ -1084,6 +1084,9 @@ compare_replicate_metric <- function(rm, metric, ref_sample = NULL,
                stringsAsFactors = FALSE)
   })
   pw <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  if (any(is.na(pw$p)))   # t.test() refuses constant data (e.g. identical lysis onsets at a coarse sampling interval)
+    warns <- c(warns, paste0("No test possible (values constant within both groups): ",
+                             paste(paste(pw$sample[is.na(pw$p)], "vs", pw$versus[is.na(pw$p)]), collapse = "; "), "."))
   pw$p_adj_holm <- p.adjust(pw$p, method = "holm")
   pw$stars      <- sig_stars(pw$p_adj_holm)
   om <- NULL; ph <- NULL
@@ -3532,7 +3535,7 @@ server <- function(input, output, session) {
                         width = 0.5, linewidth = pt2lw(0.75), inherit.aes = FALSE) +
           geom_point(aes(color = sample), shape = 21, fill = "white", size = ptsz * 0.6,
                      stroke = pt2lw(0.5), position = position_jitter(width = 0.12, height = 0, seed = 1)) +
-          facet_wrap(~ metric, scales = "free_y") +
+          facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 22)) +
           scale_color_manual(values = setNames(unname(cols[samps]), unname(labs_v[samps])), guide = "none") +
           scale_x_discrete(guide = x_guide) +
           scale_y_continuous(expand = expansion(mult = c(0.08, 0.18))) +   # headroom for marks
@@ -3754,12 +3757,21 @@ server <- function(input, output, session) {
     out
   }, striped = TRUE, spacing = "xs")
   
+  # Dashboard panels are a working view, not an export: they keep the user's
+  # colours, line weights and legend placement but use fixed screen-sized text,
+  # so they read the same whether the figure is set to 20 pt or to 6 pt.
+  dash_theme <- theme(
+    text         = element_text(size = 10),  plot.title   = element_text(size = 11),
+    axis.title   = element_text(size = 10),  axis.text    = element_text(size = 8),
+    legend.text  = element_text(size = 8),   legend.title = element_text(size = 8),
+    strip.text   = element_text(size = 9),   plot.tag     = element_blank(),
+    legend.key.size = unit(4, "mm"))
   dash_plot <- function(fun) renderPlot({
     req(rv$data, input$selected_samples)
     p <- tryCatch(fun(), error = function(e) NULL)
     if (is.null(p)) { plot.new(); return(invisible(NULL)) }
-    print(p + labs(tag = NULL))
-  }, res = 110, bg = "white")
+    print(p + labs(tag = NULL, caption = NULL) + dash_theme)
+  }, res = 96, bg = "white")
   output$dash_fig_main    <- dash_plot(function() generate_plot())
   output$dash_fig_rate    <- dash_plot(function() generate_analysis_plot("growth_rate"))
   output$dash_fig_norm    <- dash_plot(function()
