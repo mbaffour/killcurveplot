@@ -1,5 +1,30 @@
-# Lysis Curve OD Visualization App  v2.8
+# Lysis Curve OD Visualization App  v2.10
 # Michael Baffour Awuah / Ramsey Lab
+#
+# v2.10 -- Journal-standard figure export (see docs/FIGURE_STANDARDS.md):
+#   JOURNAL PRESET     -- One-click "Apply journal preset": sets the figure to a
+#                         real column width (Nature 89/120/183 mm, Cell 85/114/174,
+#                         ASM 84/175, PLOS 132, Science 55/120/183, or custom mm),
+#                         Arial 6-8 pt text, 0.5-0.75 pt lines, Okabe-Ito colours,
+#                         legend inside the panel, bold 8 pt panel label (a, b...).
+#                         Opt-in: default output is unchanged.
+#   EXPORT DEVICES     -- PDF now embeds fonts (quartz on macOS, cairo elsewhere;
+#                         grDevices::pdf never embedded and crashed on "Arial").
+#                         SVG is written with svglite(fix_text_size = FALSE) so
+#                         text stays freely editable in Inkscape (no textLength).
+#                         PNG/TIFF/JPEG use ragg when installed; TIFF keeps LZW.
+#   MM UNITS + WYSIWYG -- Export size can be given in mm; "True export size"
+#                         preview renders the on-screen plot at the exact
+#                         physical size (x zoom) so what you see is what
+#                         Inkscape opens.
+#   FIGURE LEGEND TEXT -- Auto-drafted legend paragraph (measure, n, error type,
+#                         MOI/host/phage/medium from the notebook) to paste into
+#                         the manuscript, so the artwork itself stays clean.
+#   LAYOUT INPUTS      -- Legend position (incl. inside corners), legend border,
+#                         legend key size, axis/tick line width (pt), tick length
+#                         (mm), panel label + size, explicit Arial/Helvetica fonts.
+#   PALETTE WARNING    -- Colorblind/Publication palettes warn when > 8 samples
+#                         are loaded (colours would repeat).
 #
 # v2.8 -- Accuracy fixes + stats/reporting features:
 #   REPLICATE FIX      -- CRITICAL: wide-format files with replicate columns
@@ -102,11 +127,12 @@ has_rvg       <- requireNamespace("rvg",       quietly = TRUE)
 has_gifski    <- requireNamespace("gifski",    quietly = TRUE)
 has_base64enc <- requireNamespace("base64enc", quietly = TRUE)
 has_gridExtra <- requireNamespace("gridExtra", quietly = TRUE)
+has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.9.0"
+APP_VERSION <- "2.10.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -747,6 +773,152 @@ make_demo_data <- function() {
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
+# ── v2.10: figure-standard helpers ───────────────────────────────────────────
+# ggplot2 `linewidth` is not in pt: stroke(pt) = linewidth * .pt * 0.75
+# (2.134 pt per unit, measured against svglite output). Journals specify line
+# weights in pt, so the new UI controls take pt and convert here.
+pt2lw <- function(pt) pt / (ggplot2::.pt * 0.75)
+lw2pt <- function(lw) lw * ggplot2::.pt * 0.75
+
+# Column widths in mm. Nature values are from its official figure guide; the
+# others are the journals' author instructions as quoted by secondary sources
+# (docs/FIGURE_STANDARDS.md lists them) -- confirm on the journal page before
+# submission. max_h = maximum figure height the journal allows (mm).
+JOURNAL_PRESETS <- list(
+  nature  = list(label = "Nature family (89 / 120 / 183 mm)",      single = 89,  onehalf = 120, double = 183, max_h = 170),
+  cell    = list(label = "Cell Press (85 / 114 / 174 mm)",         single = 85,  onehalf = 114, double = 174, max_h = 230),
+  asm     = list(label = "ASM journals (84 / 175 mm; <= 7 x 9 in)", single = 84, onehalf = NA,  double = 175, max_h = 228),
+  plos    = list(label = "PLOS (text column 132 mm; max 190 mm)",  single = 132, onehalf = NA,  double = 190, max_h = 225),
+  science = list(label = "Science (55 / 120 / 183 mm)",            single = 55,  onehalf = 120, double = 183, max_h = 230),
+  custom  = list(label = "Custom width (mm)",                      single = NA,  onehalf = NA,  double = NA,  max_h = NA)
+)
+PANEL_GUTTER_MM <- 5   # gap assumed between two side-by-side panels
+
+journal_width_mm <- function(family, columns, custom_mm = 89) {
+  family <- family %||% "nature"
+  jp     <- JOURNAL_PRESETS[[family]]
+  if (is.null(jp) || identical(family, "custom")) return(custom_mm)
+  switch(columns %||% "single",
+         single      = jp$single,
+         onehalf     = jp$onehalf,
+         double      = jp$double,
+         half_double = (jp$double - PANEL_GUTTER_MM) / 2,
+         jp$single)
+}
+
+# Everything a journal preset pushes into the UI. Each is an ordinary input
+# afterwards, so Save Settings captures it and the user can still adjust it.
+# Text 6-8 pt (Nature: 5-7 pt max, Cell: 6-8 pt), data lines 0.75 pt, axes and
+# error bars 0.5 pt (Nature: 0.25-1 pt), Okabe-Ito palette (Nature's own
+# recommendation), legend inside the panel, SVG for Inkscape, 600 dpi rasters.
+journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_range = NULL) {
+  s <- list(
+    export_units = "mm", export_width = width_mm, export_height = height_mm,
+    export_format = "svg", export_dpi = 600,
+    preview_mode = "wysiwyg", preview_zoom = 2,
+    font_family = "Arial",
+    title_font_size = 8, axis_label_font_size = 7, axis_text_font_size = 6,
+    legend_font_size = 6, label_font_size = 6,
+    bold_title = FALSE, italic_axis_labels = FALSE,
+    line_thickness = 0.35,        # 0.75 pt data lines
+    shape_size = 1.2, point_stroke = 0.25,
+    error_bar_thickness = 0.25,   # ~0.5 pt error bars
+    axis_line_pt = 0.5, tick_length_mm = 1.2,
+    theme_base_pt = 7, y_tick_label_style = "trim",
+    legend_position = "inside-top-left", legend_box_border = FALSE, legend_key_mm = 4,
+    panel_label = panel_label, panel_label_size = 8,
+    color_palette = "colorblind",
+    show_major_gridlines = FALSE, show_minor_gridlines = FALSE,
+    show_error_caption = FALSE,   # the Figure Legend Text box carries measure + n instead
+    custom_aspect_ratio = FALSE
+  )
+  if (!is.null(x_range) && is.numeric(x_range) && is.finite(x_range) && x_range > 0)
+    s$error_bar_width <- round(x_range * 0.015, 2)   # cap width ~1.5 % of the x span
+  s
+}
+
+# ── v2.10: export devices ────────────────────────────────────────────────────
+# One resolver so every export path agrees on which device writes a format.
+#  pdf  : journals want fonts EMBEDDED. grDevices::pdf() never embeds (it only
+#         names the base-14 Helvetica) and errors on families such as "Arial"
+#         that are not in its PostScript font database. macOS: quartz(type =
+#         "pdf") embeds any installed font; elsewhere cairo_pdf; last resort pdf.
+#  svg  : svglite with fix_text_size = FALSE. The default adds textLength= to
+#         every <text>, which makes Inkscape stretch/squash glyphs the moment a
+#         label is edited. Without it, text reflows naturally.
+#  png/tiff/jpeg : ragg when installed (crisper text, consistent font lookup).
+quartz_pdf_device <- function(filename, width, height, bg = "white", pointsize = 12, ...) {
+  grDevices::quartz(type = "pdf", file = filename, width = width, height = height,
+                    bg = bg, pointsize = pointsize)
+}
+svglite_inkscape_device <- function(filename, width, height, bg = "white", ...) {
+  svglite::svglite(filename, width = width, height = height, bg = bg, fix_text_size = FALSE)
+}
+export_device <- function(format) {
+  switch(format,
+         pdf  = if (isTRUE(capabilities("aqua"))) quartz_pdf_device
+                else if (isTRUE(capabilities("cairo"))) grDevices::cairo_pdf else "pdf",
+         svg  = svglite_inkscape_device,
+         png  = if (has_ragg) ragg::agg_png  else "png",
+         tiff = if (has_ragg) ragg::agg_tiff else "tiff",
+         jpeg = if (has_ragg) ragg::agg_jpeg else "jpeg",
+         format)
+}
+
+# ── App defaults (v2.10: single source of truth) ─────────────────────────────
+# Used by Clear/Reset Settings and by the test suites to seed a server session
+# with the same values the UI widgets start with.
+APP_DEFAULTS <- list(
+  x_scale_type          = "linear",  y_scale_type           = "log",
+  use_advanced_ticks    = TRUE,       y_log_min_exponent     = -2,
+  y_log_max_exponent    = 0,          custom_x_limits        = FALSE,
+  custom_y_limits       = FALSE,      x_expand_left          = 0,
+  x_expand_right        = 0.05,       y_expand_bottom        = 0,
+  y_expand_top          = 0.05,       x_axis_label           = "Time (minutes)",
+  y_axis_label          = "A550",     plot_title             = "",
+  plot_subtitle         = "",         show_major_gridlines   = FALSE,
+  show_minor_gridlines  = FALSE,      font_family            = "sans",
+  title_font_size       = 20,         axis_label_font_size   = 20,
+  axis_text_font_size   = 16,         bold_title             = TRUE,
+  italic_axis_labels    = FALSE,      axis_text_angle        = "0",
+  enable_highlighting   = FALSE,      enable_time_markers    = FALSE,
+  color_palette         = "custom",   line_thickness         = 1,
+  show_points           = TRUE,       shape_size             = 3,
+  point_stroke          = 0.5,        show_end_labels        = FALSE,
+  label_font_size       = 12,         label_bold             = TRUE,
+  label_offset          = 3.5,        error_type             = "sem",
+  error_display_mode    = "bars",     error_multiplier       = 1,
+  asymmetric_error      = FALSE,      error_bar_style        = "T",
+  error_bar_width       = 1,          error_bar_thickness    = 0.8,
+  error_bar_position    = "middle",   shadow_alpha           = 0.2,
+  show_error_caption    = TRUE,       # KC-6: default figure states the error measure + n
+  custom_aspect_ratio   = FALSE,      aspect_ratio           = 1,
+  export_format         = "pdf",      export_width           = 10,
+  export_height         = 8,          export_dpi             = 300,
+  plot_width            = 820,        plot_height            = 600,
+  gif_fps               = 1,          gif_width              = 800,
+  gif_height            = 600,        x_extra_ticks          = "",
+  report_title          = "Lysis Curve Analysis Report",
+  report_author         = "",         report_notes           = "",
+  metrics_smooth_window = 5,          legend_font_size       = 14,
+  metrics_peak_smooth_window = 1,     # KC-3: off by default
+  blank_od               = 0,         # KC-7: off by default
+  report_font_size      = 14,
+  # v2.10 journal-figure inputs
+  export_units = "in", preview_mode = "canvas", preview_zoom = 2,
+  axis_line_pt = 1.07, tick_length_mm = 1.5, legend_position = "right",
+  legend_box_border = TRUE, legend_key_mm = 0, panel_label = "", panel_label_size = 8,
+  theme_base_pt = 0, y_tick_label_style = "legacy",
+  journal_family = "nature", journal_columns = "single", journal_custom_width_mm = 89,
+  journal_height_mm = 65, journal_panel_label = "",
+  nb_exp_id = "", nb_experimenter = "", nb_project = "", nb_institution = "",
+  nb_exp_type = "Phage Infection", nb_host_strain = "", nb_phage_plasmid = "",
+  nb_moi = "", nb_replicate = "", nb_media = "", nb_temperature = "",
+  nb_time_inf = "", nb_inducer = "", nb_observations = "", nb_issues = "",
+  nb_next_steps = "", nb_tags = "",
+  nb_custom_key1 = "", nb_custom_val1 = "", nb_custom_key2 = "", nb_custom_val2 = "",
+  nb_custom_key3 = "", nb_custom_val3 = ""
+)
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
@@ -811,6 +983,7 @@ ui <- fluidPage(
         border:1px solid #ccc; border-radius:4px; flex-shrink:0;
       }
       .settings-status { padding:8px 12px; border-radius:4px; font-size:.85em; margin-top:6px; }
+      #figure_legend_text { white-space: pre-wrap; font-size: .82em; line-height: 1.35; }
       .settings-status.ok   { background:#d4edda; color:#155724; border:1px solid #c3e6cb; }
       .settings-status.warn { background:#fff3cd; color:#856404; border:1px solid #ffeeba; }
       .match-list { margin:4px 0 0 0; padding-left:16px; }
@@ -952,6 +1125,8 @@ ui <- fluidPage(
                        h5("Font Settings", style = "margin-top:12px;"),
                        selectInput("font_family", "Font Family:",
                                    choices  = c("Sans Serif (Arial/Helvetica)" = "sans",
+                                                "Arial"                        = "Arial",
+                                                "Helvetica"                    = "Helvetica",
                                                 "Serif (Times New Roman)"      = "serif",
                                                 "Monospace (Courier New)"      = "mono",
                                                 "Helvetica Neue"               = "Helvetica Neue",
@@ -969,6 +1144,44 @@ ui <- fluidPage(
                                                 "Angled (45\u00b0)"    = "45",
                                                 "Vertical (90\u00b0)"  = "90"),
                                    selected = "0")
+                   ),
+                   div(class = "panel-section",
+                       h4("Figure Layout", class = "panel-title"),
+                       p(style = "font-size:.8em;color:#777;margin-top:-4px;",
+                         "Line widths in pt and lengths in mm, as journals specify them. ",
+                         "Defaults reproduce the pre-v2.10 look."),
+                       selectInput("legend_position", "Legend Position:",
+                                   choices = c("Right (outside)"      = "right",
+                                               "Top (outside)"        = "top",
+                                               "Bottom (outside)"     = "bottom",
+                                               "Left (outside)"       = "left",
+                                               "Inside: top-left"     = "inside-top-left",
+                                               "Inside: top-right"    = "inside-top-right",
+                                               "Inside: bottom-left"  = "inside-bottom-left",
+                                               "Inside: bottom-right" = "inside-bottom-right",
+                                               "None"                 = "none"),
+                                   selected = "right"),
+                       checkboxInput("legend_box_border", "Legend box border", TRUE),
+                       numericInput("legend_key_mm", "Legend key size (mm; 0 = auto):", 0, 0, 20, 0.5),
+                       fluidRow(
+                         column(6, numericInput("axis_line_pt",   "Axis / tick line (pt):", 1.07, 0.1, 4, 0.05)),
+                         column(6, numericInput("tick_length_mm", "Tick length (mm):",     1.5,  0,  10, 0.1))
+                       ),
+                       fluidRow(
+                         column(6, numericInput("theme_base_pt", "Spacing base size (pt; 0 = theme default):", 0, 0, 30, 0.5)),
+                         column(6, selectInput("y_tick_label_style", "Y tick labels:",
+                                               choices = c("As is (0.10)"     = "legacy",
+                                                           "Trim zeros (0.1)" = "trim",
+                                                           "Powers of ten"    = "log10"),
+                                               selected = "legacy"))
+                       ),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Spacing base size scales margins, tick/label gaps and legend spacing; ",
+                         "set it near your text size (7 pt) for journal figures."),
+                       fluidRow(
+                         column(6, textInput("panel_label", "Panel label:", "", placeholder = "a")),
+                         column(6, numericInput("panel_label_size", "Panel label (pt):", 8, 5, 20, 0.5))
+                       )
                    )
                  ),
                  
@@ -1038,14 +1251,14 @@ ui <- fluidPage(
                    tags$summary("Line & Point Settings"),
                    div(class = "panel-section",
                        h4("Line Options", class = "panel-title"),
-                       sliderInput("line_thickness", "Line Thickness:", 0.1, 3, 1, 0.1)
+                       sliderInput("line_thickness", "Line Thickness (1 = 2.1 pt):", 0.1, 3, 1, 0.05)
                    ),
                    div(class = "panel-section",
                        h4("Point Options", class = "panel-title"),
                        checkboxInput("show_points", "Show Points", TRUE),
                        conditionalPanel(condition = "input.show_points == true",
                                         sliderInput("shape_size",   "Point Size:",   0.5, 8, 3,   0.1),
-                                        sliderInput("point_stroke", "Stroke Width:", 0,   2, 0.5, 0.1)
+                                        sliderInput("point_stroke", "Stroke Width:", 0,   2, 0.5, 0.05)
                        )
                    )
                  ),
@@ -1083,8 +1296,8 @@ ui <- fluidPage(
                                                                                   "Solid lines"  = "solid",
                                                                                   "Dashed lines" = "dashed"),
                                                                      selected = "T"),
-                                                         sliderInput("error_bar_width",     "Bar Width:",     0.01, 2, 1,   0.01),
-                                                         sliderInput("error_bar_thickness", "Bar Thickness:", 0.1,  2, 0.8, 0.1),
+                                                         sliderInput("error_bar_width",     "Bar Width (x data units):", 0.01, 50, 1, 0.01),
+                                                         sliderInput("error_bar_thickness", "Bar Thickness (1 = 2.1 pt):", 0.1,  2, 0.8, 0.05),
                                                          selectInput("error_bar_position", "Position:",
                                                                      choices  = c("Middle" = "middle", "Dodge" = "dodge"),
                                                                      selected = "middle")
@@ -1103,14 +1316,65 @@ ui <- fluidPage(
                    )
                  ),
                  
+                 # ── Journal Figure Preset (v2.10) ─────────────────────────────────────────
+                 tags$details(
+                   tags$summary("Journal Figure Preset"),
+                   div(class = "panel-section",
+                       h4("Target Journal & Width", class = "panel-title"),
+                       p(style = "font-size:.8em;color:#777;margin-top:-4px;",
+                         "Sets the export size to a real column width, text to Arial 6-8 pt, lines to ",
+                         "0.5-0.75 pt, the Okabe-Ito colour-blind-safe palette, and the legend inside the ",
+                         "panel. Everything it sets stays an ordinary control you can adjust. ",
+                         "Export as SVG, edit in Inkscape, never rescale. See docs/FIGURE_STANDARDS.md."),
+                       selectInput("journal_family", "Journal:",
+                                   choices  = setNames(names(JOURNAL_PRESETS),
+                                                       vapply(JOURNAL_PRESETS, `[[`, "", "label")),
+                                   selected = "nature"),
+                       selectInput("journal_columns", "Width:",
+                                   choices  = c("Single column"                               = "single",
+                                                "1.5 columns"                                 = "onehalf",
+                                                "Double column (full width)"                  = "double",
+                                                "Half of a double column (one panel of two)" = "half_double"),
+                                   selected = "single"),
+                       conditionalPanel(condition = "input.journal_family == 'custom'",
+                                        numericInput("journal_custom_width_mm", "Width (mm):", 89, 20, 300, 1)),
+                       numericInput("journal_height_mm", "Height (mm):", 65, 20, 250, 1),
+                       textInput("journal_panel_label", "Panel label (optional):", "", placeholder = "a"),
+                       uiOutput("journal_preset_summary"),
+                       actionButton("apply_journal_preset", "Apply journal preset",
+                                    style = "background:#2C3E50;color:white;border:none;width:100%;"),
+                       p(style = "font-size:.78em;color:#777;margin-top:6px;",
+                         "Use Save Settings afterwards to keep the result as a reusable style file.")
+                   ),
+                   div(class = "panel-section",
+                       h4("Figure Legend Text", class = "panel-title"),
+                       p(style = "font-size:.8em;color:#777;margin-top:-4px;",
+                         "Drafted from the current plot and the Experiment Notebook: measure, replicate n, ",
+                         "error type, MOI / host / phage / medium. Copy into the manuscript and edit."),
+                       verbatimTextOutput("figure_legend_text", placeholder = TRUE)
+                   )
+                 ),
+                 
                  # ── Plot Dimensions & Export ──────────────────────────────────────────────
                  tags$details(
                    tags$summary("Plot Dimensions & Export"),
                    div(class = "panel-section",
-                       h4("Canvas Size", class = "panel-title"),
-                       fluidRow(
-                         column(6, numericInput("plot_width",  "Width (px):",  820, 400, 2000)),
-                         column(6, numericInput("plot_height", "Height (px):", 600, 300, 1500))
+                       h4("On-screen Preview", class = "panel-title"),
+                       radioButtons("preview_mode", NULL,
+                                    choices  = c("Screen canvas (pixels)"                      = "canvas",
+                                                 "True export size (what Inkscape will open)" = "wysiwyg"),
+                                    selected = "canvas"),
+                       conditionalPanel(condition = "input.preview_mode == 'canvas'",
+                                        fluidRow(
+                                          column(6, numericInput("plot_width",  "Width (px):",  820, 400, 2000)),
+                                          column(6, numericInput("plot_height", "Height (px):", 600, 300, 1500))
+                                        )
+                       ),
+                       conditionalPanel(condition = "input.preview_mode == 'wysiwyg'",
+                                        sliderInput("preview_zoom", "Zoom (x physical size):", 1, 4, 2, 0.5),
+                                        p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+                                          "Rendered at the export width/height below through the same ",
+                                          "pipeline as the download; text and lines appear at their true pt size.")
                        ),
                        checkboxInput("custom_aspect_ratio", "Custom Aspect Ratio", FALSE),
                        conditionalPanel(condition = "input.custom_aspect_ratio == true",
@@ -1118,14 +1382,21 @@ ui <- fluidPage(
                        ),
                        h4("Image Export", class = "panel-title"),
                        selectInput("export_format", "Format:",
-                                   choices  = c("PDF" = "pdf", "PNG" = "png", "JPEG" = "jpeg",
-                                                "SVG" = "svg", "TIFF" = "tiff"),
+                                   choices  = c("PDF (fonts embedded)" = "pdf",
+                                                "SVG (Inkscape-ready)"  = "svg",
+                                                "PNG"                   = "png",
+                                                "TIFF (LZW)"            = "tiff",
+                                                "JPEG"                  = "jpeg"),
                                    selected = "pdf"),
+                       radioButtons("export_units", "Size units:",
+                                    choices = c("inches" = "in", "mm" = "mm"),
+                                    selected = "in", inline = TRUE),
                        fluidRow(
-                         column(6, numericInput("export_width",  "Width (in):",  10, 2, 30)),
-                         column(6, numericInput("export_height", "Height (in):", 8,  2, 20))
+                         column(6, numericInput("export_width",  "Width (in):",  10, 0.5, 400)),
+                         column(6, numericInput("export_height", "Height (in):", 8,  0.5, 400))
                        ),
-                       numericInput("export_dpi", "DPI:", 300, 72, 1200),
+                       uiOutput("export_size_note"),
+                       numericInput("export_dpi", "DPI (raster formats):", 300, 72, 1200),
                        downloadButton("downloadPlot", "Download Image"),
                        hr(),
                        h4("PowerPoint Export", class = "panel-title"),
@@ -1336,9 +1607,30 @@ server <- function(input, output, session) {
     )
   }
   
+  # v2.10: warn when the chosen font family is not installed -- every device
+  # would silently substitute another face, and the SVG would name a font the
+  # Inkscape machine may not have either.
+  observeEvent(input$font_family, {
+    fam <- input$font_family
+    if (is.null(fam) || fam %in% c("sans", "serif", "mono")) return()
+    hit <- tryCatch(basename(systemfonts::match_fonts(fam)$path), error = function(e) "")
+    if (!grepl(gsub(" ", "", fam), gsub(" ", "", hit), ignore.case = TRUE))
+      showNotification(paste0("Font '", fam, "' is not installed on this computer; exports will ",
+                              "substitute ", sub("\\.[A-Za-z]+$", "", hit), ". Install it, or choose ",
+                              "Arial / Helvetica (accepted by every journal)."),
+                       type = "warning", duration = 10)
+  }, ignoreInit = TRUE)
+  
   observeEvent(input$color_palette, {
     rv$palette_colors <- if (input$color_palette != "custom" && !is.null(rv$od_vars))
       get_palette_colors(input$color_palette, length(rv$od_vars)) else NULL
+    # v2.10: these two palettes have 8 distinct colours; beyond that they repeat.
+    if (input$color_palette %in% c("colorblind", "publication") &&
+        !is.null(rv$od_vars) && length(rv$od_vars) > 8)
+      showNotification(paste0("The '", input$color_palette, "' palette has 8 distinct colours but ",
+                              length(rv$od_vars), " samples are loaded, so colours will repeat. ",
+                              "Use Viridis, or set colours per sample."),
+                       type = "warning", duration = 10)
   })
   
   output$palette_preview <- renderUI({
@@ -1519,7 +1811,8 @@ server <- function(input, output, session) {
       
       # Inputs that belong to the data/session — never saved
       data_inputs     <- c("file", "loadSettings", "selected_samples",
-                           "time_filter_range", "exclude_timepoints")
+                           "time_filter_range", "exclude_timepoints",
+                           "apply_journal_preset")
       # Per-sample dynamic input prefixes — handled separately below
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
@@ -1593,7 +1886,8 @@ server <- function(input, output, session) {
     # ── Apply global visual settings ──────────────────────────────────────────
     # Skip anything data-specific or per-sample — only visual controls
     data_inputs     <- c("file","loadSettings","selected_samples",
-                         "time_filter_range","exclude_timepoints")
+                         "time_filter_range","exclude_timepoints",
+                         "apply_journal_preset")
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
                          "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_")
@@ -1601,6 +1895,15 @@ server <- function(input, output, session) {
     is_sample_inp <- function(nm) !(nm %in% global_exceptions) &&
       any(vapply(sample_prefixes, startsWith, logical(1), x = nm))
     
+    # v2.10: a file saved in mm must not be re-converted by the units observer;
+    # a pre-2.10 file has no export_units and its sizes are inches, so the
+    # radio is switched back to inches before the sizes arrive.
+    if (is.character(global$export_units)) {
+      rv$units_seen <- global$export_units
+    } else {
+      rv$units_seen <- "in"
+      updateRadioButtons(session, "export_units", selected = "in")
+    }
     n_global <- 0L
     for (nm in names(global)) {
       if (nm %in% data_inputs || is_sample_inp(nm)) next
@@ -1686,50 +1989,8 @@ server <- function(input, output, session) {
     }
     
     # ── Reset global visual settings to app defaults ──────────────────────────
-    defs <- list(
-      x_scale_type          = "linear",  y_scale_type           = "log",
-      use_advanced_ticks    = TRUE,       y_log_min_exponent     = -2,
-      y_log_max_exponent    = 0,          custom_x_limits        = FALSE,
-      custom_y_limits       = FALSE,      x_expand_left          = 0,
-      x_expand_right        = 0.05,       y_expand_bottom        = 0,
-      y_expand_top          = 0.05,       x_axis_label           = "Time (minutes)",
-      y_axis_label          = "A550",     plot_title             = "",
-      plot_subtitle         = "",         show_major_gridlines   = FALSE,
-      show_minor_gridlines  = FALSE,      font_family            = "sans",
-      title_font_size       = 20,         axis_label_font_size   = 20,
-      axis_text_font_size   = 16,         bold_title             = TRUE,
-      italic_axis_labels    = FALSE,      axis_text_angle        = "0",
-      enable_highlighting   = FALSE,      enable_time_markers    = FALSE,
-      color_palette         = "custom",   line_thickness         = 1,
-      show_points           = TRUE,       shape_size             = 3,
-      point_stroke          = 0.5,        show_end_labels        = FALSE,
-      label_font_size       = 12,         label_bold             = TRUE,
-      label_offset          = 3.5,        error_type             = "sem",
-      error_display_mode    = "bars",     error_multiplier       = 1,
-      asymmetric_error      = FALSE,      error_bar_style        = "T",
-      error_bar_width       = 1,          error_bar_thickness    = 0.8,
-      error_bar_position    = "middle",   shadow_alpha           = 0.2,
-      show_error_caption    = TRUE,       # KC-6: default figure states the error measure + n
-      custom_aspect_ratio   = FALSE,      aspect_ratio           = 1,
-      export_format         = "pdf",      export_width           = 10,
-      export_height         = 8,          export_dpi             = 300,
-      plot_width            = 820,        plot_height            = 600,
-      gif_fps               = 1,          gif_width              = 800,
-      gif_height            = 600,        x_extra_ticks          = "",
-      report_title          = "Lysis Curve Analysis Report",
-      report_author         = "",         report_notes           = "",
-      metrics_smooth_window = 5,          legend_font_size       = 14,
-      metrics_peak_smooth_window = 1,     # KC-3: off by default
-      blank_od               = 0,         # KC-7: off by default
-      report_font_size      = 14,
-      nb_exp_id = "", nb_experimenter = "", nb_project = "", nb_institution = "",
-      nb_exp_type = "Phage Infection", nb_host_strain = "", nb_phage_plasmid = "",
-      nb_moi = "", nb_replicate = "", nb_media = "", nb_temperature = "",
-      nb_time_inf = "", nb_inducer = "", nb_observations = "", nb_issues = "",
-      nb_next_steps = "", nb_tags = "",
-      nb_custom_key1 = "", nb_custom_val1 = "", nb_custom_key2 = "", nb_custom_val2 = "",
-      nb_custom_key3 = "", nb_custom_val3 = ""
-    )
+    defs <- APP_DEFAULTS
+    rv$units_seen <- "in"   # v2.10: see observeEvent(input$export_units)
     for (nm in names(defs)) {
       tryCatch({
         val <- defs[[nm]]
@@ -2480,15 +2741,20 @@ server <- function(input, output, session) {
     }
     
     if (input$y_scale_type == "log") {
+      # v2.10: tick-label style. "legacy" is ggplot2's default formatting (0.10).
+      y_labs <- switch(input$y_tick_label_style %||% "legacy",
+                       trim  = scales::label_number(drop0trailing = TRUE, big.mark = ""),
+                       log10 = scales::label_log(),
+                       waiver())
       if (isTRUE(input$use_advanced_ticks)) {
         minE <- input$y_log_min_exponent; maxE <- input$y_log_max_exponent
         if (is.null(y_lims)) y_lims <- c(10^minE, if (maxE >= 0) 10^(maxE+1) else 10^maxE)
         ymn <- c(rep(1:9, maxE-minE+1) * 10^rep(minE:maxE, each=9))
         if (maxE >= 0) ymn <- c(ymn, 10^(maxE+1))
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, minor_breaks = ymn,
-                               guide = guide_prism_minor())
+                               labels = y_labs, guide = guide_prism_minor())
       } else {
-        p <- p + scale_y_log10(limits = y_lims, expand = y_exp)
+        p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs)
       }
     } else if (input$y_scale_type == "sqrt") {
       p <- p + scale_y_sqrt(limits = y_lims, expand = y_exp)
@@ -2500,18 +2766,37 @@ server <- function(input, output, session) {
     
     tf      <- if (isTRUE(input$bold_title))        "bold"   else "plain"
     af      <- if (isTRUE(input$italic_axis_labels)) "italic" else "plain"
-    base_t  <- if (isTRUE(input$use_advanced_ticks)) theme_prism(border=TRUE) else theme_pubr()
+    # v2.10: theme spacing (margins, gaps) follows the theme's base_size, which
+    # defaults to 14 (prism) / 12 (pubr) and looks oversized next to 6-7 pt text.
+    # 0 keeps each theme's own default, so existing figures do not change.
+    bs      <- input$theme_base_pt %||% 0
+    base_t  <- if (isTRUE(input$use_advanced_ticks)) {
+      if (is.numeric(bs) && is.finite(bs) && bs > 0) theme_prism(border = TRUE, base_size = bs)
+      else theme_prism(border = TRUE)
+    } else {
+      if (is.numeric(bs) && is.finite(bs) && bs > 0) theme_pubr(base_size = bs) else theme_pubr()
+    }
     maj_col <- if (!is.null(input$major_gridline_color) && input$major_gridline_color == "custom")
       input$major_gridline_color_custom else input$major_gridline_color
     min_col <- if (!is.null(input$minor_gridline_color) && input$minor_gridline_color == "custom")
       input$minor_gridline_color_custom else input$minor_gridline_color
     x_ang   <- as.numeric(input$axis_text_angle)
     
+    # v2.10 figure-layout inputs. Defaults equal the previous hard-coded values
+    # (1.07 pt == linewidth 0.5; 1.5 mm == 0.15 cm; legend right, grey border).
+    axis_lw  <- pt2lw(input$axis_line_pt %||% 1.07)
+    tick_cm  <- (input$tick_length_mm %||% 1.5) / 10
+    leg_pos  <- input$legend_position %||% "right"
+    leg_bord <- if (isTRUE(input$legend_box_border %||% TRUE)) "gray80" else NA
+    leg_key  <- input$legend_key_mm %||% 0
+    pl_lab   <- trimws(input$panel_label %||% "")
+    
     p <- p + base_t + theme(
       text             = element_text(family = input$font_family),
       plot.title       = element_text(size = input$title_font_size,       face = tf, hjust = 0.5),
       plot.caption     = element_text(size = max(8, input$axis_text_font_size * 0.7),
                                       hjust = 1, color = "grey30"),
+      plot.tag         = element_text(size = input$panel_label_size %||% 8, face = "bold"),
       axis.title       = element_text(size = input$axis_label_font_size,  face = af),
       axis.text        = element_text(size = input$axis_text_font_size),
       axis.text.x      = element_text(angle = x_ang,
@@ -2521,15 +2806,32 @@ server <- function(input, output, session) {
         element_line(color = maj_col, linewidth = input$major_gridline_size) else element_blank(),
       panel.grid.minor = if (isTRUE(input$show_minor_gridlines))
         element_line(color = min_col, linewidth = input$minor_gridline_size) else element_blank(),
-      axis.ticks        = element_line(color = "black", linewidth = 0.5),
-      axis.ticks.length = unit(0.15, "cm"),
-      legend.position   = "right",
+      axis.ticks        = element_line(color = "black", linewidth = axis_lw),
+      axis.ticks.length = unit(tick_cm, "cm"),
       legend.text       = element_text(size = input$legend_font_size %||% 14),
       legend.title      = element_text(size = input$legend_font_size %||% 14),
-      legend.background = element_rect(fill = "white", color = "gray80"),
+      legend.background = element_rect(fill = "white", color = leg_bord),
       legend.key        = element_rect(fill = NA),
-      panel.border      = element_rect(color = "black", fill = NA, linewidth = 0.5)
+      panel.border      = element_rect(color = "black", fill = NA, linewidth = axis_lw)
     )
+    # Legend placement: outside positions as before; "inside-*" anchors the key
+    # just inside a panel corner (journal panels rarely spend column width on
+    # an outside key).
+    if (startsWith(leg_pos, "inside-")) {
+      just <- switch(sub("^inside-", "", leg_pos),
+                     "top-left" = c(0, 1), "top-right" = c(1, 1),
+                     "bottom-left" = c(0, 0), "bottom-right" = c(1, 0), c(1, 1))
+      pos  <- ifelse(just == 1, 0.98, 0.02)
+      p <- p + theme(legend.position = "inside",
+                     legend.position.inside = pos, legend.justification.inside = just,
+                     legend.margin = margin(2, 4, 2, 4))
+    } else {
+      p <- p + theme(legend.position = leg_pos)
+    }
+    if (!isTRUE(input$use_advanced_ticks))          # theme_pubr draws axis lines
+      p <- p + theme(axis.line = element_line(linewidth = axis_lw))
+    if (is.numeric(leg_key) && is.finite(leg_key) && leg_key > 0)
+      p <- p + theme(legend.key.size = unit(leg_key, "mm"))
     
     if (isTRUE(input$custom_aspect_ratio))
       p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
@@ -2561,9 +2863,14 @@ server <- function(input, output, session) {
     p + coord_cartesian(clip = "off") +
       labs(x        = input$x_axis_label,
            y        = input$y_axis_label,
-           title    = input$plot_title,
+           # v2.10: with journal spacing (theme_base_pt > 0) a blank title is NULL,
+           # so no empty title row (~5 mm) is reserved above the panel. Legacy
+           # spacing keeps "" so pre-2.10 figures reproduce exactly.
+           title    = if (nchar(trimws(input$plot_title %||% "")) > 0) input$plot_title
+                      else if (is.numeric(bs) && is.finite(bs) && bs > 0) NULL else "",
            subtitle = if (nchar(trimws(input$plot_subtitle)) > 0) input$plot_subtitle else NULL,
-           caption  = err_caption)
+           caption  = err_caption,
+           tag      = if (nzchar(pl_lab)) pl_lab else NULL)
   }
   
   generate_plot <- function() {
@@ -2604,10 +2911,54 @@ server <- function(input, output, session) {
     )
   }), millis = 400)
   
+  # ── Export size (v2.10): one source of truth, in inches ─────────────────────
+  # Every export path (image, reports, PPTX, true-size preview) reads this, so a
+  # journal preset given in mm cannot drift from what the reports embed.
+  export_size_in <- function() {
+    w <- input$export_width  %||% 10
+    h <- input$export_height %||% 8
+    if (identical(input$export_units, "mm")) c(w, h) / 25.4 else c(w, h)
+  }
+  
+  # Switching units converts the current numbers so the physical size is kept
+  # (10 in -> 254 mm). A preset or a settings file sets units + numbers
+  # together and pre-marks the unit it sends (rv$units_seen), so those values
+  # are not converted a second time.
+  rv$units_seen <- "in"
+  observeEvent(input$export_units, {
+    u <- input$export_units
+    if (!identical(u, rv$units_seen)) {
+      w <- isolate(input$export_width); h <- isolate(input$export_height)
+      f  <- if (identical(u, "mm")) 25.4 else 1 / 25.4
+      dg <- if (identical(u, "mm")) 1 else 3     # 89 mm -> 3.504 in -> 89.0 mm, no drift
+      if (is.numeric(w) && is.finite(w)) updateNumericInput(session, "export_width",  value = round(w * f, dg))
+      if (is.numeric(h) && is.finite(h)) updateNumericInput(session, "export_height", value = round(h * f, dg))
+      rv$units_seen <- u
+    }
+    updateNumericInput(session, "export_width",  label = paste0("Width (",  u, "):"))
+    updateNumericInput(session, "export_height", label = paste0("Height (", u, "):"))
+  }, ignoreInit = TRUE)
+  
+  output$export_size_note <- renderUI({
+    sz <- export_size_in()
+    if (!all(is.finite(sz))) return(NULL)
+    mm <- round(sz * 25.4, 1)
+    p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+      sprintf("= %s x %s mm (%s x %s in). PDF/SVG are vector; DPI applies to PNG/TIFF/JPEG.",
+              mm[1], mm[2], round(sz[1], 2), round(sz[2], 2)))
+  })
+  
   output$plot_container <- renderUI({
-    plotOutput("od_plot",
-               height = paste0(input$plot_height, "px"),
-               width  = paste0(input$plot_width,  "px"))
+    if (identical(input$preview_mode, "wysiwyg")) {
+      sz <- export_size_in(); z <- input$preview_zoom %||% 2
+      imageOutput("od_plot_img",
+                  width  = paste0(round(sz[1] * 96 * z), "px"),
+                  height = paste0(round(sz[2] * 96 * z), "px"))
+    } else {
+      plotOutput("od_plot",
+                 height = paste0(input$plot_height, "px"),
+                 width  = paste0(input$plot_width,  "px"))
+    }
   })
   
   output$od_plot <- renderPlot({
@@ -2615,19 +2966,129 @@ server <- function(input, output, session) {
     generate_plot()
   }, res = 96)
   
+  # True-size preview (v2.10): the figure goes through the same ggsave path as
+  # the download, at the export's physical size, and is shown at `zoom` x.
+  # Text and line weights therefore appear at their real size relative to the
+  # figure -- what Inkscape will open.
+  output$od_plot_img <- renderImage({
+    plot_inputs_debounced()
+    sz <- export_size_in(); z <- input$preview_zoom %||% 2
+    pr <- session$clientData$pixelratio %||% 1
+    f  <- tempfile(fileext = ".png")
+    ggsave(f, plot = generate_plot(), device = export_device("png"),
+           width = sz[1], height = sz[2], units = "in", dpi = 96 * z * pr, bg = "white")
+    list(src = f, contentType = "image/png",
+         width = round(sz[1] * 96 * z), height = round(sz[2] * 96 * z),
+         alt = "Figure preview at export size")
+  }, deleteFile = TRUE)
+  
   output$downloadPlot <- downloadHandler(
     filename = function()
       paste0("od_plot_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".", input$export_format),
     content  = function(file) {
-      args <- list(filename = file, plot = generate_plot(), device = input$export_format,
-                   width = input$export_width, height = input$export_height,
+      sz   <- export_size_in()
+      fmt  <- input$export_format
+      args <- list(filename = file, plot = generate_plot(), device = export_device(fmt),
+                   width = sz[1], height = sz[2],
                    units = "in", dpi = input$export_dpi, bg = "white")
       # Journals require lossless compression for TIFF; the arg is only valid
       # for the tiff device so it must be added conditionally.
-      if (identical(input$export_format, "tiff")) args$compression <- "lzw"
+      if (identical(fmt, "tiff")) args$compression <- "lzw"
       do.call(ggsave, args)
     }
   )
+  
+  # ── Journal preset (v2.10) ───────────────────────────────────────────────────
+  journal_target_width <- reactive({
+    journal_width_mm(input$journal_family, input$journal_columns,
+                     input$journal_custom_width_mm %||% 89)
+  })
+  
+  output$journal_preset_summary <- renderUI({
+    w  <- journal_target_width(); h <- input$journal_height_mm %||% 65
+    if (!is.numeric(w) || !is.finite(w))
+      return(p(style = "font-size:.85em;color:#856404;margin:6px 0;",
+               "This journal publishes no 1.5-column width; choose single or double."))
+    if (!is.numeric(h) || !is.finite(h)) return(NULL)
+    jp   <- JOURNAL_PRESETS[[input$journal_family %||% "nature"]]
+    warn <- if (!is.null(jp$max_h) && is.finite(jp$max_h) && h > jp$max_h)
+      sprintf(" Height exceeds this journal's maximum (%s mm).", jp$max_h) else ""
+    p(style = "font-size:.85em;margin:6px 0;",
+      strong(sprintf("Figure: %s x %s mm", round(w, 1), h)),
+      sprintf(" (%s x %s in).", round(w / 25.4, 2), round(h / 25.4, 2)),
+      if (nzchar(warn)) span(style = "color:#856404;", warn))
+  })
+  
+  observeEvent(input$apply_journal_preset, {
+    w <- journal_target_width(); h <- input$journal_height_mm %||% 65
+    if (!is.numeric(w) || !is.finite(w) || !is.numeric(h) || !is.finite(h)) return()
+    x_range <- tryCatch({
+      pd <- prepare_plot_data(); diff(range(pd$time, na.rm = TRUE))
+    }, error = function(e) NULL)
+    vals <- journal_preset_settings(w, h, input$journal_panel_label %||% "", x_range)
+    rv$units_seen <- "mm"   # see observeEvent(input$export_units)
+    for (nm in names(vals)) {
+      val <- vals[[nm]]
+      tryCatch({
+        if (is.logical(val))      updateCheckboxInput(session, nm, value = val)
+        else if (is.numeric(val)) updateNumericInput( session, nm, value = val)
+        else { updateSelectInput(session,   nm, selected = val)
+               updateRadioButtons(session, nm, selected = val)
+               updateTextInput(session,    nm, value    = val) }
+      }, error = function(e) invisible(NULL))
+    }
+    updateNumericInput(session, "export_width",  label = "Width (mm):")
+    updateNumericInput(session, "export_height", label = "Height (mm):")
+    showNotification(sprintf(paste0("Journal preset applied: %s x %s mm, Arial 6-8 pt, ",
+                                    "SVG export. Preview switched to true export size."),
+                             round(w, 1), h),
+                     type = "message", duration = 8)
+  })
+  
+  # ── Figure legend text (v2.10) ──────────────────────────────────────────────
+  # Journals put the measure, n and the error definition in the legend, not on
+  # the artwork. Drafted from the plot state + Experiment Notebook; edit freely.
+  output$figure_legend_text <- renderText({
+    if (is.null(rv$data) || is.null(input$selected_samples))
+      return("Load data and select samples to draft a legend.")
+    pd <- tryCatch(prepare_plot_data(), error = function(e) NULL)
+    if (is.null(pd) || nrow(pd) == 0) return("Load data and select samples to draft a legend.")
+    aes_v <- resolve_aesthetics(input$selected_samples)
+    nb    <- function(id) { v <- input[[id]]
+                            if (is.null(v) || !nzchar(trimws(as.character(v)))) NULL else trimws(as.character(v)) }
+    pl    <- nb("panel_label"); host <- nb("nb_host_strain"); phage <- nb("nb_phage_plasmid")
+    moi   <- nb("nb_moi");      med  <- nb("nb_media");       temp  <- nb("nb_temperature")
+    ylab  <- nb("y_axis_label") %||% "optical density"
+    s1 <- paste0(if (!is.null(pl)) paste0("(", pl, ") ") else "",
+                 "Growth and lysis of ", host %||% "the host strain",
+                 if (!is.null(phage)) paste0(" infected with ", phage) else "",
+                 if (!is.null(moi))   paste0(" (MOI ", moi, ")") else "",
+                 ", measured as ", ylab, " over time",
+                 if (!is.null(med))   paste0(" in ", med) else "",
+                 if (!is.null(temp))  paste0(" at ", temp, " °C") else "", ".")
+    s2 <- paste0("Curves: ", paste(unname(aes_v$leg_labels[input$selected_samples]), collapse = "; "), ".")
+    n_rng <- suppressWarnings(range(pd$n, na.rm = TRUE))
+    n_txt <- if (all(is.finite(n_rng)) && n_rng[1] == n_rng[2]) paste0("n = ", n_rng[1])
+             else if (all(is.finite(n_rng))) paste0("n = ", n_rng[1], "–", n_rng[2])
+             else "n not available"
+    err  <- switch(input$error_type %||% "none",
+                   sd = "s.d.", sem = "s.e.m.", ci95 = "the 95% confidence interval", NULL)
+    mult <- input$error_multiplier %||% 1
+    s3 <- paste0(if (isTRUE(input$show_points)) "Symbols and lines" else "Lines",
+                 " show the mean of ", n_txt, " replicates",
+                 if (!is.null(nb("nb_replicate"))) paste0(" (", nb("nb_replicate"), ")") else "",
+                 if (!is.null(err)) paste0(
+                   "; ", if (identical(input$error_display_mode, "shadow")) "shaded bands" else "error bars",
+                   " indicate ", if (is.numeric(mult) && mult != 1) paste0(mult, " × ") else "", err,
+                   if (any(pd$n < 2, na.rm = TRUE)) " (omitted where n = 1)" else "") else "")
+    s3 <- paste0(sub("\\.$", "", s3), ".")   # "s.e.m." already ends with a period
+    s4 <- if (identical(input$y_scale_type, "log")) "The y axis is log10-scaled." else NULL
+    blank <- input$blank_od %||% 0
+    s5 <- if (is.numeric(blank) && is.finite(blank) && blank != 0)
+      sprintf("Readings are blank-corrected (−%s).", blank) else NULL
+    s6 <- if (isTRUE(input$enable_time_filter)) "Only the displayed time window was analysed." else NULL
+    paste(c(s1, s2, s3, s4, s5, s6), collapse = " ")
+  })
 
   # ── Stats & Reports ──────────────────────────────────────────────────────────
 
@@ -2722,14 +3183,14 @@ server <- function(input, output, session) {
     settings_df <- data.frame(
       setting = c("X scale", "Y scale", "X label", "Y label", "Palette",
                   "Line thickness", "Points shown", "Point size",
-                  "Export size (in)", "Export DPI",
+                  "Export size", "Export DPI",
                   "Blank/media OD subtracted",
                   "μmax smoothing window", "Peak-detection smoothing window",
                   "Reference sample"),
       value = c(input$x_scale_type, input$y_scale_type,
                 input$x_axis_label, input$y_axis_label, input$color_palette,
                 input$line_thickness, input$show_points, input$shape_size,
-                paste0(input$export_width, " × ", input$export_height),
+                paste0(input$export_width, " × ", input$export_height, " ", input$export_units %||% "in"),
                 input$export_dpi,
                 { b <- input$blank_od %||% 0; if (is.na(b) || b == 0) "none (off)" else b },
                 input$metrics_smooth_window %||% 5,
@@ -2800,9 +3261,10 @@ server <- function(input, output, session) {
         p       <- generate_plot()
         tmp_png <- tempfile(fileext = ".png")
         on.exit(unlink(tmp_png), add = TRUE)
-        ggsave(tmp_png, plot = p, device = "png",
-               width = input$export_width, height = input$export_height,
-               units = "in", dpi = 150, bg = "white")
+        sz <- export_size_in()
+        ggsave(tmp_png, plot = p, device = export_device("png"),
+               width = sz[1], height = sz[2],
+               units = "in", dpi = if (sz[1] < 6) 300 else 150, bg = "white")
         img_b64 <- base64enc::base64encode(tmp_png)
         html <- build_html_report(report_meta(), img_b64,
                                   stats_table_export(), metrics)
@@ -2820,8 +3282,8 @@ server <- function(input, output, session) {
         metrics <- curve_metrics_current()
         build_pdf_report(file, report_meta(), generate_plot(),
                          stats_table_export(), metrics,
-                         width = max(input$export_width, 8),
-                         height = max(input$export_height, 6))
+                         width  = max(export_size_in()[1], 8),
+                         height = max(export_size_in()[2], 6))
       }
     )
   }
@@ -2842,8 +3304,8 @@ server <- function(input, output, session) {
         samps  <- input$selected_samples
         aes_v  <- resolve_aesthetics(samps)
         pd_all <- prepare_plot_data(samples = samps)
-        sw     <- max(input$export_width,  4)   # slide width  (inches)
-        sh     <- max(input$export_height, 3)   # slide height (inches)
+        sw     <- max(export_size_in()[1], 4)   # slide width  (inches)
+        sh     <- max(export_size_in()[2], 3)   # slide height (inches)
         
         # Title bar: 0.5 in tall at top of slide; plot fills the rest
         title_h  <- 0.5

@@ -59,7 +59,7 @@ Packages are add-ons that the app depends on. You only need to do this once.
 install.packages(c(
   "shiny", "tidyverse", "ggpubr", "scales",
   "ggrepel", "ggprism", "svglite", "jsonlite",
-  "officer", "rvg", "gifski", "base64enc", "gridExtra"
+  "officer", "rvg", "gifski", "base64enc", "gridExtra", "ragg"
 ))
 ```
 
@@ -71,7 +71,7 @@ If you see any errors mentioning a specific package, try installing that package
 install.packages("package_name_here")
 ```
 
-**Note:** The `officer`, `rvg`, `gifski`, `base64enc`, and `gridExtra` packages are optional. Without them, the PowerPoint, GIF, HTML-report, and PDF-report buttons (respectively) will be disabled, but everything else works fine.
+**Note:** The `officer`, `rvg`, `gifski`, `base64enc`, `gridExtra` and `ragg` packages are optional. Without them, the PowerPoint, GIF, HTML-report and PDF-report buttons (respectively) will be disabled, and PNG/TIFF exports fall back to R's built-in devices; everything else works fine.
 
 ---
 
@@ -187,18 +187,59 @@ This is useful when you want to apply the same visual style to different dataset
 
 ---
 
+## Journal-ready figures (new in v2.10)
+
+For a thesis or a manuscript, make the figure at its final printed size and
+never rescale it afterwards. Expand **Journal Figure Preset**:
+
+1. Pick the **Journal** family and the **Width** (single column, 1.5 columns,
+   double column, or *half of a double column* for one panel of a two-panel
+   figure). Nature is 89 / 120 / 183 mm; Cell Press 85 / 114 / 174; ASM 84 /
+   175; PLOS 132; Science 55 / 120 / 183; or type a custom width in mm.
+2. Set the **Height** (65 mm is a good single-column default; Nature's
+   maximum is 170 mm) and, for multi-panel figures, the **Panel label**
+   (`a`, `b`, ...).
+3. Click **Apply journal preset**. The figure becomes Arial with 7 pt axis
+   titles, 6 pt tick/legend text and an 8 pt bold panel label; 0.75 pt data
+   lines and 0.5 pt axes/error bars; the Okabe-Ito colour-blind-safe palette;
+   the legend inside the panel; trimmed log labels (0.1, not 0.10); export in
+   mm as **SVG**. The preview switches to **True export size** so what you see
+   is what Inkscape will open (use the zoom slider).
+4. Adjust anything you like (every preset value is an ordinary control; the
+   **Figure Layout** block in Axis Settings has the legend position, line
+   widths in pt, tick length in mm and the panel label), then **Download
+   Image**. **Save Settings** keeps the result as a reusable style.
+5. Copy the **Figure Legend Text** into the manuscript: it already states the
+   measure, the curves, *n*, the error statistic, and the MOI / host / phage /
+   medium you entered in the Experiment Notebook.
+
+Then in **Inkscape**: open the SVG (Document Properties shows the width in
+mm), edit text directly (it is real Arial text, not outlines), assemble panels
+at native size, and *Save a Copy* as Plain SVG or PDF for submission.
+The reasoning, the sources for each number and the full Inkscape loop are in
+[docs/FIGURE_STANDARDS.md](docs/FIGURE_STANDARDS.md).
+
+---
+
 ## Exporting Your Plot
 
 Expand the **Plot Dimensions & Export** section.
 
 ### Image Export
 
-1. Set the canvas size (width/height in pixels) to control how the plot looks on screen.
-2. Set the export dimensions (width/height in inches) and DPI for the saved file.
-3. Choose a format: **PDF** (best for publications), **PNG** (best for presentations), **JPEG**, **SVG** (scalable), or **TIFF**.
+1. **On-screen preview**: *Screen canvas* (width/height in pixels, the old
+   behaviour) or *True export size* (the figure at its physical export size,
+   zoomed 1-4x, rendered through the same pipeline as the download).
+2. Set the export **width and height** in inches or mm and, for raster
+   formats, the **DPI**. A note shows the size in both units.
+3. Choose a format: **SVG** (Inkscape-ready: real text, no `textLength`
+   distortion when you edit labels), **PDF** (fonts embedded, as journals
+   require), **TIFF** (LZW, 600 dpi for line art), **PNG** or **JPEG**.
 4. Click **"Download Image"**.
 
-Recommended settings for publications: PDF format, 10×8 inches, 300 DPI.
+Recommended settings: use the **Journal Figure Preset** above (column width
+in mm, SVG) and finish in Inkscape. For a quick slide figure, PNG at 300 dpi
+and the pixel canvas are fine.
 
 ### PowerPoint Export
 

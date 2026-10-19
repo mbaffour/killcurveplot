@@ -1,5 +1,67 @@
 # Changelog
 
+## v2.10.0 — 2026-10-18
+
+Journal-standard figure export. Opt-in: a figure made with the default
+settings is byte-identical to v2.9.0 (checked by the test suite).
+
+### New
+- **Journal Figure Preset** (sidebar). Pick a journal family and column
+  (Nature 89 / 120 / 183 mm, Cell Press 85 / 114 / 174, ASM 84 / 175,
+  PLOS 132, Science 55 / 120 / 183, half of a double column for two-panel
+  figures, or a custom mm width), a height and an optional panel label, then
+  **Apply**. It sets the export size in mm, Arial, 7 pt axis titles / 6 pt
+  tick and legend text / 8 pt bold panel label, 0.75 pt data lines, 0.5 pt
+  axes and error bars, 1.2 mm ticks, the Okabe-Ito colour-blind palette, the
+  legend inside the panel, trimmed log tick labels (0.1 not 0.10), 7 pt
+  theme spacing, SVG export and 600 dpi. Every value stays an ordinary
+  control afterwards and is captured by Save Settings.
+  Rationale and sources: `docs/FIGURE_STANDARDS.md`.
+- **Figure Legend Text** box: a drafted legend paragraph (measure, curves,
+  n, error statistic, MOI / host / phage / medium / temperature from the
+  Experiment Notebook, log-axis and blank-correction notes) to paste into
+  the manuscript. The preset turns the on-artwork error caption off and
+  relies on this instead; the default figure still carries the caption
+  (KC-6).
+- **Figure Layout** controls (Axis Settings): legend position including
+  the four inside corners, legend box border, legend key size (mm),
+  axis / tick line width in pt, tick length in mm, panel label and size,
+  theme spacing base size, Y tick-label style (as is / trim zeros / powers
+  of ten). Defaults reproduce the previous hard-coded look.
+- **Export size in mm or inches**, with a live "= W x H mm" note. Reports,
+  PPTX and the preview all read the same size.
+- **True export size preview**: the on-screen plot is rendered through the
+  same ggsave pipeline as the download, at the physical export size, shown
+  at 1-4x zoom, so fonts and line weights look exactly as Inkscape will
+  open them. The pixel canvas mode is unchanged and still the default.
+- Explicit **Arial** and **Helvetica** entries in the font list, and a
+  warning when a chosen font is not installed (exports would substitute).
+- Warning when the Colorblind / Publication palette (8 colours) is used
+  with more than 8 samples (colours repeat) - the deferred item from
+  `PUBLICATION_QUALITY_NOTES.md`.
+
+### Fixed
+- **PDF export now embeds fonts.** `grDevices::pdf()` never embedded them
+  (journals require it) and crashed with "invalid font type" for Arial,
+  Helvetica Neue, Garamond and Palatino. PDF now goes through
+  `quartz(type = "pdf")` on macOS and `cairo_pdf` elsewhere.
+- **SVG export is Inkscape-safe.** svglite's default `textLength`
+  attribute made Inkscape stretch or squash a label as soon as it was
+  edited; the app now writes SVG with `fix_text_size = FALSE`.
+- PNG / TIFF / JPEG use `ragg` when installed (TIFF keeps LZW).
+- The report provenance table records the export size with its units.
+
+### Internal
+- `APP_DEFAULTS` is now the single source of UI defaults (used by Reset
+  and by the tests). `pt2lw()` / `lw2pt()` convert between pt and ggplot2
+  linewidth units (1 unit = 2.134 pt). `export_device()` resolves the
+  device for each format in one place.
+- New suite `tests/test_v210_figure_export.R` (74 checks): every format x
+  every font family through the real server, PDF font embedding, SVG
+  physical size / no textLength / Arial / 6-8 pt / 0.25-1 pt strokes,
+  legend text, layout inputs, Inkscape CLI round trip when Inkscape is
+  installed, and the byte-identical default-figure check against v2.9.0.
+
 ## v2.9.0 — 2026-09-14
 
 Fixes from a read-only external audit (see [AUDIT-2026-09.md](AUDIT-2026-09.md)

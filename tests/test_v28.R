@@ -403,8 +403,10 @@ check("show_error_caption defaults to TRUE in the UI widget",
       { i <- grep('checkboxInput\\("show_error_caption"', src)[1]
         any(grepl("value = TRUE", src[i:(i + 3)])) })
 check("Clear-settings reset also defaults show_error_caption to TRUE",
-      any(grepl("show_error_caption\\s*=\\s*TRUE", src)) &&
-      !any(grepl("show_error_caption\\s*=\\s*FALSE", src)))
+      any(grepl("show_error_caption\\s*=\\s*TRUE,\\s*# KC-6", src)) &&
+      # v2.10: the only FALSE allowed is the opt-in journal preset, which moves
+      # the measure + n into the Figure Legend Text box instead of the artwork.
+      all(grepl("Figure Legend Text", src[grep("show_error_caption\\s*=\\s*FALSE", src)])))
 
 cat("\n--- KC-9: CITATION.cff and a licence/citation section in the README ---\n")
 check("CITATION.cff exists at repo root", file.exists("CITATION.cff"))
