@@ -1,6 +1,6 @@
 # Lysis Curve OD Visualization App — User Guide
 
-> **Docs:** [Metrics reference (formulas + sources)](docs/METRICS_REFERENCE.md) · [Changelog](CHANGELOG.md) · Tests: `Rscript tests/test_v28.R` (52 checks), `Rscript tests/test_metrics_parity.R` (29 parity checks vs [lysis-curve-app](https://github.com/mbaffour/lysis-curve-app))
+> **Docs:** [Metrics reference (formulas + sources)](docs/METRICS_REFERENCE.md) · [Changelog](CHANGELOG.md) · [Audit (2026-09)](AUDIT-2026-09.md) · Tests: `Rscript tests/test_v28.R` (101 checks), `Rscript tests/test_metrics_parity.R` (reference-free checks always run; reference-comparison checks need a compatible sibling clone of [lysis-curve-app](https://github.com/mbaffour/lysis-curve-app) — see [docs/METRICS_REFERENCE.md](docs/METRICS_REFERENCE.md#tests))
 >
 > **Looking for the full analysis platform** (Analysis tab, 30+ metrics, statistics, heatmaps, curve fitting, virulence metrics)? That's the companion app: [mbaffour/lysis-curve-app](https://github.com/mbaffour/lysis-curve-app). This repo is the lightweight plotter.
 
@@ -22,7 +22,17 @@ This is an interactive tool for visualizing Optical Density (OD) time-series dat
 
 You can export your plots as PDF, PNG, JPEG, SVG, TIFF, PowerPoint, or animated GIF — and (new in v2.8) export the underlying summary statistics and curve metrics as CSV, or generate a complete single-file **HTML or PDF analysis report** containing the figure, statistics tables, metric definitions, data provenance, and session info.
 
-Not sure where to start? Click **"Load Demo Data"** under the file picker to explore the app with a built-in example dataset (3 samples × 3 replicates).
+Not sure where to start? Pick a scenario next to **"Load Demo Data"** under the file picker to explore the app with a built-in example dataset (every scenario has 3 replicates per sample). There are five:
+
+| Scenario | What it shows |
+|---|---|
+| Lysis curve (3 samples) | Uninfected, Phage MOI 10 and Phage MOI 0.1: the basic growth-and-lysis curve (default) |
+| MOI series (dose-response) | Uninfected plus MOI 0.01 to 100, with lysis onset and rate depending on MOI: the dose-response figure |
+| Resistant regrowth | MOI 1 lyses and stays down; "+ resistant" lyses then regrows to about 60% of the control: lysis followed by regrowth |
+| Time in hours | The lysis curve on a 0 to 8 h axis: the "Time (hours)" label and time-unit handling |
+| Two phages x two MOIs | Phages A and B at MOI 1 and 10; B lyses later and less completely: comparing phages |
+
+Loading a scenario also sets the x-axis label and the reference sample (the uninfected/control sample).
 
 ---
 
@@ -59,7 +69,7 @@ Packages are add-ons that the app depends on. You only need to do this once.
 install.packages(c(
   "shiny", "tidyverse", "ggpubr", "scales",
   "ggrepel", "ggprism", "svglite", "jsonlite",
-  "officer", "rvg", "gifski", "base64enc", "gridExtra"
+  "officer", "rvg", "gifski", "base64enc", "gridExtra", "ragg", "patchwork"
 ))
 ```
 
@@ -71,7 +81,7 @@ If you see any errors mentioning a specific package, try installing that package
 install.packages("package_name_here")
 ```
 
-**Note:** The `officer`, `rvg`, `gifski`, `base64enc`, and `gridExtra` packages are optional. Without them, the PowerPoint, GIF, HTML-report, and PDF-report buttons (respectively) will be disabled, but everything else works fine.
+**Note:** The `officer`, `rvg`, `gifski`, `base64enc`, `gridExtra` and `ragg` packages are optional. Without them, the PowerPoint, GIF, HTML-report and PDF-report buttons (respectively) will be disabled, and PNG/TIFF exports fall back to R's built-in devices; everything else works fine.
 
 ---
 
@@ -125,6 +135,22 @@ Three columns: time, a grouping column (e.g., "Sample" or "Condition"), and a va
 
 The app auto-detects which format you're using.
 
+### Blank / media OD
+
+The app **assumes your data is already blank-subtracted** — it has no media-blank
+handling of its own beyond the optional **"Subtract blank/media OD"** field in the
+sidebar (0 = off, the default). If your CSV still has a constant media/blank OD baked
+into every reading, enter that value there: it's subtracted from every reading before
+plotting, statistics, and curve metrics, and the value used is recorded in the report
+provenance. A small negative OD after subtraction is expected and handled correctly —
+see the μmax note in [Stats & Reports](#stats--reports-new-in-v28) below.
+
+### Decimal-comma / semicolon CSV exports
+
+Some plate-reader software exports European-locale CSVs (`;`-separated, `,` as the
+decimal mark, e.g. `1,5E+08`). Use the **"CSV format"** selector next to the file
+picker — Auto-detect (the default, sniffed from the header line), US/UK, or European.
+
 ---
 
 ## Using the App
@@ -171,18 +197,94 @@ This is useful when you want to apply the same visual style to different dataset
 
 ---
 
+## Journal-ready figures (new in v2.10)
+
+The app now **starts in the journal standard**: Nature single column
+(89 x 65 mm), Arial 7 / 6 pt, 0.75 / 0.5 pt lines, SVG, the "True export size"
+preview (zoomed to fit the window) and an `a` panel label. A bar above the tabs
+always shows what will be exported and warns when the settings are not
+journal-standard. Sample colours come from the Okabe-Ito palette (the
+Colorblind-friendly palette) unless you set a colour per sample. You only need
+the preset below to change the journal or the width; **Legacy look (v2.9
+defaults)** in the same section restores the old 10 x 8 in, 20 pt, PDF start,
+and **Clear & Reset** returns to the journal standard.
+
+Make the figure at its final printed size and never rescale it afterwards.
+Image downloads have stable, sized names without a timestamp
+(`lysis_curve_a_89x65mm.svg`, `metric_summary_b_89x65mm.svg`,
+`figure_composed_183x120mm.svg`). Expand **Journal Figure Preset**:
+
+1. Pick the **Journal** family and the **Width** (single column, 1.5 columns,
+   double column, or *half of a double column* for one panel of a two-panel
+   figure). Nature is 89 / 120 / 183 mm; Cell Press 85 / 114 / 174; ASM 84 /
+   175; PLOS 132; Science 55 / 120 / 183; or type a custom width in mm.
+2. Set the **Height** (65 mm is a good single-column default; Nature's
+   maximum is 170 mm) and, for multi-panel figures, the **Panel label**
+   (`a`, `b`, ...).
+3. Click **Apply journal preset**. The figure becomes Arial with 7 pt axis
+   titles, 6 pt tick/legend text and an 8 pt bold panel label; 0.75 pt data
+   lines and 0.5 pt axes/error bars; the Okabe-Ito colour-blind-safe palette;
+   the legend inside the panel; trimmed log labels (0.1, not 0.10); export in
+   mm as **SVG**. The preview switches to **True export size** so what you see
+   is what Inkscape will open (use the zoom slider).
+4. Adjust anything you like (every preset value is an ordinary control; the
+   **Figure Layout** block in Axis Settings has the legend position, line
+   widths in pt, tick length in mm and the panel label), then **Download
+   Image**. The legend position **Inside: emptiest corner (auto)**, which the
+   preset selects, puts the key in the corner of the panel with the fewest
+   plotted points and moves it outside (right) when there are more than four
+   entries or when even the emptiest corner still overlaps data. **Save Settings** keeps the result as a reusable style.
+5. Copy the **Figure Legend Text** into the manuscript: it already states the
+   measure, the curves, *n*, the error statistic, and the MOI / host / phage /
+   medium you entered in the Experiment Notebook.
+
+Then in **Inkscape**: open the SVG (Document Properties shows the width in
+mm), edit text directly (it is real Arial text, not outlines), assemble panels
+at native size, and *Save a Copy* as Plain SVG or PDF for submission.
+The reasoning, the sources for each number and the full Inkscape loop are in
+[docs/FIGURE_STANDARDS.md](docs/FIGURE_STANDARDS.md).
+
+### Compose a figure in the app
+
+The **Compose figure** tab (after Dashboard) assembles the finished multi-panel
+figure for you, which replaces the Inkscape assembly step for standard layouts.
+Tick the panels (the main lysis curve plus any analysis figures; they are laid
+out in the order listed), choose 1 or 2 columns, the width (the double or
+single column of the journal selected under *Journal Figure Preset*, or a
+custom width in mm), the height of each panel row and the panel-label size and
+case. The tab shows the resulting size in mm (and warns when the height is more
+than the journal allows), previews it at true size, and **Download composed
+figure** writes it in the chosen export format (SVG for Inkscape, TIFF with
+LZW, ...). Panels are rendered at their native size, so axis and legend text
+stay 6-8 pt; apply the journal preset first. A panel whose figure is not
+available for the current selection (for example the dose-response with one
+MOI level) is left out and listed. With *Include analysis figures and
+statistics* on, the HTML and PDF reports end with the composed figure. The
+gallery script (`tools/render_gallery.R`) uses the same layout function, so its
+output and the app's agree. Needs the `patchwork` package.
+
+---
+
 ## Exporting Your Plot
 
 Expand the **Plot Dimensions & Export** section.
 
 ### Image Export
 
-1. Set the canvas size (width/height in pixels) to control how the plot looks on screen.
-2. Set the export dimensions (width/height in inches) and DPI for the saved file.
-3. Choose a format: **PDF** (best for publications), **PNG** (best for presentations), **JPEG**, **SVG** (scalable), or **TIFF**.
+1. **On-screen preview**: *True export size* (the default: the figure at its
+   physical export size, rendered through the same pipeline as the download,
+   zoomed to fit the window; untick the fit box for a fixed 0.5-4x zoom) or
+   *Screen canvas* (a pixel width; the height keeps the figure's proportions).
+2. Set the export **width and height** in inches or mm and, for raster
+   formats, the **DPI**. A note shows the size in both units.
+3. Choose a format: **SVG** (Inkscape-ready: real text, no `textLength`
+   distortion when you edit labels), **PDF** (fonts embedded, as journals
+   require), **TIFF** (LZW, 600 dpi for line art), **PNG** or **JPEG**.
 4. Click **"Download Image"**.
 
-Recommended settings for publications: PDF format, 10×8 inches, 300 DPI.
+Recommended settings: use the **Journal Figure Preset** above (column width
+in mm, SVG) and finish in Inkscape. For a quick slide figure, PNG at 300 dpi
+and the pixel canvas are fine.
 
 ### PowerPoint Export
 
@@ -194,6 +296,62 @@ Set the frames per second and GIF dimensions, then click **"Download Animated GI
 
 ---
 
+## Analysis figures and dashboard (new in v2.11)
+
+The main panel has three tabs. **Lysis curve** is the figure described above.
+
+**Analysis figures** draws the companion panels a lysis-curve paper usually
+needs, in exactly the same style (fonts, line weights, legend, colours, export
+size and journal preset) as the main figure, so they assemble in Inkscape
+without rescaling. Pick a figure, set its panel label (default `b`) and use
+**Download figure**:
+
+- **Metric summary** — one facet per chosen metric (lysis onset, OD drop,
+  μmax, AUC, infection strength, ...); open circles are individual replicates,
+  the bar is the mean, whiskers ± SD. With a reference sample set (Stats &
+  Reports) and *Mark significance* ticked, Holm-adjusted stars appear above
+  each sample.
+- **Specific growth rate vs time** — μ(t) = d ln(OD)/dt per replicate by the
+  same rolling regression as μmax, shown as mean ± SD band. Lysis is a
+  negative rate, so onset and lysis rate are visible rather than inferred.
+- **Normalized OD vs time** — each mean curve divided by the uninfected
+  reference at every time point (the infection-strength metric drawn out), or
+  by its own t = 0 value.
+- **Replicate overlay** — every replicate curve (thin) with the mean (bold):
+  the variance the error bars summarise, which reviewers ask to see at n = 3.
+- **MOI dose-response** — a metric against log10 MOI, with replicates and
+  mean ± SD. MOI is read from names like `Phage MOI 10`, or typed as
+  `sample = MOI` lines in the box.
+- **OD heatmap** — samples × time, for screens with many samples.
+- **Curve landmarks** — lag end, μmax window centre, peak, lysis onset, half
+  of peak and trough drawn on each mean curve, so every number in the Curve
+  Metrics CSV can be checked by eye before it is reported.
+
+All of these show the **same error measure as the main figure** (SD, SEM or
+95% CI from the Error Bars panel) and the same sample order. A rendered set of
+every figure from the demo data, through the journal preset, is in
+[docs/gallery/gallery.png](docs/gallery/gallery.png)
+(`Rscript tools/render_gallery.R` regenerates it, and also renders every demo scenario into `docs/gallery/<scenario>/`).
+
+Below the figure, **Replicate statistics** compares the tested metric between
+samples on the per-replicate values: Welch's t-test (or Mann-Whitney) for each
+sample vs the reference (all pairs when no reference is set), Holm-adjusted
+p, Hedges' g and the 95% CI of the difference; one-way ANOVA with Tukey HSD
+(or Kruskal-Wallis) when there are three or more samples. Groups with fewer
+than two values are excluded, and any n < 3 is flagged: three biological
+replicates give little power, so a non-significant result is not evidence of
+no difference. **Download statistics (CSV)** saves the tables with the metric,
+method and reference recorded.
+
+**Dashboard** shows the loaded experiment at a glance while you work: sample,
+replicate and time-point counts, the error measure and reference, the current
+figure size and font; key metrics per sample (± SD across replicates); the
+lysis curve, growth rate, normalized OD (or replicate overlay) and metric
+summary as small multiples; the statistics; and the Experiment Notebook
+fields you have filled in.
+
+---
+
 ## Stats & Reports (new in v2.8)
 
 Expand the **Stats & Reports** section in the sidebar. Everything here reflects the *current* sample selection and time filtering — exactly what the plot shows.
@@ -201,7 +359,9 @@ Expand the **Stats & Reports** section in the sidebar. Everything here reflects 
 ### Statistics Export
 
 - **Summary Statistics (CSV)** — per sample and time point: mean, SD, n, SEM, and the 95% CI half-width (computed as t₀.₉₇₅,ₙ₋₁ × SEM). `n` counts only non-missing replicate values.
-- **Curve Metrics (CSV)** — 27 per-sample growth & lysis metrics using the **same engine as the lysis-paper companion app** (verified to reproduce its numbers by an automated parity suite): initial/max/min/final OD and their times, AUC (trapezoidal), **μmax** (centered rolling-window regression on ln OD; window adjustable, default 5 points), **doubling time**, **lag phase** (first time the rolling slope reaches 10% of μmax), **stationary-phase duration**, **lysis onset** (first post-peak decline > 5% of peak), **lysis rate** (regression slope peak→trough), **OD drop**, **residual OD**, **recovery slope**, lysis efficiency, recovery ratio, fold change, % drop from max, time to half-max after peak, and steepest point-to-point decline. Metrics that don't apply (e.g. doubling time for a curve that never grows) are reported as `NA`, never fabricated.
+- **Curve Metrics (CSV)** — per-sample growth & lysis metrics using the **same engine as the lysis-paper companion app** (verified to reproduce its numbers by an automated parity suite): initial/max/final OD and their times, the curve's global minimum, AUC (trapezoidal), **μmax** (centered rolling-window regression on ln OD; window adjustable, default 5 points; non-positive OD readings are excluded from a window rather than clamped), **doubling time**, **lag phase** (first time the rolling slope reaches 10% of μmax), **stationary-phase duration**, **lysis onset** (first post-peak decline > 5% of peak; the 5% is adjustable under *Lysis onset: decline from peak that counts as lysis (%)*), **lysis rate** (regression slope peak→trough), **OD drop**, **residual OD**, **recovery slope**, lysis efficiency, recovery ratio, fold change, % drop from max, time to half-max after peak, and steepest point-to-point decline. Metrics that don't apply (e.g. doubling time for a curve that never grows) are reported as `NA`, never fabricated. This runs on the *mean* curve — one number per sample, with no replicate-to-replicate uncertainty. An optional **peak-detection smoothing window** (off by default) stabilizes the peak-anchored metrics against replicate noise; see [docs/METRICS_REFERENCE.md](docs/METRICS_REFERENCE.md) for why that matters. The **Peak used for lysis metrics** control (default: global maximum) can instead use the first peak that is followed by a > 10 % decline, which is what regrowth / resistance curves need (the global maximum is the late regrowth there, so lysis onset and OD drop come out `NA`); a 3-point peak-detection smoothing window is recommended with it.
+- **Dashboard and reports** — the dashboard's key-metrics table prints "—" alone when a mean-curve metric is `NA` (no "± SD" next to a missing value). The HTML and PDF reports (with *Include analysis figures and statistics*) now always include the **Curve landmarks** figure, and the **MOI dose-response** figure when the selected samples have at least two distinct positive MOI values.
+- **Per-Replicate Metrics, mean ± SD (CSV)** — the *same* metrics engine run once per individual replicate curve, then reported as mean ± SD across replicates, alongside (not instead of) the mean-curve metrics above. These two are not interchangeable — see [docs/METRICS_REFERENCE.md](docs/METRICS_REFERENCE.md#per-replicate-metrics-optional-additive--per-replicate-metrics-mean--sd-csv).
 - **Infection metrics** — pick your uninfected control in *Reference sample* to add the five reference-normalized metrics: relative growth (AUC ratio), infection strength (1 − AUC ratio), relative μmax, relative max OD, and lysis-onset Δ from lag. *(Note: the reference implementation in the companion app has an `ifelse()` recycling bug that assigns the first sample's relative values to every sample; this app computes each sample's own ratio correctly.)*
 
 ### Experiment Notebook
@@ -212,9 +372,19 @@ The **Experiment Notebook** sidebar section (modeled on the companion app's Expe
 
 Fill in an optional title, author, and notes, then click:
 
-- **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the experiment notebook record, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis.
-- **PDF Report** — the same content as a multi-page PDF (title/provenance page, notebook page, figure page, paginated tables). No LaTeX or pandoc required.
+- **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the experiment notebook record, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis. With **Include analysis figures and statistics** (on by default) it also carries the v2.11 analysis figures — metric summary, specific growth rate, normalized OD (or the replicate overlay when no reference sample is set) and, when any sample has an MOI, the dose-response — each at the export size, plus the replicate statistics (pairwise, omnibus and post-hoc tables, their warnings, and a definitions paragraph for Welch t / Holm / Hedges' g / ANOVA + Tukey / Mann-Whitney / Kruskal-Wallis); untick it for the figure-and-tables-only report.
+- **PDF Report** — the same content as a multi-page PDF (title/provenance page, notebook page, figure page, one page per analysis figure, paginated tables, replicate statistics). No LaTeX or pandoc required.
 - **Report base font size** — scales all report text and tables in both formats.
+
+### Showing error honestly
+
+The **Error Bars / Shadow** panel has, besides SD / SEM / 95% CI and bars vs
+ribbon: *individual replicate values* as open circles behind the mean (what
+reviewers ask for at n = 3), error colour (sample colour, black or grey), cap
+width as a percentage of the x range, and, on a log axis, bars whose lower
+bound crosses zero are drawn down to the axis minimum instead of vanishing.
+Single-replicate points never get a bar (SD is undefined), and the caption /
+legend text states the measure and n.
 
 ### Everything stays editable
 
@@ -230,7 +400,7 @@ All of this is live: change the Y-axis label (Axis Settings → Labels & Formatt
 
 **The plot shows an error message in red text.** — This usually means something is wrong with the data or a setting combination. Try resetting settings with the "Clear & Reset" button. Check that your CSV has numeric values in the data columns and a proper time column.
 
-**Error bars / shadow ribbon doesn't show.** — If you have only one replicate per sample per time point, the standard deviation is zero, so there's nothing to display. This is expected behavior. You need multiple replicates for error bars to be meaningful.
+**Error bars / shadow ribbon doesn't show.** — If you have only one replicate per sample per time point, the standard deviation is **undefined** (not zero — you cannot measure spread from a single value), so no bar is drawn at that point and the Summary Statistics CSV / report tables show `NA` for SD, SEM, and the 95% CI at that time point. This is expected behavior. You need at least two replicates for error bars — and for the exported statistics — to be meaningful.
 
 **The app is slow or laggy.** — If you have a very large number of samples, the app may take a moment to update. The app debounces inputs (waits 400ms after you stop adjusting before redrawing), so slight delays are intentional.
 
@@ -250,4 +420,16 @@ All of this is live: change the Y-axis label (Axis Settings → Labels & Formatt
 
 ---
 
-*Lysis Curve OD Visualization App v2.8 — Michael Baffour Awuah / Ramsey Lab*
+## License
+
+This project is released under the [GNU General Public License v3.0](LICENSE) (GPL-3.0).
+
+## Citation
+
+Citation metadata is provided in [`CITATION.cff`](CITATION.cff). If you use this app in
+published work, please cite it using that file's metadata (GitHub and Zenodo both read
+`CITATION.cff` automatically to generate a formatted citation).
+
+---
+
+*Lysis Curve OD Visualization App v2.9 — Michael Baffour Awuah / Ramsey Lab*

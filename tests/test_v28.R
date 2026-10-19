@@ -27,6 +27,31 @@ check("rgb_to_hex(255,0,0) == #FF0000 (no alpha suffix)",
 check("rgb_to_hex keeps alpha when < 1",
       nchar(env$rgb_to_hex(255, 0, 0, 0.5)) == 9)
 
+cat("\n--- KC-11: decimal-comma / semicolon CSV support ---\n")
+us_csv <- tempfile(fileext = ".csv")
+writeLines(c("Time,WT,Mutant", "0,0.05,0.06", "10,0.12,0.15"), us_csv)
+eu_csv <- tempfile(fileext = ".csv")
+writeLines(c("Time;WT;Mutant", "0;0,05;0,06", "10;0,12;0,15"), eu_csv)
+
+check("detect_csv_locale: US/UK comma file -> \"us\"",
+      env$detect_csv_locale(us_csv) == "us")
+check("detect_csv_locale: European semicolon file -> \"eu\"",
+      env$detect_csv_locale(eu_csv) == "eu")
+
+d_us <- env$read_csv_locale_aware(us_csv, "auto")
+check("read_csv_locale_aware: US file auto-detected and parsed numeric",
+      is.numeric(d_us$WT) && near(d_us$WT[1], 0.05))
+
+d_eu <- env$read_csv_locale_aware(eu_csv, "auto")
+check("read_csv_locale_aware: EU file auto-detected (3 columns, not collapsed to 1)",
+      ncol(d_eu) == 3)
+check("read_csv_locale_aware: EU decimal comma parsed as numeric, not character/NA",
+      is.numeric(d_eu$WT) && near(d_eu$WT[1], 0.05) && near(d_eu$Mutant[2], 0.15))
+
+d_eu_explicit <- env$read_csv_locale_aware(eu_csv, "eu")
+check("read_csv_locale_aware: explicit \"eu\" locale matches auto-detect",
+      identical(d_eu$WT, d_eu_explicit$WT))
+
 cat("\n--- make_demo_data ---\n")
 dd <- env$make_demo_data()
 check("demo: duplicate replicate columns, 3 per sample",
@@ -43,7 +68,7 @@ m <- env$compute_curve_metrics(pd_toy)
 check("metrics: one row",              nrow(m) == 1)
 check("initial 0.1 / final 0.05",      near(m$initial_od, 0.1) && near(m$final_od, 0.05))
 check("max 0.4 @ t=10",                near(m$max_od, 0.4) && near(m$time_max_od, 10))
-check("min 0.05 @ t=30",               near(m$min_od, 0.05) && near(m$time_min_od, 30))
+check("min 0.05 @ t=30",               near(m$global_min_od, 0.05) && near(m$time_global_min_od, 30))
 check("AUC trapezoid = 6.75",          near(m$auc, 6.75))
 check("fold change = 0.5",             near(m$fold_change_final_vs_initial, 0.5))
 check("pct drop from max = 87.5",      near(m$pct_drop_from_max, 87.5))
@@ -70,6 +95,113 @@ mf <- env$compute_curve_metrics(pd_flat)
 check("flat curve: no crash, t50 NA, growth NA",
       is.na(mf$t_half_max_decline) && is.na(mf$mu_max))
 
+cat("\n--- KC-2: non-positive OD is excluded from mu_max windows, not clamped ---\n")
+# A -0.002 first reading (routine after blank subtraction) followed by a
+# curve that exactly doubles every 10 time units. With window=3 the two
+# windows touching the negative point (output positions 1-2) must be NA;
+# the two clean windows (positions 3-4) give the true slope ln(2)/10.
+pd_neg <- data.frame(time = c(0, 10, 20, 30, 40), variable = "N",
+                     mean_value = c(-0.002, 0.05, 0.1, 0.2, 0.4))
+mn <- env$compute_curve_metrics(pd_neg, smooth_window = 3)
+check("KC-2: n_nonpositive_od counted correctly", mn$n_nonpositive_od == 1)
+check("KC-2: mu_max = ln(2)/10 (from the clean windows only, not inflated)",
+      near(mn$mu_max, log(2) / 10, tol = 1e-6))
+check("KC-2: doubling_time = 10", near(mn$doubling_time, 10, tol = 1e-6))
+
+# Directly demonstrate the regression the old code had: clamping the
+# negative reading to 1e-9 before log() (log(pmax(od, 1e-9))) puts an
+# enormous artificial slope into the window that contains it, which wins
+# max() and inflates mu_max well above the true ln(2)/10.
+old_clamped_log <- log(pmax(pd_neg$mean_value, 1e-9))
+old_slopes  <- env$rolling_slope(pd_neg$time, old_clamped_log, 3)
+old_mu_max  <- max(old_slopes[is.finite(old_slopes) & old_slopes > 1e-10])
+check("KC-2: the old clamp-based slope would have been far larger than the fixed mu_max",
+      old_mu_max > mn$mu_max * 2)
+
+# A sample with no non-positive readings reports n_nonpositive_od = 0
+pd_allpos <- data.frame(time = c(0, 10, 20), variable = "P",
+                        mean_value = c(0.1, 0.2, 0.4))
+check("KC-2: n_nonpositive_od = 0 when all OD > 0",
+      env$compute_curve_metrics(pd_allpos, smooth_window = 3)$n_nonpositive_od == 0)
+
+cat("\n--- KC-3: optional peak-detection smoothing (off by default) ---\n")
+check("moving_average(w=1) is a no-op (the default)",
+      identical(env$moving_average(c(1, 2, 3, 4, 5), 1), c(1, 2, 3, 4, 5)))
+check("moving_average(w=3): centered, smaller window at the edges",
+      near(env$moving_average(c(1, 2, 3, 4, 5), 3)[1], 1.5) &&
+      near(env$moving_average(c(1, 2, 3, 4, 5), 3)[3], 3) &&
+      near(env$moving_average(c(1, 2, 3, 4, 5), 3)[5], 4.5))
+
+# Omitting peak_smooth_window must reproduce the exact pre-KC-3 numbers.
+m_default   <- env$compute_curve_metrics(pd_toy)
+m_explicit1 <- env$compute_curve_metrics(pd_toy, peak_smooth_window = 1)
+check("KC-3: peak_smooth_window defaults to 1 (identical to the old, unsmoothed behaviour)",
+      isTRUE(all.equal(m_default, m_explicit1)))
+
+# A symmetric growth/lysis curve, true peak at t=60. Two "noisy" variants bump
+# a DIFFERENT neighbor above the true peak (deterministic, not random, so this
+# is reproducible): variant A's raw peak lands at t=50, variant B's at t=70 --
+# exactly the kind of single-timepoint jitter the audit measured from 4%
+# multiplicative noise. With peak_smooth_window = 3 both must stabilize back
+# to the true peak at t=60.
+od_clean <- c(0.05, 0.08, 0.13, 0.22, 0.35, 0.50, 0.55, 0.50, 0.35, 0.22, 0.13, 0.08, 0.05)
+t_clean  <- seq(0, 120, 10)
+od_A <- od_clean; od_A[6] <- 0.56   # bump t=50 above the true peak (0.55)
+od_B <- od_clean; od_B[8] <- 0.56   # bump t=70 above the true peak instead
+pd_A <- data.frame(time = t_clean, variable = "A", mean_value = od_A)
+pd_B <- data.frame(time = t_clean, variable = "B", mean_value = od_B)
+
+raw_A <- env$compute_curve_metrics(pd_A)
+raw_B <- env$compute_curve_metrics(pd_B)
+check("KC-3: without smoothing, noise moves the detected peak (unstable)",
+      raw_A$time_max_od == 50 && raw_B$time_max_od == 70)
+
+sm_A <- env$compute_curve_metrics(pd_A, peak_smooth_window = 3)
+sm_B <- env$compute_curve_metrics(pd_B, peak_smooth_window = 3)
+check("KC-3: with peak_smooth_window = 3, both variants find the true peak at t=60",
+      sm_A$time_max_od == 60 && sm_B$time_max_od == 60)
+check("KC-3: max_od is still the RAW value at the (smoothed-located) peak, not a smoothed value",
+      near(sm_A$max_od, 0.55) && near(sm_B$max_od, 0.55))
+
+cat("\n--- KC-4: per-replicate metrics (mean +/- SD across replicates), additive ---\n")
+# Two replicates of sample "S" that peak at DIFFERENT times but the SAME
+# value (0.5): the mean curve's peak is a tie-broken 0.35 at t=10, while
+# each individual replicate genuinely peaks at 0.5. This demonstrates why
+# the two metrics are not interchangeable: max_od is nonlinear (argmax),
+# so mean(per-replicate max_od) != max_od(mean curve).
+rep_pd_S <- data.frame(
+  time      = c(0, 10, 20, 0, 10, 20),
+  variable  = "S",
+  replicate = c(1, 1, 1, 2, 2, 2),
+  value     = c(0.1, 0.5, 0.2, 0.1, 0.2, 0.5))
+rm_S <- env$compute_replicate_metrics(rep_pd_S)
+check("KC-4: n_replicates = 2", rm_S$n_replicates == 2)
+check("KC-4: per-replicate max_od mean = 0.5 (both replicates individually peak at 0.5)",
+      near(rm_S$max_od_mean, 0.5))
+check("KC-4: per-replicate max_od sd = 0 (both replicates peak at exactly the same value)",
+      near(rm_S$max_od_sd, 0, 1e-12))
+mean_pd_S <- data.frame(time = c(0, 10, 20), variable = "S", mean_value = c(0.1, 0.35, 0.35))
+cm_S <- env$compute_curve_metrics(mean_pd_S)
+check("KC-4: mean-curve max_od (0.35) != per-replicate mean max_od (0.5) -- not interchangeable",
+      near(cm_S$max_od, 0.35) && !isTRUE(all.equal(cm_S$max_od, rm_S$max_od_mean)))
+
+# One growing replicate, one flat (mu_max NA): safe_mean/safe_sd must skip
+# the NA rather than propagating it or silently treating it as 0.
+rep_pd_G <- data.frame(
+  time      = rep(c(0, 10, 20, 30), 2),
+  variable  = "G",
+  replicate = rep(c(1, 2), each = 4),
+  value     = c(0.05, 0.1, 0.2, 0.4,   0.2, 0.2, 0.2, 0.2))
+rm_G  <- env$compute_replicate_metrics(rep_pd_G)
+solo1 <- env$compute_curve_metrics(
+  data.frame(time = c(0, 10, 20, 30), variable = "G1", mean_value = c(0.05, 0.1, 0.2, 0.4)))
+check("KC-4: mu_max mean = the one non-NA replicate's value (flat replicate excluded, not zeroed)",
+      near(rm_G$mu_max_mean, solo1$mu_max))
+check("KC-4: mu_max sd is NA with only one non-NA replicate (not 0)",
+      is.na(rm_G$mu_max_sd))
+check("KC-4: compute_replicate_metrics returns NULL on empty input",
+      is.null(env$compute_replicate_metrics(rep_pd_S[0, ])))
+
 cat("\n--- Server integration via testServer: replicate pooling ---\n")
 tmp <- tempfile(fileext = ".csv")
 writeLines(c("Time,WT,WT,WT,Mutant,Mutant,Mutant",
@@ -92,6 +224,17 @@ testServer(app, {
         near(wt0$ci95_value, qt(0.975, 2) * 0.01/sqrt(3), 1e-12))
   mu0 <- pd[pd$variable == "Mutant" & pd$time == 30, ]
   check("Mutant t=30 mean over 3 reps", near(mu0$mean_value, mean(c(0.08, 0.09, 0.07))))
+
+  # KC-4: prepare_replicate_data() must keep every individual replicate
+  # curve un-averaged, with a stable per-sample replicate index
+  rep_pd <- prepare_replicate_data()
+  check("prepare_replicate_data: 3 replicates x 2 samples x 2 timepoints = 12 rows",
+        nrow(rep_pd) == 12)
+  wt_rep_od0 <- sort(rep_pd$value[rep_pd$variable == "WT" & rep_pd$time == 0])
+  check("prepare_replicate_data: WT t=0 keeps all 3 raw values (not averaged)",
+        isTRUE(all.equal(wt_rep_od0, sort(c(0.05, 0.06, 0.04)))))
+  check("prepare_replicate_data: replicate index is 1..3 per sample",
+        setequal(rep_pd$replicate[rep_pd$variable == "WT"], c(1, 2, 3)))
 
   st <- stats_table_export()
   check("stats export columns",
@@ -127,6 +270,70 @@ testServer(app, {
   l0 <- pd4[pd4$time == 0, ]
   check("long + NA: n = 2", l0$n == 2)
   check("long + NA: mean = 0.055", near(l0$mean_value, 0.055))
+
+  # KC-4: long-format replicate identity is inferred from row order within
+  # each (sample, time) group; the NA row (occurrence 3 at t=0) is dropped
+  rpd4 <- prepare_replicate_data()
+  check("prepare_replicate_data (long): NA value dropped, 5 rows remain (not 6)",
+        nrow(rpd4) == 5)
+  check("prepare_replicate_data (long): replicate 1 tracks the 1st row at each time (0.05, 0.12)",
+        near(rpd4$value[rpd4$replicate == 1 & rpd4$time == 0],  0.05) &&
+        near(rpd4$value[rpd4$replicate == 1 & rpd4$time == 30], 0.12))
+
+  # KC-7: optional blank/media OD subtraction (off by default)
+  tmp5 <- tempfile(fileext = ".csv")
+  writeLines(c("Time,X,X", "0,0.12,0.14", "10,0.30,0.34"), tmp5)
+  ingest_data(read.csv(tmp5, stringsAsFactors = FALSE, check.names = FALSE), "blank_test.csv")
+  session$setInputs(selected_samples = "X", blank_od = 0)
+  pd_noblank <- prepare_plot_data()
+  check("KC-7: blank_od = 0 (the default) leaves values unchanged",
+        near(pd_noblank$mean_value[pd_noblank$time == 0], mean(c(0.12, 0.14))))
+
+  session$setInputs(blank_od = 0.10)
+  pd_blank <- prepare_plot_data()
+  check("KC-7: blank subtraction shifts the mean curve by exactly the blank value",
+        near(pd_blank$mean_value[pd_blank$time == 0],  mean(c(0.12, 0.14)) - 0.10) &&
+        near(pd_blank$mean_value[pd_blank$time == 10], mean(c(0.30, 0.34)) - 0.10))
+  check("KC-7: sd_value is unaffected by a constant blank shift (shift-invariant)",
+        near(pd_blank$sd_value[pd_blank$time == 0], sd(c(0.12, 0.14))))
+
+  rep_blank <- prepare_replicate_data()
+  check("KC-7: per-replicate values are shifted by the same blank",
+        isTRUE(all.equal(sort(rep_blank$value[rep_blank$time == 0]),
+                         sort(c(0.12, 0.14) - 0.10))))
+
+  st_blank <- stats_table_export()
+  check("KC-7: exported Summary Statistics CSV reflects the blank-corrected mean",
+        near(st_blank$mean[st_blank$time == 0], mean(c(0.12, 0.14)) - 0.10))
+
+  session$setInputs(blank_od = 0)   # reset for any later checks in this block
+
+  # KC-1: n = 1 must export SD/SEM/95% CI as NA (undefined), never 0
+  tmp4 <- tempfile(fileext = ".csv")
+  writeLines(c("Time,S1", "0,0.1", "10,0.5"), tmp4)
+  ingest_data(read.csv(tmp4, stringsAsFactors = FALSE, check.names = FALSE), "single_rep.csv")
+  session$setInputs(selected_samples = "S1")
+  pd5 <- prepare_plot_data()
+  check("KC-1: n = 1 at every time point", all(pd5$n == 1))
+  check("KC-1: sd_value is NA (not 0) at n = 1",  all(is.na(pd5$sd_value)))
+  check("KC-1: sem_value is NA (not 0) at n = 1", all(is.na(pd5$sem_value)))
+  check("KC-1: ci95_value is NA (not 0) at n = 1", all(is.na(pd5$ci95_value)))
+  st5 <- stats_table_export()
+  check("KC-1: exported CSV has NA sd/sem/ci95 at n = 1",
+        all(is.na(st5$sd)) && all(is.na(st5$sem)) && all(is.na(st5$ci95_half_width)))
+
+  # A mix of n=1 and n>=2 time points: only the n=1 rows should be NA
+  tmp5 <- tempfile(fileext = ".csv")
+  writeLines(c("Time,S2,S2", "0,0.10,0.12", "10,0.50,NA"), tmp5)
+  ingest_data(read.csv(tmp5, stringsAsFactors = FALSE, check.names = FALSE), "mixed_n.csv")
+  session$setInputs(selected_samples = "S2")
+  pd6   <- prepare_plot_data()
+  r_n2  <- pd6[pd6$time == 0, ]
+  r_n1  <- pd6[pd6$time == 10, ]
+  check("KC-1: n = 2 row keeps a real (non-NA) sd/sem/ci95",
+        r_n2$n == 2 && !is.na(r_n2$sd_value) && !is.na(r_n2$sem_value) && !is.na(r_n2$ci95_value))
+  check("KC-1: n = 1 row (NA replicate dropped) is NA, not 0",
+        r_n1$n == 1 && is.na(r_n1$sd_value) && is.na(r_n1$sem_value) && is.na(r_n1$ci95_value))
 })
 
 cat("\n--- Report builders (headless, real functions) ---\n")
@@ -189,6 +396,34 @@ cat("\n--- Settings prefix fix present in both handlers ---\n")
 src <- readLines("Lysis_Curve_App_v28.R")
 check("global_exceptions appears twice (save + load)",
       sum(grepl("global_exceptions <- c(\"shape_size\", \"color_palette\")", src, fixed = TRUE)) == 2)
+
+cat("\n--- KC-6: default figure labels its SEM error bars ---\n")
+# v2.14: the app starts in the journal standard, which moves the measure + n into the Figure Legend Text
+# box (show_error_caption FALSE); the KC-6 caption is the Legacy look (and any non-journal use).
+check("show_error_caption widget takes its start value from APP_DEFAULTS (journal standard: off)",
+      any(grepl('checkboxInput\\("show_error_caption"', src)) &&
+      { i <- grep('checkboxInput\\("show_error_caption"', src)[1]
+        any(grepl("value = APP_DEFAULTS\\$show_error_caption", src[i:(i + 3)])) } &&
+      isFALSE(env$APP_DEFAULTS$show_error_caption))
+check("the Legacy look keeps the KC-6 caption on (error type + n on the figure)",
+      isTRUE(env$legacy_preset_settings()$show_error_caption) &&
+      any(grepl("show_error_caption\\s*=\\s*TRUE,\\s*# KC-6", src)) &&
+      all(grepl("Figure Legend Text", src[grep("show_error_caption\\s*=\\s*FALSE", src)])))
+
+cat("\n--- KC-9: CITATION.cff and a licence/citation section in the README ---\n")
+check("CITATION.cff exists at repo root", file.exists("CITATION.cff"))
+check("CITATION.cff declares the GPL-3 licence",
+      any(grepl("^license:.*GPL-3", readLines("CITATION.cff"))))
+readme <- readLines("README.md")
+check("README has a License section", any(grepl("^## License", readme)))
+check("README has a Citation section", any(grepl("^## Citation", readme)))
+
+cat("\n--- KC-8: settings JSON version matches the app, not a stale \"2.5\" ---\n")
+check("APP_VERSION constant is defined and is not the stale \"2.5\"",
+      !is.null(env$APP_VERSION) && is.character(env$APP_VERSION) && env$APP_VERSION != "2.5")
+check("saved settings JSON stamps APP_VERSION rather than a literal \"2.5\"",
+      any(grepl("version\\s*=\\s*APP_VERSION", src)) &&
+      !any(grepl('version\\s*=\\s*"2\\.5"', src)))
 
 cat("\n============ SUMMARY:", pass, "passed /", fail, "failed ============\n")
 if (fail > 0) quit(status = 1)
