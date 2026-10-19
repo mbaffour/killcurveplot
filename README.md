@@ -209,6 +209,28 @@ the preset below to change the journal or the width; **Legacy look (v2.9
 defaults)** in the same section restores the old 10 x 8 in, 20 pt, PDF start,
 and **Clear & Reset** returns to the journal standard.
 
+### Square panels
+
+The plotting panel now has a fixed size, 65 x 65 mm by default
+(`panel_size_mode = "fixed"`, `panel_width_mm`, `panel_height_mm`,
+`panel_square`). The figure's outer size is computed from that panel plus the
+axes and the legend, so curve figures keep the same shape and size whatever the
+journal width, and every panel in a composed figure matches. With the legend
+inside the panel (the default, in the emptiest corner) the figure is about
+75 mm wide; an outside legend adds 20-28 mm.
+
+| Panel | Figure width, legend inside | Figure width, legend outside | Fits |
+|---|---|---|---|
+| 65 × 65 mm | ≈ 75 mm | ≈ 95 mm | single column; two across a 183 mm double column with inside legends |
+| 60 × 60 mm | ≈ 70 mm | ≈ 90 mm | two across with inside legends; an outside legend is just over a single column |
+| 55 × 55 mm | ≈ 65 mm | ≈ 85 mm | two across even with outside legends; three across does not fit |
+
+The height per figure row is the panel height plus about 8 mm. The size bar
+above the tabs shows the panel and figure sizes and a "fits" note, which says
+which layouts (single column, two across, three across) the current figure
+satisfies for the chosen journal family. **Legacy look** restores the old
+behaviour, where the panel fills the export size (`panel_size_mode = "fit"`).
+
 Make the figure at its final printed size and never rescale it afterwards.
 Image downloads have stable, sized names without a timestamp
 (`lysis_curve_a_89x65mm.svg`, `metric_summary_b_89x65mm.svg`,

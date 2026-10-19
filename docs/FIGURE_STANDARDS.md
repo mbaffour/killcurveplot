@@ -13,6 +13,7 @@ manuscript without re-editing every figure.
 |---|---|---|
 | Width | the journal's column width (table below) | Journals reduce or reject figures that are not at print size; Nature asks for files "at about the size they are to be printed". |
 | Height | 65 mm default (you choose) | Nature caps a figure at 170 mm so the legend fits beneath it. |
+| Panel | 65 × 65 mm fixed (figure ≈ 75 mm wide with the legend inside, up to the column width with it outside) | journals fix the figure width and text size, not the panel; a fixed panel keeps every curve figure the same shape and size |
 | Font | Arial | Nature: "standard fonts such as Arial or Helvetica". Arial ships with macOS and Windows, so an SVG that names it opens identically in Inkscape on both. |
 | Axis titles | 7 pt | Nature: text between 5 and 7 pt; Cell Press: 6–8 pt. |
 | Tick labels, legend | 6 pt | same |
@@ -84,7 +85,7 @@ one full-width figure at native size.
    needed for non-standard layouts or final touch-ups. Otherwise, assemble multi-panel
    figures by importing each panel SVG at its native
    size and aligning them. Nature's double column is 183 mm; two
-   "half of a double column" panels plus the 5 mm gutter fit exactly.
+   "half of a double column" panels plus the 5 mm gutter fit exactly. Panels from the app share one panel size (65 x 65 mm by default), so they align without resizing.
 5. Submit: **File → Save a Copy → Plain SVG** (Nature accepts plain .svg, not
    "Inkscape SVG"), or **Save a Copy → PDF** with "embed fonts" (default) for
    journals that want PDF/EPS, or **Export → PNG/TIFF at 600 dpi** for ASM.

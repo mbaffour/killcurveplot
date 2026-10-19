@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.15.0 — 2026-10-19
+
+**Square panels.** The plotting panel is now a fixed size and the figure is
+sized around it, so curve figures keep the same shape whatever the journal
+width. The default panel is 65 x 65 mm; the figure's outer size comes from the
+panel plus the axes and the legend. **Legacy look** restores the v2.14 behaviour.
+
+- **Fixed panel**: new inputs `panel_size_mode` ("fixed" or "fit"),
+  `panel_width_mm`, `panel_height_mm` and `panel_square`. The default is a fixed
+  65 x 65 mm square.
+- **Computed figure size**: `fixed_panel_grob()` builds the figure from the panel
+  plus the axis and legend space. With the legend inside the panel (the default,
+  in the emptiest corner) the figure is about 75 mm wide; an outside legend adds
+  20-28 mm.
+- **Size bar fits text**: "Panel 65 x 65 mm · figure W x H mm · ... fits: single
+  column · two across double column" uses the chosen journal family's widths:
+  single column if W <= single; two across if 2W + 5 <= double; three across if
+  3W + 10 <= double.
+- **Square curve figures**: the main lysis curve, growth rate, normalized OD,
+  replicate overlay, curve landmarks and dose-response are square when
+  `panel_square` is on. The metric summary shares the panel area across its
+  facets, and the heatmap may be non-square.
+- **Legacy look**: the "Legacy look" preset sets `panel_size_mode = "fit"`, so the
+  panel fills the export size as before.
+- **Composer**: the Compose figure tab uses the fixed-panel grobs, so every cell
+  has the same panel size. Height per figure row is about the panel height plus
+  8 mm.
+
 ## v2.14.1 — 2026-10-19
 
 Hardening after a "vector memory limit reached" report. No change to normal output.
