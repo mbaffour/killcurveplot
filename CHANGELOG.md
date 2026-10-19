@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.14.0 — 2026-10-19
+
+**Change of default output.** The app now starts in the journal standard instead
+of the old 10 x 8 in / 20 pt / PDF state. Everything the journal preset sets is
+the start value (`APP_DEFAULTS = journal_preset_settings(89, 65, "a")`): Nature
+single column 89 x 65 mm, Arial 7 / 6 pt, 0.75 / 0.5 pt lines, Okabe-Ito
+palette, legend in the emptiest corner, trimmed log labels, SVG at 600 dpi,
+panel label "a", true-size preview. Non-visual defaults (metrics, notebook,
+analysis, compose, demo scenario) are unchanged.
+
+- **Legacy look**: the button "Legacy look (v2.9 defaults)" in Journal Figure
+  Preset restores the old values (`legacy_preset_settings()`); the v2.9
+  byte-identical test now applies it. **Clear & Reset** returns to the journal
+  standard. Preset, Legacy look and Reset share one update loop
+  (`apply_settings()`), which also keeps the unit bookkeeping (mm / in) right.
+- **True-size previews everywhere**: the zoom fits the main panel width
+  (checkbox "Fit the preview to the panel width", on by default; rounded down to
+  0.25, 0.5-4x; the slider applies when it is off). In canvas mode the height
+  now follows the export aspect ratio instead of a fixed 600 px (the canvas
+  height input is gone). The composer preview uses the same path.
+- **Figure size bar** above the tabs: "Export: 89 x 65 mm · Nature single
+  column · Arial 7 / 6 pt · lines 0.75 / 0.5 pt · SVG"; in warning style with an
+  inline "Apply journal preset" button when units are not mm, text is outside
+  5-8 pt, the font is not Arial/Helvetica/sans or data lines exceed 1.5 pt. On
+  the Compose tab it also shows the composed size.
+- **Sized file names without timestamps**: `lysis_curve_<label>_<W>x<H>mm.<ext>`,
+  `<type>_<label>_<W>x<H>mm.<ext>`, `figure_composed_<W>x<H>mm.<ext>` (inches with
+  one decimal when the units are inches). Reports, settings and GIF/PPTX files
+  keep their timestamps.
+- **PDF report**: opens the font-embedding device the image export uses, since
+  `grDevices::pdf()` cannot draw Arial (now the default font).
+- Widget start values come from `APP_DEFAULTS`; the font-size inputs accept 5 pt.
+- Tests: `test_v210` applies `legacy_preset_settings()` for the v2.9 byte
+  comparison and checks the startup state (UI HTML attributes and an 89 mm,
+  6-8 pt Arial SVG from a session with only `APP_DEFAULTS`); the new section
+  covers file names, the bar, zoom and canvas aspect.
+
 ## v2.13.0 — 2026-10-19
 
 A multi-panel figure composer, so a complete journal figure can be assembled

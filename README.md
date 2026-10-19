@@ -199,8 +199,20 @@ This is useful when you want to apply the same visual style to different dataset
 
 ## Journal-ready figures (new in v2.10)
 
-For a thesis or a manuscript, make the figure at its final printed size and
-never rescale it afterwards. Expand **Journal Figure Preset**:
+The app now **starts in the journal standard**: Nature single column
+(89 x 65 mm), Arial 7 / 6 pt, 0.75 / 0.5 pt lines, SVG, the "True export size"
+preview (zoomed to fit the window) and an `a` panel label. A bar above the tabs
+always shows what will be exported and warns when the settings are not
+journal-standard. Sample colours come from the Okabe-Ito palette (the
+Colorblind-friendly palette) unless you set a colour per sample. You only need
+the preset below to change the journal or the width; **Legacy look (v2.9
+defaults)** in the same section restores the old 10 x 8 in, 20 pt, PDF start,
+and **Clear & Reset** returns to the journal standard.
+
+Make the figure at its final printed size and never rescale it afterwards.
+Image downloads have stable, sized names without a timestamp
+(`lysis_curve_a_89x65mm.svg`, `metric_summary_b_89x65mm.svg`,
+`figure_composed_183x120mm.svg`). Expand **Journal Figure Preset**:
 
 1. Pick the **Journal** family and the **Width** (single column, 1.5 columns,
    double column, or *half of a double column* for one panel of a two-panel
@@ -259,9 +271,10 @@ Expand the **Plot Dimensions & Export** section.
 
 ### Image Export
 
-1. **On-screen preview**: *Screen canvas* (width/height in pixels, the old
-   behaviour) or *True export size* (the figure at its physical export size,
-   zoomed 1-4x, rendered through the same pipeline as the download).
+1. **On-screen preview**: *True export size* (the default: the figure at its
+   physical export size, rendered through the same pipeline as the download,
+   zoomed to fit the window; untick the fit box for a fixed 0.5-4x zoom) or
+   *Screen canvas* (a pixel width; the height keeps the figure's proportions).
 2. Set the export **width and height** in inches or mm and, for raster
    formats, the **DPI**. A note shows the size in both units.
 3. Choose a format: **SVG** (Inkscape-ready: real text, no `textLength`

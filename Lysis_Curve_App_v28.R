@@ -1,6 +1,18 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.14.0 -- Journal standard by default (a deliberate change of default output):
+#   STARTUP STATE     -- APP_DEFAULTS = journal_preset_settings(89, 65, "a"): Nature single
+#                        column, Arial 6-8 pt, SVG, true-size preview. The pre-v2.14 look is
+#                        legacy_preset_settings() (button "Legacy look"); the byte-identical
+#                        test against v2.9 applies it. Widgets start from APP_DEFAULTS.
+#   TRUE-SIZE PREVIEW -- zoom fits the main panel (input$main_panel_width, rounded down to
+#                        0.25); canvas mode keeps the export aspect ratio.
+#   SIZE BAR          -- always-visible line above the tabs with the live export size,
+#                        journal column, fonts and line widths; warns when not journal-standard.
+#   FILE NAMES        -- lysis_curve_<label>_<W>x<H>mm.svg etc., no timestamp.
+#   PDF REPORT        -- opens the font-embedding device (Arial is now the default font).
+#
 # v2.13.0 -- Multi-panel figure composer (opt-in; default main figure unchanged):
 #   COMPOSE FIGURE    -- New main-panel tab: pick the main lysis curve and any
 #                        analysis figures, a column count, a journal column width
@@ -187,7 +199,7 @@ has_patchwork <- requireNamespace("patchwork", quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.13.0"
+APP_VERSION <- "2.14.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -855,7 +867,11 @@ html_table(meta$settings_df),
 build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
                              width = 10, height = 8, analysis = NULL) {
   stopifnot(requireNamespace("gridExtra", quietly = TRUE))
-  grDevices::pdf(file, width = width, height = height, onefile = TRUE)
+  # v2.14: the figure fonts are Arial by default, which grDevices::pdf() (base-14 PostScript fonts
+  # only) cannot draw; open the same font-embedding device the image export uses.
+  pdf_dev <- export_device("pdf")
+  if (is.function(pdf_dev)) pdf_dev(file, width = width, height = height)
+  else grDevices::pdf(file, width = width, height = height, onefile = TRUE)
   on.exit(grDevices::dev.off(), add = TRUE)
 
   fscale <- (meta$font_pt %||% 14) / 14   # report font size control
@@ -1460,7 +1476,12 @@ compare_replicate_metric <- function(rm, metric, ref_sample = NULL,
 # ── App defaults (v2.10: single source of truth) ─────────────────────────────
 # Used by Clear/Reset Settings and by the test suites to seed a server session
 # with the same values the UI widgets start with.
-APP_DEFAULTS <- list(
+# v2.14.0: the app now STARTS in the journal standard (Nature single column, 89 x 65 mm,
+# Arial 6-8 pt, SVG). LEGACY_BASE is the complete pre-v2.14 default set (the v2.9 look:
+# 10 x 8 in, 20 pt, PDF, canvas preview); legacy_preset_settings() is the part of it the
+# journal preset touches, offered as the "Legacy look" button. Every non-visual default
+# (metrics, notebook, analysis, compose, ...) is unchanged.
+LEGACY_BASE <- list(
   x_scale_type          = "linear",  y_scale_type           = "log",
   use_advanced_ticks    = TRUE,       y_log_min_exponent     = -2,
   y_log_max_exponent    = 0,          custom_x_limits        = FALSE,
@@ -1488,13 +1509,14 @@ APP_DEFAULTS <- list(
   custom_aspect_ratio   = FALSE,      aspect_ratio           = 1,
   export_format         = "pdf",      export_width           = 10,
   export_height         = 8,          export_dpi             = 300,
-  plot_width            = 820,        plot_height            = 600,
+  plot_width            = 820,
   gif_fps               = 1,          gif_width              = 800,
   gif_height            = 600,        x_extra_ticks          = "",
   report_title          = "Lysis Curve Analysis Report",
   report_author         = "",         report_notes           = "",
   metrics_smooth_window = 5,          legend_font_size       = 14,
   metrics_peak_smooth_window = 1,     # KC-3: off by default
+  preview_zoom_auto = TRUE,           # v2.14: zoom chosen to fit the main panel width
   # v2.13.0 figure composer
   compose_panels = c("main", "metric_summary", "growth_rate", "normalized"),
   compose_ncol = "2", compose_width = "double", compose_width_mm = 183,
@@ -1527,6 +1549,10 @@ APP_DEFAULTS <- list(
   nb_custom_key1 = "", nb_custom_val1 = "", nb_custom_key2 = "", nb_custom_val2 = "",
   nb_custom_key3 = "", nb_custom_val3 = ""
 )
+
+# The inputs the journal preset sets, at their legacy values.
+legacy_preset_settings <- function() LEGACY_BASE[names(journal_preset_settings(89, 65))]
+APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65, panel_label = "a"))
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
@@ -1572,7 +1598,24 @@ ui <- fluidPage(
          if (el) el.style.backgroundColor = msg.color;
        });"
     )),
+    # v2.14: the main panel's pixel width, so true-size previews can pick the zoom that fits it
+    tags$script(HTML(
+      "(function() {
+         var timer = null;
+         function report() {
+           var el = document.getElementById('main_panel');
+           if (el && window.Shiny && Shiny.setInputValue)
+             Shiny.setInputValue('main_panel_width', Math.round(el.clientWidth));
+         }
+         window.addEventListener('resize', function() { clearTimeout(timer); timer = setTimeout(report, 200); });
+         if (window.jQuery) jQuery(document).on('shiny:connected', report);
+       })();"
+    )),
     tags$style(HTML("
+      .fig-bar { background:#f1f3f5; border:1px solid #dee2e6; border-radius:3px; padding:4px 10px;
+                 font-size:.85em; margin-bottom:8px; color:#495057; }
+      .fig-bar.warn { background:#fff3cd; border-color:#ffe08a; color:#856404; }
+      .fig-bar .btn { margin-left:10px; padding:0 8px; font-size:.95em; }
       .panel-section {
         background:#f8f9fa; padding:12px; border-radius:5px;
         margin:10px 0; border:1px solid #e9ecef;
@@ -1726,8 +1769,8 @@ ui <- fluidPage(
                        textInput("plot_title",    "Plot Title:",    ""),
                        textInput("plot_subtitle", "Plot Subtitle:", ""),
                        h5("Gridlines", style = "margin-top:12px;"),
-                       checkboxInput("show_major_gridlines", "Show Major Gridlines", FALSE),
-                       checkboxInput("show_minor_gridlines", "Show Minor Gridlines", FALSE),
+                       checkboxInput("show_major_gridlines", "Show Major Gridlines", APP_DEFAULTS$show_major_gridlines),
+                       checkboxInput("show_minor_gridlines", "Show Minor Gridlines", APP_DEFAULTS$show_minor_gridlines),
                        conditionalPanel(condition = "input.show_major_gridlines == true",
                                         selectInput("major_gridline_color", "Major Gridline Color:",
                                                     choices  = c("Light Gray" = "#E6E6E6", "Medium Gray" = "#CCCCCC",
@@ -1758,13 +1801,13 @@ ui <- fluidPage(
                                                 "Helvetica Neue"               = "Helvetica Neue",
                                                 "Garamond"                     = "Garamond",
                                                 "Palatino"                     = "Palatino"),
-                                   selected = "sans"),
-                       numericInput("title_font_size",      "Title Font Size:",  20, 8, 48),
-                       numericInput("axis_label_font_size", "Axis Label Size:",  20, 8, 36),
-                       numericInput("axis_text_font_size",  "Axis Text Size:",   16, 6, 32),
-                       numericInput("legend_font_size",     "Legend Font Size:", 14, 6, 32),
-                       checkboxInput("bold_title",         "Bold Title",         TRUE),
-                       checkboxInput("italic_axis_labels", "Italic Axis Labels", FALSE),
+                                   selected = APP_DEFAULTS$font_family),
+                       numericInput("title_font_size",      "Title Font Size:",  APP_DEFAULTS$title_font_size, 5, 48),
+                       numericInput("axis_label_font_size", "Axis Label Size:",  APP_DEFAULTS$axis_label_font_size, 5, 36),
+                       numericInput("axis_text_font_size",  "Axis Text Size:",   APP_DEFAULTS$axis_text_font_size, 5, 32),
+                       numericInput("legend_font_size",     "Legend Font Size:", APP_DEFAULTS$legend_font_size, 5, 32),
+                       checkboxInput("bold_title",         "Bold Title",         APP_DEFAULTS$bold_title),
+                       checkboxInput("italic_axis_labels", "Italic Axis Labels", APP_DEFAULTS$italic_axis_labels),
                        selectInput("axis_text_angle", "X-axis Text Angle:",
                                    choices  = c("Horizontal (0\u00b0)" = "0",
                                                 "Angled (45\u00b0)"    = "45",
@@ -1775,7 +1818,7 @@ ui <- fluidPage(
                        h4("Figure Layout", class = "panel-title"),
                        p(style = "font-size:.8em;color:#777;margin-top:-4px;",
                          "Line widths in pt and lengths in mm, as journals specify them. ",
-                         "Defaults reproduce the pre-v2.10 look."),
+                         "The app starts in the journal standard; the Legacy look button restores the pre-v2.14 look."),
                        selectInput("legend_position", "Legend Position:",
                                    choices = c("Right (outside)"      = "right",
                                                "Top (outside)"        = "top",
@@ -1787,31 +1830,31 @@ ui <- fluidPage(
                                                "Inside: bottom-right" = "inside-bottom-right",
                                                "Inside: emptiest corner (auto)" = "inside-auto",
                                                "None"                 = "none"),
-                                   selected = "right"),
-                       checkboxInput("legend_box_border", "Legend box border", TRUE),
+                                   selected = APP_DEFAULTS$legend_position),
+                       checkboxInput("legend_box_border", "Legend box border", APP_DEFAULTS$legend_box_border),
                        selectInput("legend_order", "Sample order (legend, panels, facets):",
                                    choices = c("Alphabetical (legacy)" = "alpha",
                                                "As selected / as in the file" = "selected"),
-                                   selected = "alpha"),
-                       numericInput("legend_key_mm", "Legend key size (mm; 0 = auto):", 0, 0, 20, 0.5),
+                                   selected = APP_DEFAULTS$legend_order),
+                       numericInput("legend_key_mm", "Legend key size (mm; 0 = auto):", APP_DEFAULTS$legend_key_mm, 0, 20, 0.5),
                        fluidRow(
-                         column(6, numericInput("axis_line_pt",   "Axis / tick line (pt):", 1.07, 0.1, 4, 0.05)),
-                         column(6, numericInput("tick_length_mm", "Tick length (mm):",     1.5,  0,  10, 0.1))
+                         column(6, numericInput("axis_line_pt",   "Axis / tick line (pt):", APP_DEFAULTS$axis_line_pt, 0.1, 4, 0.05)),
+                         column(6, numericInput("tick_length_mm", "Tick length (mm):",     APP_DEFAULTS$tick_length_mm,  0,  10, 0.1))
                        ),
                        fluidRow(
-                         column(6, numericInput("theme_base_pt", "Spacing base size (pt; 0 = theme default):", 0, 0, 30, 0.5)),
+                         column(6, numericInput("theme_base_pt", "Spacing base size (pt; 0 = theme default):", APP_DEFAULTS$theme_base_pt, 0, 30, 0.5)),
                          column(6, selectInput("y_tick_label_style", "Y tick labels:",
                                                choices = c("As is (0.10)"     = "legacy",
                                                            "Trim zeros (0.1)" = "trim",
                                                            "Powers of ten"    = "log10"),
-                                               selected = "legacy"))
+                                               selected = APP_DEFAULTS$y_tick_label_style))
                        ),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
                          "Spacing base size scales margins, tick/label gaps and legend spacing; ",
                          "set it near your text size (7 pt) for journal figures."),
                        fluidRow(
-                         column(6, textInput("panel_label", "Panel label:", "", placeholder = "a")),
-                         column(6, numericInput("panel_label_size", "Panel label (pt):", 8, 5, 20, 0.5))
+                         column(6, textInput("panel_label", "Panel label:", APP_DEFAULTS$panel_label, placeholder = "a")),
+                         column(6, numericInput("panel_label_size", "Panel label (pt):", APP_DEFAULTS$panel_label_size, 5, 20, 0.5))
                        )
                    )
                  ),
@@ -1872,7 +1915,7 @@ ui <- fluidPage(
                                                 "Publication"         = "publication",
                                                 "Rainbow"             = "rainbow",
                                                 "Grayscale"           = "gray"),
-                                   selected = "custom"),
+                                   selected = APP_DEFAULTS$color_palette),
                        htmlOutput("palette_preview")
                    )
                  ),
@@ -1882,14 +1925,14 @@ ui <- fluidPage(
                    tags$summary("Line & Point Settings"),
                    div(class = "panel-section",
                        h4("Line Options", class = "panel-title"),
-                       sliderInput("line_thickness", "Line Thickness (1 = 2.1 pt):", 0.1, 3, 1, 0.05)
+                       sliderInput("line_thickness", "Line Thickness (1 = 2.1 pt):", 0.1, 3, APP_DEFAULTS$line_thickness, 0.05)
                    ),
                    div(class = "panel-section",
                        h4("Point Options", class = "panel-title"),
                        checkboxInput("show_points", "Show Points", TRUE),
                        conditionalPanel(condition = "input.show_points == true",
-                                        sliderInput("shape_size",   "Point Size:",   0.5, 8, 3,   0.1),
-                                        sliderInput("point_stroke", "Stroke Width:", 0,   2, 0.5, 0.05)
+                                        sliderInput("shape_size",   "Point Size:",   0.5, 8, APP_DEFAULTS$shape_size,   0.1),
+                                        sliderInput("point_stroke", "Stroke Width:", 0,   2, APP_DEFAULTS$point_stroke, 0.05)
                        )
                    )
                  ),
@@ -1900,7 +1943,7 @@ ui <- fluidPage(
                    div(class = "panel-section",
                        checkboxInput("show_end_labels", "Show End-of-Line Labels", FALSE),
                        conditionalPanel(condition = "input.show_end_labels == true",
-                                        numericInput("label_font_size", "Label Font Size (pt):", 12, 3, 36),
+                                        numericInput("label_font_size", "Label Font Size (pt):", APP_DEFAULTS$label_font_size, 3, 36),
                                         checkboxInput("label_bold",  "Bold Labels",              TRUE),
                                         numericInput("label_offset", "Label Offset (% x-axis):", 3.5, 0, 20)
                        )
@@ -1923,7 +1966,7 @@ ui <- fluidPage(
                                         checkboxInput("asymmetric_error", "Floor errors at zero", FALSE),
                                         selectInput("error_bar_color", "Error colour:",
                                                     choices = c("Sample colour" = "sample", "Black" = "black", "Grey" = "grey50"),
-                                                    selected = "sample"),
+                                                    selected = APP_DEFAULTS$error_bar_color),
                                         checkboxInput("show_replicate_points",
                                                       "Show individual replicate values (open circles behind the mean)", FALSE),
                                         checkboxInput("error_log_floor",
@@ -1937,9 +1980,9 @@ ui <- fluidPage(
                                                                                   "Solid lines"  = "solid",
                                                                                   "Dashed lines" = "dashed"),
                                                                      selected = "T"),
-                                                         sliderInput("error_bar_width",     "Cap width:", 0.01, 50, 1, 0.01),
-                                                         checkboxInput("error_cap_relative", "Cap width is % of the x range (same look at any time scale)", FALSE),
-                                                         sliderInput("error_bar_thickness", "Bar Thickness (1 = 2.1 pt):", 0.1,  2, 0.8, 0.05),
+                                                         sliderInput("error_bar_width",     "Cap width:", 0.01, 50, APP_DEFAULTS$error_bar_width, 0.01),
+                                                         checkboxInput("error_cap_relative", "Cap width is % of the x range (same look at any time scale)", APP_DEFAULTS$error_cap_relative),
+                                                         sliderInput("error_bar_thickness", "Bar Thickness (1 = 2.1 pt):", 0.1,  2, APP_DEFAULTS$error_bar_thickness, 0.05),
                                                          selectInput("error_bar_position", "Position:",
                                                                      choices  = c("Middle" = "middle", "Dodge" = "dodge"),
                                                                      selected = "middle")
@@ -1949,7 +1992,7 @@ ui <- fluidPage(
                                         ),
                                         checkboxInput("show_error_caption",
                                                       "Annotate error type + n in caption",
-                                                      value = TRUE),
+                                                      value = APP_DEFAULTS$show_error_caption),
                                         p(style = "font-size:.8em;color:#777;margin-top:-6px;",
                                           "Adds a figure caption stating the error measure (SD / SEM / 95% CI) ",
                                           "and the replicate count — on by default (KC-6) so a default SEM-bar ",
@@ -1985,6 +2028,11 @@ ui <- fluidPage(
                        uiOutput("journal_preset_summary"),
                        actionButton("apply_journal_preset", "Apply journal preset",
                                     style = "background:#2C3E50;color:white;border:none;width:100%;"),
+                       actionButton("apply_legacy_look", "Legacy look (v2.9 defaults)",
+                                    style = "background:#f8f9fa;color:#495057;border:1px solid #ced4da;width:100%;margin-top:6px;"),
+                       p(style = "font-size:.78em;color:#777;margin-top:4px;",
+                         "The app starts in the journal standard (Nature single column, 89 x 65 mm). ",
+                         "Legacy look restores the pre-v2.14 start: 10 x 8 in, 20 pt text, PDF, pixel canvas."),
                        p(style = "font-size:.78em;color:#777;margin-top:6px;",
                          "Use Save Settings afterwards to keep the result as a reusable style file.")
                    ),
@@ -2005,20 +2053,22 @@ ui <- fluidPage(
                        radioButtons("preview_mode", NULL,
                                     choices  = c("Screen canvas (pixels)"                      = "canvas",
                                                  "True export size (what Inkscape will open)" = "wysiwyg"),
-                                    selected = "canvas"),
+                                    selected = APP_DEFAULTS$preview_mode),
                        conditionalPanel(condition = "input.preview_mode == 'canvas'",
-                                        fluidRow(
-                                          column(6, numericInput("plot_width",  "Width (px):",  820, 400, 2000)),
-                                          column(6, numericInput("plot_height", "Height (px):", 600, 300, 1500))
-                                        )
+                                        numericInput("plot_width", "Width (px):", 820, 400, 2000),
+                                        p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+                                          "The height follows the export size, so the figure keeps its proportions.")
                        ),
                        conditionalPanel(condition = "input.preview_mode == 'wysiwyg'",
-                                        sliderInput("preview_zoom", "Zoom (x physical size):", 1, 4, 2, 0.5),
+                                        checkboxInput("preview_zoom_auto", "Fit the preview to the panel width",
+                                                      APP_DEFAULTS$preview_zoom_auto),
+                                        conditionalPanel(condition = "input.preview_zoom_auto == false",
+                                          sliderInput("preview_zoom", "Zoom (x physical size):", 0.5, 4, APP_DEFAULTS$preview_zoom, 0.25)),
                                         p(style = "font-size:.8em;color:#777;margin-top:-6px;",
                                           "Rendered at the export width/height below through the same ",
                                           "pipeline as the download; text and lines appear at their true pt size.")
                        ),
-                       checkboxInput("custom_aspect_ratio", "Custom Aspect Ratio", FALSE),
+                       checkboxInput("custom_aspect_ratio", "Custom Aspect Ratio", APP_DEFAULTS$custom_aspect_ratio),
                        conditionalPanel(condition = "input.custom_aspect_ratio == true",
                                         numericInput("aspect_ratio", "Width/Height:", 1, 0.3, 4, 0.1)
                        ),
@@ -2029,16 +2079,16 @@ ui <- fluidPage(
                                                 "PNG"                   = "png",
                                                 "TIFF (LZW)"            = "tiff",
                                                 "JPEG"                  = "jpeg"),
-                                   selected = "pdf"),
+                                   selected = APP_DEFAULTS$export_format),
                        radioButtons("export_units", "Size units:",
                                     choices = c("inches" = "in", "mm" = "mm"),
-                                    selected = "in", inline = TRUE),
+                                    selected = APP_DEFAULTS$export_units, inline = TRUE),
                        fluidRow(
-                         column(6, numericInput("export_width",  "Width (in):",  10, 0.5, 400)),
-                         column(6, numericInput("export_height", "Height (in):", 8,  0.5, 400))
+                         column(6, numericInput("export_width",  paste0("Width (", APP_DEFAULTS$export_units, "):"),  APP_DEFAULTS$export_width, 0.5, 400)),
+                         column(6, numericInput("export_height", paste0("Height (", APP_DEFAULTS$export_units, "):"), APP_DEFAULTS$export_height,  0.5, 400))
                        ),
                        uiOutput("export_size_note"),
-                       numericInput("export_dpi", "DPI (raster formats):", 300, 72, 1200),
+                       numericInput("export_dpi", "DPI (raster formats):", APP_DEFAULTS$export_dpi, 72, 1200),
                        downloadButton("downloadPlot", "Download Image"),
                        hr(),
                        h4("PowerPoint Export", class = "panel-title"),
@@ -2229,7 +2279,8 @@ ui <- fluidPage(
                  
     ), # end sidebarPanel
     
-    mainPanel(width = 9,
+    mainPanel(width = 9, id = "main_panel",
+      uiOutput("figure_standard_bar"),
       tabsetPanel(id = "main_tabs",
         tabPanel("Lysis curve", br(), uiOutput("plot_container")),
         # ── Analysis figures (v2.11) ──────────────────────────────────────────
@@ -2627,7 +2678,8 @@ server <- function(input, output, session) {
       # Inputs that belong to the data/session — never saved
       data_inputs     <- c("file", "loadSettings", "selected_samples",
                            "time_filter_range", "exclude_timepoints",
-                           "apply_journal_preset")
+                           "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
+                           "main_panel_width")
       # Per-sample dynamic input prefixes — handled separately below
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
@@ -2702,7 +2754,8 @@ server <- function(input, output, session) {
     # Skip anything data-specific or per-sample — only visual controls
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
-                         "apply_journal_preset")
+                         "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
+                         "main_panel_width")
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
                          "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_")
@@ -2807,20 +2860,7 @@ server <- function(input, output, session) {
     }
     
     # ── Reset global visual settings to app defaults ──────────────────────────
-    defs <- APP_DEFAULTS
-    rv$units_seen <- "in"   # v2.10: see observeEvent(input$export_units)
-    for (nm in names(defs)) {
-      tryCatch({
-        val <- defs[[nm]]
-        if (is.logical(val))      updateCheckboxInput(session, nm, value    = val)
-        else if (is.numeric(val)) updateNumericInput( session, nm, value    = val)
-        else if (is.character(val) && length(val) > 1)   # v2.13: checkbox groups (compose_panels)
-          updateCheckboxGroupInput(session, nm, selected = val)
-        else { updateSelectInput(session, nm, selected = val)
-          updateTextInput(session,  nm, value    = val)
-          if (startsWith(nm, "compose_")) updateRadioButtons(session, nm, selected = val) }
-      }, error = function(e) invisible(NULL))
-    }
+    apply_settings(APP_DEFAULTS)   # v2.14: the journal standard (also moves rv$units_seen)
     
     # ── Reset per-sample aesthetics to position-based defaults ───────────────
     cur_samps  <- isolate(input$selected_samples)
@@ -3816,7 +3856,30 @@ server <- function(input, output, session) {
   # (10 in -> 254 mm). A preset or a settings file sets units + numbers
   # together and pre-marks the unit it sends (rv$units_seen), so those values
   # are not converted a second time.
-  rv$units_seen <- "in"
+  rv$units_seen <- APP_DEFAULTS$export_units
+  # One update loop for everything that pushes a settings list into the UI: the journal
+  # preset, the legacy look and Clear & Reset. A value's type picks the widget update
+  # (radio / select / text updates on a mismatched widget are no-ops).
+  apply_settings <- function(vals) {
+    if (is.character(vals$export_units)) rv$units_seen <- vals$export_units   # see observeEvent(input$export_units)
+    for (nm in names(vals)) {
+      val <- vals[[nm]]
+      tryCatch({
+        if (is.logical(val))      updateCheckboxInput(session, nm, value = val)
+        else if (is.numeric(val)) updateNumericInput( session, nm, value = val)
+        else if (is.character(val) && length(val) > 1) updateCheckboxGroupInput(session, nm, selected = val)
+        else { updateSelectInput(session,   nm, selected = val)
+               updateRadioButtons(session, nm, selected = val)
+               updateTextInput(session,    nm, value    = val) }
+      }, error = function(e) invisible(NULL))
+    }
+    if (is.character(vals$export_units)) {
+      u <- vals$export_units
+      updateNumericInput(session, "export_width",  label = paste0("Width (",  u, "):"))
+      updateNumericInput(session, "export_height", label = paste0("Height (", u, "):"))
+    }
+    invisible(NULL)
+  }
   observeEvent(input$export_units, {
     u <- input$export_units
     if (!identical(u, rv$units_seen)) {
@@ -3844,17 +3907,26 @@ server <- function(input, output, session) {
   # pixel-canvas / true-export-size preview mechanics.
   # size_fun: figure size in inches (the export size unless the figure has its own,
   # as the composed figure does); canvas mode keeps its width and scales the height.
+  # v2.14: the zoom that makes the figure fit the main panel (rounded down to 0.25, 0.5-4), or the
+  # slider's value when auto-fit is off or the page width is not known (tests, first render).
+  preview_zoom_value <- function(width_in) {
+    pw <- input$main_panel_width
+    if (isTRUE(input$preview_zoom_auto %||% TRUE) && is.numeric(pw) && length(pw) == 1 && is.finite(pw) &&
+        pw > 0 && is.finite(width_in) && width_in > 0)
+      min(max(floor((pw - 24) / (width_in * 96) * 4) / 4, 0.5), 4)
+    else input$preview_zoom %||% 2
+  }
   preview_container <- function(plot_id, img_id, size_fun = export_size_in) {
+    sz <- size_fun()
     if (identical(input$preview_mode, "wysiwyg")) {
-      sz <- size_fun(); z <- input$preview_zoom %||% 2
+      z <- preview_zoom_value(sz[1])
       imageOutput(img_id,
                   width  = paste0(round(sz[1] * 96 * z), "px"),
                   height = paste0(round(sz[2] * 96 * z), "px"))
     } else {
-      h_px <- if (identical(size_fun, export_size_in)) input$plot_height
-              else round(input$plot_width * size_fun()[2] / size_fun()[1])
+      # canvas mode: the pixel width is the user's, the height keeps the figure's aspect ratio
       plotOutput(plot_id,
-                 height = paste0(h_px, "px"),
+                 height = paste0(round(input$plot_width * sz[2] / sz[1]), "px"),
                  width  = paste0(input$plot_width,  "px"))
     }
   }
@@ -3869,7 +3941,7 @@ server <- function(input, output, session) {
     }, res = 96)
     output[[img_id]] <- renderImage({
       plot_inputs_debounced()
-      sz <- size_fun(); z <- input$preview_zoom %||% 2
+      sz <- size_fun(); z <- preview_zoom_value(sz[1])
       pr <- session$clientData$pixelratio %||% 1
       f  <- tempfile(fileext = ".png")
       ggsave(f, plot = plot_fun(), device = export_device("png"),
@@ -3879,12 +3951,77 @@ server <- function(input, output, session) {
            alt = "Figure preview at export size")
     }, deleteFile = TRUE)
   }
+  # v2.14: stable, sized file names (no timestamp) so panels can be assembled from them:
+  # lysis_curve_<label>_<W>x<H><unit>.<ext>, <type>_<label>_<W>x<H><unit>.<ext>, figure_composed_<W>x<H>mm.<ext>
+  file_label <- function(x, fallback) {
+    x <- gsub("[^A-Za-z0-9._-]+", "_", trimws(x %||% ""))
+    if (nzchar(x)) x else fallback
+  }
+  export_size_tag <- function() {
+    u <- input$export_units %||% "mm"; w <- input$export_width %||% 89; h <- input$export_height %||% 65
+    if (identical(u, "mm")) sprintf("%dx%dmm", as.integer(round(w)), as.integer(round(h)))
+    else sprintf("%.1fx%.1fin", w, h)
+  }
+  main_download_name <- function()
+    paste0("lysis_curve_", file_label(input$panel_label, "main"), "_", export_size_tag(), ".", input$export_format %||% "svg")
+  analysis_download_name <- function() {
+    ty <- input$analysis_type %||% "figure"
+    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(), ".", input$export_format %||% "svg")
+  }
+  composed_download_name <- function() {
+    sz <- tryCatch({ i <- compose_info(); c(i$width_mm, i$height_mm) }, error = function(e) NULL)
+    paste0("figure_composed", if (!is.null(sz)) sprintf("_%dx%dmm", as.integer(round(sz[1])), as.integer(round(sz[2]))),
+           ".", input$export_format %||% "svg")
+  }
+
+  # ── Figure size bar (v2.14) ──────────────────────────────────────────────────
+  # One line above the tabs, always visible: what the export will be, from the live inputs, and a
+  # warning (with a one-click fix) when the state is not journal-standard.
+  output$figure_standard_bar <- renderUI({
+    u  <- input$export_units %||% "mm"
+    w  <- input$export_width; h <- input$export_height
+    if (!is.numeric(w) || !is.numeric(h) || !is.finite(w) || !is.finite(h)) return(NULL)
+    w_mm <- if (identical(u, "mm")) w else w * 25.4
+    names_short <- function(jp) sub(" family$", "", sub(" \\(.*$", "", jp$label))
+    fams <- JOURNAL_PRESETS[setdiff(names(JOURNAL_PRESETS), "custom")]
+    fam  <- input$journal_family %||% "nature"
+    fams <- fams[unique(c(if (fam %in% names(fams)) fam, names(fams)))]   # the chosen family first
+    jname <- NULL
+    col_names <- c(single = "single column", onehalf = "1.5 column", double = "double column")
+    for (jp in fams) {
+      for (key in names(col_names)) {
+        val <- jp[[key]]
+        if (is.finite(val %||% NA) && abs(w_mm - val) < 0.6) { jname <- paste(names_short(jp), col_names[[key]]); break }
+      }
+      if (!is.null(jname)) break
+    }
+    if (is.null(jname)) jname <- "custom size"
+    size_txt <- if (identical(u, "mm")) sprintf("%s \u00d7 %s mm", round(w), round(h))
+                else sprintf("%s \u00d7 %s in", round(w, 1), round(h, 1))
+    fnt  <- input$font_family %||% "sans"
+    al   <- input$axis_label_font_size %||% 7; at <- input$axis_text_font_size %||% 6
+    dl   <- lw2pt(input$line_thickness %||% 0.35); xl <- input$axis_line_pt %||% 0.5
+    g    <- function(x) format(round(x, 2), nsmall = 0)
+    txt  <- sprintf("Export: %s \u00b7 %s \u00b7 %s %s / %s pt \u00b7 lines %s / %s pt \u00b7 %s",
+                    size_txt, jname, fnt, g(al), g(at), g(dl), g(xl), toupper(input$export_format %||% "svg"))
+    standard <- identical(u, "mm") && al <= 8 && al >= 5 && at <= 8 && at >= 5 &&
+      fnt %in% c("Arial", "Helvetica", "sans") && dl <= 1.5
+    comp <- NULL
+    if (identical(input$main_tabs, "Compose figure") && has_patchwork) {
+      i <- tryCatch(compose_info(), error = function(e) NULL)
+      if (!is.null(i)) comp <- sprintf("  |  Composed: %s \u00d7 %s mm, %s column%s", round(i$width_mm), round(i$height_mm),
+                                       i$ncol, if (i$ncol == 1) "" else "s")
+    }
+    if (standard) div(class = "fig-bar", txt, comp)
+    else div(class = "fig-bar warn", txt, comp, " \u2014 not journal-standard \u2014 ",
+             actionButton("apply_journal_preset_bar", "Apply journal preset", class = "btn btn-default btn-xs"))
+  })
+
   output$plot_container <- renderUI(preview_container("od_plot", "od_plot_img"))
   register_preview("od_plot", "od_plot_img", generate_plot)
   
   output$downloadPlot <- downloadHandler(
-    filename = function()
-      paste0("od_plot_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".", input$export_format),
+    filename = function() main_download_name(),
     content  = function(file) {
       sz   <- export_size_in()
       fmt  <- input$export_format
@@ -3919,30 +4056,24 @@ server <- function(input, output, session) {
       if (nzchar(warn)) span(style = "color:#856404;", warn))
   })
   
-  observeEvent(input$apply_journal_preset, {
+  apply_journal_preset_now <- function() {
     w <- journal_target_width(); h <- input$journal_height_mm %||% 65
     if (!is.numeric(w) || !is.finite(w) || !is.numeric(h) || !is.finite(h)) return()
     x_range <- tryCatch({
       pd <- prepare_plot_data(); diff(range(pd$time, na.rm = TRUE))
     }, error = function(e) NULL)
-    vals <- journal_preset_settings(w, h, input$journal_panel_label %||% "", x_range)
-    rv$units_seen <- "mm"   # see observeEvent(input$export_units)
-    for (nm in names(vals)) {
-      val <- vals[[nm]]
-      tryCatch({
-        if (is.logical(val))      updateCheckboxInput(session, nm, value = val)
-        else if (is.numeric(val)) updateNumericInput( session, nm, value = val)
-        else { updateSelectInput(session,   nm, selected = val)
-               updateRadioButtons(session, nm, selected = val)
-               updateTextInput(session,    nm, value    = val) }
-      }, error = function(e) invisible(NULL))
-    }
-    updateNumericInput(session, "export_width",  label = "Width (mm):")
-    updateNumericInput(session, "export_height", label = "Height (mm):")
+    apply_settings(journal_preset_settings(w, h, input$journal_panel_label %||% "", x_range))
     showNotification(sprintf(paste0("Journal preset applied: %s x %s mm, Arial 6-8 pt, ",
                                     "SVG export. Preview switched to true export size."),
                              round(w, 1), h),
                      type = "message", duration = 8)
+  }
+  observeEvent(input$apply_journal_preset,     apply_journal_preset_now())
+  observeEvent(input$apply_journal_preset_bar, apply_journal_preset_now())   # the size bar's button
+  # the pre-v2.14 look (10 x 8 in, 20 pt, PDF, canvas preview), as one click
+  observeEvent(input$apply_legacy_look, {
+    apply_settings(legacy_preset_settings())
+    showNotification("Legacy look applied (the v2.9 defaults: 10 x 8 in, 20 pt, PDF).", type = "message", duration = 6)
   })
   
   # ── Figure legend text (v2.10) ──────────────────────────────────────────────
@@ -4287,9 +4418,7 @@ server <- function(input, output, session) {
   register_preview("analysis_plot", "analysis_img", generate_analysis_plot)
   
   output$downloadAnalysisPlot <- downloadHandler(
-    filename = function()
-      paste0("analysis_", input$analysis_type %||% "figure", "_",
-             format(Sys.time(), "%Y%m%d_%H%M%S"), ".", input$export_format),
+    filename = function() analysis_download_name(),
     content  = function(file) {
       sz   <- export_size_in(); fmt <- input$export_format
       args <- list(filename = file, plot = generate_analysis_plot(), device = export_device(fmt),
@@ -4390,8 +4519,7 @@ server <- function(input, output, session) {
   })
 
   output$downloadComposedFigure <- downloadHandler(
-    filename = function()
-      paste0("composed_figure_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".", input$export_format),
+    filename = function() composed_download_name(),
     content  = function(file) {
       i <- compose_info()
       if (is.null(i$plot)) stop("No panel to compose: tick at least one available figure.")

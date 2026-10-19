@@ -338,10 +338,9 @@ testServer(app, {
     check("HTML report (on): replicate overlay replaces the normalized figure without a reference sample",
           grepl("<h3>Replicate overlay</h3>", html_noref, fixed = TRUE) && !grepl("<h3>Normalized OD", html_noref, fixed = TRUE))
     session$setInputs(metrics_ref_sample = "Uninfected")
-    # The PDF report draws on grDevices::pdf, whose font database has no "Arial"
-    # (set above by the journal preset): a pre-existing limit of the PDF report,
-    # not of the analysis pages, so build the PDFs with the default family.
-    session$setInputs(font_family = "sans")
+    # (v2.14: Arial is now the default, so the PDF report must work with it: it opens the same
+    # font-embedding device as the image export instead of grDevices::pdf())
+    check("the font family is Arial for the PDF report below", identical(input$font_family, "Arial"))
     pdf_on <- of("report_on.pdf"); pdf_report_file(pdf_on, meta)
     session$setInputs(report_include_analysis = FALSE)
     html_off <- html_report_string(meta)
@@ -365,7 +364,7 @@ testServer(app, {
   ingest_data(env$make_demo_data("resistance"), "demo")
   do.call(session$setInputs, env$APP_DEFAULTS)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
-                    metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time", font_family = "sans")
+                    metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time")
   m_r <- curve_metrics_current()
   check("resistance: Uninfected lysis onset is NA on the mean curve", is.na(m_r$lysis_time[m_r$sample == "Uninfected"]))
   tbl_r <- output$dash_metrics_table
@@ -737,6 +736,77 @@ testServer(app, {
         is.null(io$plot) && io$n == 0 && inherits(compose_plot_current(), "ggplot"))
   check("composed panels never contain a 'Figure not available' placeholder",
         !any(vapply(compose_info()$types, function(t) t == "dose_response", logical(1))))
+})
+
+cat("\n--- v2.14: sized file names, size bar, true-size previews ---\n")
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)          # the startup state, no preset pressed
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected")
+  check("main download name at startup: lysis_curve_a_89x65mm.svg", identical(main_download_name(), "lysis_curve_a_89x65mm.svg"))
+  check("analysis download name at startup: metric_summary_b_89x65mm.svg", identical(analysis_download_name(), "metric_summary_b_89x65mm.svg"))
+  check("composed download name: figure_composed_183x120mm.svg", identical(composed_download_name(), "figure_composed_183x120mm.svg"))
+  check("file names carry no timestamp", all(!grepl("[0-9]{8}", c(main_download_name(), analysis_download_name(), composed_download_name()))))
+  session$setInputs(panel_label = "", analysis_panel_label = "", analysis_type = "growth_rate", export_format = "png")
+  check("empty panel labels fall back to 'main' and the figure type",
+        identical(main_download_name(), "lysis_curve_main_89x65mm.png") && identical(analysis_download_name(), "growth_rate_growth_rate_89x65mm.png"))
+  session$setInputs(panel_label = "a", analysis_panel_label = "b", analysis_type = "metric_summary", export_format = "svg")
+  # the bar
+  bar <- output$figure_standard_bar$html
+  check("size bar at startup shows size, journal, font, text and line sizes and format",
+        grepl("Export: 89 × 65 mm", bar, fixed = TRUE) && grepl("Nature single column", bar, fixed = TRUE) &&
+        grepl("Arial 7 / 6 pt", bar, fixed = TRUE) && grepl("lines 0.75 / 0.5 pt", bar, fixed = TRUE) && grepl("SVG", bar, fixed = TRUE) &&
+        !grepl("not journal-standard", bar, fixed = TRUE))
+  session$setInputs(export_width = 100)
+  check("a width that is no journal column reads 'custom size'", grepl("custom size", output$figure_standard_bar$html, fixed = TRUE))
+  session$setInputs(export_width = 183, export_height = 120)
+  check("183 mm is recognised as the Nature double column", grepl("Nature double column", output$figure_standard_bar$html, fixed = TRUE))
+  session$setInputs(export_width = 89, export_height = 65)
+  session$setInputs(main_tabs = "Compose figure")
+  check("on the Compose tab the bar also shows the composed size",
+        grepl("Composed: 183 × 120 mm, 2 columns", output$figure_standard_bar$html, fixed = TRUE))
+  session$setInputs(main_tabs = "Lysis curve")
+  # legacy look -> warning bar with the inline button, and sized names in inches
+  do.call(session$setInputs, env$legacy_preset_settings())
+  bar2 <- output$figure_standard_bar$html
+  check("non-standard state (legacy look): warning style, message and the inline Apply button",
+        grepl("fig-bar warn", bar2, fixed = TRUE) && grepl("not journal-standard", bar2, fixed = TRUE) &&
+        grepl("apply_journal_preset_bar", bar2, fixed = TRUE) && grepl("Export: 10 × 8 in", bar2, fixed = TRUE))
+  check("inch units give one-decimal inch names (legacy: lysis_curve_main_10.0x8.0in.pdf)",
+        identical(main_download_name(), "lysis_curve_main_10.0x8.0in.pdf"))
+  # the buttons move the unit bookkeeping with the numbers
+  session$setInputs(apply_legacy_look = 1)
+  check("Legacy look button marks the units as inches", identical(rv$units_seen, "in"))
+  session$setInputs(apply_journal_preset = 1)
+  check("Apply journal preset marks the units as mm", identical(rv$units_seen, "mm"))
+  session$setInputs(apply_legacy_look = 2); session$setInputs(apply_journal_preset_bar = 1)
+  check("the size bar's button runs the same preset handler", identical(rv$units_seen, "mm"))
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  # previews: aspect ratio in canvas mode, fitted zoom in true-size mode
+  session$setInputs(preview_mode = "canvas", plot_width = 820)
+  pc <- as.character(preview_container("od_plot", "od_plot_img"))
+  check("canvas preview keeps the export aspect ratio (820 px wide -> 599 px tall for 89 x 65 mm)",
+        grepl("height:599px", pc, fixed = TRUE) && grepl("width:820px", pc, fixed = TRUE))
+  pcc <- as.character(preview_container("compose_plot", "compose_img", compose_size_in))
+  check("canvas preview of the composed figure keeps its aspect (183 x 120 mm -> 538 px tall)", grepl("height:538px", pcc, fixed = TRUE))
+  session$setInputs(preview_mode = "wysiwyg", preview_zoom = 2, preview_zoom_auto = FALSE)
+  check("true-size preview with auto-fit off uses the slider zoom (89 mm x 2 = 673 px)",
+        grepl("width:673px", as.character(preview_container("od_plot", "od_plot_img")), fixed = TRUE))
+  session$setInputs(preview_zoom_auto = TRUE)
+  check("auto-fit without a known page width falls back to the slider",
+        grepl("width:673px", as.character(preview_container("od_plot", "od_plot_img")), fixed = TRUE))
+  session$setInputs(main_panel_width = 1000)
+  check("auto-fit: 1000 px panel -> zoom 2.75 (rounded down to 0.25) for the 89 mm figure = 925 px",
+        grepl("width:925px", as.character(preview_container("od_plot", "od_plot_img")), fixed = TRUE))
+  check("auto-fit: the composed 183 mm figure gets zoom 1.25 = 865 px",
+        grepl("width:865px", as.character(preview_container("compose_plot", "compose_img", compose_size_in)), fixed = TRUE))
+  session$setInputs(main_panel_width = 100)
+  check("auto-fit never goes below 0.5x (89 mm x 0.5 = 168 px)",
+        grepl("width:168px", as.character(preview_container("od_plot", "od_plot_img")), fixed = TRUE))
+  session$setInputs(main_panel_width = 5000)
+  check("auto-fit never goes above 4x (89 mm x 4 = 1346 px)",
+        grepl("width:1346px", as.character(preview_container("od_plot", "od_plot_img")), fixed = TRUE))
+  check("preview_zoom_auto has an APP_DEFAULTS entry (TRUE)", isTRUE(env$APP_DEFAULTS$preview_zoom_auto))
 })
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))

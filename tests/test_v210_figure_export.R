@@ -230,6 +230,66 @@ testServer(app, {
   check("settings load reported success", identical(rv$settings_status$type, "ok"))
 })
 
+# ── v2.14: the app STARTS in the journal standard ───────────────────────────
+cat("\n--- v2.14: startup state is the journal standard ---\n")
+check("legacy_preset_settings() covers exactly the inputs the journal preset sets",
+      setequal(names(env$legacy_preset_settings()), names(env$journal_preset_settings(89, 65))))
+check("APP_DEFAULTS = the Nature single-column preset (89 x 65 mm, SVG, Arial, inside-auto legend)",
+      identical(env$APP_DEFAULTS$export_units, "mm") && env$APP_DEFAULTS$export_width == 89 &&
+      env$APP_DEFAULTS$export_height == 65 && identical(env$APP_DEFAULTS$export_format, "svg") &&
+      identical(env$APP_DEFAULTS$font_family, "Arial") && identical(env$APP_DEFAULTS$legend_position, "inside-auto") &&
+      identical(env$APP_DEFAULTS$preview_mode, "wysiwyg") && identical(env$APP_DEFAULTS$color_palette, "colorblind") &&
+      identical(env$APP_DEFAULTS$panel_label, "a"))
+check("the legacy preset is the old look (10 x 8 in, PDF, 20 pt, canvas)",
+      identical(env$legacy_preset_settings()$export_units, "in") && env$legacy_preset_settings()$export_width == 10 &&
+      env$legacy_preset_settings()$axis_label_font_size == 20 && identical(env$legacy_preset_settings()$export_format, "pdf") &&
+      identical(env$legacy_preset_settings()$preview_mode, "canvas"))
+check("non-visual defaults are unchanged (metrics, notebook, compose, journal selectors)",
+      env$APP_DEFAULTS$metrics_smooth_window == 5 && identical(env$APP_DEFAULTS$nb_exp_type, "Phage Infection") &&
+      identical(env$APP_DEFAULTS$journal_family, "nature") && identical(env$APP_DEFAULTS$journal_columns, "single") &&
+      env$APP_DEFAULTS$journal_height_mm == 65 && identical(env$APP_DEFAULTS$demo_scenario, "lysis"))
+# The rendered UI (HTML attributes, not the R source) starts at the standard values
+ui_html <- htmltools::renderTags(env$ui)$html
+ui_value    <- function(id) { m <- regmatches(ui_html, regexpr(sprintf('<input[^>]*id="%s"[^>]*>', id), ui_html))
+                              if (!length(m)) return(NA_character_); sub('.*value="([^"]*)".*', "\\1", m) }
+ui_selected <- function(id) { blk <- regmatches(ui_html, regexpr(sprintf('<select id="%s".*?</select>', id), ui_html))
+                              if (!length(blk)) return(NA_character_)
+                              sub('.*<option value="([^"]*)" selected.*', "\\1", gsub("\n", " ", blk)) }
+ui_radio    <- function(name) { m <- regmatches(ui_html, gregexpr(sprintf('<input type="radio" name="%s"[^>]*>', name), ui_html))[[1]]
+                                m <- m[grepl("checked", m)]; if (!length(m)) NA_character_ else sub('.*value="([^"]*)".*', "\\1", m) }
+check("UI starts at export_width 89 and export_height 65", identical(ui_value("export_width"), "89") && identical(ui_value("export_height"), "65"))
+check("UI starts with units mm checked and preview 'wysiwyg' checked",
+      identical(ui_radio("export_units"), "mm") && identical(ui_radio("preview_mode"), "wysiwyg"))
+check("UI starts with SVG, Arial and the auto legend selected",
+      identical(ui_selected("export_format"), "svg") && identical(ui_selected("font_family"), "Arial") &&
+      identical(ui_selected("legend_position"), "inside-auto"))
+check("UI starts with axis text 6, axis labels 7 and spacing base 7 pt",
+      identical(ui_value("axis_text_font_size"), "6") && identical(ui_value("axis_label_font_size"), "7") &&
+      identical(ui_value("theme_base_pt"), "7"))
+check("UI starts with the Okabe-Ito palette, trimmed log labels and the panel label 'a'",
+      identical(ui_selected("color_palette"), "colorblind") && identical(ui_selected("y_tick_label_style"), "trim") &&
+      identical(ui_value("panel_label"), "a"))
+check("every journal-preset input has a start value equal to the preset in the UI HTML (numeric ones)",
+      all(vapply(c("title_font_size", "legend_font_size", "axis_line_pt", "tick_length_mm", "legend_key_mm", "panel_label_size", "export_dpi"),
+                 function(id) isTRUE(as.numeric(ui_value(id)) == env$APP_DEFAULTS[[id]]), logical(1))))
+check("the Legacy look button exists in the preset section", grepl('id="apply_legacy_look"', ui_html, fixed = TRUE))
+check("figure size bar and main panel id exist for the zoom script", grepl('id="figure_standard_bar"', ui_html, fixed = TRUE) &&
+      grepl('id="main_panel"', ui_html, fixed = TRUE))
+testServer(app, {
+  ingest_data(env$make_demo_data(), "Demo data (built-in)")
+  do.call(session$setInputs, env$APP_DEFAULTS)          # NO preset applied: the startup state
+  session$setInputs(selected_samples = rv$od_vars, exclude_timepoints = "")
+  p <- generate_plot(); real_plot("startup state renders a real main figure", p)
+  sz <- export_size_in()
+  svg0 <- of("startup_default.svg")
+  quiet(ggsave(svg0, p, device = env$export_device(input$export_format), width = sz[1], height = sz[2], units = "in", bg = "white"))
+  x0 <- readLines(svg0); t0 <- grep("<text", x0, value = TRUE)
+  s0 <- as.numeric(sub('.*font-size: ([0-9.]+)px.*', '\\1', t0))
+  check("startup export is an 89 mm wide SVG", grepl("width='252.28pt'", grep("<svg", x0, value = TRUE)[1]))
+  check("startup export: all text 6-8 pt Arial, no textLength",
+        length(t0) > 5 && all(grepl('font-family: "Arial"', t0)) && all(s0 >= 6 - 1e-6 & s0 <= 8 + 1e-6) && !any(grepl("textLength", t0)))
+})
+
 # ── Byte-identical default output vs the pre-v2.10 app ──────────────────────
 cat("\n--- default figure is byte-identical to v2.9 (opt-in only) ---\n")
 old_path <- Sys.getenv("KC_OLD_APP", "")
@@ -240,7 +300,8 @@ if (old_path == "" && nzchar(Sys.which("git"))) {
   if (!identical(rc, 0L) || !file.exists(old_path) || file.size(old_path) == 0) old_path <- ""
 }
 if (nzchar(old_path) && file.exists(old_path)) {
-  defaults_v210 <- env$APP_DEFAULTS
+  # v2.14: the default is now the journal standard, so the v2.9-identical look is the Legacy look preset
+  defaults_v210 <- modifyList(env$APP_DEFAULTS, env$legacy_preset_settings())
   render_default_svg <- function(app_path, out) {
     e <- new.env(); a <- source(app_path, local = e)$value
     testServer(a, {

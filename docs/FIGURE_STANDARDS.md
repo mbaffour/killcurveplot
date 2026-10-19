@@ -1,7 +1,9 @@
 # Journal figure standards and the Inkscape workflow
 
-This document is the reference behind the **Journal Figure Preset** section of
-the app (v2.10). It records where each number comes from, what the preset
+This document is the reference behind the journal standard the app now starts
+in (v2.14; before that it was the opt-in **Journal Figure Preset** of v2.10,
+which still switches journal and width and whose **Legacy look** button
+restores the old defaults). It records where each number comes from, what the preset
 sets, and how to take the exported file through Inkscape into a thesis or a
 manuscript without re-editing every figure.
 

@@ -398,14 +398,16 @@ check("global_exceptions appears twice (save + load)",
       sum(grepl("global_exceptions <- c(\"shape_size\", \"color_palette\")", src, fixed = TRUE)) == 2)
 
 cat("\n--- KC-6: default figure labels its SEM error bars ---\n")
-check("show_error_caption defaults to TRUE in the UI widget",
+# v2.14: the app starts in the journal standard, which moves the measure + n into the Figure Legend Text
+# box (show_error_caption FALSE); the KC-6 caption is the Legacy look (and any non-journal use).
+check("show_error_caption widget takes its start value from APP_DEFAULTS (journal standard: off)",
       any(grepl('checkboxInput\\("show_error_caption"', src)) &&
       { i <- grep('checkboxInput\\("show_error_caption"', src)[1]
-        any(grepl("value = TRUE", src[i:(i + 3)])) })
-check("Clear-settings reset also defaults show_error_caption to TRUE",
+        any(grepl("value = APP_DEFAULTS\\$show_error_caption", src[i:(i + 3)])) } &&
+      isFALSE(env$APP_DEFAULTS$show_error_caption))
+check("the Legacy look keeps the KC-6 caption on (error type + n on the figure)",
+      isTRUE(env$legacy_preset_settings()$show_error_caption) &&
       any(grepl("show_error_caption\\s*=\\s*TRUE,\\s*# KC-6", src)) &&
-      # v2.10: the only FALSE allowed is the opt-in journal preset, which moves
-      # the measure + n into the Figure Legend Text box instead of the artwork.
       all(grepl("Figure Legend Text", src[grep("show_error_caption\\s*=\\s*FALSE", src)])))
 
 cat("\n--- KC-9: CITATION.cff and a licence/citation section in the README ---\n")
