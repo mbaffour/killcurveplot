@@ -246,10 +246,14 @@ testServer(app, {
   eb_d <- layer_data(p_fl, which(layer_names(p_fl) == "GeomErrorbar")[1])
   check("bars that cross zero are floored at the axis minimum (10^-2), not dropped",
         nrow(eb_d) > 0 && all(eb_d$ymin >= log10(0.01) - 1e-9) && any(abs(eb_d$ymin - log10(0.01)) < 1e-9))
-  session$setInputs(error_log_floor = FALSE)
+  session$setInputs(error_log_floor = FALSE, y_oob = "censor")   # v2.17: under the default "squish" they would be clipped to the floor
   eb_d2 <- layer_data(generate_plot(), which(layer_names(generate_plot()) == "GeomErrorbar")[1])
-  check("with the floor off, those bars are dropped (old behaviour)",
+  check("with the floor off and out-of-range readings dropped (legacy), those bars are dropped (old behaviour)",
         sum(is.finite(eb_d2$ymin)) < sum(is.finite(eb_d$ymin)))
+  session$setInputs(y_oob = "squish")
+  eb_d3 <- layer_data(generate_plot(), which(layer_names(generate_plot()) == "GeomErrorbar")[1])
+  check("v2.17: with 'clip to the floor' even those bars are kept (drawn down to the floor)",
+        sum(is.finite(eb_d3$ymin)) == sum(is.finite(eb_d$ymin)))
   session$setInputs(error_log_floor = TRUE, error_multiplier = 1, error_type = "sem")
   session$setInputs(legend_order = "selected")
   p_ord <- generate_plot()

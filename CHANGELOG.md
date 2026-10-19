@@ -1,5 +1,53 @@
 # Changelog
 
+## v2.17.0 — 2026-10-19
+
+**Log-axis clipping, QC flags, notebook exports, figure bundle, threshold line, gradient palettes.**
+
+- **Log-axis clipping**: a post-lysis reading below the log-axis floor
+  (10^`y_log_min_exponent`) used to be deleted by ggplot's default `oob` (censor), so
+  the lysed curve lost its points. New input `y_oob` ("Readings below the axis
+  floor"): **Clip to the floor (recommended)** = `scales::squish`, the default and the
+  journal preset's value, or **Drop (legacy)** = `censor`, which the Legacy look sets
+  so the v2.9 output stays byte-identical. Applied to every y scale in the main
+  figure and to the log y scales of the replicate overlay and the landmarks figures.
+- **QC flags**: `qc_flags(rep_pd, pd, ref_sample, ceiling = 2.5)` returns
+  (sample, flag, detail) rows for CEILING (a reading above the ceiling), NEGATIVE
+  (a reading <= 0), GAP (a time step of at least 2x the median step; "at least" so that
+  one missing reading in a regular series is caught) and FLAT_REFERENCE (reference max
+  OD < 2x its initial OD). Shown as a warning list under the sidebar data summary,
+  beside the non-positive-OD warning, on the Dashboard, and as a "QC flags" section
+  after the provenance in the HTML and PDF reports (the PDF gets a page only when a
+  flag was raised, and a "QC flags: none" line otherwise). New input `qc_od_ceiling`.
+- **Legend text in the reports**: the Figure Legend Text (now `figure_legend_string()`)
+  is a "Figure legend" paragraph right under the main figure in the HTML and PDF
+  reports.
+- **Notebook downloads**: "Download notebook (.txt)" (filled fields as `key: value`,
+  then the legend and methods text) and "Download notebook row (.csv)" (one row, one
+  column per filled field, custom keys as column names). New notebook fields
+  `nb_passage` (Passage #), `nb_inducer_conc` (Inducer concentration) and
+  `nb_other_condition` (Other condition), in the reports and both downloads; the
+  "Inducer (+ conc.)" label is now "Inducer".
+- **Figure bundle**: "Download figure bundle (.zip)" writes the main figure (SVG +
+  PDF), the composed figure (SVG, with two or more panels), `settings.json`,
+  `source_data_tidy.csv`, `summary_statistics.csv`, `curve_metrics.csv`,
+  `figure_legend.txt`, `methods.txt` and `README.txt` as
+  `figure_bundle_<W>x<H>mm.zip` (`zip::zip`, else `utils::zip`, else a `.tar`).
+- **Threshold line**: `enable_threshold`, `threshold_value`, `threshold_label`,
+  `threshold_color`, `threshold_linetype` (Time Point Markers section): a horizontal
+  `geom_hline` with an optional label at the right end in the axis-text size. Off by
+  default and cleared by the journal preset and the Legacy look.
+- **Gradient palettes**: "Blues (dose gradient)" and "Blue to red (dose gradient)"
+  for MOI series: the first sample (the control) black, the others a ramp
+  (`colorRampPalette` over #c6dbef-#08306b, or #2166ac-#b2182b). `get_palette_colors()`
+  moved out of the server so it can be tested.
+- **Robustness**: when the selected samples match no loaded column (for a moment when
+  a new file replaces the old one), `prepare_plot_data()` and
+  `prepare_replicate_data()` return zero-row frames with their usual columns instead of
+  erroring, so the Statistics tab and the stats notes no longer fail in that moment.
+- Dashboard hint now points to the Statistics tab; `.claude/` is git-ignored; the README
+  gallery was regenerated.
+
 ## v2.16.0 — 2026-10-19
 
 **Subscript axis labels and a Statistics tab.** The wavelength in the y label is

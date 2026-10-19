@@ -167,15 +167,15 @@ Under **Variable Styling → Sample Selection**, use the dropdown to check or un
 
 All settings are in the left sidebar, organized into collapsible sections. Click on any section header to expand it.
 
-**Axis Settings** — Change between linear, logarithmic, square root, or reverse axis scales. Customize tick marks, axis labels, fonts, and gridlines. The default Y-axis is logarithmic (common for OD data).
+**Axis Settings** — Change between linear, logarithmic, square root, or reverse axis scales. Customize tick marks, axis labels, fonts, and gridlines. The default Y-axis is logarithmic (common for OD data). *Readings below the axis floor* (new in v2.17) decides what happens to a post-lysis reading that falls below the log-axis minimum: **Clip to the floor** (the default) draws it on the floor so the curve and its points stay visible, **Drop (legacy)** deletes it as earlier versions did (the Legacy look keeps this).
 
 **Time Point Filtering** — Restrict the displayed time range or exclude specific time points (e.g., removing an outlier at time 0).
 
 **Region Highlighting** — Add colored rectangular regions to highlight specific areas of the plot (e.g., a growth phase).
 
-**Time Point Markers** — Add vertical lines at specific time points (e.g., when a treatment was added).
+**Time Point Markers** — Add vertical lines at specific time points (e.g., when a treatment was added). New in v2.17: a horizontal **threshold line** at an OD value (for example the lysis threshold), with an optional label at the right end in the axis-text size, a colour and a line type; off by default.
 
-**Color Palettes** — Choose from preset palettes (Viridis, Colorblind-friendly, Publication, etc.) or use custom colors per sample.
+**Color Palettes** — Choose from preset palettes (Viridis, Colorblind-friendly, Publication, etc.) or use custom colors per sample. For MOI series, the two dose-gradient palettes (v2.17), **Blues (dose gradient)** and **Blue to red (dose gradient)**, make the first sample (usually the uninfected control) black and run the other samples from low to high dose.
 
 **Line & Point Settings** — Control line thickness and point appearance. Toggle points on/off and adjust their size.
 
@@ -323,6 +323,8 @@ Expand the **Plot Dimensions & Export** section.
    require), **TIFF** (LZW, 600 dpi for line art), **PNG** or **JPEG**.
 4. Click **"Download Image"**.
 
+**Figure bundle (new in v2.17).** **"Download figure bundle (.zip)"** (`figure_bundle_<W>x<H>mm.zip`) packs everything a figure submission needs: the main figure as SVG and PDF at the current size, the composed figure as SVG (when two or more panels are selected in the composer), `settings.json` (the same document as Save Settings), `source_data_tidy.csv` (time, sample, replicate, value), `summary_statistics.csv`, `curve_metrics.csv`, `figure_legend.txt`, `methods.txt` (when the Statistics tab's methods box has text) and a `README.txt` with the app version, date, data source, figure size and fonts. If neither the `zip` package nor a `zip` program is available it is written as a `.tar` instead.
+
 Recommended settings: use the **Journal Figure Preset** above (column width
 in mm, SVG) and finish in Inkscape. For a quick slide figure, PNG at 300 dpi
 and the pixel canvas are fine.
@@ -425,12 +427,17 @@ Expand the **Stats & Reports** section in the sidebar. Everything here reflects 
 
 ### Experiment Notebook
 
-The **Experiment Notebook** sidebar section (modeled on the companion app's Experiment Notes tab) records the full experimental context: experiment ID, date, experimenter, project, lab; experiment type, host strain(s), phage/plasmid, MOI, replicate/batch; medium, temperature, time of infection, inducer; observations, issues, next steps, tags; plus three free key–value custom fields. Every non-empty field is embedded in the HTML and PDF reports automatically, so the report doubles as a complete lab-notebook record.
+The **Experiment Notebook** sidebar section (modeled on the companion app's Experiment Notes tab) records the full experimental context: experiment ID, date, experimenter, project, lab; experiment type, host strain(s), phage/plasmid, MOI, replicate/batch; medium, temperature, time of infection, inducer; observations, issues, next steps, tags; plus three free key–value custom fields. Since v2.17 it also records passage number, inducer concentration and any other condition. Every non-empty field is embedded in the HTML and PDF reports automatically, so the report doubles as a complete lab-notebook record. **Download notebook (.txt)** writes every filled field as `key: value` lines followed by the Figure Legend Text and the methods text, and **Download notebook row (.csv)** writes one row with one column per filled field (custom keys become column names), ready to append to a master experiment spreadsheet.
+
+### Data quality flags (new in v2.17)
+
+The app checks the loaded data and lists problems as a compact warning list under the data summary, under the Dashboard cards, and as a **QC flags** section after the provenance in the HTML and PDF reports: **CEILING** (a replicate reading above the OD ceiling, default 2.5, adjustable under Curve Metrics; plate-reader linearity is lost at high OD), **NEGATIVE** (a reading at or below 0, typically blank over-subtraction), **GAP** (a time step at least twice the median step of that sample, i.e. a missing or excluded reading) and **FLAT_REFERENCE** (the reference sample's maximum OD is below twice its initial OD, so ratios to it are unreliable). Clean data show nothing.
 
 ### Analysis Report (single file)
 
 Fill in an optional title, author, and notes, then click:
 
+- **Figure legend in the reports** (v2.17) — the Figure Legend Text appears as a "Figure legend" paragraph right under the main figure in both the HTML and the PDF report.
 - **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the experiment notebook record, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis. With **Include analysis figures and statistics** (on by default) it also carries the v2.11 analysis figures — metric summary, specific growth rate, normalized OD (or the replicate overlay when no reference sample is set) and, when any sample has an MOI, the dose-response — each at the export size, plus the replicate statistics (pairwise, omnibus and post-hoc tables, their warnings, and a definitions paragraph for Welch t / Holm / Hedges' g / ANOVA + Tukey / Mann-Whitney / Kruskal-Wallis); untick it for the figure-and-tables-only report.
 - **PDF Report** — the same content as a multi-page PDF (title/provenance page, notebook page, figure page, one page per analysis figure, paginated tables, replicate statistics). No LaTeX or pandoc required.
 - **Report base font size** — scales all report text and tables in both formats.
