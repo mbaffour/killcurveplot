@@ -69,7 +69,7 @@ Packages are add-ons that the app depends on. You only need to do this once.
 install.packages(c(
   "shiny", "tidyverse", "ggpubr", "scales",
   "ggrepel", "ggprism", "svglite", "jsonlite",
-  "officer", "rvg", "gifski", "base64enc", "gridExtra", "ragg"
+  "officer", "rvg", "gifski", "base64enc", "gridExtra", "ragg", "patchwork"
 ))
 ```
 
@@ -231,6 +231,25 @@ mm), edit text directly (it is real Arial text, not outlines), assemble panels
 at native size, and *Save a Copy* as Plain SVG or PDF for submission.
 The reasoning, the sources for each number and the full Inkscape loop are in
 [docs/FIGURE_STANDARDS.md](docs/FIGURE_STANDARDS.md).
+
+### Compose a figure in the app
+
+The **Compose figure** tab (after Dashboard) assembles the finished multi-panel
+figure for you, which replaces the Inkscape assembly step for standard layouts.
+Tick the panels (the main lysis curve plus any analysis figures; they are laid
+out in the order listed), choose 1 or 2 columns, the width (the double or
+single column of the journal selected under *Journal Figure Preset*, or a
+custom width in mm), the height of each panel row and the panel-label size and
+case. The tab shows the resulting size in mm (and warns when the height is more
+than the journal allows), previews it at true size, and **Download composed
+figure** writes it in the chosen export format (SVG for Inkscape, TIFF with
+LZW, ...). Panels are rendered at their native size, so axis and legend text
+stay 6-8 pt; apply the journal preset first. A panel whose figure is not
+available for the current selection (for example the dose-response with one
+MOI level) is left out and listed. With *Include analysis figures and
+statistics* on, the HTML and PDF reports end with the composed figure. The
+gallery script (`tools/render_gallery.R`) uses the same layout function, so its
+output and the app's agree. Needs the `patchwork` package.
 
 ---
 

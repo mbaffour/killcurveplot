@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.13.0 — 2026-10-19
+
+A multi-panel figure composer, so a complete journal figure can be assembled
+inside the app. Opt-in: the default main figure is byte-identical to v2.9.0.
+
+- **Compose figure tab** (after Dashboard): tick the main lysis curve and any
+  analysis figures (same labels as the Analysis tab), choose 1 or 2 columns,
+  the figure width (double or single column of the journal chosen under Journal
+  Figure Preset, or a custom width in mm), the height of each panel row, and
+  the panel-label size and case (a, b, c or A, B, C). Panels are composed in
+  checkbox order at their native size, so text stays 6-8 pt. A note shows the
+  resulting size in mm and warns when the height exceeds the journal maximum.
+  The preview uses the same true-export-size and canvas mechanics as the other
+  figures; **Download composed figure** writes the file at width x rows x panel
+  height in the Export format (TIFF stays LZW).
+- Panels whose figure is "not available" (e.g. the dose-response with one MOI
+  level) are left out and listed in the note and in a notification.
+- `compose_figure(panels, ncol, tag_size, font, tag_case)` is the single layout
+  function (patchwork, `free()` panels, own tags removed). `tools/render_gallery.R`
+  now calls it, so the gallery and the app agree.
+- **Reports**: with "Include analysis figures and statistics" the HTML and PDF
+  reports end with the "Composed figure" (when at least two panels are
+  selected), at its own size and aspect ratio.
+- Settings: the new inputs are in `APP_DEFAULTS`; Save/Load and Reset now handle
+  the checkbox group `compose_panels` (and the compose radio buttons).
+- Tests: composed SVG at 183 x 120 mm (518.74 pt wide, bold 8 pt tags a-d, all
+  text 6-8 pt), 1 column, widths per journal, skipped panels, download, and the
+  composed figure in the HTML and PDF reports.
+
 ## v2.12.4 — 2026-10-19
 
 Review round 4. Default main-figure output unchanged; new behaviour is opt-in

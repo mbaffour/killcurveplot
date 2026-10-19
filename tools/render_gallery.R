@@ -56,13 +56,9 @@ for (sc in c("lysis", "moi_series", "resistance", "hours", "two_phages")) {
     }
     # two-column gallery at a full Nature double column (183 mm): panels keep
     # their native 89 mm size, which is exactly how they would be assembled
-    # free() stops patchwork from aligning panels to each other: the metric summary has rotated
-    # 45-degree x labels (a gap under its row-mates' x axis otherwise), and panels with an outside
-    # legend would squeeze the inside-legend panels in their column to a fraction of their 89 mm
-    panels <- lapply(plots, function(p) patchwork::free(p + labs(tag = NULL)))
-    g <- wrap_plots(panels, ncol = 2) +
-      plot_annotation(tag_levels = "a") &
-      theme(plot.tag = element_text(size = 8, face = "bold", family = "Arial"))
+    # the app's own composer (compose_figure(): free() panels, a-h tags), so the gallery and the
+    # in-app "Compose figure" tab are the same code
+    g <- compose_figure(plots, ncol = 2, tag_size = 8, font = input$font_family)
     quiet(ggsave(file.path(sc_out, "gallery.png"), g, device = env$export_device("png"),
                  width = 183, height = 245, units = "mm", dpi = 300, bg = "white"))
     quiet(ggsave(file.path(sc_out, "gallery.svg"), g, device = env$export_device("svg"),

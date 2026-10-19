@@ -1,6 +1,17 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.13.0 -- Multi-panel figure composer (opt-in; default main figure unchanged):
+#   COMPOSE FIGURE    -- New main-panel tab: pick the main lysis curve and any
+#                        analysis figures, a column count, a journal column width
+#                        and a panel height; the app lays them out with patchwork
+#                        (a, b, c tags, free() panels so outside legends do not
+#                        squeeze their neighbours), previews it at true size and
+#                        exports it (compose_figure(), shared with
+#                        tools/render_gallery.R). Panels whose figure is not
+#                        available are skipped, not composed. The composed figure
+#                        is also the last figure of the HTML / PDF reports.
+#
 # v2.12.4 -- Review round 4: dashboard prints "—" (no "± SD") when a mean-curve
 #   metric is NA; adjustable lysis-onset threshold (metrics_lysis_threshold_pct,
 #   default 5 %); the reports always carry the curve-landmarks figure and the
@@ -171,11 +182,12 @@ has_gifski    <- requireNamespace("gifski",    quietly = TRUE)
 has_base64enc <- requireNamespace("base64enc", quietly = TRUE)
 has_gridExtra <- requireNamespace("gridExtra", quietly = TRUE)
 has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
+has_patchwork <- requireNamespace("patchwork", quietly = TRUE)
 
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.12.4"
+APP_VERSION <- "2.13.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -902,7 +914,13 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
       drawn <- tryCatch({
         grid::grid.newpage()
         grid::grid.text(f$title, y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
-        grid::pushViewport(grid::viewport(y = 0.53, height = 0.82))
+        vp <- if (is.null(f$aspect)) grid::viewport(y = 0.53, height = 0.82) else {
+          # a composed figure keeps its own aspect ratio inside the page area
+          pg <- grDevices::dev.size("in"); bw <- 0.95 * pg[1]; bh <- 0.82 * pg[2]
+          if (f$aspect * bw <= bh) grid::viewport(y = 0.53, width = grid::unit(bw, "in"), height = grid::unit(f$aspect * bw, "in"))
+          else grid::viewport(y = 0.53, width = grid::unit(bh / f$aspect, "in"), height = grid::unit(bh, "in"))
+        }
+        grid::pushViewport(vp)
         print(f$plot, newpage = FALSE)
         grid::popViewport()
         if (nzchar(f$caption %||% ""))
@@ -1240,6 +1258,15 @@ ANALYSIS_METRIC_LABELS <- c(
   relative_mu_max    = "Relative μmax",
   relative_max_od    = "Relative peak OD"
 )
+# The analysis figures, with the labels the Analysis tab and the figure composer both use.
+ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
+                             "Specific growth rate vs time"              = "growth_rate",
+                             "Normalized OD vs time"                     = "normalized",
+                             "Replicate overlay"                         = "replicate_overlay",
+                             "Curve landmarks (metrics drawn on the curves)" = "landmarks",
+                             "MOI dose-response"                         = "dose_response",
+                             "OD heatmap (samples \u00d7 time)"           = "heatmap")
+COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main", ANALYSIS_FIGURE_CHOICES)
 metric_label <- function(m) { l <- unname(ANALYSIS_METRIC_LABELS[m]); ifelse(is.na(l), m, l) }
 # Axis / facet label with units, from the x-axis time unit and the y-axis label.
 metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
@@ -1468,6 +1495,10 @@ APP_DEFAULTS <- list(
   report_author         = "",         report_notes           = "",
   metrics_smooth_window = 5,          legend_font_size       = 14,
   metrics_peak_smooth_window = 1,     # KC-3: off by default
+  # v2.13.0 figure composer
+  compose_panels = c("main", "metric_summary", "growth_rate", "normalized"),
+  compose_ncol = "2", compose_width = "double", compose_width_mm = 183,
+  compose_panel_height_mm = 60, compose_tag_size = 8, compose_tag_case = "a",
   metrics_lysis_threshold_pct = 5,    # v2.12.4: decline from peak that counts as lysis (%)
   metrics_peak_mode = "global",       # v2.12.2: "first_local" for regrowth / resistance curves
   blank_od               = 0,         # KC-7: off by default
@@ -2207,13 +2238,7 @@ ui <- fluidPage(
             fluidRow(
               column(3,
                 selectInput("analysis_type", "Figure:",
-                            choices = c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
-                                        "Specific growth rate vs time"              = "growth_rate",
-                                        "Normalized OD vs time"                     = "normalized",
-                                        "Replicate overlay"                         = "replicate_overlay",
-                                        "Curve landmarks (metrics drawn on the curves)" = "landmarks",
-                                        "MOI dose-response"                         = "dose_response",
-                                        "OD heatmap (samples \u00d7 time)"           = "heatmap"),
+                            choices = ANALYSIS_FIGURE_CHOICES,
                             selected = "metric_summary"),
                 textInput("analysis_panel_label", "Panel label:", "b")
               ),
@@ -2286,6 +2311,39 @@ ui <- fluidPage(
           tableOutput("analysis_stats_omnibus"),
           tableOutput("analysis_stats_posthoc")
         ),
+        # ── Compose figure (v2.13) ────────────────────────────────────────────
+        tabPanel("Compose figure", br(),
+          div(class = "analysis-controls",
+            fluidRow(
+              column(4,
+                checkboxGroupInput("compose_panels", "Panels (composed in this order):",
+                                   choices = COMPOSE_PANEL_CHOICES,
+                                   selected = c("main", "metric_summary", "growth_rate", "normalized"))),
+              column(4,
+                radioButtons("compose_ncol", "Columns:", choices = c("1" = "1", "2" = "2"),
+                             selected = "2", inline = TRUE),
+                selectInput("compose_width", "Figure width:",
+                            choices = c("Double column of Nature family (183 mm)" = "double",
+                                        "Single column of Nature family (89 mm)"  = "single",
+                                        "Custom" = "custom"),
+                            selected = "double"),
+                conditionalPanel("input.compose_width == 'custom'",
+                                 numericInput("compose_width_mm", "Width (mm):", 183, 20, 300, 1)),
+                numericInput("compose_panel_height_mm", "Height of each panel row (mm):", 60, 20, 250, 1)),
+              column(4,
+                numericInput("compose_tag_size", "Panel label size (pt):", 8, 4, 20, 0.5),
+                radioButtons("compose_tag_case", "Panel labels:",
+                             choices = c("a, b, c" = "a", "A, B, C" = "A"), selected = "a", inline = TRUE),
+                downloadButton("downloadComposedFigure", "Download composed figure",
+                               style = "background:#2C3E50;color:white;border:none;width:100%;"))),
+            uiOutput("compose_note"),
+            p(style = "font-size:.8em;color:#777;",
+              "Panels are rendered at their native single-column size, so text stays 6\u20138 pt ",
+              "(use Apply journal preset first). Tick the figures, pick the columns and the width, ",
+              "and download: the complete figure with a, b, c labels, without assembling it in Inkscape. ",
+              "Export format and DPI come from the Export settings; a panel whose figure is not ",
+              "available is left out.")),
+          uiOutput("compose_container")),
         # ── Dashboard (v2.11) ─────────────────────────────────────────────────
         tabPanel("Dashboard", br(),
           uiOutput("dash_cards"),
@@ -2667,13 +2725,16 @@ server <- function(input, output, session) {
       if (!(nm %in% names(input)))                  next
       tryCatch({
         val <- global[[nm]]
-        if (is.logical(val) && length(val) == 1) {
+        if (is.character(val) && (length(val) > 1 || nm == "compose_panels")) {
+          updateCheckboxGroupInput(session, nm, selected = val)     # v2.13: checkbox groups
+        } else if (is.logical(val) && length(val) == 1) {
           updateCheckboxInput(session, nm, value = val)
         } else if (is.numeric(val) && length(val) == 1) {
           updateNumericInput(session, nm, value = val)
         } else if (is.character(val) && length(val) == 1) {
           updateSelectInput(session, nm, selected = val)
           updateTextInput(session,   nm, value    = val)
+          if (startsWith(nm, "compose_")) updateRadioButtons(session, nm, selected = val)
         }
         n_global <- n_global + 1L
       }, error = function(e) invisible(NULL))
@@ -2753,8 +2814,11 @@ server <- function(input, output, session) {
         val <- defs[[nm]]
         if (is.logical(val))      updateCheckboxInput(session, nm, value    = val)
         else if (is.numeric(val)) updateNumericInput( session, nm, value    = val)
+        else if (is.character(val) && length(val) > 1)   # v2.13: checkbox groups (compose_panels)
+          updateCheckboxGroupInput(session, nm, selected = val)
         else { updateSelectInput(session, nm, selected = val)
-          updateTextInput(session,  nm, value    = val) }
+          updateTextInput(session,  nm, value    = val)
+          if (startsWith(nm, "compose_")) updateRadioButtons(session, nm, selected = val) }
       }, error = function(e) invisible(NULL))
     }
     
@@ -3778,15 +3842,19 @@ server <- function(input, output, session) {
   
   # Preview helpers (v2.11): the main figure and the analysis figure share the
   # pixel-canvas / true-export-size preview mechanics.
-  preview_container <- function(plot_id, img_id) {
+  # size_fun: figure size in inches (the export size unless the figure has its own,
+  # as the composed figure does); canvas mode keeps its width and scales the height.
+  preview_container <- function(plot_id, img_id, size_fun = export_size_in) {
     if (identical(input$preview_mode, "wysiwyg")) {
-      sz <- export_size_in(); z <- input$preview_zoom %||% 2
+      sz <- size_fun(); z <- input$preview_zoom %||% 2
       imageOutput(img_id,
                   width  = paste0(round(sz[1] * 96 * z), "px"),
                   height = paste0(round(sz[2] * 96 * z), "px"))
     } else {
+      h_px <- if (identical(size_fun, export_size_in)) input$plot_height
+              else round(input$plot_width * size_fun()[2] / size_fun()[1])
       plotOutput(plot_id,
-                 height = paste0(input$plot_height, "px"),
+                 height = paste0(h_px, "px"),
                  width  = paste0(input$plot_width,  "px"))
     }
   }
@@ -3794,14 +3862,14 @@ server <- function(input, output, session) {
   # the download, at the export's physical size, and is shown at `zoom` x.
   # Text and line weights therefore appear at their real size relative to the
   # figure -- what Inkscape will open.
-  register_preview <- function(plot_id, img_id, plot_fun) {
+  register_preview <- function(plot_id, img_id, plot_fun, size_fun = export_size_in) {
     output[[plot_id]] <- renderPlot({
       plot_inputs_debounced()   # take debounced dependency
       plot_fun()
     }, res = 96)
     output[[img_id]] <- renderImage({
       plot_inputs_debounced()
-      sz <- export_size_in(); z <- input$preview_zoom %||% 2
+      sz <- size_fun(); z <- input$preview_zoom %||% 2
       pr <- session$clientData$pixelratio %||% 1
       f  <- tempfile(fileext = ".png")
       ggsave(f, plot = plot_fun(), device = export_device("png"),
@@ -4231,6 +4299,115 @@ server <- function(input, output, session) {
     }
   )
   
+  # ── Figure composer (v2.13) ──────────────────────────────────────────────────
+  # compose_figure() is the one place that lays panels out: tools/render_gallery.R
+  # calls it too, so the gallery, the app and the reports agree. Each panel's own
+  # tag is removed, panels are free()d from alignment (an outside legend would
+  # otherwise squeeze the panels beside it), and patchwork adds a, b, c tags in the
+  # journal's panel-label style.
+  compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a") {
+    if (!has_patchwork) stop("The figure composer needs the 'patchwork' package: install.packages('patchwork')")
+    panels <- lapply(panels, function(p) patchwork::free(p + labs(tag = NULL)))
+    patchwork::wrap_plots(panels, ncol = ncol) +
+      patchwork::plot_annotation(tag_levels = tag_case) &
+      theme(plot.tag = element_text(size = tag_size, face = "bold", family = font))
+  }
+  is_placeholder_plot <- function(p) {
+    lab <- tryCatch(p$layers[[1]]$aes_params$label, error = function(e) NULL)
+    is.character(lab) && length(lab) == 1 && grepl("^(Plot error|Figure not available)", lab)
+  }
+  compose_width_mm_value <- function() {
+    jp  <- JOURNAL_PRESETS[[input$journal_family %||% "nature"]]
+    w   <- switch(input$compose_width %||% "double", double = jp$double, single = jp$single,
+                  custom = input$compose_width_mm %||% 183)
+    if (!is.numeric(w) || !is.finite(w)) w <- input$compose_width_mm %||% 183
+    w
+  }
+  # Choice labels follow the journal family chosen under Journal Figure Preset.
+  observeEvent(input$journal_family, {
+    jp  <- JOURNAL_PRESETS[[input$journal_family %||% "nature"]]
+    nm  <- sub(" \\(.*$", "", jp$label)
+    ch  <- c(if (is.finite(jp$double %||% NA)) setNames("double", sprintf("Double column of %s (%s mm)", nm, jp$double)),
+             if (is.finite(jp$single %||% NA)) setNames("single", sprintf("Single column of %s (%s mm)", nm, jp$single)),
+             "Custom" = "custom")
+    sel <- isolate(input$compose_width %||% "double")
+    updateSelectInput(session, "compose_width", choices = ch,
+                      selected = if (sel %in% ch) sel else ch[[1]])
+  }, ignoreInit = TRUE)
+
+  # The composed figure and its geometry, built once per input change and shared by
+  # the preview, the note, the download and the reports. Panels whose figure is
+  # "not available" (the placeholder) are skipped and listed in $skipped.
+  compose_info <- reactive({
+    req(rv$data, input$selected_samples)
+    sel   <- input$compose_panels %||% character(0)
+    types <- unname(COMPOSE_PANEL_CHOICES[COMPOSE_PANEL_CHOICES %in% sel])   # composed in checkbox order
+    built <- lapply(setNames(types, types), function(ty) {
+      p <- tryCatch(if (identical(ty, "main")) generate_plot() else generate_analysis_plot(ty),
+                    error = function(e) NULL)
+      if (is.null(p) || is_placeholder_plot(p)) NULL else p
+    })
+    ok      <- !vapply(built, is.null, logical(1))
+    skipped <- names(COMPOSE_PANEL_CHOICES)[match(types[!ok], COMPOSE_PANEL_CHOICES)]
+    plots   <- built[ok]; n <- length(plots)
+    ncol    <- min(as.integer(input$compose_ncol %||% "2"), max(n, 1L))
+    rows    <- if (n) ceiling(n / ncol) else 0L
+    w_mm    <- compose_width_mm_value()
+    h_mm    <- max(rows, 1L) * (input$compose_panel_height_mm %||% 60)
+    fig <- if (n >= 1)
+      compose_figure(plots, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
+                     font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a")
+    else NULL
+    list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
+         types = names(plots), width_mm = w_mm, height_mm = h_mm)
+  })
+  compose_size_in <- function() { i <- compose_info(); c(i$width_mm, i$height_mm) / 25.4 }
+  compose_plot_current <- function() {
+    i <- compose_info()
+    if (is.null(i$plot))
+      ggplot() + annotate("text", x = 0.5, y = 0.5, size = 3.5, color = "grey30",
+                          label = "Tick at least one panel (no selected figure is available).") + theme_void()
+    else i$plot
+  }
+  output$compose_container <- renderUI(preview_container("compose_plot", "compose_img", compose_size_in))
+  register_preview("compose_plot", "compose_img", compose_plot_current, compose_size_in)
+
+  output$compose_note <- renderUI({
+    if (!has_patchwork)
+      return(p(style = "font-size:.85em;color:#a94442;", "The figure composer needs the 'patchwork' package."))
+    i <- compose_info()
+    jp <- JOURNAL_PRESETS[[input$journal_family %||% "nature"]]
+    warn <- if (!is.null(jp$max_h) && is.finite(jp$max_h) && i$height_mm > jp$max_h)
+      sprintf(" Height exceeds this journal's maximum (%s mm).", jp$max_h) else ""
+    p(style = "font-size:.85em;margin:6px 0;",
+      strong(sprintf("Figure: %s x %s mm", round(i$width_mm, 1), round(i$height_mm, 1))),
+      sprintf(" (%s panel%s in %s row%s of %s column%s).", i$n, if (i$n == 1) "" else "s",
+              i$rows, if (i$rows == 1) "" else "s", i$ncol, if (i$ncol == 1) "" else "s"),
+      if (length(i$skipped))
+        span(style = "color:#856404;", " Left out (not available for this selection): ",
+             paste(i$skipped, collapse = "; "), "."),
+      if (nzchar(warn)) span(style = "color:#856404;", warn))
+  })
+
+  output$downloadComposedFigure <- downloadHandler(
+    filename = function()
+      paste0("composed_figure_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".", input$export_format),
+    content  = function(file) {
+      i <- compose_info()
+      if (is.null(i$plot)) stop("No panel to compose: tick at least one available figure.")
+      if (length(i$skipped))
+        tryCatch(showNotification(paste0("Left out of the composed figure (not available): ",
+                                         paste(i$skipped, collapse = "; ")),
+                                  type = "warning", duration = 10), error = function(e) invisible(NULL))
+      fmt  <- input$export_format
+      args <- list(filename = file, plot = i$plot, device = export_device(fmt),
+                   width = i$width_mm, height = i$height_mm, units = "mm",
+                   dpi = input$export_dpi, bg = "white")
+      if (identical(fmt, "tiff")) args$compression <- "lzw"
+      do.call(ggsave, args)
+    }
+  )
+
   # ── Statistics tables ───────────────────────────────────────────────────────
   fmt_stats_table <- fmt_stats_df   # same formatting in the app and the reports
   stats_notes_ui <- function(st) {
@@ -4526,10 +4703,10 @@ server <- function(input, output, session) {
 
   # Every report PNG (main figure and analysis figures) goes through the same
   # device, export size and dpi rule.
-  report_png_b64 <- function(p) {
+  report_png_b64 <- function(p, size_in = NULL) {
     tmp_png <- tempfile(fileext = ".png")
     on.exit(unlink(tmp_png), add = TRUE)
-    sz <- export_size_in()
+    sz <- size_in %||% export_size_in()
     ggsave(tmp_png, plot = p, device = export_device("png"),
            width = sz[1], height = sz[2],
            units = "in", dpi = if (sz[1] < 6) 300 else 150, bg = "white")
@@ -4599,6 +4776,19 @@ server <- function(input, output, session) {
       f
     })
     figs <- Filter(Negate(is.null), figs)
+    # v2.13: the composed figure closes the list, when at least two panels are selected
+    comp <- if (has_patchwork) tryCatch(compose_info(), error = function(e) NULL) else NULL
+    if (!is.null(comp) && comp$n >= 2) {
+      f <- list(type = "composed", title = "Composed figure",
+                caption = paste0("Panels a-", letters[comp$n], " composed in the app at ",
+                                 round(comp$width_mm), " x ", round(comp$height_mm), " mm (",
+                                 comp$ncol, " column", if (comp$ncol == 1) "" else "s", "): ",
+                                 paste(names(COMPOSE_PANEL_CHOICES)[match(comp$types, COMPOSE_PANEL_CHOICES)],
+                                       collapse = "; "), "."),
+                plot = comp$plot, aspect = comp$height_mm / comp$width_mm)
+      if (render_png) f$b64 <- report_png_b64(comp$plot, size_in = c(comp$width_mm, comp$height_mm) / 25.4)
+      figs <- c(figs, list(f))
+    }
     st <- analysis_stats_current()
     list(figures = figs, stats = st, metric_label = metric_label(st$metric),
          ref_sample = ref, method = input$stats_method %||% "welch")

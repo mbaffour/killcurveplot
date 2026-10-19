@@ -3,7 +3,7 @@
 # Launched by the "Run Lysis Curve Plotter" (.bat / .command) scripts, or run:  Rscript run_app.R
 APP  <- "Lysis_Curve_App_v28.R"
 PKGS <- c("shiny","tidyverse","ggpubr","ggprism","ggrepel","scales","svglite","jsonlite",
-          "gifski","officer","rvg","base64enc","gridExtra","ragg")
+          "gifski","officer","rvg","base64enc","gridExtra","ragg","patchwork")
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 
 # Use a writable personal library — R in "Program Files" usually isn't user-writable,

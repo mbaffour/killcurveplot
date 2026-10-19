@@ -76,7 +76,11 @@ one full-width figure at native size.
    text stays 6–7 pt.
 3. Edit text freely (double-click): it is real text in Arial, not outlines.
    Lines and points are plain paths with pt stroke widths.
-4. Assemble multi-panel figures by importing each panel SVG at its native
+4. For a standard layout (the main curve plus analysis panels in one or two columns) the app
+   can do this step itself: the **Compose figure** tab lays the panels out at the journal's
+   column width with a, b, c labels and exports the finished figure, so Inkscape is only
+   needed for non-standard layouts or final touch-ups. Otherwise, assemble multi-panel
+   figures by importing each panel SVG at its native
    size and aligning them. Nature's double column is 183 mm; two
    "half of a double column" panels plus the 5 mm gutter fit exactly.
 5. Submit: **File → Save a Copy → Plain SVG** (Nature accepts plain .svg, not

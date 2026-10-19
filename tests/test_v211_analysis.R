@@ -309,10 +309,11 @@ testServer(app, {
     check("HTML report (on): at least two more <img> elements than before (demo data: +4)",
           n_img(html_on) >= n_img(html_old) + 2)
     # lysis demo (MOI 10 and 0.1 = two distinct positive levels, reference set): main figure + metric summary +
-    # growth rate + normalized + landmarks (v2.12.4, always) + dose-response = 6 images. Before v2.12.4 it was 5
-    # (the dose-response was already embedded), so the landmarks figure is the one added image.
-    check("HTML report (on): exactly 6 <img> (main, metric summary, growth rate, normalized, landmarks, dose-response)",
-          n_img(html_on) == 6 && grepl("<h3>Curve landmarks</h3>", html_on, fixed = TRUE))
+    # growth rate + normalized + landmarks (v2.12.4, always) + dose-response = 6 images, plus the composed figure
+    # (v2.13.0: the default compose_panels selection has four panels) = 7.
+    check("HTML report (on): exactly 7 <img> (main, metric summary, growth rate, normalized, landmarks, dose-response, composed)",
+          n_img(html_on) == 7 && grepl("<h3>Curve landmarks</h3>", html_on, fixed = TRUE) &&
+          grepl("<h3>Composed figure</h3>", html_on, fixed = TRUE))
     check("HTML report (on): every analysis figure rendered (no 'Figure not available')",
           !grepl("Figure not available", html_on, fixed = TRUE))
     check("HTML report (on): metric summary, growth rate, normalized (reference set) and dose-response (MOI in names)",
@@ -354,7 +355,7 @@ testServer(app, {
     cat(sprintf("   -> PDF pages: on = %d, off = %d\n", n_pages(pdf_on), n_pages(pdf_off)))
     # before v2.12.4 this lysis-demo PDF had 19 pages (on) vs 13 (off); the landmarks page is one more
     check("PDF report (on): more pages than without the option (5 figure pages + statistics)",
-          n_pages(pdf_on) >= n_pages(pdf_off) + 6 && n_pages(pdf_on) >= 20)
+          n_pages(pdf_on) >= n_pages(pdf_off) + 7 && n_pages(pdf_on) >= 21)   # 20 before the composed-figure page
     session$setInputs(report_include_analysis = TRUE)
   } else skip <<- skip + 1L
 })
@@ -380,9 +381,9 @@ testServer(app, {
     h_r <- html_report_string(meta)
     n_img <- function(h) lengths(regmatches(h, gregexpr("<img ", h, fixed = TRUE)))
     # resistance: both infected samples are MOI 1 = ONE positive level, so no dose-response; images =
-    # main + metric summary + growth rate + normalized + landmarks = 5, one more than before v2.12.4 (4)
-    check("resistance report: exactly 5 <img> (landmarks added, dose-response skipped for one MOI level)",
-          n_img(h_r) == 5 && grepl("<h3>Curve landmarks</h3>", h_r, fixed = TRUE))
+    # main + metric summary + growth rate + normalized + landmarks = 5, plus the composed figure (v2.13.0) = 6
+    check("resistance report: exactly 6 <img> (landmarks and the composed figure; dose-response skipped for one MOI level)",
+          n_img(h_r) == 6 && grepl("<h3>Curve landmarks</h3>", h_r, fixed = TRUE))
     check("resistance report: no 'MOI dose-response' heading and no 'Figure not available' placeholder",
           !grepl("MOI dose-response", h_r, fixed = TRUE) && !grepl("Figure not available", h_r, fixed = TRUE))
   }
@@ -627,6 +628,115 @@ testServer(app, {
         all(is.finite(rr3$lysis_time[rr3$sample == "Phage MOI 1 + resistant"])))
   session$setInputs(metrics_peak_smooth_window = 1)
   check("metrics_peak_mode has an APP_DEFAULTS entry", identical(env$APP_DEFAULTS$metrics_peak_mode, "global"))
+})
+
+cat("\n--- v2.13.0: multi-panel figure composer ---\n")
+check("compose inputs have APP_DEFAULTS entries (compose_panels is a character vector)",
+      is.character(env$APP_DEFAULTS$compose_panels) && length(env$APP_DEFAULTS$compose_panels) == 4 &&
+      identical(env$APP_DEFAULTS$compose_ncol, "2") && identical(env$APP_DEFAULTS$compose_width, "double") &&
+      env$APP_DEFAULTS$compose_panel_height_mm == 60 && env$APP_DEFAULTS$compose_tag_size == 8 &&
+      identical(env$APP_DEFAULTS$compose_tag_case, "a") && is.numeric(env$APP_DEFAULTS$compose_width_mm))
+check("compose panel choices: main first, then the analysis figures with the Analysis tab's labels",
+      identical(unname(env$COMPOSE_PANEL_CHOICES), c("main", unname(env$ANALYSIS_FIGURE_CHOICES))) &&
+      identical(names(env$COMPOSE_PANEL_CHOICES)[1], "Lysis curve (main)"))
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected")
+  do.call(session$setInputs, env$journal_preset_settings(89, 65, "a"))
+  session$setInputs(analysis_metrics = c("lysis_time", "od_drop"), analysis_panel_label = "b")
+  info <- compose_info()
+  check("compose_info: main + metric summary + growth rate + normalized, two columns, two rows",
+        identical(info$types, c("main", "metric_summary", "growth_rate", "normalized")) &&
+        info$n == 4 && info$ncol == 2 && info$rows == 2 && length(info$skipped) == 0)
+  check("compose_info: Nature double column x 2 rows of 60 mm = 183 x 120 mm",
+        near(info$width_mm, 183) && near(info$height_mm, 120))
+  check("compose_figure returns a patchwork object", inherits(info$plot, "patchwork"))
+  svg_c <- of("composed_183x120.svg")
+  quiet(ggsave(svg_c, info$plot, device = env$export_device("svg"), width = info$width_mm, height = info$height_mm,
+               units = "mm", bg = "white"))
+  xc <- readLines(svg_c); txt <- grep("<text", xc, value = TRUE)
+  szs <- as.numeric(sub('.*font-size: ([0-9.]+)px.*', '\\1', txt))
+  check("composed SVG is 183 mm wide (518.74 pt) and 120 mm tall", grepl("width='518.74pt'", grep("<svg", xc, value = TRUE)[1]) &&
+        grepl("height='340.16pt'", grep("<svg", xc, value = TRUE)[1]))
+  tag_txt <- grepl("font-weight: bold", txt) & grepl("font-size: 8.00px", txt) & grepl(">[a-d]</text>", txt)
+  check("composed SVG: four bold 8 pt panel tags a-d (and no 'b' left over from the analysis panel's own label)",
+        sum(tag_txt) == 4 && setequal(sub(".*>([a-d])</text>.*", "\\1", txt[tag_txt]), c("a", "b", "c", "d")))
+  check("composed SVG: all text is Arial 6-8 pt without textLength",
+        all(grepl('font-family: "Arial"', txt)) && all(szs >= 6 - 1e-6 & szs <= 8 + 1e-6) && !any(grepl("textLength", txt)))
+  # upper-case tags and a custom tag size
+  session$setInputs(compose_tag_case = "A", compose_tag_size = 7)
+  svg_u <- of("composed_upper.svg"); iu <- compose_info()
+  quiet(ggsave(svg_u, iu$plot, device = env$export_device("svg"), width = iu$width_mm, height = iu$height_mm, units = "mm", bg = "white"))
+  tu <- grep("<text", readLines(svg_u), value = TRUE)
+  check("tag case 'A' and size 7 reach the composed figure",
+        sum(grepl("font-weight: bold", tu) & grepl("font-size: 7.00px", tu) & grepl(">[A-D]</text>", tu)) == 4)
+  session$setInputs(compose_tag_case = "a", compose_tag_size = 8)
+  # one column: four rows
+  session$setInputs(compose_ncol = "1")
+  i1 <- compose_info()
+  check("one column: 4 rows, height = rows x panel height (240 mm), taller than the two-column figure",
+        i1$rows == 4 && near(i1$height_mm, 4 * 60) && i1$height_mm > info$height_mm)
+  session$setInputs(compose_ncol = "2", compose_panel_height_mm = 50)
+  check("panel row height is configurable (2 rows x 50 mm = 100 mm)", near(compose_info()$height_mm, 100))
+  session$setInputs(compose_panel_height_mm = 60, compose_width = "single")
+  check("single column width of the chosen journal (Nature 89 mm)", near(compose_info()$width_mm, 89))
+  session$setInputs(compose_width = "custom", compose_width_mm = 150)
+  check("custom width uses compose_width_mm", near(compose_info()$width_mm, 150))
+  session$setInputs(compose_width = "double", journal_family = "cell")
+  check("the double column follows the journal family (Cell Press 174 mm)", near(compose_info()$width_mm, 174))
+  session$setInputs(journal_family = "nature")
+  # the height warning is the journal_preset_summary style
+  session$setInputs(compose_panel_height_mm = 100, compose_ncol = "1")
+  note <- output$compose_note
+  check("height beyond the journal maximum is flagged in the note (4 x 100 = 400 mm > 170 mm)",
+        grepl("exceeds this journal's maximum", note$html) || grepl("exceeds this journal's maximum", paste(note, collapse = "")))
+  session$setInputs(compose_panel_height_mm = 60, compose_ncol = "2")
+  # composed in the checkbox order, not the order the boxes were ticked
+  session$setInputs(compose_panels = c("normalized", "main"))
+  check("panels are composed in the checkbox order (main before normalized)",
+        identical(compose_info()$types, c("main", "normalized")))
+  # the download handler writes a vector file at the computed size
+  session$setInputs(compose_panels = c("main", "metric_summary", "growth_rate", "normalized"), export_format = "svg")
+  dl <- tryCatch(output$downloadComposedFigure, error = function(e) NULL)
+  check("download handler writes an SVG of the composed figure",
+        !is.null(dl) && file.exists(dl) && grepl("width='518.74pt'", paste(readLines(dl, n = 3), collapse = "")))
+  # reports: the composed figure is an extra figure only when >= 2 panels are selected
+  if (env$has_base64enc) {
+    n_img <- function(h) lengths(regmatches(h, gregexpr("<img ", h, fixed = TRUE)))
+    meta <- report_meta(); meta$generated <- "2026-10-19 00:00:00"
+    session$setInputs(report_include_analysis = TRUE)
+    h4 <- html_report_string(meta)
+    session$setInputs(compose_panels = "main")
+    h1 <- html_report_string(meta)
+    check("HTML report: the composed figure adds exactly one <img> with 4 panels selected, none with 1", n_img(h4) == n_img(h1) + 1 &&
+          grepl("<h3>Composed figure</h3>", h4, fixed = TRUE) && !grepl("Composed figure", h1, fixed = TRUE))
+    check("HTML report: the composed figure comes after the analysis figures",
+          regexpr("<h3>Curve landmarks</h3>", h4, fixed = TRUE) < regexpr("<h3>Composed figure</h3>", h4, fixed = TRUE))
+    session$setInputs(compose_panels = c("main", "metric_summary", "growth_rate", "normalized"),
+                      report_include_analysis = FALSE)
+    check("HTML report: no composed figure when 'Include analysis figures' is off",
+          !grepl("Composed figure", html_report_string(meta), fixed = TRUE))
+    session$setInputs(report_include_analysis = TRUE)
+  }
+})
+testServer(app, {
+  ingest_data(env$make_demo_data("resistance"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time")
+  session$setInputs(compose_panels = c("main", "growth_rate", "dose_response"))
+  ir <- compose_info()
+  check("a panel that cannot render (dose-response with one MOI level) is skipped and reported",
+        identical(ir$types, c("main", "growth_rate")) && identical(ir$skipped, "MOI dose-response") && ir$n == 2 &&
+        inherits(ir$plot, "patchwork"))
+  session$setInputs(compose_panels = "dose_response")
+  io <- compose_info()
+  check("when every selected panel is unavailable nothing is composed (NULL plot, placeholder preview)",
+        is.null(io$plot) && io$n == 0 && inherits(compose_plot_current(), "ggplot"))
+  check("composed panels never contain a 'Figure not available' placeholder",
+        !any(vapply(compose_info()$types, function(t) t == "dose_response", logical(1))))
 })
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
