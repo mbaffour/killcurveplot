@@ -63,7 +63,7 @@ scenario).
 | `doubling_time` | `ln(2)/mu_max`; NA without growth |
 | `lag_phase` | First time the rolling ln-slope reaches 10% of `mu_max` |
 | `stat_phase_dur` | Time spanned by points ≥ 95% of the peak |
-| `lysis_time` | First post-peak time with decline > 5% of peak; NA if never |
+| `lysis_time` | Lysis onset: first post-peak time with decline from the peak greater than the lysis threshold (default 5% of the peak, adjustable with **Lysis onset: decline from peak that counts as lysis (%)**, `lysis_threshold`); NA if never. The threshold also gates `lysis_rate`, `od_drop`, `residual_od`, `lysis_efficiency` and `recovery_slope`, which are NA when no point declines past it |
 | `lysis_rate` | Regression slope from peak to post-peak trough |
 | `od_drop` | Peak − post-peak minimum |
 | `residual_od` | Post-peak minimum |

@@ -1,6 +1,11 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.12.4 -- Review round 4: dashboard prints "—" (no "± SD") when a mean-curve
+#   metric is NA; adjustable lysis-onset threshold (metrics_lysis_threshold_pct,
+#   default 5 %); the reports always carry the curve-landmarks figure and the
+#   dose-response figure when the selection has >= 2 distinct positive MOIs.
+#
 # v2.12.3 -- Review round 3 (opt-in; default main figure unchanged):
 #   Inside legends fall back to "right" above 4 entries, or when the emptiest
 #   corner box still holds 2+ points. Peak mode "first_local" now needs a > 10 %
@@ -170,7 +175,7 @@ has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.12.3"
+APP_VERSION <- "2.12.4"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -300,6 +305,9 @@ moving_average <- function(y, w) {
 # reported OD value still comes from the raw data at that index -- smoothing
 # only decides WHERE the peak is, never WHAT its value is.
 #
+# lysis_threshold (v2.12.4): the decline from the peak, as a fraction of the
+# peak, that counts as lysis (default 0.05 = 5 %, the paper's definition).
+#
 # peak_mode (v2.12.2): "global" (default, unchanged) takes the global maximum as
 # the peak. "first_local" is for regrowth / resistance curves, where the global
 # maximum is the late regrowth and every lysis metric would be NA: the peak is
@@ -327,7 +335,8 @@ first_local_peak_index <- function(peak_vec) {
 }
 compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
                                       smooth_window = 5, peak_smooth_window = 1,
-                                      peak_mode = c("global", "first_local")) {
+                                      peak_mode = c("global", "first_local"),
+                                      lysis_threshold = 0.05) {
     peak_mode <- match.arg(peak_mode)
     n_pts  <- length(t_vec)
     peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
@@ -398,7 +407,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
     if (max_idx < n_pts) {
       post_peak  <- (max_idx + 1):n_pts
       od_decline <- max_od - od_vec[post_peak]
-      lysis_idx  <- which(od_decline > 0.05 * max_od)
+      lysis_idx  <- which(od_decline > lysis_threshold * max_od)
       if (length(lysis_idx) > 0) {
         lysis_time <- t_vec[post_peak[lysis_idx[1]]]
         trough_idx <- max_idx + which.min(od_vec[post_peak])
@@ -489,12 +498,13 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
 # ref_sample: optional name of an uninfected/reference sample; when given (and
 # present in the data) the five reference-normalised infection metrics are added.
 compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
-                                  peak_smooth_window = 1, peak_mode = "global") {
+                                  peak_smooth_window = 1, peak_mode = "global",
+                                  lysis_threshold = 0.05) {
   if (is.null(pd) || nrow(pd) == 0) return(NULL)
   pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
   out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
     compute_one_curve_metrics(g$time, g$mean_value, g$variable[1],
-                              smooth_window, peak_smooth_window, peak_mode)
+                              smooth_window, peak_smooth_window, peak_mode, lysis_threshold)
   })
   m <- do.call(rbind, c(out, list(make.row.names = FALSE)))
 
@@ -542,7 +552,8 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
 # replicate, each replicate divided by the reference sample's replicate MEAN
 # (same definitions as compute_curve_metrics).
 compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth_window = 1,
-                                          ref_sample = NULL, peak_mode = "global") {
+                                          ref_sample = NULL, peak_mode = "global",
+                                          lysis_threshold = 0.05) {
   if (is.null(rep_pd) || nrow(rep_pd) == 0) return(NULL)
   rep_pd <- rep_pd[is.finite(rep_pd$value), , drop = FALSE]
   if (nrow(rep_pd) == 0) return(NULL)
@@ -551,7 +562,7 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
 
   per_rep <- lapply(split(rep_pd, rep_key, drop = TRUE), function(g) {
     row <- compute_one_curve_metrics(g$time, g$value, g$variable[1],
-                                     smooth_window, peak_smooth_window, peak_mode)
+                                     smooth_window, peak_smooth_window, peak_mode, lysis_threshold)
     row$replicate <- g$replicate[1]
     row
   })
@@ -570,9 +581,9 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
 }
 
 compute_replicate_metrics <- function(rep_pd, smooth_window = 5, peak_smooth_window = 1,
-                                      peak_mode = "global") {
+                                      peak_mode = "global", lysis_threshold = 0.05) {
   rm <- compute_replicate_metric_rows(rep_pd, smooth_window, peak_smooth_window,
-                                      peak_mode = peak_mode)
+                                      peak_mode = peak_mode, lysis_threshold = lysis_threshold)
   if (is.null(rm)) return(NULL)
 
   safe_mean <- function(x) if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
@@ -608,7 +619,7 @@ METRIC_DEFINITIONS <- c(
   doubling_time   = "ln(2) / mu_max; NA when there is no growth phase",
   lag_phase       = "First time at which the rolling ln-slope reaches 10% of mu_max",
   stat_phase_dur  = "Time spanned by all points within 95% of the peak",
-  lysis_time      = "Lysis onset: first post-peak time at which the decline from peak exceeds 5% of the peak; NA if the curve never declines past that",
+  lysis_time      = "Lysis onset: first post-peak time at which the decline from peak exceeds the lysis threshold (adjustable, default 5%) of the peak; NA if the curve never declines past that",
   lysis_rate      = "Linear-regression slope of the mean from the peak to the post-peak trough (negative = decline)",
   od_drop         = "Peak minus post-peak minimum (absolute decline)",
   residual_od     = "Post-peak minimum (residual OD after lysis) -- this is the post-lysis floor; see global_min_od for the curve's overall minimum",
@@ -1457,6 +1468,7 @@ APP_DEFAULTS <- list(
   report_author         = "",         report_notes           = "",
   metrics_smooth_window = 5,          legend_font_size       = 14,
   metrics_peak_smooth_window = 1,     # KC-3: off by default
+  metrics_lysis_threshold_pct = 5,    # v2.12.4: decline from peak that counts as lysis (%)
   metrics_peak_mode = "global",       # v2.12.2: "first_local" for regrowth / resistance curves
   blank_od               = 0,         # KC-7: off by default
   report_font_size      = 14,
@@ -2134,6 +2146,13 @@ ui <- fluidPage(
                          "maximum at the end, so lysis onset, OD drop and time to half peak come out NA. ",
                          "“First peak” anchors them on the first peak that is followed by a ",
                          "decline of more than 10 % instead (falls back to the global maximum if there is none)."),
+                       numericInput("metrics_lysis_threshold_pct",
+                                    "Lysis onset: decline from peak that counts as lysis (%):",
+                                    5, 1, 50, 1),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Default 5 % (the paper's definition). A larger value ignores small dips ",
+                         "after the peak; it changes lysis onset, lysis rate, OD drop, residual OD, ",
+                         "lysis efficiency and recovery slope."),
                        selectInput("metrics_ref_sample",
                                    "Reference sample (infection metrics):",
                                    choices = c("None" = "")),
@@ -3905,12 +3924,19 @@ server <- function(input, output, session) {
   })
 
   # ── Analysis figures (v2.11) ─────────────────────────────────────────────────
+  # v2.12.4: lysis-onset threshold as a fraction (input is a percentage; default 5 %)
+  lysis_threshold_current <- function() {
+    p <- input$metrics_lysis_threshold_pct %||% 5
+    if (!is.numeric(p) || !is.finite(p)) p <- 5
+    min(max(p, 1), 50) / 100
+  }
   replicate_metric_rows_current <- function() {
     compute_replicate_metric_rows(prepare_replicate_data(),
                                   smooth_window      = input$metrics_smooth_window %||% 5,
                                   peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
                                   ref_sample         = input$metrics_ref_sample,
-                                  peak_mode          = input$metrics_peak_mode %||% "global")
+                                  peak_mode          = input$metrics_peak_mode %||% "global",
+                                  lysis_threshold    = lysis_threshold_current())
   }
   analysis_stat_metric <- function() {
     if (identical(input$analysis_type, "dose_response")) input$analysis_dose_metric %||% "lysis_time"
@@ -4281,7 +4307,9 @@ server <- function(input, output, session) {
       idx <- match(m$sample, rm$sample)
       for (cc in intersect(c("lysis_time", "od_drop"), names(out))) {
         sdv <- rm[[paste0(cc, "_sd")]][idx]
-        out[[cc]] <- ifelse(is.finite(sdv), paste0(out[[cc]], " ± ", formatC(signif(sdv, 2), format = "g")), out[[cc]])
+        # "—" alone when the mean-curve value is NA; "value ± sd" only for a finite value
+        out[[cc]] <- ifelse(is.finite(sdv) & is.finite(m[[cc]]),
+                            paste0(out[[cc]], " ± ", formatC(signif(sdv, 2), format = "g")), out[[cc]])
       }
     }
     names(out) <- unname(cols)
@@ -4357,7 +4385,8 @@ server <- function(input, output, session) {
                           smooth_window       = input$metrics_smooth_window %||% 5,
                           ref_sample          = input$metrics_ref_sample,
                           peak_smooth_window  = input$metrics_peak_smooth_window %||% 1,
-                          peak_mode           = input$metrics_peak_mode %||% "global")
+                          peak_mode           = input$metrics_peak_mode %||% "global",
+                          lysis_threshold     = lysis_threshold_current())
   }
 
   # KC-2: warn when any sample has non-positive OD readings, since those
@@ -4392,7 +4421,8 @@ server <- function(input, output, session) {
     compute_replicate_metrics(prepare_replicate_data(),
                               smooth_window      = input$metrics_smooth_window %||% 5,
                               peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
-                              peak_mode          = input$metrics_peak_mode %||% "global")
+                              peak_mode          = input$metrics_peak_mode %||% "global",
+                              lysis_threshold    = lysis_threshold_current())
   }
 
   output$downloadReplicateMetricsCSV <- downloadHandler(
@@ -4426,7 +4456,7 @@ server <- function(input, output, session) {
                   "Export size", "Export DPI",
                   "Blank/media OD subtracted",
                   "μmax smoothing window", "Peak-detection smoothing window",
-                  "Peak used for lysis metrics", "Reference sample"),
+                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Reference sample"),
       value = c(input$x_scale_type, input$y_scale_type,
                 input$x_axis_label, input$y_axis_label, input$color_palette,
                 input$line_thickness, input$show_points, input$shape_size,
@@ -4438,6 +4468,7 @@ server <- function(input, output, session) {
                        if (identical(input$metrics_peak_smooth_window %||% 1, 1)) " (off)" else ""),
                 if (identical(input$metrics_peak_mode %||% "global", "first_local"))
                   "first peak before a > 10 % decline" else "global maximum",
+                input$metrics_lysis_threshold_pct %||% 5,
                 if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample
                 else "none (infection metrics omitted)"),
       stringsAsFactors = FALSE)
@@ -4524,11 +4555,15 @@ server <- function(input, output, session) {
     norm_mode <- input$analysis_norm_mode %||% "reference"
     types <- c("metric_summary", "growth_rate",
                if (nzchar(ref)) "normalized" else "replicate_overlay",
-               if (any(is.finite(moi) & moi > 0)) "dose_response")
+               "landmarks",
+               # dose-response only with >= 2 distinct positive MOI levels (v2.12.4); a
+               # single level would only produce the "Figure not available" message
+               if (length(unique(moi[is.finite(moi) & moi > 0])) >= 2) "dose_response")
     titles <- c(metric_summary    = "Metric summary (replicates, mean ± SD)",
                 growth_rate       = "Specific growth rate vs time",
                 normalized        = "Normalized OD vs time",
                 replicate_overlay = "Replicate overlay",
+                landmarks         = "Curve landmarks",
                 dose_response     = "MOI dose-response")
     captions <- c(
       metric_summary = paste0(
@@ -4547,17 +4582,23 @@ server <- function(input, output, session) {
       else paste0("Mean ", ylab, " of each sample divided by the mean ", ylab, " of the reference '", ref,
                   "' at the same time point; the dashed line marks a ratio of 1."),
       replicate_overlay = "Individual replicate curves (thin lines) with the mean curve (thick line) per sample.",
+      landmarks = paste0("Mean curves with the computed landmarks drawn where they come from: lag end, centre of the μmax window, ",
+                         "peak, lysis onset (> ", lysis_threshold_current() * 100, " % decline from the peak), half of the peak and the trough."),
       dose_response = paste0(
         metric_axis_label(input$analysis_dose_metric %||% "lysis_time", tunit = tunit, ylab = ylab),
         " per replicate (open circles) and mean ± SD (filled symbols) against MOI (log scale)."))
     figs <- lapply(types, function(ty) {
       f <- list(type = ty, title = unname(titles[ty]), caption = unname(captions[ty]))
       p <- tryCatch(build_analysis_plot(ty), error = function(e) e)
-      if (inherits(p, "error")) { f$error <- conditionMessage(p); return(f) }
+      if (inherits(p, "error")) {
+        if (ty == "dose_response") return(NULL)   # silently skipped: never embed a placeholder for it
+        f$error <- conditionMessage(p); return(f)
+      }
       f$plot <- p
       if (render_png) f$b64 <- report_png_b64(p)
       f
     })
+    figs <- Filter(Negate(is.null), figs)
     st <- analysis_stats_current()
     list(figures = figs, stats = st, metric_label = metric_label(st$metric),
          ref_sample = ref, method = input$stats_method %||% "welch")

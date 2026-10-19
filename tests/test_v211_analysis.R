@@ -308,6 +308,11 @@ testServer(app, {
           grepl("<h2>Replicate statistics</h2>", html_on, fixed = TRUE))
     check("HTML report (on): at least two more <img> elements than before (demo data: +4)",
           n_img(html_on) >= n_img(html_old) + 2)
+    # lysis demo (MOI 10 and 0.1 = two distinct positive levels, reference set): main figure + metric summary +
+    # growth rate + normalized + landmarks (v2.12.4, always) + dose-response = 6 images. Before v2.12.4 it was 5
+    # (the dose-response was already embedded), so the landmarks figure is the one added image.
+    check("HTML report (on): exactly 6 <img> (main, metric summary, growth rate, normalized, landmarks, dose-response)",
+          n_img(html_on) == 6 && grepl("<h3>Curve landmarks</h3>", html_on, fixed = TRUE))
     check("HTML report (on): every analysis figure rendered (no 'Figure not available')",
           !grepl("Figure not available", html_on, fixed = TRUE))
     check("HTML report (on): metric summary, growth rate, normalized (reference set) and dose-response (MOI in names)",
@@ -347,11 +352,77 @@ testServer(app, {
     check("PDF report: both build and start with %PDF",
           identical(readBin(pdf_on, "raw", 4), charToRaw("%PDF")) && identical(readBin(pdf_off, "raw", 4), charToRaw("%PDF")))
     cat(sprintf("   -> PDF pages: on = %d, off = %d\n", n_pages(pdf_on), n_pages(pdf_off)))
-    check("PDF report (on): more pages than without the option (4 figure pages + statistics)",
-          n_pages(pdf_on) >= n_pages(pdf_off) + 5)
+    # before v2.12.4 this lysis-demo PDF had 19 pages (on) vs 13 (off); the landmarks page is one more
+    check("PDF report (on): more pages than without the option (5 figure pages + statistics)",
+          n_pages(pdf_on) >= n_pages(pdf_off) + 6 && n_pages(pdf_on) >= 20)
     session$setInputs(report_include_analysis = TRUE)
   } else skip <<- skip + 1L
 })
+
+cat("\n--- v2.12.4: dashboard NA formatting, lysis threshold, report figures (resistance) ---\n")
+testServer(app, {
+  ingest_data(env$make_demo_data("resistance"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "",
+                    metrics_ref_sample = "Uninfected", analysis_dose_metric = "lysis_time", font_family = "sans")
+  m_r <- curve_metrics_current()
+  check("resistance: Uninfected lysis onset is NA on the mean curve", is.na(m_r$lysis_time[m_r$sample == "Uninfected"]))
+  tbl_r <- output$dash_metrics_table
+  check("dashboard table never prints '\u2014 \u00b1' (NA mean-curve value shown as a dash alone)",
+        !grepl("\u2014 \u00b1", tbl_r, fixed = TRUE) && grepl("Uninfected", tbl_r))
+  rm_r <- replicate_metrics_current()
+  check("(the regression case is real: the Uninfected replicate SD of lysis onset is finite although the mean-curve value is NA)",
+        is.finite(rm_r$lysis_time_sd[rm_r$sample == "Uninfected"]))
+  check("dashboard table keeps 'value \u00b1 sd' for finite values", grepl("\u00b1", tbl_r, fixed = TRUE))
+  if (env$has_base64enc) {
+    meta <- report_meta(); meta$generated <- "2026-10-19 00:00:00"
+    session$setInputs(report_include_analysis = TRUE)
+    h_r <- html_report_string(meta)
+    n_img <- function(h) lengths(regmatches(h, gregexpr("<img ", h, fixed = TRUE)))
+    # resistance: both infected samples are MOI 1 = ONE positive level, so no dose-response; images =
+    # main + metric summary + growth rate + normalized + landmarks = 5, one more than before v2.12.4 (4)
+    check("resistance report: exactly 5 <img> (landmarks added, dose-response skipped for one MOI level)",
+          n_img(h_r) == 5 && grepl("<h3>Curve landmarks</h3>", h_r, fixed = TRUE))
+    check("resistance report: no 'MOI dose-response' heading and no 'Figure not available' placeholder",
+          !grepl("MOI dose-response", h_r, fixed = TRUE) && !grepl("Figure not available", h_r, fixed = TRUE))
+  }
+  # lysis threshold through the server: 5 % default vs the input
+  session$setInputs(metrics_lysis_threshold_pct = 5)
+  m5 <- curve_metrics_current()
+  check("metrics_lysis_threshold_pct has an APP_DEFAULTS entry of 5", identical(env$APP_DEFAULTS$metrics_lysis_threshold_pct, 5))
+  check("server default threshold gives the same metrics as the engine default",
+        isTRUE(all.equal(m5, env$compute_curve_metrics(prepare_plot_data(), smooth_window = input$metrics_smooth_window %||% 5,
+                                                        ref_sample = "Uninfected"))))
+  # (the resistance demo's infected samples all fall by > 90 %, so a threshold up to 50 % does not move their onset;
+  #  the effect of the threshold itself is tested on the synthetic plateau below)
+  session$setInputs(metrics_lysis_threshold_pct = 50)
+  m50 <- curve_metrics_current()
+  session$setInputs(metrics_lysis_threshold_pct = 80)   # out of range: clamped to 50 %
+  check("an out-of-range threshold input is clamped to 1-50 % (80 behaves as 50)",
+        isTRUE(all.equal(curve_metrics_current(), m50)))
+})
+cat("\n--- v2.12.4: lysis threshold in the engine ---\n")
+demo_l <- env$make_demo_data("lysis")
+pd_l <- do.call(rbind, lapply(unique(colnames(demo_l)[-1]), function(vn)
+  data.frame(time = demo_l$Time, variable = vn, mean_value = rowMeans(demo_l[, colnames(demo_l) == vn, drop = FALSE]))))
+check("compute_curve_metrics: explicit lysis_threshold = 0.05 equals the default output",
+      identical(env$compute_curve_metrics(pd_l), env$compute_curve_metrics(pd_l, lysis_threshold = 0.05)))
+rp_l <- data.frame(time = rep(0:8, 2), variable = "P", replicate = rep(1:2, each = 9),
+                   value = rep(c(0.05, 0.2, 0.5, 0.8, 1.0, 0.94, 1.0, 1.0, 1.0), 2))
+check("replicate rows and summary: explicit 0.05 equals the default",
+      identical(env$compute_replicate_metric_rows(rp_l), env$compute_replicate_metric_rows(rp_l, lysis_threshold = 0.05)) &&
+      identical(env$compute_replicate_metrics(rp_l), env$compute_replicate_metrics(rp_l, lysis_threshold = 0.05)))
+pl6 <- c(0.05, 0.2, 0.5, 0.8, 1.0, 0.94, 1.0, 1.0, 1.0)   # plateau with a single 6 % dip
+l05 <- env$compute_one_curve_metrics(0:8, pl6, "P", lysis_threshold = 0.05)
+l10 <- env$compute_one_curve_metrics(0:8, pl6, "P", lysis_threshold = 0.10)
+check("plateau with a 6 % dip: lysis_time is finite at a 5 % threshold and NA at 10 %",
+      is.finite(l05$lysis_time) && is.na(l10$lysis_time) && is.na(l10$od_drop) && is.finite(l05$od_drop))
+check("lysis threshold is threaded through compute_curve_metrics and the replicate functions",
+      is.finite(env$compute_curve_metrics(data.frame(time = 0:8, variable = "P", mean_value = pl6))$lysis_time) &&
+      is.na(env$compute_curve_metrics(data.frame(time = 0:8, variable = "P", mean_value = pl6), lysis_threshold = 0.10)$lysis_time) &&
+      all(is.na(env$compute_replicate_metric_rows(rp_l, lysis_threshold = 0.10)$lysis_time)) &&
+      all(is.finite(env$compute_replicate_metric_rows(rp_l)$lysis_time)) &&
+      is.na(env$compute_replicate_metrics(rp_l, lysis_threshold = 0.10)$lysis_time_mean))
 
 cat("\n--- v2.12.1: MOI-series demo through the server ---\n")
 testServer(app, {

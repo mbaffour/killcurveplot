@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.12.4 — 2026-10-19
+
+Review round 4. Default main-figure output unchanged; new behaviour is opt-in
+except the dashboard and report changes below.
+
+- **Dashboard NA formatting**: "Key metrics per sample" printed "— ± 32" when
+  the mean-curve value was NA but replicates had an SD. It now prints "—"
+  alone; "value ± sd" only for a finite mean-curve value.
+- **Adjustable lysis-onset threshold**: new Stats & Reports input "Lysis onset:
+  decline from peak that counts as lysis (%)" (`metrics_lysis_threshold_pct`,
+  default 5, 1 to 50), passed as `lysis_threshold = pct / 100` through
+  `compute_one_curve_metrics()`, `compute_curve_metrics()`,
+  `compute_replicate_metrics()` and `compute_replicate_metric_rows()`.
+  Default output is unchanged. The report key-settings table has a
+  "Lysis-onset threshold (%)" row; definitions, METRICS_REFERENCE and README
+  updated.
+- **Reports**: the HTML and PDF reports (with "Include analysis figures and
+  statistics") always embed the Curve landmarks figure, and the MOI
+  dose-response figure only when the selected samples have at least two
+  distinct positive MOI values (previously any positive MOI, which embedded a
+  "Figure not available" note for a single level). A dose-response figure that
+  fails to build is skipped silently.
+- Tests: dashboard "— ±" regression on the resistance demo, lysis-threshold
+  default/6 % plateau dip, report image counts for the lysis and resistance
+  scenarios, PDF page count.
+
 ## v2.12.3 — 2026-10-19
 
 Review round 3. Default main-figure output unchanged; everything is opt-in.
