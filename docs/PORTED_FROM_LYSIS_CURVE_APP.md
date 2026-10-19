@@ -34,3 +34,39 @@ Numbers that moved on purpose: the 4-point toy curve (0.1, 0.4, 0.2, 0.05 at
 t = 0, 10, 20, 30) now has `lysis_time` 11 (was 20). On the demo data the
 Uninfected control no longer gets a `lysis_time` on any replicate and the phage
 curves' onsets are ~61.2 and ~106.3 (the true onsets are 60 and 105).
+
+## 2. New metrics
+
+New columns of `compute_one_curve_metrics()` (hence of `compute_curve_metrics()`,
+`compute_replicate_metric_rows()` and the per-replicate mean +/- SD export):
+
+* `first_peak_od`, `t_first_peak`: `first_prominent_peak_idx()` (ported verbatim)
+  on a 3-point smoothed curve (`smooth3_raw_edges()`, the reference's
+  `rollapply(..., fill = NA)` with raw values at the edges) with the plain
+  `0.05 * range` prominence floor. Fallback when there is no prominent peak:
+  the GLOBAL maximum, as in the reference, whatever `peak_mode` is.
+* `extinction_time`: `curve_extinction_time()`, the reference's rule and floor
+  (0.05 OD, interpolated; `od[1] < floor` reports the first time point). New
+  argument `extinction_threshold = 0.05` on `compute_one_curve_metrics()`,
+  `compute_curve_metrics()`; no UI control.
+* `centroid_x`, `centroid_y`: `curve_centroid()`, the exact trapezoid-strip
+  centroid.
+* With a reference sample: `centroid_index` (`centroid_index_vs_ref()`, mean of
+  the reference's `cx * cy` products) and `local_virulence`
+  (`calculate_local_virulence()`, Storms 2020, default `t_stat` rule) in both
+  `compute_curve_metrics()` and `compute_replicate_metric_rows()`.
+* `ANALYSIS_METRIC_LABELS`, `METRIC_DEFINITIONS` and `metric_axis_label()` know
+  the seven new metrics, so they are selectable in the metric summary / dose-response.
+
+Known property of the reference rule, kept as specified: the demo inoculum is
+0.05 OD, exactly the extinction floor, so with 4 % noise a curve's first point
+falls below it about half the time and then reports `extinction_time` = the first
+time point (e.g. the demo "Phage MOI 0.1" mean curve, 0 min). The demo
+Uninfected mean curve is NA (first point 0.0506).
+The 5 %-of-range floor of `first_peak_od` is noise-sensitive by design (the
+reference's LC-18): on the demo "Phage MOI 10" mean curve the first prominent peak
+is the t = 45 bump, not the t = 60 maximum.
+
+`tests/test_metrics_parity.R` now also compares all of these with the reference
+(`first_peak_od`, `t_first_peak`, `extinction_time`, `centroid_x/y`,
+`centroid_index`, `local_virulence` and its `t_stat`).

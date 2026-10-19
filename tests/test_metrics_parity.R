@@ -95,7 +95,8 @@ if (!file.exists(ref_file)) {
     invisible(NULL)
   }
   ref_ok <- tryCatch({
-    grab_defs(c("curve_noise_sd", "LYSIS_SUSTAIN_PTS", "first_prominent_peak_idx"))
+    grab_defs(c("curve_noise_sd", "LYSIS_SUSTAIN_PTS", "first_prominent_peak_idx",
+                  "calculate_local_virulence"))
     eval(parse(text = grab("^calculate_growth_metrics <- function",
                            "Derivative data")), envir = ref_env)
     eval(parse(text = grab("^calculate_infection_metrics <- function",
@@ -148,7 +149,9 @@ curves <- list(
 
 shared_cols <- c("initial_od","max_od","time_max_od","final_od","auc","mu_max",
                  "doubling_time","lag_phase","stat_phase_dur","lysis_time",
-                 "lysis_rate","od_drop","residual_od","recovery_slope")
+                 "lysis_rate","od_drop","residual_od","recovery_slope",
+                 # ported new metrics (first peak / extinction / centroid)
+                 "first_peak_od","t_first_peak","extinction_time","centroid_x","centroid_y")
 
 both_equal <- function(a, b) {
   (is.na(a) && is.na(b)) || isTRUE(all.equal(a, b, tolerance = 1e-9))
@@ -213,6 +216,24 @@ if (isTRUE(ref_ok)) {
     if (!both_equal(a, b)) { cat("  MISMATCH", cc, "Infected:", a, "vs", b, "\n"); ok <- FALSE }
   }
   check("infection metrics match reference on its non-buggy row", ok)
+  # centroid_index (reference calculate_infection_metrics) and local_virulence
+  # (reference calculate_local_virulence) on both samples
+  ok <- TRUE
+  for (smp in c("Infected", "Uninfected")) {
+    a <- ref_i$centroid_index[ref_i$sample == smp]; b <- new_i$centroid_index[new_i$sample == smp]
+    if (!both_equal(a, b)) { cat("  MISMATCH centroid_index", smp, ":", a, "vs", b, "\n"); ok <- FALSE }
+  }
+  check("centroid_index matches the reference (both samples)", ok)
+  ref_lv <- ref_env$calculate_local_virulence(multi, "Uninfected", smooth_window = 5)
+  ok <- TRUE
+  for (smp in c("Infected", "Uninfected")) {
+    a <- ref_lv$local_virulence[ref_lv$sample == smp]; b <- new_i$local_virulence[new_i$sample == smp]
+    if (!both_equal(a, b)) { cat("  MISMATCH local_virulence", smp, ":", a, "vs", b, "\n"); ok <- FALSE }
+  }
+  check("local_virulence matches the reference (both samples)", ok)
+  check("local_virulence t_stat matches the reference",
+        both_equal(ref_lv$t_stat_used[1],
+                   env$calculate_local_virulence(multi, "Uninfected", 5)$t_stat_used[1]))
 } else {
   cat("SKIPPING infection-metrics reference comparison --", ref_status, "\n")
 }

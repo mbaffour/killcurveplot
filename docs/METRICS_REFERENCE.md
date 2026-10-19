@@ -74,6 +74,9 @@ scenario).
 | `pct_drop_from_max` | `(max_od − final_od)/max_od × 100` |
 | `t_half_max_decline` | First time after the peak below 50% of the peak, linearly interpolated; NA if never |
 | `steepest_decline_rate/interval` | Most negative consecutive-point slope, and where |
+| `first_peak_od`, `t_first_peak` | The **first prominent peak** (Blazanin et al., PNAS 2025): the earliest local maximum of the 3-point centered moving mean (raw value kept at the two edge points) whose topographic prominence — the drop to the shallower of its two saddles — is at least 5 % of that smoothed curve's range. `first_peak_od` is the raw OD at that point. With no prominent peak (or fewer than 3 points) both fall back to the **global** maximum, whatever the peak mode. Unlike `max_od` it is not displaced by regrowth that overtakes the first peak. The 5 %-of-range floor has no noise term, so on noisy curves a small early bump can qualify (the companion audit's LC-18, deliberately unchanged because the definition is published) |
+| `extinction_time` | First time the mean falls **below the 0.05 OD floor**, linearly interpolated between the last point at or above the floor and the first below it. A curve that *starts* below the floor reports its first time point; NA if it never falls below. The floor is the companion app's default (argument `extinction_threshold`, not exposed in the UI): note that a blanked inoculum near 0.05 OD can sit just under it and so score an extinction at t = start, which is a property of the rule, not of the curve |
+| `centroid_x`, `centroid_y` | Centroid of the area under the mean curve, exact: each consecutive pair of points is a trapezoid with a closed-form centroid and the curve centroid is their area-weighted mean. NA when the total area is not positive |
 
 ### Lysis detection rules (ported from the companion app, audit findings LC-3 / LC-9 / LC-17)
 
@@ -146,6 +149,8 @@ consistent relative order across time points.
 | `infection_strength` | `1 − auc/auc_ref` over the full run (≡ PhageScore/100 — **not** the Storms virulence index, which uses a bounded integration window) |
 | `relative_mu_max`, `relative_max_od` | Ratios vs the reference |
 | `lysis_onset_delta` | `lysis_time − lag_phase` |
+| `centroid_index` | `1 − (centroid_x · centroid_y) / (centroid_x · centroid_y of the reference)` (Hosseini et al. 2024). With replicates the denominator is the **mean of the reference replicates' `centroid_x · centroid_y` products** (not the product of the means), which makes the reference's own index average exactly 0. |
+| `local_virulence` | Storms local virulence (PHAGE 2020): `1 − A_sample / A_reference`, with both areas integrated only up to `t_stat`, the **onset of stationary phase in the reference** — the first time after the reference's fastest growth at which its centered rolling ln-slope (same window and non-positive-OD rule as `mu_max`) falls below 10 % of `mu_max`; the last time point if it never does. The areas are trapezoidal and the integral stops at an interpolated point exactly at `t_stat`. The reference's own value is 0; unlike `infection_strength` it ignores everything after the reference stops growing. Per replicate, each replicate's area is compared with the reference's replicate-mean curve. |
 
 Metrics that don't apply are `NA`, never fabricated. Two deliberate
 corrections vs the original reference implementation are documented in the

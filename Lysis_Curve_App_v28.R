@@ -358,6 +358,83 @@ longest_true_run <- function(flag) {
   c(start = starts[k], end = ends[k])
 }
 
+# ── New metrics (ported from the companion app, step 2) ──────────────────────
+# 3-point centered moving mean with the RAW value kept at the two edges (and
+# wherever the mean is not finite) -- the smoothing calculate_growth_metrics()
+# uses to find the first prominent peak. Deliberately NOT moving_average(y, 3),
+# whose edge windows shrink instead of falling back to the raw point.
+smooth3_raw_edges <- function(y) {
+  n <- length(y)
+  if (n < 3) return(y)
+  sm <- rep(NA_real_, n)
+  sm[2:(n - 1)] <- (y[1:(n - 2)] + y[2:(n - 1)] + y[3:n]) / 3
+  ifelse(is.finite(sm), sm, y)
+}
+
+# Port of first_prominent_peak_idx(): index of the EARLIEST local maximum of
+# `sm` whose topographic prominence reaches `prom_min`, or NA when there is
+# none. A regrowing culture's global maximum can be its SECOND peak, so
+# anything anchored on which.max() misses the first one.
+first_prominent_peak_idx <- function(sm, prom_min) {
+  n <- length(sm)
+  if (n < 3 || !is.finite(prom_min)) return(NA_integer_)
+  cand <- which(sm[2:(n - 1)] >  sm[1:(n - 2)] &
+                sm[2:(n - 1)] >= sm[3:n]) + 1L
+  for (pk in cand) {
+    p_val <- sm[pk]
+    # walk out both ways until a higher point (or the curve end) is met; the
+    # prominence is the drop to the shallower of the two saddles
+    li <- pk
+    while (li > 1 && sm[li - 1] <= p_val) li <- li - 1
+    ri <- pk
+    while (ri < n && sm[ri + 1] <= p_val) ri <- ri + 1
+    left_min  <- min(sm[li:pk], na.rm = TRUE)
+    right_min <- min(sm[pk:ri], na.rm = TRUE)
+    prom <- p_val - max(left_min, right_min)
+    if (is.finite(prom) && prom >= prom_min) return(pk)
+  }
+  NA_integer_
+}
+
+# Port of the centroid block: EXACT trapezoid-strip centroids of the area
+# under the curve (each consecutive pair of points is a trapezoid whose own
+# centroid is known in closed form; the curve centroid is the area-weighted
+# mean of the strip centroids). Returns c(x, y); NA, NA for < 2 points or a
+# non-positive total area.
+curve_centroid <- function(t_vec, od_vec) {
+  n <- length(t_vec)
+  if (n < 2) return(c(x = NA_real_, y = NA_real_))
+  h_s <- diff(t_vec)
+  a_s <- head(od_vec, -1)
+  b_s <- tail(od_vec, -1)
+  A_s <- h_s * (a_s + b_s) / 2
+  ab  <- a_s + b_s
+  xbar_s <- ifelse(ab == 0, head(t_vec, -1) + h_s / 2,
+                   head(t_vec, -1) + h_s * (a_s + 2 * b_s) / (3 * ab))
+  ybar_s <- ifelse(ab == 0, 0, (a_s^2 + a_s * b_s + b_s^2) / (3 * ab))
+  A_tot  <- sum(A_s, na.rm = TRUE)
+  if (!is.finite(A_tot) || A_tot <= 0) return(c(x = NA_real_, y = NA_real_))
+  c(x = sum(xbar_s * A_s, na.rm = TRUE) / A_tot,
+    y = sum(ybar_s * A_s, na.rm = TRUE) / A_tot)
+}
+
+# Port of the extinction block: first time the curve falls below the floor
+# `thr` (default 0.05 OD, as in the reference), linearly interpolated between
+# the last point at/above it and the first below. A curve that STARTS below the
+# floor reports its first time point. NA when it never falls below.
+curve_extinction_time <- function(t_vec, od_vec, thr = 0.05) {
+  n <- length(t_vec)
+  thr <- suppressWarnings(as.numeric(thr))
+  if (n < 1 || length(thr) != 1 || !is.finite(thr)) return(NA_real_)
+  if (isTRUE(od_vec[1] < thr)) return(t_vec[1])
+  if (n < 2) return(NA_real_)
+  cross <- which(od_vec[-1] < thr & od_vec[-n] >= thr)
+  if (length(cross) == 0) return(NA_real_)
+  j  <- cross[1]
+  y0 <- od_vec[j]; y1 <- od_vec[j + 1]; x0 <- t_vec[j]; x1 <- t_vec[j + 1]
+  if (y0 == y1) x1 else x0 + (x1 - x0) * (y0 - thr) / (y0 - y1)
+}
+
 # KC-4: the full per-curve metrics engine, factored out into its own function
 # so the EXACT SAME formulas run on a per-replicate curve
 # (compute_replicate_metrics(), below) as on the mean curve
@@ -406,7 +483,8 @@ first_local_peak_index <- function(peak_vec) {
 compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
                                       smooth_window = 5, peak_smooth_window = 1,
                                       peak_mode = c("global", "first_local"),
-                                      lysis_threshold = 0.05) {
+                                      lysis_threshold = 0.05,
+                                      extinction_threshold = 0.05) {
     peak_mode <- match.arg(peak_mode)
     n_pts  <- length(t_vec)
     peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
@@ -563,6 +641,26 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       }
     }
 
+    # ── First prominent peak, extinction time, area centroid (companion-app port) ──
+    # first_peak_od / t_first_peak: the earliest local maximum of the lightly
+    # (3-point) smoothed curve whose prominence is >= 5 % of that curve's range
+    # (Blazanin et al., PNAS 2025). The definition is deliberately the plain
+    # published one (no noise term; AUDIT LC-18). With no prominent peak (or
+    # < 3 points) it falls back to the GLOBAL maximum, as the reference does,
+    # whatever peak_mode is. The reported OD is the raw value at that index.
+    fp_idx <- NA_integer_
+    if (n_pts >= 3 && all(is.finite(od_vec))) {
+      sm_vec   <- smooth3_raw_edges(od_vec)
+      sm_range <- diff(range(sm_vec))
+      fp_idx   <- tryCatch(first_prominent_peak_idx(sm_vec, 0.05 * sm_range),
+                           error = function(e) NA_integer_)
+    }
+    if (is.na(fp_idx)) fp_idx <- which.max(od_vec)
+    first_peak_od <- od_vec[fp_idx]
+    t_first_peak  <- t_vec[fp_idx]
+    extinction_time <- curve_extinction_time(t_vec, od_vec, extinction_threshold)
+    cen <- curve_centroid(t_vec, od_vec)
+
     data.frame(
       sample          = sample_name,
       n_timepoints    = n_pts,
@@ -596,6 +694,11 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       t_half_max_decline        = t50,
       steepest_decline_rate     = dec_rate,
       steepest_decline_interval = dec_int,
+      first_peak_od   = first_peak_od,
+      t_first_peak    = t_first_peak,
+      extinction_time = extinction_time,
+      centroid_x      = unname(cen[["x"]]),
+      centroid_y      = unname(cen[["y"]]),
       stringsAsFactors = FALSE
     )
 }
@@ -604,12 +707,13 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
 # present in the data) the five reference-normalised infection metrics are added.
 compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
                                   peak_smooth_window = 1, peak_mode = "global",
-                                  lysis_threshold = 0.05) {
+                                  lysis_threshold = 0.05, extinction_threshold = 0.05) {
   if (is.null(pd) || nrow(pd) == 0) return(NULL)
   pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
   out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
     compute_one_curve_metrics(g$time, g$mean_value, g$variable[1],
-                              smooth_window, peak_smooth_window, peak_mode, lysis_threshold)
+                              smooth_window, peak_smooth_window, peak_mode, lysis_threshold,
+                              extinction_threshold)
   })
   m <- do.call(rbind, c(out, list(make.row.names = FALSE)))
 
@@ -628,8 +732,108 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
     m$relative_max_od    <- if (is.finite(ref_max_od) && ref_max_od > 0)
       m$max_od / ref_max_od else NA_real_
     m$lysis_onset_delta  <- m$lysis_time - m$lag_phase
+    m$centroid_index     <- centroid_index_vs_ref(m$centroid_x, m$centroid_y, ref$centroid_x, ref$centroid_y)
+    lv <- calculate_local_virulence(pd, ref_sample, smooth_window)
+    m$local_virulence    <- if (is.null(lv)) NA_real_ else lv$local_virulence[match(m$sample, lv$sample)]
   }
   m
+}
+
+# Centroid Index (Hosseini et al. 2024; port of calculate_infection_metrics()):
+# 1 - (cx * cy) / (ref_cx * ref_cy). The denominator is the MEAN of the reference
+# curves' cx*cy products, not the product of the column means: with one reference
+# curve the two coincide, with replicates only this form makes the reference's own
+# index average to exactly 0 (E[XY] != E[X]E[Y]). NA when the reference product is
+# not a positive finite number.
+centroid_index_vs_ref <- function(cx, cy, ref_cx, ref_cy) {
+  ref_prod <- mean(ref_cx * ref_cy, na.rm = TRUE)
+  if (!is.finite(ref_prod) || ref_prod <= 0) return(rep(NA_real_, length(cx)))
+  1 - (cx * cy) / ref_prod
+}
+
+# Storms local virulence (PHAGE 1(1):27-36, 2020), port of
+# calculate_local_virulence(): the "virulence index" area ratio
+# 1 - A_sample / A_reference, integrated only up to the onset of stationary phase
+# (t_stat) in the REFERENCE culture -- unlike infection_strength, which integrates
+# the whole run. t_stat defaults to the first time AFTER the reference's mu_max
+# window at which the reference's centered rolling ln-slope falls below 10 % of
+# mu_max (the run's last time when there is none); `t_stat_override` replaces it.
+# Operates on time / variable / mean_value[, replicate] data so it also works per
+# replicate; the reference curve is the mean over the reference's replicates at each
+# time. Returns sample[, replicate], local_virulence, t_stat_used; NULL when the
+# reference is absent. The reference sample's own value is 0.
+calculate_local_virulence <- function(pd, ref_sample, smooth_window = 5,
+                                      t_stat_override = NULL) {
+  if (is.null(pd) || nrow(pd) == 0 || is.null(ref_sample) || !nzchar(ref_sample)) return(NULL)
+  if (!ref_sample %in% pd$variable) return(NULL)
+  has_rep <- "replicate" %in% names(pd)
+
+  rg <- pd[pd$variable == ref_sample & is.finite(pd$time) & is.finite(pd$mean_value), , drop = FALSE]
+  if (nrow(rg) == 0) return(NULL)
+  t_ref  <- sort(unique(rg$time))
+  od_ref <- vapply(t_ref, function(tt) mean(rg$mean_value[rg$time == tt]), numeric(1))
+  n_ref  <- length(t_ref)
+  if (n_ref < 2) return(NULL)
+
+  t_stat <- t_ref[n_ref]
+  win <- min(smooth_window, n_ref)
+  if (n_ref >= win && win >= 3) {
+    # same non-positive-OD rule as mu_max: a window containing a reading <= 0 has no slope
+    pos_ref <- od_ref > 0
+    log_od  <- rep(NA_real_, n_ref); log_od[pos_ref] <- log(od_ref[pos_ref])
+    roll <- tryCatch(rolling_slope(t_ref, log_od, win), error = function(e) rep(NA_real_, n_ref))
+    off <- floor((win - 1) / 2)
+    for (s in seq_len(n_ref - win + 1)) {
+      idx <- s:(s + win - 1)
+      if (any(!pos_ref[idx])) roll[s + off] <- NA_real_
+    }
+    valid <- which(is.finite(roll) & roll > 1e-10)
+    if (length(valid) > 0) {
+      mu_max_ref <- max(roll[valid])
+      mu_idx     <- valid[which.max(roll[valid])]
+      after <- which(seq_len(n_ref) > mu_idx & is.finite(roll) & roll < 0.10 * mu_max_ref)
+      if (length(after) > 0) t_stat <- t_ref[after[1]]
+    }
+  }
+  if (!is.null(t_stat_override)) {
+    ov <- suppressWarnings(as.numeric(t_stat_override))
+    if (length(ov) == 1 && is.finite(ov)) t_stat <- ov
+  }
+
+  # trapezoid integral up to t_cut, interpolating a point AT t_cut
+  area_to <- function(tt, yy, t_cut) {
+    ok <- is.finite(tt) & is.finite(yy)
+    tt <- tt[ok]; yy <- yy[ok]
+    o  <- order(tt); tt <- tt[o]; yy <- yy[o]
+    if (length(tt) < 2) return(NA_real_)
+    keep <- which(tt <= t_cut)
+    if (length(keep) == 0) return(NA_real_)
+    k  <- max(keep)
+    tk <- tt[seq_len(k)]; yk <- yy[seq_len(k)]
+    if (k < length(tt) && tt[k] < t_cut) {
+      frac <- (t_cut - tt[k]) / (tt[k + 1] - tt[k])
+      tk <- c(tk, t_cut)
+      yk <- c(yk, yy[k] + frac * (yy[k + 1] - yy[k]))
+    }
+    if (length(tk) < 2) return(NA_real_)
+    sum(diff(tk) * (head(yk, -1) + tail(yk, -1)) / 2)
+  }
+  A0 <- area_to(t_ref, od_ref, t_stat)
+
+  key <- if (has_rep) interaction(pd$variable, pd$replicate, drop = TRUE, lex.order = TRUE)
+         else factor(pd$variable)
+  rows <- lapply(split(seq_len(nrow(pd)), key, drop = TRUE), function(ix) {
+    d  <- pd[ix, , drop = FALSE]
+    Ai <- area_to(d$time, d$mean_value, t_stat)
+    r  <- data.frame(sample = d$variable[1],
+                     local_virulence = if (is.finite(A0) && A0 > 0 && is.finite(Ai)) 1 - Ai / A0 else NA_real_,
+                     t_stat_used = t_stat, stringsAsFactors = FALSE)
+    if (has_rep) r$replicate <- d$replicate[1]
+    r
+  })
+  res <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  res[, if (has_rep) c("sample", "replicate", "local_virulence", "t_stat_used")
+        else c("sample", "local_virulence", "t_stat_used"), drop = FALSE]
 }
 
 # KC-4: compute_curve_metrics() above runs the metrics engine ONCE per
@@ -681,6 +885,15 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
     rm$infection_strength <- if (is.finite(ref_auc) && ref_auc > 0) 1 - rm$auc / ref_auc    else NA_real_
     rm$relative_mu_max    <- if (is.finite(ref_mu)  && ref_mu  > 0) rm$mu_max / ref_mu      else NA_real_
     rm$relative_max_od    <- if (is.finite(ref_max) && ref_max > 0) rm$max_od / ref_max     else NA_real_
+    # centroid index: per replicate vs the reference's mean cx*cy product
+    rm$centroid_index     <- centroid_index_vs_ref(rm$centroid_x, rm$centroid_y, ref$centroid_x, ref$centroid_y)
+    # local virulence: each replicate's area to t_stat vs the reference's replicate-mean curve
+    lv <- calculate_local_virulence(
+      data.frame(time = rep_pd$time, variable = rep_pd$variable, replicate = rep_pd$replicate,
+                 mean_value = rep_pd$value, stringsAsFactors = FALSE),
+      ref_sample, smooth_window)
+    rm$local_virulence    <- if (is.null(lv)) NA_real_ else
+      lv$local_virulence[match(paste(rm$sample, rm$replicate), paste(lv$sample, lv$replicate))]
   }
   rm
 }
@@ -736,11 +949,18 @@ METRIC_DEFINITIONS <- c(
   t_half_max_decline = "First time after the peak at which the mean falls below 50% of the peak (linear interpolation); NA if never",
   steepest_decline_rate = "Most negative slope between consecutive mean points",
   steepest_decline_interval = "Time interval over which the steepest decline occurs",
+  first_peak_od   = "OD at the first prominent peak: the earliest local maximum of the 3-point smoothed curve whose prominence is at least 5% of the curve's range (Blazanin et al., PNAS 2025); the global maximum when there is no prominent peak. Unlike max_od it is not displaced by regrowth that overtakes the first peak",
+  t_first_peak    = "Time of the first prominent peak (see first_peak_od)",
+  extinction_time = "First time the mean falls below the extinction floor (0.05 OD), linearly interpolated between the last point at or above it and the first below; the first time point if the curve starts below the floor; NA if it never falls below (Blazanin et al., PNAS 2025)",
+  centroid_x      = "Time coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
+  centroid_y      = "OD coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
   relative_growth    = "auc / auc(reference sample)",
   infection_strength = "1 - auc / auc(reference sample)",
   relative_mu_max    = "mu_max / mu_max(reference sample)",
   relative_max_od    = "max_od / max_od(reference sample)",
-  lysis_onset_delta  = "lysis_time - lag_phase"
+  lysis_onset_delta  = "lysis_time - lag_phase",
+  centroid_index     = "1 - (centroid_x * centroid_y) / (centroid_x * centroid_y of the reference sample); Centroid Index, Hosseini et al. 2024 (0 for the reference itself)",
+  local_virulence    = "Storms local virulence: 1 - area under the mean curve / area under the reference curve, both integrated only up to the onset of stationary phase in the reference (first time after its fastest growth that its rolling ln-slope falls below 10% of mu_max; the last time if none); 0 for the reference itself (Storms et al., PHAGE 2020)"
 )
 
 # ── Report helpers ────────────────────────────────────────────────────────────
@@ -1471,7 +1691,14 @@ ANALYSIS_METRIC_LABELS <- c(
   relative_growth    = "Relative growth",
   infection_strength = "Infection strength",
   relative_mu_max    = "Relative μmax",
-  relative_max_od    = "Relative peak OD"
+  relative_max_od    = "Relative peak OD",
+  first_peak_od      = "First-peak OD",
+  t_first_peak       = "Time of first peak",
+  extinction_time    = "Extinction time",
+  centroid_x         = "Centroid time",
+  centroid_y         = "Centroid OD",
+  centroid_index     = "Centroid index",
+  local_virulence    = "Local virulence"
 )
 # The analysis figures, with the labels the Analysis tab and the figure composer both use.
 ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
@@ -1486,12 +1713,14 @@ metric_label <- function(m) { l <- unname(ANALYSIS_METRIC_LABELS[m]); ifelse(is.
 # Axis / facet label with units, from the x-axis time unit and the y-axis label.
 metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
   base <- metric_label(m)
-  if (m %in% c("lysis_time", "t_half_max_decline", "doubling_time", "lag_phase", "time_max_od"))
+  if (m %in% c("lysis_time", "t_half_max_decline", "doubling_time", "lag_phase", "time_max_od",
+               "t_first_peak", "extinction_time", "centroid_x"))
     paste0(base, " (", tunit, ")")
   else if (m == "mu_max") paste0("\u03bcmax (", tunit, "\u207b\u00b9)")
   else if (m %in% c("lysis_rate", "recovery_slope"))
     paste0(base, " (", ylab, " per ", tunit, ")")
-  else if (m %in% c("od_drop", "residual_od", "max_od", "final_od")) paste0(base, " (", ylab, ")")
+  else if (m %in% c("od_drop", "residual_od", "max_od", "final_od", "first_peak_od", "centroid_y"))
+    paste0(base, " (", ylab, ")")
   else if (m == "auc") paste0(base, " (", ylab, " \u00d7 ", tunit, ")")
   else base
 }
