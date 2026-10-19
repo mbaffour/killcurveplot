@@ -277,15 +277,243 @@ detect_csv_locale <- function(path) {
   if (grepl(";", first_line, fixed = TRUE)) "eu" else "us"
 }
 
+# Ingest hardening (ported from the companion app's read_csv_smart(),
+# coerce_sentinel_columns(), parse_time_column(), infer_wide_replicates() and
+# detect_replicate_column(); see docs/PORTED_FROM_LYSIS_CURVE_APP.md).
+
+# Field counts of the non-blank lines of a file, WITH their raw line numbers
+# (read.csv's `skip` counts raw lines, blank ones included). Counts come from
+# strsplit(), which drops trailing empty fields: a preamble line padded with
+# commas out to the table width ("Software Version,3.08,,,,") therefore still
+# counts as narrow, which is what the preamble test needs.
+csv_line_field_counts <- function(path, sep, n = 500) {
+  raw <- tryCatch(readLines(path, n = n, warn = FALSE), error = function(e) character(0))
+  keep <- which(nzchar(trimws(raw)))
+  list(line = keep, text = raw[keep],
+       fc = vapply(raw[keep], function(l) length(strsplit(l, sep, fixed = TRUE)[[1]]),
+                   integer(1), USE.NAMES = FALSE))
+}
+
+# Raw-line index (0-based, i.e. read.csv's `skip`) of the table header when the
+# file starts with a reader preamble: the first non-blank line is NARROWER than
+# the widest field count that occurs at least twice. 0 for an ordinary file.
+csv_preamble_skip <- function(path, sep = ",") {
+  z <- csv_line_field_counts(path, sep)
+  if (length(z$fc) < 3) return(0L)
+  tab <- table(z$fc[z$fc > 1])
+  rep_counts <- as.integer(names(tab)[tab >= 2])
+  if (!length(rep_counts)) return(0L)
+  modal <- max(rep_counts)
+  if (z$fc[1] >= modal) return(0L)
+  as.integer(z$line[which(z$fc == modal)[1]] - 1L)
+}
+
+# Delimiter / preamble sniffing. Tries comma, semicolon and tab; the table is
+# the block of lines with the LARGEST field count that occurs at least twice
+# (a reader preamble is a handful of narrow lines above a wide table, so a modal
+# count would sometimes pick the preamble); everything above its first line is
+# skipped. The plain read.csv() is tried first and kept whenever it produces
+# something sane (>= 2 columns, rows, and no preamble), so ordinary files take
+# exactly the path they always did. Errors are worded for a bench scientist.
+# Deviation from the companion app: `skip` is computed on RAW line numbers (the
+# original filtered blank lines out first, so a blank line inside a preamble
+# made read.csv skip too few lines).
+read_csv_smart <- function(path) {
+  plain <- tryCatch(read.csv(path, stringsAsFactors = FALSE, check.names = FALSE),
+                    error = function(e) NULL)
+  if (!is.null(plain) && ncol(plain) >= 2 && nrow(plain) > 0 && csv_preamble_skip(path, ",") == 0L)
+    return(list(data = plain, sep = ",", dec = ".", skip = 0L, sniffed = FALSE))
+
+  raw <- tryCatch(readLines(path, n = 500, warn = FALSE), error = function(e) character(0))
+  keep  <- which(nzchar(trimws(raw)))
+  lines <- raw[keep]
+  if (length(lines) == 0) stop("The file is empty.", call. = FALSE)
+
+  nf <- function(sep) vapply(lines, function(l)
+    length(strsplit(l, sep, fixed = TRUE)[[1]]), integer(1), USE.NAMES = FALSE)
+
+  # European Excel writes 0,05 for 0.05. With a comma separator that is
+  # unparseable by construction -- the header has k fields and every data row
+  # has more -- so diagnose it instead of guessing.
+  fc_comma <- nf(",")
+  if (length(fc_comma) >= 2 && fc_comma[1] >= 2 &&
+      all(fc_comma[-1] > fc_comma[1]) &&
+      any(grepl("[0-9],[0-9]", lines[-1])))
+    stop("The header has ", fc_comma[1], " comma-separated fields but the data ",
+         "rows have more. This looks like a European CSV written with decimal ",
+         "commas (0,05 rather than 0.05); re-export it with a semicolon ",
+         "separator or with decimal points.", call. = FALSE)
+
+  best <- NULL
+  for (sep in c(",", ";", "\t")) {
+    fc  <- nf(sep)
+    tab <- table(fc[fc > 1])
+    if (!length(tab)) next
+    rep_counts <- as.integer(names(tab)[tab >= 2])
+    modal <- if (length(rep_counts)) max(rep_counts)
+             else as.integer(names(tab)[which.max(tab)])
+    if (modal <= 1) next
+    score <- sum(fc == modal) * modal
+    if (is.null(best) || score > best$score)
+      best <- list(sep = sep, modal = modal, fc = fc, score = score)
+  }
+  if (is.null(best))
+    stop("Could not find a consistent column separator (comma, semicolon and ",
+         "tab were all tried). Check that the file is a plain-text table.",
+         call. = FALSE)
+
+  skip <- as.integer(keep[which(best$fc == best$modal)[1]] - 1L)   # raw lines above the header
+
+  # decimal comma only makes sense when the separator is not a comma
+  dec  <- "."
+  body <- lines[best$fc == best$modal][-1]
+  if (length(body) && best$sep != "," &&
+      sum(grepl("[0-9],[0-9]", body)) >= 0.5 * length(body))
+    dec <- ","
+
+  data <- tryCatch(
+    read.csv(path, sep = best$sep, dec = dec, skip = skip,
+             stringsAsFactors = FALSE, check.names = FALSE),
+    error = function(e)
+      stop("Could not read the file even after detecting a '",
+           if (best$sep == "\t") "tab" else best$sep, "' separator and ",
+           skip, " header line(s) to skip: ", conditionMessage(e), call. = FALSE))
+  list(data = data, sep = best$sep, dec = dec, skip = skip, sniffed = TRUE)
+}
+
+# The app's reader. The locale-aware attempt (KC-11: semicolon/decimal-comma
+# files) is tried first and kept whenever it yields >= 2 columns, rows and no
+# reader preamble, so those files parse exactly as before; otherwise (a parse
+# error, a single column because the wrong locale was picked, or a preamble above
+# the header) the separator/preamble sniffer read_csv_smart() takes over.
 read_csv_locale_aware <- function(path, locale = "auto") {
   loc <- if (identical(locale, "auto")) detect_csv_locale(path) else locale
   sep <- if (identical(loc, "eu")) ";" else ","
   dec <- if (identical(loc, "eu")) "," else "."
-  tryCatch(
+  plain <- tryCatch(
     read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = FALSE),
-    error = function(e)
-      read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE)
-  )
+    error = function(e) tryCatch(
+      read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE),
+      error = function(e2) NULL))
+  if (!is.null(plain) && ncol(plain) >= 2 && nrow(plain) > 0 && csv_preamble_skip(path, sep) == 0L)
+    return(plain)
+  smart <- tryCatch(read_csv_smart(path), error = function(e) e)
+  if (inherits(smart, "error")) {
+    if (!is.null(plain)) return(plain)       # nothing better than the locale-aware parse
+    stop(smart)
+  }
+  smart$data
+}
+
+# Strings a reader writes into a well that went out of range (Gen5 OVRFLW,
+# i-control OVER, SoftMax Pro #SAT) make read.csv() type the whole column as
+# character, and detect_od_column_idx()'s is.numeric() fallback then dropped that
+# entire sample without a word. Coerce a mostly-numeric character column to
+# numeric, every unparseable cell becoming NA and being reported, so one bad well
+# costs one time point instead of the whole curve. min_numeric_frac keeps genuine
+# text columns (notes, sample labels) out; skip_cols protects the time column and
+# any group / replicate column. Returns list(data, report) where report is NULL or
+# a data.frame(sample, time, value) of the cells set to NA.
+coerce_sentinel_columns <- function(data, skip_cols = character(0),
+                                    time_values = NULL,
+                                    min_numeric_frac = 0.5) {
+  report <- list()
+  if (is.null(data) || ncol(data) == 0) return(list(data = data, report = NULL))
+  for (j in seq_along(data)) {
+    nm  <- colnames(data)[j]
+    if (nm %in% skip_cols) next
+    col <- data[[j]]
+    if (is.numeric(col) || !(is.character(col) || is.factor(col))) next
+    txt <- trimws(as.character(col))
+    txt[is.na(txt)] <- ""
+    num <- suppressWarnings(as.numeric(txt))
+    nonblank <- nzchar(txt)
+    if (!any(nonblank)) next
+    if (sum(is.finite(num) & nonblank) / sum(nonblank) < min_numeric_frac) next
+    bad <- which(nonblank & !is.finite(num))
+    if (length(bad))
+      report[[length(report) + 1]] <- data.frame(
+        sample = nm,
+        time   = if (!is.null(time_values) && length(time_values) == nrow(data))
+                   as.character(time_values[bad]) else as.character(bad),
+        value  = txt[bad], stringsAsFactors = FALSE)
+    data[[j]] <- num
+  }
+  list(data = data,
+       report = if (length(report)) do.call(rbind, report) else NULL)
+}
+
+# BioTek Gen5 and Tecan i-control write elapsed time as 0:15:00, and an Excel
+# round-trip turns the column into a full datetime. Both are non-numeric, so the
+# is.finite() row filter used to delete EVERY row. Returns list(values, converted,
+# unit): values in MINUTES when converted (clock durations H:MM[:SS[.s]], or
+# date-times as minutes from the earliest timestamp), otherwise the numeric
+# values as they were.
+parse_time_column <- function(x) {
+  txt  <- trimws(as.character(x))
+  txt[is.na(txt)] <- ""
+  keep <- nzchar(txt)
+  num  <- suppressWarnings(as.numeric(txt))
+  if (any(keep) && all(is.finite(num[keep])))
+    return(list(values = num, converted = FALSE, unit = NA_character_))
+
+  out <- rep(NA_real_, length(txt))
+
+  # 1. clock durations H:MM / H:MM:SS (optionally with fractional seconds)
+  is_clock <- grepl("^[0-9]{1,5}:[0-9]{1,2}(:[0-9]{1,2}([.][0-9]+)?)?$", txt)
+  if (any(is_clock)) {
+    out[is_clock] <- vapply(strsplit(txt[is_clock], ":", fixed = TRUE), function(p) {
+      p <- suppressWarnings(as.numeric(p))
+      if (length(p) == 2) p[1] * 60 + p[2] else p[1] * 60 + p[2] + p[3] / 60
+    }, numeric(1))
+    out[is.finite(num)] <- num[is.finite(num)]
+    return(list(values = out, converted = TRUE, unit = "minutes"))
+  }
+
+  # 2. datetimes -> minutes elapsed from the earliest timestamp
+  fmts <- c("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
+            "%m/%d/%Y %H:%M")
+  for (f in fmts) {
+    pt <- suppressWarnings(as.POSIXct(txt, format = f, tz = "UTC"))
+    if (sum(!is.na(pt)) >= max(2, 0.8 * sum(keep)))
+      return(list(values = as.numeric(difftime(pt, min(pt, na.rm = TRUE), units = "mins")),
+                  converted = TRUE, unit = "minutes"))
+  }
+
+  # 3. whatever was already numeric; the caller decides what to do with the rest
+  out[is.finite(num)] <- num[is.finite(num)]
+  list(values = out, converted = FALSE, unit = NA_character_)
+}
+
+# Replicates in WIDE format from repeated (stacked) time blocks: the time counter
+# restarts for each replicate block. Returns list(reps = number of blocks,
+# block_id = per-row block number); reps/block_id NULL when the time column is
+# unreadable.
+infer_wide_replicates <- function(data, time_col) {
+  if (is.null(data) || nrow(data) == 0) return(list(reps = NULL, block_id = NULL))
+  t_vec <- suppressWarnings(as.numeric(as.character(data[[time_col]])))
+  if (all(is.na(t_vec))) return(list(reps = NULL, block_id = NULL))
+  resets <- which(diff(t_vec) < 0)
+  if (length(resets) == 0) return(list(reps = 1L, block_id = rep(1L, nrow(data))))
+  block_starts <- c(1L, resets + 1L)
+  block_ends   <- c(resets, nrow(data))
+  block_id <- integer(nrow(data))
+  for (i in seq_along(block_starts)) block_id[block_starts[i]:block_ends[i]] <- i
+  list(reps = length(block_starts), block_id = block_id)
+}
+
+# A replicate / well column in LONG format (never the time, group or value column).
+detect_replicate_column <- function(data, time_col, group_col, value_col) {
+  if (is.null(data) || nrow(data) == 0) return(NULL)
+  ignore_cols <- c(time_col, group_col, value_col)
+  names_lower <- tolower(colnames(data))
+  rep_hits <- names_lower %in% c("replicate", "rep", "rep_id", "replicate_id",
+                                 "well", "well_id", "wellid",
+                                 "technical_replicate", "biological_replicate", "repeat")
+  rep_cols <- setdiff(colnames(data)[rep_hits], ignore_cols)
+  if (length(rep_cols) > 0) return(rep_cols[1])
+  NULL
 }
 
 parse_excluded_timepoints <- function(text, all_timepoints) {
@@ -353,6 +581,118 @@ moving_average <- function(y, w) {
   }, numeric(1))
 }
 
+# LC-3 (ported from curve_noise_sd() in "Lysis Curve Ap 26.03.13.R"): robust
+# point-to-point noise SD from second differences. For white noise the second
+# difference y[i] - 2y[i+1] + y[i+2] has variance 6*sigma^2, so
+# sigma = median(|d2|) * 1.4826 / sqrt(6). The MEDIAN is what makes it usable:
+# real curvature (growth shoulder, lysis kink) shows up in a handful of large
+# second differences and cannot inflate the noise floor. Returns 0 when there
+# are fewer than 5 finite points (too little data to estimate anything).
+curve_noise_sd <- function(y) {
+  y <- y[is.finite(y)]
+  n <- length(y)
+  if (n < 5) return(0)
+  d2 <- y[1:(n - 2)] - 2 * y[2:(n - 1)] + y[3:n]
+  s  <- stats::median(abs(d2)) * 1.4826 / sqrt(6)
+  if (!is.finite(s) || s < 0) return(0)
+  s
+}
+
+# LC-3: number of consecutive post-peak points that must sit below the lysis
+# detection threshold before a decline counts as lysis. One point below a fixed
+# 5 % of peak scored a clean 4 %-CV uninfected control as lysing in 39 % of
+# simulated runs (and the app's own demo Uninfected replicates).
+LYSIS_SUSTAIN_PTS <- 2L
+
+# LC-17: start/end indices of the longest contiguous TRUE run in `flag`
+# (first one on ties), or NULL when there is none. Used for stat_phase_dur.
+longest_true_run <- function(flag) {
+  flag <- !is.na(flag) & flag
+  if (!any(flag)) return(NULL)
+  r <- rle(flag)
+  ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1L
+  k <- which(r$values)
+  k <- k[which.max(r$lengths[k])]
+  c(start = starts[k], end = ends[k])
+}
+
+# ── New metrics (ported from the companion app, step 2) ──────────────────────
+# 3-point centered moving mean with the RAW value kept at the two edges (and
+# wherever the mean is not finite) -- the smoothing calculate_growth_metrics()
+# uses to find the first prominent peak. Deliberately NOT moving_average(y, 3),
+# whose edge windows shrink instead of falling back to the raw point.
+smooth3_raw_edges <- function(y) {
+  n <- length(y)
+  if (n < 3) return(y)
+  sm <- rep(NA_real_, n)
+  sm[2:(n - 1)] <- (y[1:(n - 2)] + y[2:(n - 1)] + y[3:n]) / 3
+  ifelse(is.finite(sm), sm, y)
+}
+
+# Port of first_prominent_peak_idx(): index of the EARLIEST local maximum of
+# `sm` whose topographic prominence reaches `prom_min`, or NA when there is
+# none. A regrowing culture's global maximum can be its SECOND peak, so
+# anything anchored on which.max() misses the first one.
+first_prominent_peak_idx <- function(sm, prom_min) {
+  n <- length(sm)
+  if (n < 3 || !is.finite(prom_min)) return(NA_integer_)
+  cand <- which(sm[2:(n - 1)] >  sm[1:(n - 2)] &
+                sm[2:(n - 1)] >= sm[3:n]) + 1L
+  for (pk in cand) {
+    p_val <- sm[pk]
+    # walk out both ways until a higher point (or the curve end) is met; the
+    # prominence is the drop to the shallower of the two saddles
+    li <- pk
+    while (li > 1 && sm[li - 1] <= p_val) li <- li - 1
+    ri <- pk
+    while (ri < n && sm[ri + 1] <= p_val) ri <- ri + 1
+    left_min  <- min(sm[li:pk], na.rm = TRUE)
+    right_min <- min(sm[pk:ri], na.rm = TRUE)
+    prom <- p_val - max(left_min, right_min)
+    if (is.finite(prom) && prom >= prom_min) return(pk)
+  }
+  NA_integer_
+}
+
+# Port of the centroid block: EXACT trapezoid-strip centroids of the area
+# under the curve (each consecutive pair of points is a trapezoid whose own
+# centroid is known in closed form; the curve centroid is the area-weighted
+# mean of the strip centroids). Returns c(x, y); NA, NA for < 2 points or a
+# non-positive total area.
+curve_centroid <- function(t_vec, od_vec) {
+  n <- length(t_vec)
+  if (n < 2) return(c(x = NA_real_, y = NA_real_))
+  h_s <- diff(t_vec)
+  a_s <- head(od_vec, -1)
+  b_s <- tail(od_vec, -1)
+  A_s <- h_s * (a_s + b_s) / 2
+  ab  <- a_s + b_s
+  xbar_s <- ifelse(ab == 0, head(t_vec, -1) + h_s / 2,
+                   head(t_vec, -1) + h_s * (a_s + 2 * b_s) / (3 * ab))
+  ybar_s <- ifelse(ab == 0, 0, (a_s^2 + a_s * b_s + b_s^2) / (3 * ab))
+  A_tot  <- sum(A_s, na.rm = TRUE)
+  if (!is.finite(A_tot) || A_tot <= 0) return(c(x = NA_real_, y = NA_real_))
+  c(x = sum(xbar_s * A_s, na.rm = TRUE) / A_tot,
+    y = sum(ybar_s * A_s, na.rm = TRUE) / A_tot)
+}
+
+# Port of the extinction block: first time the curve falls below the floor
+# `thr` (default 0.05 OD, as in the reference), linearly interpolated between
+# the last point at/above it and the first below. A curve that STARTS below the
+# floor reports its first time point. NA when it never falls below.
+curve_extinction_time <- function(t_vec, od_vec, thr = 0.05) {
+  n <- length(t_vec)
+  thr <- suppressWarnings(as.numeric(thr))
+  if (n < 1 || length(thr) != 1 || !is.finite(thr)) return(NA_real_)
+  if (isTRUE(od_vec[1] < thr)) return(t_vec[1])
+  if (n < 2) return(NA_real_)
+  cross <- which(od_vec[-1] < thr & od_vec[-n] >= thr)
+  if (length(cross) == 0) return(NA_real_)
+  j  <- cross[1]
+  y0 <- od_vec[j]; y1 <- od_vec[j + 1]; x0 <- t_vec[j]; x1 <- t_vec[j + 1]
+  if (y0 == y1) x1 else x0 + (x1 - x0) * (y0 - thr) / (y0 - y1)
+}
+
 # KC-4: the full per-curve metrics engine, factored out into its own function
 # so the EXACT SAME formulas run on a per-replicate curve
 # (compute_replicate_metrics(), below) as on the mean curve
@@ -401,7 +741,8 @@ first_local_peak_index <- function(peak_vec) {
 compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
                                       smooth_window = 5, peak_smooth_window = 1,
                                       peak_mode = c("global", "first_local"),
-                                      lysis_threshold = 0.05) {
+                                      lysis_threshold = 0.05,
+                                      extinction_threshold = 0.05) {
     peak_mode <- match.arg(peak_mode)
     n_pts  <- length(t_vec)
     peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
@@ -457,24 +798,59 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
     doubling_time <- if (is.finite(mu_max) && mu_max > 0) log(2) / mu_max else NA_real_
 
     # ── Stationary phase duration: time spent within 95% of max OD ───────────
+    # LC-17: the LONGEST CONTIGUOUS run of points >= 95 % of the peak, not the
+    # span from the first to the last such point. The span ran straight
+    # through a lysis trough (or any dip) between two separate near-peak
+    # episodes -- the opposite of "time spent near the maximum". A single
+    # near-peak point gives no duration (NA), as before.
     stat_phase_dur <- NA_real_
     if (max_idx > 1) {
-      near_max <- which(od_vec >= 0.95 * max_od)
-      if (length(near_max) >= 2)
-        stat_phase_dur <- t_vec[max(near_max)] - t_vec[min(near_max)]
+      run <- longest_true_run(is.finite(od_vec) & od_vec >= 0.95 * max_od)
+      if (!is.null(run) && run[["end"]] > run[["start"]])
+        stat_phase_dur <- t_vec[run[["end"]]] - t_vec[run[["start"]]]
     }
 
-    # ── Lysis detection (paper method) ───────────────────────────────────────
-    # onset = first post-peak point whose decline from peak exceeds 5% of peak;
+    # ── Lysis detection ──────────────────────────────────────────────────────
+    # Detection and reporting are deliberately separate (LC-3 / LC-9; ported
+    # from calculate_growth_metrics() in the companion app).
+    #   DETECT (LC-3): the post-peak decline must exceed
+    #     max(lysis_threshold * peak, 3 * curve_noise_sd(od))
+    #     for LYSIS_SUSTAIN_PTS consecutive points. A single point 5 % below
+    #     a noisy peak is noise, not lysis.
+    #   REPORT (LC-9): once lysis is called, lysis_time is the LINEARLY
+    #     INTERPOLATED time at which the curve first falls lysis_threshold *
+    #     peak below the peak (the noise term is NOT in the interpolation, so
+    #     the number does not move with the curve's noise). The old value was
+    #     the first sampled point already past the threshold -- late by up to
+    #     one acquisition interval and not comparable across sampling rates.
     # rate  = linear-regression slope from peak to the post-peak trough
     lysis_time <- NA_real_; lysis_rate <- NA_real_
     od_drop <- NA_real_; residual_od <- NA_real_; recovery_slope <- NA_real_
+    noise_sd <- curve_noise_sd(od_vec)
     if (max_idx < n_pts) {
       post_peak  <- (max_idx + 1):n_pts
+      detect_thr <- max(lysis_threshold * max_od, 3 * noise_sd)
+      report_thr <- lysis_threshold * max_od
       od_decline <- max_od - od_vec[post_peak]
-      lysis_idx  <- which(od_decline > lysis_threshold * max_od)
-      if (length(lysis_idx) > 0) {
-        lysis_time <- t_vec[post_peak[lysis_idx[1]]]
+      below      <- is.finite(od_decline) & od_decline > detect_thr
+      need       <- as.integer(LYSIS_SUSTAIN_PTS)
+      onset      <- NA_integer_
+      if (length(below) >= need) {
+        runs <- vapply(seq_len(length(below) - need + 1L),
+                       function(i) all(below[i:(i + need - 1L)]), logical(1))
+        if (any(runs)) onset <- which(runs)[1]
+      }
+      if (!is.na(onset)) {
+        # the report level is crossed at or before the sustained run starts
+        cross   <- which(is.finite(od_decline) & od_decline > report_thr &
+                         seq_along(od_decline) <= onset)
+        abs_idx <- post_peak[if (length(cross)) cross[1] else onset]
+        level   <- max_od - report_thr
+        y0 <- od_vec[abs_idx - 1L]; y1 <- od_vec[abs_idx]
+        x0 <- t_vec[abs_idx - 1L];  x1 <- t_vec[abs_idx]
+        lysis_time <- if (is.finite(y0) && is.finite(y1) && y0 > level && y0 > y1)
+                        x0 + (x1 - x0) * (y0 - level) / (y0 - y1)
+                      else t_vec[abs_idx]
         trough_idx <- max_idx + which.min(od_vec[post_peak])
         if (trough_idx > max_idx) {
           lw <- max_idx:trough_idx
@@ -523,6 +899,26 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       }
     }
 
+    # ── First prominent peak, extinction time, area centroid (companion-app port) ──
+    # first_peak_od / t_first_peak: the earliest local maximum of the lightly
+    # (3-point) smoothed curve whose prominence is >= 5 % of that curve's range
+    # (Blazanin et al., PNAS 2025). The definition is deliberately the plain
+    # published one (no noise term; AUDIT LC-18). With no prominent peak (or
+    # < 3 points) it falls back to the GLOBAL maximum, as the reference does,
+    # whatever peak_mode is. The reported OD is the raw value at that index.
+    fp_idx <- NA_integer_
+    if (n_pts >= 3 && all(is.finite(od_vec))) {
+      sm_vec   <- smooth3_raw_edges(od_vec)
+      sm_range <- diff(range(sm_vec))
+      fp_idx   <- tryCatch(first_prominent_peak_idx(sm_vec, 0.05 * sm_range),
+                           error = function(e) NA_integer_)
+    }
+    if (is.na(fp_idx)) fp_idx <- which.max(od_vec)
+    first_peak_od <- od_vec[fp_idx]
+    t_first_peak  <- t_vec[fp_idx]
+    extinction_time <- curve_extinction_time(t_vec, od_vec, extinction_threshold)
+    cen <- curve_centroid(t_vec, od_vec)
+
     data.frame(
       sample          = sample_name,
       n_timepoints    = n_pts,
@@ -556,6 +952,11 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       t_half_max_decline        = t50,
       steepest_decline_rate     = dec_rate,
       steepest_decline_interval = dec_int,
+      first_peak_od   = first_peak_od,
+      t_first_peak    = t_first_peak,
+      extinction_time = extinction_time,
+      centroid_x      = unname(cen[["x"]]),
+      centroid_y      = unname(cen[["y"]]),
       stringsAsFactors = FALSE
     )
 }
@@ -564,12 +965,13 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
 # present in the data) the five reference-normalised infection metrics are added.
 compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
                                   peak_smooth_window = 1, peak_mode = "global",
-                                  lysis_threshold = 0.05) {
+                                  lysis_threshold = 0.05, extinction_threshold = 0.05) {
   if (is.null(pd) || nrow(pd) == 0) return(NULL)
   pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
   out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
     compute_one_curve_metrics(g$time, g$mean_value, g$variable[1],
-                              smooth_window, peak_smooth_window, peak_mode, lysis_threshold)
+                              smooth_window, peak_smooth_window, peak_mode, lysis_threshold,
+                              extinction_threshold)
   })
   m <- do.call(rbind, c(out, list(make.row.names = FALSE)))
 
@@ -588,8 +990,108 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
     m$relative_max_od    <- if (is.finite(ref_max_od) && ref_max_od > 0)
       m$max_od / ref_max_od else NA_real_
     m$lysis_onset_delta  <- m$lysis_time - m$lag_phase
+    m$centroid_index     <- centroid_index_vs_ref(m$centroid_x, m$centroid_y, ref$centroid_x, ref$centroid_y)
+    lv <- calculate_local_virulence(pd, ref_sample, smooth_window)
+    m$local_virulence    <- if (is.null(lv)) NA_real_ else lv$local_virulence[match(m$sample, lv$sample)]
   }
   m
+}
+
+# Centroid Index (Hosseini et al. 2024; port of calculate_infection_metrics()):
+# 1 - (cx * cy) / (ref_cx * ref_cy). The denominator is the MEAN of the reference
+# curves' cx*cy products, not the product of the column means: with one reference
+# curve the two coincide, with replicates only this form makes the reference's own
+# index average to exactly 0 (E[XY] != E[X]E[Y]). NA when the reference product is
+# not a positive finite number.
+centroid_index_vs_ref <- function(cx, cy, ref_cx, ref_cy) {
+  ref_prod <- mean(ref_cx * ref_cy, na.rm = TRUE)
+  if (!is.finite(ref_prod) || ref_prod <= 0) return(rep(NA_real_, length(cx)))
+  1 - (cx * cy) / ref_prod
+}
+
+# Storms local virulence (PHAGE 1(1):27-36, 2020), port of
+# calculate_local_virulence(): the "virulence index" area ratio
+# 1 - A_sample / A_reference, integrated only up to the onset of stationary phase
+# (t_stat) in the REFERENCE culture -- unlike infection_strength, which integrates
+# the whole run. t_stat defaults to the first time AFTER the reference's mu_max
+# window at which the reference's centered rolling ln-slope falls below 10 % of
+# mu_max (the run's last time when there is none); `t_stat_override` replaces it.
+# Operates on time / variable / mean_value[, replicate] data so it also works per
+# replicate; the reference curve is the mean over the reference's replicates at each
+# time. Returns sample[, replicate], local_virulence, t_stat_used; NULL when the
+# reference is absent. The reference sample's own value is 0.
+calculate_local_virulence <- function(pd, ref_sample, smooth_window = 5,
+                                      t_stat_override = NULL) {
+  if (is.null(pd) || nrow(pd) == 0 || is.null(ref_sample) || !nzchar(ref_sample)) return(NULL)
+  if (!ref_sample %in% pd$variable) return(NULL)
+  has_rep <- "replicate" %in% names(pd)
+
+  rg <- pd[pd$variable == ref_sample & is.finite(pd$time) & is.finite(pd$mean_value), , drop = FALSE]
+  if (nrow(rg) == 0) return(NULL)
+  t_ref  <- sort(unique(rg$time))
+  od_ref <- vapply(t_ref, function(tt) mean(rg$mean_value[rg$time == tt]), numeric(1))
+  n_ref  <- length(t_ref)
+  if (n_ref < 2) return(NULL)
+
+  t_stat <- t_ref[n_ref]
+  win <- min(smooth_window, n_ref)
+  if (n_ref >= win && win >= 3) {
+    # same non-positive-OD rule as mu_max: a window containing a reading <= 0 has no slope
+    pos_ref <- od_ref > 0
+    log_od  <- rep(NA_real_, n_ref); log_od[pos_ref] <- log(od_ref[pos_ref])
+    roll <- tryCatch(rolling_slope(t_ref, log_od, win), error = function(e) rep(NA_real_, n_ref))
+    off <- floor((win - 1) / 2)
+    for (s in seq_len(n_ref - win + 1)) {
+      idx <- s:(s + win - 1)
+      if (any(!pos_ref[idx])) roll[s + off] <- NA_real_
+    }
+    valid <- which(is.finite(roll) & roll > 1e-10)
+    if (length(valid) > 0) {
+      mu_max_ref <- max(roll[valid])
+      mu_idx     <- valid[which.max(roll[valid])]
+      after <- which(seq_len(n_ref) > mu_idx & is.finite(roll) & roll < 0.10 * mu_max_ref)
+      if (length(after) > 0) t_stat <- t_ref[after[1]]
+    }
+  }
+  if (!is.null(t_stat_override)) {
+    ov <- suppressWarnings(as.numeric(t_stat_override))
+    if (length(ov) == 1 && is.finite(ov)) t_stat <- ov
+  }
+
+  # trapezoid integral up to t_cut, interpolating a point AT t_cut
+  area_to <- function(tt, yy, t_cut) {
+    ok <- is.finite(tt) & is.finite(yy)
+    tt <- tt[ok]; yy <- yy[ok]
+    o  <- order(tt); tt <- tt[o]; yy <- yy[o]
+    if (length(tt) < 2) return(NA_real_)
+    keep <- which(tt <= t_cut)
+    if (length(keep) == 0) return(NA_real_)
+    k  <- max(keep)
+    tk <- tt[seq_len(k)]; yk <- yy[seq_len(k)]
+    if (k < length(tt) && tt[k] < t_cut) {
+      frac <- (t_cut - tt[k]) / (tt[k + 1] - tt[k])
+      tk <- c(tk, t_cut)
+      yk <- c(yk, yy[k] + frac * (yy[k + 1] - yy[k]))
+    }
+    if (length(tk) < 2) return(NA_real_)
+    sum(diff(tk) * (head(yk, -1) + tail(yk, -1)) / 2)
+  }
+  A0 <- area_to(t_ref, od_ref, t_stat)
+
+  key <- if (has_rep) interaction(pd$variable, pd$replicate, drop = TRUE, lex.order = TRUE)
+         else factor(pd$variable)
+  rows <- lapply(split(seq_len(nrow(pd)), key, drop = TRUE), function(ix) {
+    d  <- pd[ix, , drop = FALSE]
+    Ai <- area_to(d$time, d$mean_value, t_stat)
+    r  <- data.frame(sample = d$variable[1],
+                     local_virulence = if (is.finite(A0) && A0 > 0 && is.finite(Ai)) 1 - Ai / A0 else NA_real_,
+                     t_stat_used = t_stat, stringsAsFactors = FALSE)
+    if (has_rep) r$replicate <- d$replicate[1]
+    r
+  })
+  res <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  res[, if (has_rep) c("sample", "replicate", "local_virulence", "t_stat_used")
+        else c("sample", "local_virulence", "t_stat_used"), drop = FALSE]
 }
 
 # KC-4: compute_curve_metrics() above runs the metrics engine ONCE per
@@ -641,6 +1143,15 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
     rm$infection_strength <- if (is.finite(ref_auc) && ref_auc > 0) 1 - rm$auc / ref_auc    else NA_real_
     rm$relative_mu_max    <- if (is.finite(ref_mu)  && ref_mu  > 0) rm$mu_max / ref_mu      else NA_real_
     rm$relative_max_od    <- if (is.finite(ref_max) && ref_max > 0) rm$max_od / ref_max     else NA_real_
+    # centroid index: per replicate vs the reference's mean cx*cy product
+    rm$centroid_index     <- centroid_index_vs_ref(rm$centroid_x, rm$centroid_y, ref$centroid_x, ref$centroid_y)
+    # local virulence: each replicate's area to t_stat vs the reference's replicate-mean curve
+    lv <- calculate_local_virulence(
+      data.frame(time = rep_pd$time, variable = rep_pd$variable, replicate = rep_pd$replicate,
+                 mean_value = rep_pd$value, stringsAsFactors = FALSE),
+      ref_sample, smooth_window)
+    rm$local_virulence    <- if (is.null(lv)) NA_real_ else
+      lv$local_virulence[match(paste(rm$sample, rm$replicate), paste(lv$sample, lv$replicate))]
   }
   rm
 }
@@ -683,8 +1194,8 @@ METRIC_DEFINITIONS <- c(
   n_nonpositive_od = "Count of time points with OD <= 0 (e.g. a blank-subtraction artefact). Any mu_max rolling window touching one of these is excluded rather than clamped, so mu_max/doubling_time/lag_phase may be NA or based on fewer windows when this is > 0",
   doubling_time   = "ln(2) / mu_max; NA when there is no growth phase",
   lag_phase       = "First time at which the rolling ln-slope reaches 10% of mu_max",
-  stat_phase_dur  = "Time spanned by all points within 95% of the peak",
-  lysis_time      = "Lysis onset: first post-peak time at which the decline from peak exceeds the lysis threshold (adjustable, default 5%) of the peak; NA if the curve never declines past that",
+  stat_phase_dur  = "Duration of the longest contiguous run of points within 95% of the peak (separate near-peak episodes are not joined across a dip)",
+  lysis_time      = "Lysis onset: linearly interpolated time at which the mean falls the lysis threshold (adjustable, default 5%) of the peak below the peak. Called only when the post-peak decline exceeds max(threshold x peak, 3 x the curve's noise SD) for 2 consecutive points, so noise on an uninfected plateau is not scored as lysis; NA otherwise",
   lysis_rate      = "Linear-regression slope of the mean from the peak to the post-peak trough (negative = decline)",
   od_drop         = "Peak minus post-peak minimum (absolute decline)",
   residual_od     = "Post-peak minimum (residual OD after lysis) -- this is the post-lysis floor; see global_min_od for the curve's overall minimum",
@@ -696,11 +1207,18 @@ METRIC_DEFINITIONS <- c(
   t_half_max_decline = "First time after the peak at which the mean falls below 50% of the peak (linear interpolation); NA if never",
   steepest_decline_rate = "Most negative slope between consecutive mean points",
   steepest_decline_interval = "Time interval over which the steepest decline occurs",
+  first_peak_od   = "OD at the first prominent peak: the earliest local maximum of the 3-point smoothed curve whose prominence is at least 5% of the curve's range (Blazanin et al., PNAS 2025); the global maximum when there is no prominent peak. Unlike max_od it is not displaced by regrowth that overtakes the first peak",
+  t_first_peak    = "Time of the first prominent peak (see first_peak_od)",
+  extinction_time = "First time the mean falls below the extinction floor (0.05 OD), linearly interpolated between the last point at or above it and the first below; the first time point if the curve starts below the floor; NA if it never falls below (Blazanin et al., PNAS 2025)",
+  centroid_x      = "Time coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
+  centroid_y      = "OD coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
   relative_growth    = "auc / auc(reference sample)",
   infection_strength = "1 - auc / auc(reference sample)",
   relative_mu_max    = "mu_max / mu_max(reference sample)",
   relative_max_od    = "max_od / max_od(reference sample)",
-  lysis_onset_delta  = "lysis_time - lag_phase"
+  lysis_onset_delta  = "lysis_time - lag_phase",
+  centroid_index     = "1 - (centroid_x * centroid_y) / (centroid_x * centroid_y of the reference sample); Centroid Index, Hosseini et al. 2024 (0 for the reference itself)",
+  local_virulence    = "Storms local virulence: 1 - area under the mean curve / area under the reference curve, both integrated only up to the onset of stationary phase in the reference (first time after its fastest growth that its rolling ln-slope falls below 10% of mu_max; the last time if none); 0 for the reference itself (Storms et al., PHAGE 2020)"
 )
 
 # ── Report helpers ────────────────────────────────────────────────────────────
@@ -1568,7 +2086,14 @@ ANALYSIS_METRIC_LABELS <- c(
   relative_growth    = "Relative growth",
   infection_strength = "Infection strength",
   relative_mu_max    = "Relative μmax",
-  relative_max_od    = "Relative peak OD"
+  relative_max_od    = "Relative peak OD",
+  first_peak_od      = "First-peak OD",
+  t_first_peak       = "Time of first peak",
+  extinction_time    = "Extinction time",
+  centroid_x         = "Centroid time",
+  centroid_y         = "Centroid OD",
+  centroid_index     = "Centroid index",
+  local_virulence    = "Local virulence"
 )
 # The analysis figures, with the labels the Analysis tab and the figure composer both use.
 ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
@@ -1583,12 +2108,14 @@ metric_label <- function(m) { l <- unname(ANALYSIS_METRIC_LABELS[m]); ifelse(is.
 # Axis / facet label with units, from the x-axis time unit and the y-axis label.
 metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
   base <- metric_label(m)
-  if (m %in% c("lysis_time", "t_half_max_decline", "doubling_time", "lag_phase", "time_max_od"))
+  if (m %in% c("lysis_time", "t_half_max_decline", "doubling_time", "lag_phase", "time_max_od",
+               "t_first_peak", "extinction_time", "centroid_x"))
     paste0(base, " (", tunit, ")")
   else if (m == "mu_max") paste0("\u03bcmax (", tunit, "\u207b\u00b9)")
   else if (m %in% c("lysis_rate", "recovery_slope"))
     paste0(base, " (", ylab, " per ", tunit, ")")
-  else if (m %in% c("od_drop", "residual_od", "max_od", "final_od")) paste0(base, " (", ylab, ")")
+  else if (m %in% c("od_drop", "residual_od", "max_od", "final_od", "first_peak_od", "centroid_y"))
+    paste0(base, " (", ylab, ")")
   else if (m == "auc") paste0(base, " (", ylab, " \u00d7 ", tunit, ")")
   else base
 }
@@ -3083,25 +3610,61 @@ server <- function(input, output, session) {
 
   # Shared ingestion for both file upload and demo data
   ingest_data <- function(data, source_name) {
-    rv$is_long_format <- is_long_format_detect(data)
     rv$time_col       <- detect_time_column(data)
     rv$col_map        <- NULL
+    rv$replicate_col  <- NULL    # long format: replicate / well column, when the file has one
+    rv$n_blocks       <- NULL    # wide format: stacked time blocks (replicates), when > 1
+    rv$block_id       <- NULL
+    notes <- character(0)
+
+    # Elapsed time as 0:15:00 (Gen5 / i-control) or a full date-time: convert to minutes
+    # so the numeric time handling downstream (filters, axis range) just works.
+    pt <- parse_time_column(data[[rv$time_col]])
+    if (isTRUE(pt$converted)) {
+      data[[rv$time_col]] <- pt$values
+      notes <- c(notes, paste0("Time column '", rv$time_col, "' was written as clock time / date-time; converted to minutes."))
+    }
+
+    # A well that went out of range (OVER / OVRFLW / #SAT) makes read.csv type the whole
+    # column as text: keep the column, turn just those cells into NA. The time column and
+    # any group / replicate column are left alone.
+    group_names <- c("variable","Variable","condition","Condition","treatment","Treatment",
+                     "sample","Sample","group","Group")
+    rep_names   <- colnames(data)[tolower(colnames(data)) %in%
+                     c("replicate","rep","rep_id","replicate_id","well","well_id","wellid",
+                       "technical_replicate","biological_replicate","repeat")]
+    cs <- coerce_sentinel_columns(data, skip_cols = c(rv$time_col, group_names, rep_names),
+                                  time_values = data[[rv$time_col]])
+    data <- cs$data
+    if (!is.null(cs$report))
+      notes <- c(notes, paste0(nrow(cs$report), " non-numeric reading(s) (",
+                               paste(utils::head(unique(cs$report$value), 3), collapse = ", "),
+                               ") were treated as missing; affected column(s): ",
+                               paste(unique(cs$report$sample), collapse = ", "), "."))
+    rv$sentinel_report <- cs$report
+
+    rv$is_long_format <- is_long_format_detect(data)
 
     if (rv$is_long_format) {
-      potential <- c("variable","Variable","condition","Condition","treatment","Treatment",
-                     "sample","Sample","group","Group")
+      potential <- group_names
       found     <- potential[potential %in% colnames(data)]
+      rep_col0  <- detect_replicate_column(data, rv$time_col, NULL, NULL)
       group_col <- if (length(found) > 0) found[1] else {
         dv    <- sapply(data, function(x) length(unique(x)) / nrow(data))
-        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), rv$time_col)
-        if (length(cands)) cands[1] else setdiff(colnames(data), rv$time_col)[1]
+        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), c(rv$time_col, rep_col0))
+        if (length(cands)) cands[1] else setdiff(colnames(data), c(rv$time_col, rep_col0))[1]
       }
-      vc <- detect_od_columns(data, c(rv$time_col, group_col))
+      # the replicate column must never be taken for the value column (a numeric "rep"
+      # column would win the is.numeric() fallback)
+      rep_col <- detect_replicate_column(data, rv$time_col, group_col, NULL)
+      vc <- detect_od_columns(data, c(rv$time_col, group_col, rep_col))
       if (length(vc) > 1) vc <- vc[1]
-      rv$group_col   <- group_col
-      rv$value_col   <- vc
-      rv$od_vars     <- as.character(unique(data[[group_col]]))
-      rv$od_vars_raw <- rv$od_vars
+      rep_col <- detect_replicate_column(data, rv$time_col, group_col, vc)
+      rv$group_col     <- group_col
+      rv$value_col     <- vc
+      rv$replicate_col <- rep_col
+      rv$od_vars       <- as.character(unique(data[[group_col]]))
+      rv$od_vars_raw   <- rv$od_vars
     } else {
       # Index-based detection keeps ALL replicate columns, including
       # duplicates of the same name (v2.8 REPLICATE FIX).
@@ -3111,9 +3674,23 @@ server <- function(input, output, session) {
       rv$col_map     <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
       rv$od_vars     <- oc
       rv$od_vars_raw <- oc
+      # Stacked replicate blocks (the time counter restarts for each block): every block is
+      # one more replicate of every sample at each time point. prepare_plot_data() already
+      # pools rows that share a time stamp; the block id lets prepare_replicate_data() keep
+      # the blocks apart as separate replicate curves.
+      wb <- infer_wide_replicates(data, rv$time_col)
+      if (!is.null(wb$reps) && wb$reps > 1) {
+        rv$n_blocks <- wb$reps
+        rv$block_id <- wb$block_id
+        notes <- c(notes, paste0("Detected ", wb$reps, " stacked time blocks (the time column restarts); ",
+                                 "each block is treated as one replicate."))
+      }
     }
     rv$data        <- data
     rv$data_source <- source_name
+    # Tell the user what was repaired on load (best effort: no notification channel in tests)
+    for (nt in notes)
+      tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)
 
     tr <- range(suppressWarnings(as.numeric(as.character(data[[rv$time_col]]))), na.rm = TRUE)
     updateNumericInput(session, "x_min", value = tr[1])
@@ -3161,7 +3738,7 @@ server <- function(input, output, session) {
   data_size_info <- function() {
     ntp <- length(rv$all_timepoints); ns <- length(rv$od_vars)
     nrep <- if (isTRUE(rv$is_long_format)) max(1, round(nrow(rv$data) / max(1, ntp * ns)))
-            else max(1, lengths(rv$col_map))
+            else max(1, lengths(rv$col_map)) * max(1, rv$n_blocks %||% 1)
     list(ntp = ntp, ns = ns, nrep = nrep, cells = as.numeric(ntp) * ns * nrep)
   }
   DATA_WARN_TIMEPOINTS <- 5000; DATA_WARN_SAMPLES <- 200; DASHBOARD_MAX_CELLS <- 2e6
@@ -3821,6 +4398,13 @@ server <- function(input, output, session) {
       # exported in the same replicate order, the common case).
       rep_idx <- ave(seq_len(nrow(d)),
                      d[[rv$group_col]], d[[rv$time_col]], FUN = seq_along)
+      # When the file has a replicate / well column, that column is the replicate identity
+      # (dense rank of its values within each sample) instead of the occurrence order.
+      if (!is.null(rv$replicate_col) && rv$replicate_col %in% colnames(d)) {
+        rc <- d[[rv$replicate_col]]
+        rep_idx <- ave(seq_len(nrow(d)), d[[rv$group_col]],
+                       FUN = function(ix) match(rc[ix], sort(unique(rc[ix]))))
+      }
       out <- data.frame(time      = d[[rv$time_col]],
                         variable  = d[[rv$group_col]],
                         replicate = rep_idx,
@@ -3831,13 +4415,21 @@ server <- function(input, output, session) {
       meas <- intersect(rv$od_vars_raw, samps)
       if (length(meas) == 0) return(empty_replicate_data())
       t_vec <- d[[rv$time_col]]
+      # Stacked time blocks (rv$block_id, set at ingest) are replicates too: the replicate
+      # index of (column r, block b) is (b - 1) * ncols + r, so no replicate curve ever
+      # holds the same time point twice. rows are matched by their original row names,
+      # which the time filters preserve.
+      blk <- if (!is.null(rv$block_id)) rv$block_id[suppressWarnings(as.integer(rownames(d)))] else NULL
+      if (!is.null(blk) && (length(blk) != nrow(d) || anyNA(blk))) blk <- NULL
       pieces <- lapply(meas, function(vn) {
         idxs <- rv$col_map[[vn]]
         if (is.null(idxs)) idxs <- which(colnames(d) == vn)
-        bind_rows(lapply(seq_along(idxs), function(r)
-          data.frame(time      = t_vec, variable = vn, replicate = r,
-                    value     = suppressWarnings(as.numeric(as.character(d[[idxs[r]]]))),
-                    stringsAsFactors = FALSE)))
+        bind_rows(lapply(seq_along(idxs), function(r) {
+          vals <- suppressWarnings(as.numeric(as.character(d[[idxs[r]]])))
+          data.frame(time      = t_vec, variable = vn,
+                     replicate = if (is.null(blk)) r else (blk - 1L) * length(idxs) + r,
+                     value     = vals, stringsAsFactors = FALSE)
+        }))
       })
       out <- bind_rows(pieces)
       if (nrow(out) == 0) return(empty_replicate_data())

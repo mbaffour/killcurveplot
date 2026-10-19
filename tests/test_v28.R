@@ -75,8 +75,12 @@ check("pct drop from max = 87.5",      near(m$pct_drop_from_max, 87.5))
 check("t half-max decline = 20",       near(m$t_half_max_decline, 20))
 check("steepest decline = -0.02 over 10-20",
       near(m$steepest_decline_rate, -0.02) && grepl("^10", m$steepest_decline_interval))
-check("lysis onset = 20, od_drop = 0.35, residual = 0.05",
-      near(m$lysis_time, 20) && near(m$od_drop, 0.35) && near(m$residual_od, 0.05))
+# LC-9: lysis_time is now the LINEARLY INTERPOLATED crossing of the 5 % level
+# (0.4 * 0.95 = 0.38 between t=10 (0.4) and t=20 (0.2) -> 10 + 10 * 0.02/0.2 = 11),
+# not the first sampled point already past it (20). LC-3: two consecutive
+# post-peak points (0.2, 0.05) are below the detection threshold, so lysis is called.
+check("lysis onset = 11 (interpolated, LC-9), od_drop = 0.35, residual = 0.05",
+      near(m$lysis_time, 11) && near(m$od_drop, 0.35) && near(m$residual_od, 0.05))
 check("doubling = ln2/mu_max when growth detected",
       is.na(m$mu_max) || near(m$doubling_time, log(2)/m$mu_max))
 
