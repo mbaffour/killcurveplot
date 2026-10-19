@@ -247,15 +247,243 @@ detect_csv_locale <- function(path) {
   if (grepl(";", first_line, fixed = TRUE)) "eu" else "us"
 }
 
+# Ingest hardening (ported from the companion app's read_csv_smart(),
+# coerce_sentinel_columns(), parse_time_column(), infer_wide_replicates() and
+# detect_replicate_column(); see docs/PORTED_FROM_LYSIS_CURVE_APP.md).
+
+# Field counts of the non-blank lines of a file, WITH their raw line numbers
+# (read.csv's `skip` counts raw lines, blank ones included). Counts come from
+# strsplit(), which drops trailing empty fields: a preamble line padded with
+# commas out to the table width ("Software Version,3.08,,,,") therefore still
+# counts as narrow, which is what the preamble test needs.
+csv_line_field_counts <- function(path, sep, n = 500) {
+  raw <- tryCatch(readLines(path, n = n, warn = FALSE), error = function(e) character(0))
+  keep <- which(nzchar(trimws(raw)))
+  list(line = keep, text = raw[keep],
+       fc = vapply(raw[keep], function(l) length(strsplit(l, sep, fixed = TRUE)[[1]]),
+                   integer(1), USE.NAMES = FALSE))
+}
+
+# Raw-line index (0-based, i.e. read.csv's `skip`) of the table header when the
+# file starts with a reader preamble: the first non-blank line is NARROWER than
+# the widest field count that occurs at least twice. 0 for an ordinary file.
+csv_preamble_skip <- function(path, sep = ",") {
+  z <- csv_line_field_counts(path, sep)
+  if (length(z$fc) < 3) return(0L)
+  tab <- table(z$fc[z$fc > 1])
+  rep_counts <- as.integer(names(tab)[tab >= 2])
+  if (!length(rep_counts)) return(0L)
+  modal <- max(rep_counts)
+  if (z$fc[1] >= modal) return(0L)
+  as.integer(z$line[which(z$fc == modal)[1]] - 1L)
+}
+
+# Delimiter / preamble sniffing. Tries comma, semicolon and tab; the table is
+# the block of lines with the LARGEST field count that occurs at least twice
+# (a reader preamble is a handful of narrow lines above a wide table, so a modal
+# count would sometimes pick the preamble); everything above its first line is
+# skipped. The plain read.csv() is tried first and kept whenever it produces
+# something sane (>= 2 columns, rows, and no preamble), so ordinary files take
+# exactly the path they always did. Errors are worded for a bench scientist.
+# Deviation from the companion app: `skip` is computed on RAW line numbers (the
+# original filtered blank lines out first, so a blank line inside a preamble
+# made read.csv skip too few lines).
+read_csv_smart <- function(path) {
+  plain <- tryCatch(read.csv(path, stringsAsFactors = FALSE, check.names = FALSE),
+                    error = function(e) NULL)
+  if (!is.null(plain) && ncol(plain) >= 2 && nrow(plain) > 0 && csv_preamble_skip(path, ",") == 0L)
+    return(list(data = plain, sep = ",", dec = ".", skip = 0L, sniffed = FALSE))
+
+  raw <- tryCatch(readLines(path, n = 500, warn = FALSE), error = function(e) character(0))
+  keep  <- which(nzchar(trimws(raw)))
+  lines <- raw[keep]
+  if (length(lines) == 0) stop("The file is empty.", call. = FALSE)
+
+  nf <- function(sep) vapply(lines, function(l)
+    length(strsplit(l, sep, fixed = TRUE)[[1]]), integer(1), USE.NAMES = FALSE)
+
+  # European Excel writes 0,05 for 0.05. With a comma separator that is
+  # unparseable by construction -- the header has k fields and every data row
+  # has more -- so diagnose it instead of guessing.
+  fc_comma <- nf(",")
+  if (length(fc_comma) >= 2 && fc_comma[1] >= 2 &&
+      all(fc_comma[-1] > fc_comma[1]) &&
+      any(grepl("[0-9],[0-9]", lines[-1])))
+    stop("The header has ", fc_comma[1], " comma-separated fields but the data ",
+         "rows have more. This looks like a European CSV written with decimal ",
+         "commas (0,05 rather than 0.05); re-export it with a semicolon ",
+         "separator or with decimal points.", call. = FALSE)
+
+  best <- NULL
+  for (sep in c(",", ";", "\t")) {
+    fc  <- nf(sep)
+    tab <- table(fc[fc > 1])
+    if (!length(tab)) next
+    rep_counts <- as.integer(names(tab)[tab >= 2])
+    modal <- if (length(rep_counts)) max(rep_counts)
+             else as.integer(names(tab)[which.max(tab)])
+    if (modal <= 1) next
+    score <- sum(fc == modal) * modal
+    if (is.null(best) || score > best$score)
+      best <- list(sep = sep, modal = modal, fc = fc, score = score)
+  }
+  if (is.null(best))
+    stop("Could not find a consistent column separator (comma, semicolon and ",
+         "tab were all tried). Check that the file is a plain-text table.",
+         call. = FALSE)
+
+  skip <- as.integer(keep[which(best$fc == best$modal)[1]] - 1L)   # raw lines above the header
+
+  # decimal comma only makes sense when the separator is not a comma
+  dec  <- "."
+  body <- lines[best$fc == best$modal][-1]
+  if (length(body) && best$sep != "," &&
+      sum(grepl("[0-9],[0-9]", body)) >= 0.5 * length(body))
+    dec <- ","
+
+  data <- tryCatch(
+    read.csv(path, sep = best$sep, dec = dec, skip = skip,
+             stringsAsFactors = FALSE, check.names = FALSE),
+    error = function(e)
+      stop("Could not read the file even after detecting a '",
+           if (best$sep == "\t") "tab" else best$sep, "' separator and ",
+           skip, " header line(s) to skip: ", conditionMessage(e), call. = FALSE))
+  list(data = data, sep = best$sep, dec = dec, skip = skip, sniffed = TRUE)
+}
+
+# The app's reader. The locale-aware attempt (KC-11: semicolon/decimal-comma
+# files) is tried first and kept whenever it yields >= 2 columns, rows and no
+# reader preamble, so those files parse exactly as before; otherwise (a parse
+# error, a single column because the wrong locale was picked, or a preamble above
+# the header) the separator/preamble sniffer read_csv_smart() takes over.
 read_csv_locale_aware <- function(path, locale = "auto") {
   loc <- if (identical(locale, "auto")) detect_csv_locale(path) else locale
   sep <- if (identical(loc, "eu")) ";" else ","
   dec <- if (identical(loc, "eu")) "," else "."
-  tryCatch(
+  plain <- tryCatch(
     read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = FALSE),
-    error = function(e)
-      read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE)
-  )
+    error = function(e) tryCatch(
+      read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE),
+      error = function(e2) NULL))
+  if (!is.null(plain) && ncol(plain) >= 2 && nrow(plain) > 0 && csv_preamble_skip(path, sep) == 0L)
+    return(plain)
+  smart <- tryCatch(read_csv_smart(path), error = function(e) e)
+  if (inherits(smart, "error")) {
+    if (!is.null(plain)) return(plain)       # nothing better than the locale-aware parse
+    stop(smart)
+  }
+  smart$data
+}
+
+# Strings a reader writes into a well that went out of range (Gen5 OVRFLW,
+# i-control OVER, SoftMax Pro #SAT) make read.csv() type the whole column as
+# character, and detect_od_column_idx()'s is.numeric() fallback then dropped that
+# entire sample without a word. Coerce a mostly-numeric character column to
+# numeric, every unparseable cell becoming NA and being reported, so one bad well
+# costs one time point instead of the whole curve. min_numeric_frac keeps genuine
+# text columns (notes, sample labels) out; skip_cols protects the time column and
+# any group / replicate column. Returns list(data, report) where report is NULL or
+# a data.frame(sample, time, value) of the cells set to NA.
+coerce_sentinel_columns <- function(data, skip_cols = character(0),
+                                    time_values = NULL,
+                                    min_numeric_frac = 0.5) {
+  report <- list()
+  if (is.null(data) || ncol(data) == 0) return(list(data = data, report = NULL))
+  for (j in seq_along(data)) {
+    nm  <- colnames(data)[j]
+    if (nm %in% skip_cols) next
+    col <- data[[j]]
+    if (is.numeric(col) || !(is.character(col) || is.factor(col))) next
+    txt <- trimws(as.character(col))
+    txt[is.na(txt)] <- ""
+    num <- suppressWarnings(as.numeric(txt))
+    nonblank <- nzchar(txt)
+    if (!any(nonblank)) next
+    if (sum(is.finite(num) & nonblank) / sum(nonblank) < min_numeric_frac) next
+    bad <- which(nonblank & !is.finite(num))
+    if (length(bad))
+      report[[length(report) + 1]] <- data.frame(
+        sample = nm,
+        time   = if (!is.null(time_values) && length(time_values) == nrow(data))
+                   as.character(time_values[bad]) else as.character(bad),
+        value  = txt[bad], stringsAsFactors = FALSE)
+    data[[j]] <- num
+  }
+  list(data = data,
+       report = if (length(report)) do.call(rbind, report) else NULL)
+}
+
+# BioTek Gen5 and Tecan i-control write elapsed time as 0:15:00, and an Excel
+# round-trip turns the column into a full datetime. Both are non-numeric, so the
+# is.finite() row filter used to delete EVERY row. Returns list(values, converted,
+# unit): values in MINUTES when converted (clock durations H:MM[:SS[.s]], or
+# date-times as minutes from the earliest timestamp), otherwise the numeric
+# values as they were.
+parse_time_column <- function(x) {
+  txt  <- trimws(as.character(x))
+  txt[is.na(txt)] <- ""
+  keep <- nzchar(txt)
+  num  <- suppressWarnings(as.numeric(txt))
+  if (any(keep) && all(is.finite(num[keep])))
+    return(list(values = num, converted = FALSE, unit = NA_character_))
+
+  out <- rep(NA_real_, length(txt))
+
+  # 1. clock durations H:MM / H:MM:SS (optionally with fractional seconds)
+  is_clock <- grepl("^[0-9]{1,5}:[0-9]{1,2}(:[0-9]{1,2}([.][0-9]+)?)?$", txt)
+  if (any(is_clock)) {
+    out[is_clock] <- vapply(strsplit(txt[is_clock], ":", fixed = TRUE), function(p) {
+      p <- suppressWarnings(as.numeric(p))
+      if (length(p) == 2) p[1] * 60 + p[2] else p[1] * 60 + p[2] + p[3] / 60
+    }, numeric(1))
+    out[is.finite(num)] <- num[is.finite(num)]
+    return(list(values = out, converted = TRUE, unit = "minutes"))
+  }
+
+  # 2. datetimes -> minutes elapsed from the earliest timestamp
+  fmts <- c("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
+            "%m/%d/%Y %H:%M")
+  for (f in fmts) {
+    pt <- suppressWarnings(as.POSIXct(txt, format = f, tz = "UTC"))
+    if (sum(!is.na(pt)) >= max(2, 0.8 * sum(keep)))
+      return(list(values = as.numeric(difftime(pt, min(pt, na.rm = TRUE), units = "mins")),
+                  converted = TRUE, unit = "minutes"))
+  }
+
+  # 3. whatever was already numeric; the caller decides what to do with the rest
+  out[is.finite(num)] <- num[is.finite(num)]
+  list(values = out, converted = FALSE, unit = NA_character_)
+}
+
+# Replicates in WIDE format from repeated (stacked) time blocks: the time counter
+# restarts for each replicate block. Returns list(reps = number of blocks,
+# block_id = per-row block number); reps/block_id NULL when the time column is
+# unreadable.
+infer_wide_replicates <- function(data, time_col) {
+  if (is.null(data) || nrow(data) == 0) return(list(reps = NULL, block_id = NULL))
+  t_vec <- suppressWarnings(as.numeric(as.character(data[[time_col]])))
+  if (all(is.na(t_vec))) return(list(reps = NULL, block_id = NULL))
+  resets <- which(diff(t_vec) < 0)
+  if (length(resets) == 0) return(list(reps = 1L, block_id = rep(1L, nrow(data))))
+  block_starts <- c(1L, resets + 1L)
+  block_ends   <- c(resets, nrow(data))
+  block_id <- integer(nrow(data))
+  for (i in seq_along(block_starts)) block_id[block_starts[i]:block_ends[i]] <- i
+  list(reps = length(block_starts), block_id = block_id)
+}
+
+# A replicate / well column in LONG format (never the time, group or value column).
+detect_replicate_column <- function(data, time_col, group_col, value_col) {
+  if (is.null(data) || nrow(data) == 0) return(NULL)
+  ignore_cols <- c(time_col, group_col, value_col)
+  names_lower <- tolower(colnames(data))
+  rep_hits <- names_lower %in% c("replicate", "rep", "rep_id", "replicate_id",
+                                 "well", "well_id", "wellid",
+                                 "technical_replicate", "biological_replicate", "repeat")
+  rep_cols <- setdiff(colnames(data)[rep_hits], ignore_cols)
+  if (length(rep_cols) > 0) return(rep_cols[1])
+  NULL
 }
 
 parse_excluded_timepoints <- function(text, all_timepoints) {
@@ -3036,25 +3264,61 @@ server <- function(input, output, session) {
 
   # Shared ingestion for both file upload and demo data
   ingest_data <- function(data, source_name) {
-    rv$is_long_format <- is_long_format_detect(data)
     rv$time_col       <- detect_time_column(data)
     rv$col_map        <- NULL
+    rv$replicate_col  <- NULL    # long format: replicate / well column, when the file has one
+    rv$n_blocks       <- NULL    # wide format: stacked time blocks (replicates), when > 1
+    rv$block_id       <- NULL
+    notes <- character(0)
+
+    # Elapsed time as 0:15:00 (Gen5 / i-control) or a full date-time: convert to minutes
+    # so the numeric time handling downstream (filters, axis range) just works.
+    pt <- parse_time_column(data[[rv$time_col]])
+    if (isTRUE(pt$converted)) {
+      data[[rv$time_col]] <- pt$values
+      notes <- c(notes, paste0("Time column '", rv$time_col, "' was written as clock time / date-time; converted to minutes."))
+    }
+
+    # A well that went out of range (OVER / OVRFLW / #SAT) makes read.csv type the whole
+    # column as text: keep the column, turn just those cells into NA. The time column and
+    # any group / replicate column are left alone.
+    group_names <- c("variable","Variable","condition","Condition","treatment","Treatment",
+                     "sample","Sample","group","Group")
+    rep_names   <- colnames(data)[tolower(colnames(data)) %in%
+                     c("replicate","rep","rep_id","replicate_id","well","well_id","wellid",
+                       "technical_replicate","biological_replicate","repeat")]
+    cs <- coerce_sentinel_columns(data, skip_cols = c(rv$time_col, group_names, rep_names),
+                                  time_values = data[[rv$time_col]])
+    data <- cs$data
+    if (!is.null(cs$report))
+      notes <- c(notes, paste0(nrow(cs$report), " non-numeric reading(s) (",
+                               paste(utils::head(unique(cs$report$value), 3), collapse = ", "),
+                               ") were treated as missing; affected column(s): ",
+                               paste(unique(cs$report$sample), collapse = ", "), "."))
+    rv$sentinel_report <- cs$report
+
+    rv$is_long_format <- is_long_format_detect(data)
 
     if (rv$is_long_format) {
-      potential <- c("variable","Variable","condition","Condition","treatment","Treatment",
-                     "sample","Sample","group","Group")
+      potential <- group_names
       found     <- potential[potential %in% colnames(data)]
+      rep_col0  <- detect_replicate_column(data, rv$time_col, NULL, NULL)
       group_col <- if (length(found) > 0) found[1] else {
         dv    <- sapply(data, function(x) length(unique(x)) / nrow(data))
-        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), rv$time_col)
-        if (length(cands)) cands[1] else setdiff(colnames(data), rv$time_col)[1]
+        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), c(rv$time_col, rep_col0))
+        if (length(cands)) cands[1] else setdiff(colnames(data), c(rv$time_col, rep_col0))[1]
       }
-      vc <- detect_od_columns(data, c(rv$time_col, group_col))
+      # the replicate column must never be taken for the value column (a numeric "rep"
+      # column would win the is.numeric() fallback)
+      rep_col <- detect_replicate_column(data, rv$time_col, group_col, NULL)
+      vc <- detect_od_columns(data, c(rv$time_col, group_col, rep_col))
       if (length(vc) > 1) vc <- vc[1]
-      rv$group_col   <- group_col
-      rv$value_col   <- vc
-      rv$od_vars     <- as.character(unique(data[[group_col]]))
-      rv$od_vars_raw <- rv$od_vars
+      rep_col <- detect_replicate_column(data, rv$time_col, group_col, vc)
+      rv$group_col     <- group_col
+      rv$value_col     <- vc
+      rv$replicate_col <- rep_col
+      rv$od_vars       <- as.character(unique(data[[group_col]]))
+      rv$od_vars_raw   <- rv$od_vars
     } else {
       # Index-based detection keeps ALL replicate columns, including
       # duplicates of the same name (v2.8 REPLICATE FIX).
@@ -3064,9 +3328,23 @@ server <- function(input, output, session) {
       rv$col_map     <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
       rv$od_vars     <- oc
       rv$od_vars_raw <- oc
+      # Stacked replicate blocks (the time counter restarts for each block): every block is
+      # one more replicate of every sample at each time point. prepare_plot_data() already
+      # pools rows that share a time stamp; the block id lets prepare_replicate_data() keep
+      # the blocks apart as separate replicate curves.
+      wb <- infer_wide_replicates(data, rv$time_col)
+      if (!is.null(wb$reps) && wb$reps > 1) {
+        rv$n_blocks <- wb$reps
+        rv$block_id <- wb$block_id
+        notes <- c(notes, paste0("Detected ", wb$reps, " stacked time blocks (the time column restarts); ",
+                                 "each block is treated as one replicate."))
+      }
     }
     rv$data        <- data
     rv$data_source <- source_name
+    # Tell the user what was repaired on load (best effort: no notification channel in tests)
+    for (nt in notes)
+      tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)
 
     tr <- range(suppressWarnings(as.numeric(as.character(data[[rv$time_col]]))), na.rm = TRUE)
     updateNumericInput(session, "x_min", value = tr[1])
@@ -3114,7 +3392,7 @@ server <- function(input, output, session) {
   data_size_info <- function() {
     ntp <- length(rv$all_timepoints); ns <- length(rv$od_vars)
     nrep <- if (isTRUE(rv$is_long_format)) max(1, round(nrow(rv$data) / max(1, ntp * ns)))
-            else max(1, lengths(rv$col_map))
+            else max(1, lengths(rv$col_map)) * max(1, rv$n_blocks %||% 1)
     list(ntp = ntp, ns = ns, nrep = nrep, cells = as.numeric(ntp) * ns * nrep)
   }
   DATA_WARN_TIMEPOINTS <- 5000; DATA_WARN_SAMPLES <- 200; DASHBOARD_MAX_CELLS <- 2e6
@@ -3761,6 +4039,13 @@ server <- function(input, output, session) {
       # exported in the same replicate order, the common case).
       rep_idx <- ave(seq_len(nrow(d)),
                      d[[rv$group_col]], d[[rv$time_col]], FUN = seq_along)
+      # When the file has a replicate / well column, that column is the replicate identity
+      # (dense rank of its values within each sample) instead of the occurrence order.
+      if (!is.null(rv$replicate_col) && rv$replicate_col %in% colnames(d)) {
+        rc <- d[[rv$replicate_col]]
+        rep_idx <- ave(seq_len(nrow(d)), d[[rv$group_col]],
+                       FUN = function(ix) match(rc[ix], sort(unique(rc[ix]))))
+      }
       out <- data.frame(time      = d[[rv$time_col]],
                         variable  = d[[rv$group_col]],
                         replicate = rep_idx,
@@ -3770,13 +4055,21 @@ server <- function(input, output, session) {
       d    <- apply_time_filters(rv$data, rv$time_col)
       meas <- intersect(rv$od_vars_raw, samps)
       t_vec <- d[[rv$time_col]]
+      # Stacked time blocks (rv$block_id, set at ingest) are replicates too: the replicate
+      # index of (column r, block b) is (b - 1) * ncols + r, so no replicate curve ever
+      # holds the same time point twice. rows are matched by their original row names,
+      # which the time filters preserve.
+      blk <- if (!is.null(rv$block_id)) rv$block_id[suppressWarnings(as.integer(rownames(d)))] else NULL
+      if (!is.null(blk) && (length(blk) != nrow(d) || anyNA(blk))) blk <- NULL
       pieces <- lapply(meas, function(vn) {
         idxs <- rv$col_map[[vn]]
         if (is.null(idxs)) idxs <- which(colnames(d) == vn)
-        bind_rows(lapply(seq_along(idxs), function(r)
-          data.frame(time      = t_vec, variable = vn, replicate = r,
-                    value     = suppressWarnings(as.numeric(as.character(d[[idxs[r]]]))),
-                    stringsAsFactors = FALSE)))
+        bind_rows(lapply(seq_along(idxs), function(r) {
+          vals <- suppressWarnings(as.numeric(as.character(d[[idxs[r]]])))
+          data.frame(time      = t_vec, variable = vn,
+                     replicate = if (is.null(blk)) r else (blk - 1L) * length(idxs) + r,
+                     value     = vals, stringsAsFactors = FALSE)
+        }))
       })
       out <- bind_rows(pieces)
     }

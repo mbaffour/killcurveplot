@@ -213,5 +213,167 @@ check("new metrics are selectable in the metric summary (ANALYSIS_METRIC_LABELS)
       env$metric_axis_label("extinction_time", "min") == "Extinction time (min)" &&
       env$metric_axis_label("first_peak_od", "min", "OD") == "First-peak OD (OD)")
 
+# ── 3. Robust ingest ─────────────────────────────────────────────────────────
+write_fixture <- function(lines) { p <- tempfile(fileext = ".csv"); writeLines(lines, p); p }
+load_file <- function(path, session) session$setInputs(file = list(name = basename(path), datapath = path))
+
+cat("\n--- ingest helpers (unit) ---\n")
+cs <- env$coerce_sentinel_columns(
+  data.frame(Time = 1:4, A = c("0.1", "OVER", "0.3", "0.4"), Note = c("a", "b", "c", "d"),
+             B = c("0.5", "#SAT", "OVRFLW", "0.8"), stringsAsFactors = FALSE),
+  skip_cols = "Time", time_values = c(0, 10, 20, 30))
+check("coerce_sentinel_columns: a column with OVER becomes numeric with that cell NA (column kept)",
+      is.numeric(cs$data$A) && is.na(cs$data$A[2]) && near(cs$data$A[3], 0.3))
+check("coerce_sentinel_columns: #SAT / OVRFLW cells -> NA; genuine text column untouched",
+      is.numeric(cs$data$B) && sum(is.na(cs$data$B)) == 2 && is.character(cs$data$Note))
+check("coerce_sentinel_columns: report names sample, time and the offending string",
+      nrow(cs$report) == 3 && "OVER" %in% cs$report$value &&
+      cs$report$time[cs$report$value == "OVER"] == "10" && "A" %in% cs$report$sample)
+check("coerce_sentinel_columns: skip_cols are left alone",
+      identical(env$coerce_sentinel_columns(data.frame(Time = c("a", "1", "2")), skip_cols = "Time")$data$Time, c("a", "1", "2")))
+check("coerce_sentinel_columns: numeric-only data has no report",
+      is.null(env$coerce_sentinel_columns(data.frame(Time = 1:3, A = c(0.1, 0.2, 0.3)))$report))
+
+pt <- env$parse_time_column(c("0:00:00", "0:15:00", "1:00:30", "1:30"))
+check("parse_time_column: HH:MM:SS (and H:MM) -> minutes", pt$converted && near(pt$values[2], 15) &&
+      near(pt$values[3], 60.5) && near(pt$values[4], 90) && identical(pt$unit, "minutes"))
+pd_t <- env$parse_time_column(c("2026-03-01 10:00:00", "2026-03-01 10:30:00", "2026-03-01 12:00:00"))
+check("parse_time_column: date-times -> minutes from the earliest", pd_t$converted && isTRUE(all.equal(pd_t$values, c(0, 30, 120))))
+pn <- env$parse_time_column(c("0", "15", "30"))
+check("parse_time_column: plain numbers are not converted", !pn$converted && isTRUE(all.equal(pn$values, c(0, 15, 30))))
+check("parse_time_column: unparseable text is not converted (all NA)",
+      !env$parse_time_column(c("a", "b"))$converted && all(is.na(env$parse_time_column(c("a", "b"))$values)))
+
+wb <- env$infer_wide_replicates(data.frame(Time = c(0, 10, 20, 0, 10, 20, 0, 10, 20), x = 1), "Time")
+check("infer_wide_replicates: 3 stacked blocks, block ids 1,1,1,2,2,2,3,3,3",
+      wb$reps == 3 && identical(wb$block_id, rep(1:3, each = 3)))
+check("infer_wide_replicates: a monotone time column is one block",
+      env$infer_wide_replicates(data.frame(Time = 0:5), "Time")$reps == 1L)
+check("infer_wide_replicates: unreadable time -> NULL",
+      is.null(env$infer_wide_replicates(data.frame(Time = c("a", "b")), "Time")$reps))
+check("detect_replicate_column: finds replicate / well columns, never time/group/value",
+      identical(env$detect_replicate_column(data.frame(Time = 1, Sample = "a", Replicate = 1, OD = 1), "Time", "Sample", "OD"), "Replicate") &&
+      identical(env$detect_replicate_column(data.frame(t = 1, s = "a", Well = "A1", v = 1), "t", "s", "v"), "Well") &&
+      is.null(env$detect_replicate_column(data.frame(Time = 1, Sample = "a", OD = 1), "Time", "Sample", "OD")) &&
+      is.null(env$detect_replicate_column(data.frame(Time = 1, rep = 1), "Time", "rep", "Time")))
+
+f_tab <- write_fixture(c("Time\tA\tB", "0\t0.1\t0.2", "10\t0.3\t0.4"))
+check("read_csv_locale_aware: a tab-separated file (one column under the comma assumption) is sniffed",
+      identical(colnames(env$read_csv_locale_aware(f_tab, "auto")), c("Time", "A", "B")))
+f_eu_pre <- write_fixture(c("Instrument;X", "Run;7", "", "Time;A;B", "0;0,1;0,2", "10;0,3;0,4"))
+d_eup <- env$read_csv_locale_aware(f_eu_pre, "auto")
+check("read_csv_locale_aware: preamble WITH A BLANK LINE above a decimal-comma table (skip counts raw lines)",
+      identical(colnames(d_eup), c("Time", "A", "B")) && near(d_eup$A[2], 0.3))
+f_us <- write_fixture(c("Time,A,B", "0,0.1,0.2", "10,0.3,0.4"))
+check("read_csv_locale_aware: an ordinary file takes the unchanged path (no preamble skip)",
+      env$csv_preamble_skip(f_us, ",") == 0L && identical(colnames(env$read_csv_locale_aware(f_us, "auto")), c("Time", "A", "B")))
+
+cat("\n--- ingest through the server (testServer) ---\n")
+testServer(app, {
+  # (a) OVER / OVRFLW sentinel: the column is KEPT with NA cells
+  p_over <- write_fixture(c("Time,WT,WT,Mutant",
+                            "0,0.05,0.06,0.04",
+                            "10,0.10,OVER,0.08",
+                            "20,0.20,0.22,0.12",
+                            "30,0.35,0.37,0.15"))
+  load_file(p_over, session)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "")
+  check("OVER: wide format (not flipped to long by the text column)", !rv$is_long_format)
+  check("OVER: both WT replicate columns are kept in col_map", length(rv$col_map[["WT"]]) == 2)
+  pd <- prepare_plot_data()
+  check("OVER: n = 2 at the clean time points, 1 at the time point with the OVER cell",
+        all(pd$n[pd$variable == "WT" & pd$time != 10] == 2) && pd$n[pd$variable == "WT" & pd$time == 10] == 1)
+  check("OVER: the mean at that time point is the remaining replicate (0.10)",
+        near(pd$mean_value[pd$variable == "WT" & pd$time == 10], 0.10))
+  check("OVER: the sentinel report is recorded", !is.null(rv$sentinel_report) && "OVER" %in% rv$sentinel_report$value)
+
+  # (b) Gen5-style preamble above the header (with a blank line inside it)
+  p_pre <- write_fixture(c("Software Version,3.08.01",
+                           "Experiment File Path:,C:\\Users\\lab\\kinetic.xpt",
+                           "Protocol File Path:,C:\\Users\\lab\\growth.prt",
+                           "",
+                           "Plate Number,Plate 1",
+                           "Date,2026-01-02",
+                           "Reader Type,Synergy H1",
+                           "",
+                           "Time,WT,WT,Mutant",
+                           "0,0.05,0.06,0.04",
+                           "15,0.09,0.10,0.07",
+                           "30,0.18,0.20,0.10"))
+  load_file(p_pre, session)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "")
+  check("preamble: the table header is found (time column 'Time', samples WT and Mutant)",
+        identical(rv$time_col, "Time") && setequal(rv$od_vars, c("WT", "Mutant")))
+  pd <- prepare_plot_data()
+  check("preamble: 3 time points, WT n = 2 at each",
+        identical(sort(unique(pd$time)), c(0, 15, 30)) && all(pd$n[pd$variable == "WT"] == 2))
+
+  # (c) HH:MM:SS elapsed time
+  p_hms <- write_fixture(c("Time,WT,WT,Mutant",
+                           "0:00:00,0.05,0.06,0.04",
+                           "0:15:00,0.09,0.10,0.07",
+                           "1:00:00,0.30,0.32,0.10"))
+  load_file(p_hms, session)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "")
+  pd <- prepare_plot_data()
+  check("HH:MM:SS: time parsed to minutes (0, 15, 60)", identical(sort(unique(pd$time)), c(0, 15, 60)))
+  check("HH:MM:SS: the time axis range and the time-point list follow", identical(rv$all_timepoints, c(0, 15, 60)))
+  check("HH:MM:SS: every point survives the is.finite() filter (3 times x 2 samples)", nrow(pd) == 6)
+
+  # (d) stacked time blocks (wide): n = number of blocks per time point
+  p_blk <- write_fixture(c("Time,WT,Mutant",
+                           "0,0.05,0.04", "10,0.10,0.06", "20,0.20,0.08",
+                           "0,0.06,0.05", "10,0.12,0.07", "20,0.22,0.09",
+                           "0,0.04,0.03", "10,0.08,0.05", "20,0.18,0.07"))
+  load_file(p_blk, session)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "")
+  pd <- prepare_plot_data()
+  check("stacked blocks: 3 blocks detected", identical(as.integer(rv$n_blocks), 3L))
+  check("stacked blocks: n = 3 at every time point of every sample", all(pd$n == 3) && nrow(pd) == 6)
+  check("stacked blocks: mean at t=10 for WT = mean(0.10, 0.12, 0.08)",
+        near(pd$mean_value[pd$variable == "WT" & pd$time == 10], mean(c(0.10, 0.12, 0.08))))
+  rp <- prepare_replicate_data()
+  check("stacked blocks: 3 replicate curves per sample, none with a repeated time point",
+        setequal(unique(rp$replicate[rp$variable == "WT"]), 1:3) &&
+        all(table(rp$variable, rp$replicate, rp$time) <= 1))
+  check("stacked blocks: replicate 2 of WT is block 2 (0.06, 0.12, 0.22)",
+        isTRUE(all.equal(rp$value[rp$variable == "WT" & rp$replicate == 2][order(rp$time[rp$variable == "WT" & rp$replicate == 2])],
+                         c(0.06, 0.12, 0.22))))
+  check("stacked blocks: per-replicate metrics run on clean curves (3 replicates reported)",
+        env$compute_replicate_metrics(rp)$n_replicates[1] == 3)
+  # blocks x duplicate columns: replicates = blocks * columns
+  p_blk2 <- write_fixture(c("Time,WT,WT,Mutant", "0,1,2,3", "10,4,5,6", "0,7,8,9", "10,10,11,12"))
+  load_file(p_blk2, session)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "")
+  check("stacked blocks x replicate columns: n = 2 blocks x 2 columns = 4 for WT; 2 for Mutant",
+        { pd2 <- prepare_plot_data(); all(pd2$n[pd2$variable == "WT"] == 4) && all(pd2$n[pd2$variable == "Mutant"] == 2) })
+  check("stacked blocks x replicate columns: 4 WT replicate ids",
+        setequal(unique(prepare_replicate_data()$replicate[prepare_replicate_data()$variable == "WT"]), 1:4))
+
+  # (e) long format with a replicate column; row order scrambled so that the occurrence
+  # order within a time point disagrees with the replicate column
+  val <- function(s, r, t) (if (s == "A") 0.1 else 0.5) * r + t / 100
+  rows <- expand.grid(t = c(0, 10, 20), s = c("A", "B"), r = 1:3, stringsAsFactors = FALSE)
+  rows <- rows[order(rows$s, rows$t, rows$r), ]
+  rows <- rows[c(1, 3, 2, 4:nrow(rows)), ]               # swap two rows of the first (A, t=0) group
+  rows$v <- mapply(val, rows$s, rows$r, rows$t)
+  p_long <- write_fixture(c("Time,Sample,Replicate,OD",
+                            paste(rows$t, rows$s, rows$r, rows$v, sep = ",")))
+  load_file(p_long, session)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "")
+  check("long + replicate column: long format, group = Sample, value = OD (not the numeric Replicate)",
+        rv$is_long_format && identical(rv$group_col, "Sample") && identical(rv$value_col, "OD"))
+  check("long + replicate column: the Replicate column is detected", identical(rv$replicate_col, "Replicate"))
+  pd <- prepare_plot_data()
+  check("long + replicate column: n = 3 per (sample, time)", all(pd$n == 3) && nrow(pd) == 6)
+  rp <- prepare_replicate_data()
+  a2 <- rp[rp$variable == "A" & rp$replicate == 2, ]
+  check("long + replicate column: replicate identity comes from the column, not the row order",
+        nrow(a2) == 3 && isTRUE(all.equal(a2$value[order(a2$time)], val("A", 2, c(0, 10, 20)))))
+  check("long without a replicate column: occurrence order is still used (rv$replicate_col NULL)",
+        { load_file(write_fixture(c("Time,Sample,OD", "0,A,0.1", "0,A,0.2", "10,A,0.3", "10,A,0.4")), session)
+          is.null(rv$replicate_col) })
+})
+
 cat("\n============ SUMMARY:", pass, "passed /", fail, "failed ============\n")
 if (fail > 0) quit(status = 1)

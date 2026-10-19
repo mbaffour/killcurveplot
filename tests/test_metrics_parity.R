@@ -96,7 +96,8 @@ if (!file.exists(ref_file)) {
   }
   ref_ok <- tryCatch({
     grab_defs(c("curve_noise_sd", "LYSIS_SUSTAIN_PTS", "first_prominent_peak_idx",
-                  "calculate_local_virulence"))
+                  "calculate_local_virulence", "coerce_sentinel_columns", "parse_time_column",
+                  "infer_wide_replicates", "detect_replicate_column", "read_csv_smart"))
     eval(parse(text = grab("^calculate_growth_metrics <- function",
                            "Derivative data")), envir = ref_env)
     eval(parse(text = grab("^calculate_infection_metrics <- function",
@@ -187,6 +188,39 @@ if (isTRUE(ref_ok)) {
 } else {
   cat("SKIPPING reference-comparison checks (", length(curves) + 1,
       "of them) --", ref_status, "\n")
+}
+
+# ── Ingest helpers ported from the reference (step 3) ────────────────────────
+if (isTRUE(ref_ok)) {
+  dsent <- data.frame(Time = 1:4, A = c("0.1", "OVER", "0.3", "0.4"), N = c("a", "b", "c", "d"),
+                      B = c("0.5", "#SAT", "OVRFLW", "0.8"), stringsAsFactors = FALSE)
+  check("coerce_sentinel_columns matches the reference",
+        isTRUE(all.equal(ref_env$coerce_sentinel_columns(dsent, "Time", c(0, 10, 20, 30)),
+                         env$coerce_sentinel_columns(dsent, "Time", c(0, 10, 20, 30)))))
+  tx <- list(c("0:00:00", "0:15:00", "1:00:30", "1:30"),
+             c("2026-03-01 10:00:00", "2026-03-01 10:30:00", "2026-03-01 12:00:00"),
+             c("0", "15", "30"), c("a", "b"))
+  check("parse_time_column matches the reference (clock, date-time, numeric, text)",
+        all(vapply(tx, function(x) isTRUE(all.equal(ref_env$parse_time_column(x), env$parse_time_column(x))), logical(1))))
+  dblk <- data.frame(Time = c(0, 10, 20, 0, 10, 20), x = 1)
+  check("infer_wide_replicates matches the reference",
+        isTRUE(all.equal(ref_env$infer_wide_replicates(dblk, "Time"), env$infer_wide_replicates(dblk, "Time"))))
+  dlong <- data.frame(Time = 1, Sample = "a", Replicate = 1, OD = 1)
+  check("detect_replicate_column matches the reference",
+        identical(ref_env$detect_replicate_column(dlong, "Time", "Sample", "OD"),
+                  env$detect_replicate_column(dlong, "Time", "Sample", "OD")))
+  # read_csv_smart: a TAB-separated file with a preamble (no blank lines), which the
+  # reference's plain read.csv() parses to one column, so the reference sniffs too. Two
+  # deliberate deviations are not compared here: (1) the port counts RAW lines for
+  # read.csv's `skip` (blank lines inside a preamble); (2) the port also sniffs when a
+  # comma-parse "succeeds" on garbage -- the reference keeps that junk 2-column table
+  # for a comma preamble above a comma table.
+  fp <- tempfile(fileext = ".txt")
+  writeLines(c("Software Version\t3.08", "Experiment\tkinetic", "Reader\tH1", "Time\tA\tB",
+               paste0(seq(0, 50, by = 10), "\t0.", 1:6, "\t0.", 2:7)), fp)
+  rs <- ref_env$read_csv_smart(fp); ns <- env$read_csv_smart(fp)
+  check("read_csv_smart matches the reference on a preamble file without blank lines",
+        isTRUE(all.equal(rs$data, ns$data)) && identical(rs$skip, ns$skip) && identical(rs$sep, ns$sep))
 }
 
 # ── Infection metrics on multi-sample data ───────────────────────────────────

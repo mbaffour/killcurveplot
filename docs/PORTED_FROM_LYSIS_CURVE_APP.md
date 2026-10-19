@@ -70,3 +70,40 @@ is the t = 45 bump, not the t = 60 maximum.
 `tests/test_metrics_parity.R` now also compares all of these with the reference
 (`first_peak_od`, `t_first_peak`, `extinction_time`, `centroid_x/y`,
 `centroid_index`, `local_virulence` and its `t_stat`).
+
+## 3. Robust ingest
+
+Ported verbatim unless noted: `coerce_sentinel_columns()`, `parse_time_column()`,
+`infer_wide_replicates()`, `detect_replicate_column()`, `read_csv_smart()`.
+
+* `coerce_sentinel_columns()`: `OVER` / `OVRFLW` / `#SAT` (any non-numeric cell
+  of a mostly-numeric text column) becomes NA for that cell; the column is kept.
+  Previously the whole column was dropped by `detect_od_column_idx()` (and a
+  small wide file with such a column was even mis-detected as long format).
+  Called in `ingest_data()` with the time column, the group-label names and
+  replicate-column names protected. The cells set to NA are in `rv$sentinel_report`
+  and announced in a notification.
+* `parse_time_column()`: `H:MM:SS` and date-time time columns become minutes.
+* `read_csv_smart()`: separator (comma / semicolon / tab) and preamble sniffing.
+  `read_csv_locale_aware()` still tries the locale-aware parse first (decimal-comma
+  files unchanged) and falls back to the sniffer on an error, a single column, or a
+  reader preamble above the header.
+  **Deliberate differences from the reference:** (1) `skip` is counted in RAW lines
+  (the reference dropped blank lines before counting, so a blank line inside a
+  preamble made `read.csv` skip too few lines); (2) the sniffer also runs when the
+  plain comma parse "succeeds" on a preamble file with a header narrower than the
+  table (`csv_preamble_skip()`), where the reference keeps a junk 2-column table.
+* `infer_wide_replicates()`: stacked time blocks. `ingest_data()` stores
+  `rv$n_blocks` / `rv$block_id` (dynamic fields of the existing `rv`).
+  `prepare_plot_data()` already pooled rows sharing a time stamp, so `n` per time
+  point already equalled the block count; what was broken is the per-replicate
+  data: `prepare_replicate_data()` (wide branch) now numbers replicates
+  `(block - 1) * columns + column`, so no replicate curve holds a time point twice.
+  `data_size_info()` multiplies the replicate count by the number of blocks.
+* `detect_replicate_column()`: a `replicate` / `rep` / `well` ... column of a long
+  file is excluded from the group and value column candidates and used by
+  `prepare_replicate_data()` (dense rank within each sample) as the replicate id;
+  without one the occurrence order is used as before (`rv$replicate_col` is NULL).
+
+Not done: a Gen5 temperature column (`T° 600`) in a real export is still
+read as a sample (numeric fallback in `detect_od_column_idx()`).
