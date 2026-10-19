@@ -152,7 +152,7 @@ has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.11.0"
+APP_VERSION <- "2.11.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -614,10 +614,88 @@ html_table <- function(df, digits = 5, class = NULL) {
          paste0(body, collapse = ""), "</tbody></table></div>")
 }
 
+# ── v2.11.1: analysis figures + replicate statistics in the reports ──────────
+# Both report builders take an optional `analysis` list (NULL = omitted, and
+# the output is byte-identical to v2.11.0):
+#   figures      list of list(type, title, caption, plot | b64, error)
+#   stats        the compare_replicate_metric() result
+#   metric_label human-readable name of the tested metric
+#   ref_sample   "" for all-pairs comparisons
+#   method       "welch" | "nonparametric"
+# Same formatting as the app's on-screen statistics tables (3 significant
+# figures, an em dash for non-finite values).
+fmt_stats_df <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  for (cc in names(df)) if (is.numeric(df[[cc]]))
+    df[[cc]] <- ifelse(is.finite(df[[cc]]), formatC(signif(df[[cc]], 3), format = "g"), "—")
+  df
+}
+
+STATS_DEFINITIONS <- paste0(
+  "Welch's t-test compares two sample means without assuming equal variances. ",
+  "p values across the pairwise comparisons are Holm-adjusted (step-down Bonferroni; ",
+  "controls the family-wise error rate). Hedges' g is the standardized mean difference ",
+  "(difference divided by the pooled SD) with a small-sample bias correction; |g| of 0.2, ",
+  "0.5 and 0.8 are conventionally small, medium and large. The 95% CI is the confidence ",
+  "interval of the difference in means from the Welch test. With three or more groups, ",
+  "one-way ANOVA tests whether any group mean differs and Tukey's HSD then compares every ",
+  "pair with family-wise error control. The nonparametric alternatives are the ",
+  "Mann-Whitney U (Wilcoxon rank-sum) test for pairs and the Kruskal-Wallis test for three ",
+  "or more groups; they compare distributions by rank and do not assume normality. ",
+  "Stars: *** p < 0.001, ** p < 0.01, * p < 0.05, ns = not significant. With three ",
+  "biological replicates power is low: a non-significant result is not evidence of no difference.")
+
+# One-sentence description of what was tested and how.
+stats_lead_text <- function(analysis) {
+  st <- analysis$stats
+  if (is.null(st$pairwise))
+    return("No comparison possible: the statistics need at least two samples with 2+ replicate values for this metric.")
+  ref <- analysis$ref_sample %||% ""
+  paste0("Metric: ", analysis$metric_label %||% st$metric, ". ",
+         if (nzchar(ref) && all(st$pairwise$versus == ref)) paste0("Each sample vs reference '", ref, "'. ")
+         else "All pairs of samples. ",
+         if (identical(analysis$method, "nonparametric"))
+           "Mann-Whitney U per pair, Holm-adjusted; Kruskal-Wallis across 3+ groups."
+         else "Welch's t-test per pair, Holm-adjusted; one-way ANOVA + Tukey HSD across 3+ groups.")
+}
+
+report_analysis_html <- function(analysis) {
+  figs <- analysis$figures %||% list()
+  cap_style <- "font-size:0.9em;color:#495057;margin-top:6px;"
+  fig_html <- vapply(figs, function(f) {
+    body <- if (!is.null(f$b64))
+      paste0("<img class='figure' src='data:image/png;base64,", f$b64,
+             "' alt='", html_escape(f$title), "'/>")
+    else paste0("<p><em>Figure not available: ", html_escape(f$error %||% "unknown reason"), "</em></p>")
+    paste0("<h3>", html_escape(f$title), "</h3>", body,
+           if (nzchar(f$caption %||% "")) paste0("<p style='", cap_style, "'>", html_escape(f$caption), "</p>") else "")
+  }, character(1))
+  st <- analysis$stats
+  warn_html <- paste0(vapply(st$warnings %||% character(0), function(w)
+    paste0("<p style='background:#fff4e6;border:1px solid #ffd8a8;border-radius:6px;padding:8px 12px;'>",
+           html_escape(w), "</p>"), character(1)), collapse = "")
+  tbl <- function(df, title) if (is.null(df) || nrow(df) == 0) "" else
+    paste0("<h3>", title, "</h3>", html_table(fmt_stats_df(df)))
+  paste0(
+    "<h2>Analysis figures</h2>\n",
+    "<p>Rendered at the export size with the main figure's theme; each is the figure the ",
+    "Analysis figures tab shows for the current samples, filtering and settings.</p>\n",
+    paste0(fig_html, collapse = "\n"),
+    "\n<h2>Replicate statistics</h2>\n",
+    "<p>", html_escape(stats_lead_text(analysis)), "</p>\n",
+    warn_html,
+    tbl(st$pairwise, "Pairwise comparisons"),
+    tbl(st$omnibus,  "Omnibus test"),
+    tbl(st$posthoc,  "Post-hoc comparisons (Tukey HSD)"),
+    "<h3>Definitions</h3>\n<p style='font-size:0.9em;'>", html_escape(STATS_DEFINITIONS), "</p>\n")
+}
+
 # Builds the entire self-contained HTML report as one string.
 # meta: named list with title, author, notes, generated, data_file, format,
 #       time_col, samples_txt, filter_txt, error_txt, settings_df
-build_html_report <- function(meta, img_b64, stats_df, metrics_df) {
+# analysis: optional (v2.11.1), see report_analysis_html(); NULL omits it.
+build_html_report <- function(meta, img_b64, stats_df, metrics_df, analysis = NULL) {
+  analysis_html <- if (is.null(analysis)) "" else report_analysis_html(analysis)
   def_keys <- if (!is.null(metrics_df))
     intersect(names(METRIC_DEFINITIONS), colnames(metrics_df))
   else names(METRIC_DEFINITIONS)
@@ -680,7 +758,7 @@ notes_html,
 notebook_html,
 "<h2>Figure</h2>
 <img class='figure' src='data:image/png;base64,", img_b64, "' alt='Lysis curve figure'/>
-<h2>Summary statistics</h2>
+", analysis_html, "<h2>Summary statistics</h2>
 <p>Per sample and time point, computed from the currently loaded (and filtered) data.
 SEM = SD / &radic;n; 95% CI = t<sub>0.975, n-1</sub> &times; SEM.</p>",
 html_table(stats_df),
@@ -700,8 +778,10 @@ html_table(meta$settings_df),
 
 # Builds a multi-page PDF report (no LaTeX/pandoc; base pdf device + gridExtra).
 # Page 1: title + provenance. Page 2: figure. Later pages: stats + metrics tables.
+# analysis (v2.11.1, optional): one page per analysis figure right after the
+# main figure, then a replicate-statistics text page and paginated tables.
 build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
-                             width = 10, height = 8) {
+                             width = 10, height = 8, analysis = NULL) {
   stopifnot(requireNamespace("gridExtra", quietly = TRUE))
   grDevices::pdf(file, width = width, height = height, onefile = TRUE)
   on.exit(grDevices::dev.off(), add = TRUE)
@@ -747,6 +827,33 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
   # ── Figure page ──
   print(plot_obj)
 
+  # ── Analysis figure pages (v2.11.1): title, figure, caption; one per page ──
+  text_page <- function(title, paragraphs, wrap = 95) {
+    grid::grid.newpage()
+    grid::grid.text(title, y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
+    body <- paste(vapply(paragraphs, function(s) paste(strwrap(s, wrap), collapse = "\n"), character(1)),
+                  collapse = "\n\n")
+    grid::grid.text(body, x = 0.04, y = 0.92, just = c("left", "top"),
+                    gp = grid::gpar(fontsize = 9.5 * fscale, lineheight = 1.3))
+  }
+  for (f in analysis$figures %||% list()) {
+    drawn <- FALSE
+    if (!is.null(f$plot)) {
+      drawn <- tryCatch({
+        grid::grid.newpage()
+        grid::grid.text(f$title, y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
+        grid::pushViewport(grid::viewport(y = 0.53, height = 0.82))
+        print(f$plot, newpage = FALSE)
+        grid::popViewport()
+        if (nzchar(f$caption %||% ""))
+          grid::grid.text(paste(strwrap(f$caption, 110), collapse = "\n"), y = 0.08, just = "top",
+                          gp = grid::gpar(fontsize = 9 * fscale, lineheight = 1.25, col = "grey20"))
+        TRUE
+      }, error = function(e) { f$error <<- conditionMessage(e); FALSE })
+    }
+    if (!drawn) text_page(f$title, paste0("Figure not available: ", f$error %||% "unknown reason"))
+  }
+
   # ── Stats table pages (chunked) ──
   fmt_df <- function(df) {
     df2 <- df
@@ -771,6 +878,17 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
       vp <- if (gw > 0.98) grid::viewport(y = 0.5, width = 0.98 / gw) else grid::viewport(y = 0.5)
       grid::pushViewport(vp); grid::grid.draw(g); grid::popViewport()
     }
+  }
+  # ── Replicate statistics pages (v2.11.1): same place as in the HTML report,
+  #    between the figures and the summary-statistics table ──
+  if (!is.null(analysis)) {
+    st <- analysis$stats
+    text_page("Replicate statistics",
+              c(stats_lead_text(analysis), st$warnings %||% character(0),
+                paste0("Definitions. ", STATS_DEFINITIONS)))
+    if (!is.null(st$pairwise)) page_table(fmt_stats_df(st$pairwise), "Replicate statistics: pairwise comparisons")
+    if (!is.null(st$omnibus))  page_table(fmt_stats_df(st$omnibus),  "Replicate statistics: omnibus test")
+    if (!is.null(st$posthoc))  page_table(fmt_stats_df(st$posthoc),  "Replicate statistics: post-hoc (Tukey HSD)")
   }
   page_table(stats_df,   "Summary statistics (mean / SD / n / SEM / 95% CI)")
   if (!is.null(metrics_df)) {
@@ -1157,6 +1275,7 @@ APP_DEFAULTS <- list(
   metrics_peak_smooth_window = 1,     # KC-3: off by default
   blank_od               = 0,         # KC-7: off by default
   report_font_size      = 14,
+  report_include_analysis = TRUE,   # v2.11.1: analysis figures + replicate statistics in reports
   # v2.10 journal-figure inputs
   export_units = "in", preview_mode = "canvas", preview_zoom = 2,
   axis_line_pt = 1.07, tick_length_mm = 1.5, legend_position = "right",
@@ -1810,6 +1929,14 @@ ui <- fluidPage(
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
                          "Scales all report text and tables (HTML and PDF). ",
                          "Everything in the Experiment Notebook section is included too."),
+                       checkboxInput("report_include_analysis",
+                                     "Include analysis figures and statistics", TRUE),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Adds the metric summary, specific growth rate, normalized OD (or ",
+                         "replicate overlay without a reference sample) and, when any sample ",
+                         "has an MOI, the dose-response figure, plus the replicate statistics ",
+                         "tables from the Analysis figures tab. Off: the report is figure, ",
+                         "tables and provenance only."),
                        html_report_ui,
                        pdf_report_ui
                    )
@@ -3670,12 +3797,7 @@ server <- function(input, output, session) {
   )
   
   # ── Statistics tables ───────────────────────────────────────────────────────
-  fmt_stats_table <- function(df) {
-    if (is.null(df) || nrow(df) == 0) return(NULL)
-    for (cc in names(df)) if (is.numeric(df[[cc]]))
-      df[[cc]] <- ifelse(is.finite(df[[cc]]), formatC(signif(df[[cc]], 3), format = "g"), "—")
-    df
-  }
+  fmt_stats_table <- fmt_stats_df   # same formatting in the app and the reports
   stats_notes_ui <- function(st) {
     notes <- st$warnings
     if (!is.null(st$pairwise))
@@ -3958,25 +4080,101 @@ server <- function(input, output, session) {
          font_pt     = input$report_font_size %||% 14)
   }
 
+  # Every report PNG (main figure and analysis figures) goes through the same
+  # device, export size and dpi rule.
+  report_png_b64 <- function(p) {
+    tmp_png <- tempfile(fileext = ".png")
+    on.exit(unlink(tmp_png), add = TRUE)
+    sz <- export_size_in()
+    ggsave(tmp_png, plot = p, device = export_device("png"),
+           width = sz[1], height = sz[2],
+           units = "in", dpi = if (sz[1] < 6) 300 else 150, bg = "white")
+    base64enc::base64encode(tmp_png)
+  }
+
+  # v2.11.1: the analysis figures and replicate statistics for the reports.
+  # NULL when the "Include analysis figures and statistics" box is off, so the
+  # reports are exactly what they were in v2.11.0. Figure choice mirrors the
+  # dashboard: metric summary, growth rate, normalized OD (replicate overlay
+  # without a reference sample) and the dose-response only when an MOI is
+  # known. A figure that cannot be built is recorded as a note, not as a
+  # placeholder image.
+  report_analysis_payload <- function(render_png = FALSE) {
+    if (!isTRUE(input$report_include_analysis %||% TRUE)) return(NULL)
+    samps <- input$selected_samples
+    ref   <- input$metrics_ref_sample %||% ""
+    tunit <- time_unit_from_label(input$x_axis_label)
+    ylab  <- input$y_axis_label %||% "OD"
+    mets  <- input$analysis_metrics %||% c("lysis_time", "od_drop")
+    moi   <- moi_map(samps, input$moi_override)
+    win   <- input$metrics_smooth_window %||% 5
+    norm_mode <- input$analysis_norm_mode %||% "reference"
+    types <- c("metric_summary", "growth_rate",
+               if (nzchar(ref)) "normalized" else "replicate_overlay",
+               if (any(is.finite(moi) & moi > 0)) "dose_response")
+    titles <- c(metric_summary    = "Metric summary (replicates, mean ± SD)",
+                growth_rate       = "Specific growth rate vs time",
+                normalized        = "Normalized OD vs time",
+                replicate_overlay = "Replicate overlay",
+                dose_response     = "MOI dose-response")
+    captions <- c(
+      metric_summary = paste0(
+        "Per-replicate values (open circles), mean (bar) ± SD (whiskers) for ",
+        paste(vapply(mets, metric_axis_label, "", tunit = tunit, ylab = ylab), collapse = ", "), ".",
+        if (isTRUE(input$stats_mark) && nzchar(ref))
+          paste0(" Marks: significance vs reference '", ref, "' (",
+                 if (identical(input$stats_method, "nonparametric")) "Mann-Whitney" else "Welch t",
+                 ", Holm-adjusted; see Replicate statistics).") else ""),
+      growth_rate = paste0(
+        "Specific growth rate μ(t) from a centred rolling regression on ln ", ylab,
+        " (window ", win, " points), averaged across replicates; the band is ± SD. ",
+        "The dashed line marks μ = 0."),
+      normalized = if (norm_mode == "t0")
+        paste0("Mean ", ylab, " of each sample divided by its own value at t = 0; the dashed line marks a ratio of 1.")
+      else paste0("Mean ", ylab, " of each sample divided by the mean ", ylab, " of the reference '", ref,
+                  "' at the same time point; the dashed line marks a ratio of 1."),
+      replicate_overlay = "Individual replicate curves (thin lines) with the mean curve (thick line) per sample.",
+      dose_response = paste0(
+        metric_axis_label(input$analysis_dose_metric %||% "lysis_time", tunit = tunit, ylab = ylab),
+        " per replicate (open circles) and mean ± SD (filled symbols) against MOI (log scale)."))
+    figs <- lapply(types, function(ty) {
+      f <- list(type = ty, title = unname(titles[ty]), caption = unname(captions[ty]))
+      p <- tryCatch(build_analysis_plot(ty), error = function(e) e)
+      if (inherits(p, "error")) { f$error <- conditionMessage(p); return(f) }
+      f$plot <- p
+      if (render_png) f$b64 <- report_png_b64(p)
+      f
+    })
+    st <- analysis_stats_current()
+    list(figures = figs, stats = st, metric_label = metric_label(st$metric),
+         ref_sample = ref, method = input$stats_method %||% "welch")
+  }
+
+  # The report bodies live outside the download handlers so the test suites
+  # can call them through testServer. `meta` is a parameter so a caller can
+  # pin the "Generated" timestamp.
+  html_report_string <- function(meta = report_meta()) {
+    req(rv$data, input$selected_samples)
+    metrics <- curve_metrics_current()
+    img_b64 <- report_png_b64(generate_plot())
+    build_html_report(meta, img_b64, stats_table_export(), metrics,
+                      analysis = report_analysis_payload(render_png = TRUE))
+  }
+  pdf_report_file <- function(file, meta = report_meta()) {
+    req(rv$data, input$selected_samples)
+    metrics <- curve_metrics_current()
+    build_pdf_report(file, meta, generate_plot(),
+                     stats_table_export(), metrics,
+                     width  = max(export_size_in()[1], 8),
+                     height = max(export_size_in()[2], 6),
+                     analysis = report_analysis_payload(render_png = FALSE))
+  }
+
   if (has_base64enc) {
     output$downloadHTMLReport <- downloadHandler(
       filename = function()
         paste0("lysis_report_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".html"),
-      content = function(file) {
-        req(rv$data, input$selected_samples)
-        metrics <- curve_metrics_current()
-        p       <- generate_plot()
-        tmp_png <- tempfile(fileext = ".png")
-        on.exit(unlink(tmp_png), add = TRUE)
-        sz <- export_size_in()
-        ggsave(tmp_png, plot = p, device = export_device("png"),
-               width = sz[1], height = sz[2],
-               units = "in", dpi = if (sz[1] < 6) 300 else 150, bg = "white")
-        img_b64 <- base64enc::base64encode(tmp_png)
-        html <- build_html_report(report_meta(), img_b64,
-                                  stats_table_export(), metrics)
-        writeLines(html, file, useBytes = TRUE)
-      }
+      content = function(file) writeLines(html_report_string(), file, useBytes = TRUE)
     )
   }
 
@@ -3984,14 +4182,7 @@ server <- function(input, output, session) {
     output$downloadPDFReport <- downloadHandler(
       filename = function()
         paste0("lysis_report_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".pdf"),
-      content = function(file) {
-        req(rv$data, input$selected_samples)
-        metrics <- curve_metrics_current()
-        build_pdf_report(file, report_meta(), generate_plot(),
-                         stats_table_export(), metrics,
-                         width  = max(export_size_in()[1], 8),
-                         height = max(export_size_in()[2], 6))
-      }
+      content = function(file) pdf_report_file(file)
     )
   }
   

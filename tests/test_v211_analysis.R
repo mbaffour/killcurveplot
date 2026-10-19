@@ -228,6 +228,69 @@ testServer(app, {
   session$setInputs(nb_host_strain = "E. coli K-12", nb_moi = "10")
   check("dashboard notebook shows filled fields", grepl("E. coli K-12", output$dash_notebook$html))
   check("dashboard normalized-panel title follows the reference", grepl("Normalized", output$dash_fig_norm_title))
+
+  cat("\n--- v2.11.1: analysis figures and replicate statistics in the reports ---\n")
+  check("APP_DEFAULTS includes the report option, on by default", isTRUE(env$APP_DEFAULTS$report_include_analysis))
+  n_img   <- function(h) lengths(regmatches(h, gregexpr("<img ", h, fixed = TRUE)))
+  no_b64  <- function(h) gsub("base64,[A-Za-z0-9+/=]+", "base64,", h)
+  n_pages <- function(f) length(grepRaw("/Type /Page[^s]", readBin(f, "raw", file.size(f)), all = TRUE))
+  if (env$has_base64enc && env$has_gridExtra) {
+    # pin the timestamp so two builds of the same inputs can be compared
+    meta <- report_meta(); meta$generated <- "2026-10-19 00:00:00"
+    session$setInputs(report_include_analysis = TRUE, metrics_ref_sample = "Uninfected",
+                      analysis_type = "metric_summary", analysis_metrics = c("lysis_time", "od_drop"))
+    html_on  <- html_report_string(meta)
+    # the v2.11.0 report for the same inputs = the builder without the analysis argument
+    html_old <- env$build_html_report(meta, report_png_b64(generate_plot()), stats_table_export(),
+                                      curve_metrics_current())
+    check("HTML report (on): 'Analysis figures' and 'Replicate statistics' headings",
+          grepl("<h2>Analysis figures</h2>", html_on, fixed = TRUE) &&
+          grepl("<h2>Replicate statistics</h2>", html_on, fixed = TRUE))
+    check("HTML report (on): at least two more <img> elements than before (demo data: +4)",
+          n_img(html_on) >= n_img(html_old) + 2)
+    check("HTML report (on): every analysis figure rendered (no 'Figure not available')",
+          !grepl("Figure not available", html_on, fixed = TRUE))
+    check("HTML report (on): metric summary, growth rate, normalized (reference set) and dose-response (MOI in names)",
+          all(vapply(c("Metric summary", "Specific growth rate vs time", "Normalized OD vs time", "MOI dose-response"),
+                     grepl, logical(1), x = html_on, fixed = TRUE)) &&
+          !grepl("<h3>Replicate overlay</h3>", html_on, fixed = TRUE))
+    check("HTML report (on): pairwise table, the lysis_time warnings and the definitions paragraph",
+          grepl("Pairwise comparisons", html_on, fixed = TRUE) && grepl("<th>p_adj_holm</th>", html_on, fixed = TRUE) &&
+          grepl("all pairs are compared instead", html_on, fixed = TRUE) &&
+          grepl("Hedges' g is the standardized mean difference", html_on, fixed = TRUE) &&
+          grepl("Tukey", html_on, fixed = TRUE) && grepl("Kruskal-Wallis", html_on, fixed = TRUE))
+    check("HTML report (on): the analysis section sits between the main figure and the summary statistics",
+          regexpr("<h2>Figure</h2>", html_on, fixed = TRUE) < regexpr("<h2>Analysis figures</h2>", html_on, fixed = TRUE) &&
+          regexpr("<h2>Replicate statistics</h2>", html_on, fixed = TRUE) < regexpr("<h2>Summary statistics</h2>", html_on, fixed = TRUE))
+    session$setInputs(analysis_metrics = c("max_od", "od_drop"))   # a metric the reference has -> ANOVA + Tukey
+    html_an <- html_report_string(meta)
+    check("HTML report (on): omnibus and Tukey post-hoc tables when 3 groups are testable",
+          grepl("Omnibus test", html_an, fixed = TRUE) && grepl("One-way ANOVA", html_an, fixed = TRUE) &&
+          grepl("Post-hoc comparisons (Tukey HSD)", html_an, fixed = TRUE) && grepl("<th>p_adj_tukey</th>", html_an, fixed = TRUE))
+    session$setInputs(analysis_metrics = c("lysis_time", "od_drop"), metrics_ref_sample = "")
+    html_noref <- html_report_string(meta)
+    check("HTML report (on): replicate overlay replaces the normalized figure without a reference sample",
+          grepl("<h3>Replicate overlay</h3>", html_noref, fixed = TRUE) && !grepl("<h3>Normalized OD", html_noref, fixed = TRUE))
+    session$setInputs(metrics_ref_sample = "Uninfected")
+    # The PDF report draws on grDevices::pdf, whose font database has no "Arial"
+    # (set above by the journal preset): a pre-existing limit of the PDF report,
+    # not of the analysis pages, so build the PDFs with the default family.
+    session$setInputs(font_family = "sans")
+    pdf_on <- of("report_on.pdf"); pdf_report_file(pdf_on, meta)
+    session$setInputs(report_include_analysis = FALSE)
+    html_off <- html_report_string(meta)
+    pdf_off  <- of("report_off.pdf"); pdf_report_file(pdf_off, meta)
+    check("HTML report (off): identical to the v2.11 output for the same inputs",
+          identical(no_b64(html_off), no_b64(html_old)))
+    check("HTML report (off): no analysis section, one <img>",
+          !grepl("Analysis figures", html_off, fixed = TRUE) && n_img(html_off) == 1)
+    check("PDF report: both build and start with %PDF",
+          identical(readBin(pdf_on, "raw", 4), charToRaw("%PDF")) && identical(readBin(pdf_off, "raw", 4), charToRaw("%PDF")))
+    cat(sprintf("   -> PDF pages: on = %d, off = %d\n", n_pages(pdf_on), n_pages(pdf_off)))
+    check("PDF report (on): more pages than without the option (4 figure pages + statistics)",
+          n_pages(pdf_on) >= n_pages(pdf_off) + 5)
+    session$setInputs(report_include_analysis = TRUE)
+  } else skip <<- skip + 1L
 })
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))

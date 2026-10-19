@@ -317,8 +317,8 @@ The **Experiment Notebook** sidebar section (modeled on the companion app's Expe
 
 Fill in an optional title, author, and notes, then click:
 
-- **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the experiment notebook record, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis.
-- **PDF Report** — the same content as a multi-page PDF (title/provenance page, notebook page, figure page, paginated tables). No LaTeX or pandoc required.
+- **HTML Report** — one self-contained `.html` file (openable in any browser, easily shared or printed to PDF) containing: the figure at export settings, the experiment notebook record, the summary statistics table, the curve metrics table *with the definition of every metric*, data provenance (file name, detected format, time column, filters applied, error settings), key visual settings, and the R/package versions used — everything needed to reproduce or defend the analysis. With **Include analysis figures and statistics** (on by default) it also carries the v2.11 analysis figures — metric summary, specific growth rate, normalized OD (or the replicate overlay when no reference sample is set) and, when any sample has an MOI, the dose-response — each at the export size, plus the replicate statistics (pairwise, omnibus and post-hoc tables, their warnings, and a definitions paragraph for Welch t / Holm / Hedges' g / ANOVA + Tukey / Mann-Whitney / Kruskal-Wallis); untick it for the figure-and-tables-only report.
+- **PDF Report** — the same content as a multi-page PDF (title/provenance page, notebook page, figure page, one page per analysis figure, paginated tables, replicate statistics). No LaTeX or pandoc required.
 - **Report base font size** — scales all report text and tables in both formats.
 
 ### Everything stays editable

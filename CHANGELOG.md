@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.11.1 — 2026-10-19
+
+The HTML and PDF reports now double as a complete record of the v2.11
+analysis.
+
+- **Reports carry the analysis figures and replicate statistics.** After the
+  main figure, both reports embed the metric summary, the specific growth
+  rate, the normalized OD (or the replicate overlay when no reference sample
+  is set) and, when any sample has an MOI, the dose-response figure, each
+  rendered at the export size through the same PNG device as the main figure
+  (one page each in the PDF), with a caption. A "Replicate statistics"
+  section follows with the pairwise, omnibus and post-hoc tables from the
+  Analysis figures tab, their warnings (excluded groups, n < 3, no usable
+  reference, constant values), and a definitions paragraph (Welch t, Holm,
+  Hedges' g, ANOVA + Tukey HSD, Mann-Whitney, Kruskal-Wallis). A figure that
+  cannot be built is recorded as a one-line note rather than a placeholder
+  image.
+- **Include analysis figures and statistics** checkbox (Stats & Reports,
+  on by default, in `APP_DEFAULTS`). Off, both reports are exactly what
+  they were in v2.11.0.
+- Internal: `build_html_report()` / `build_pdf_report()` take an optional
+  `analysis` argument (NULL = v2.11.0 output); the report bodies are
+  `html_report_string()` / `pdf_report_file()` in the server so the tests
+  reach them. `tests/test_v211_analysis.R` gains 13 checks: headings, image
+  count, figure choice with and without a reference, ANOVA + Tukey tables,
+  PDF page count, and the off-path HTML being identical to the v2.11.0
+  output for the same inputs.
+
 ## v2.11.0 — 2026-10-18 (in progress; code and tests complete, docs pending)
 
 Analysis figures, replicate statistics and a dashboard. All new figures use
