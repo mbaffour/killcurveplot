@@ -1,5 +1,52 @@
 # Changelog
 
+## v2.16.0 — 2026-10-19
+
+**Subscript axis labels and a Statistics tab.** The wavelength in the y label is
+typeset as a subscript (A₅₅₀, OD₆₀₀), and the descriptive statistics and an
+editable methods paragraph have a tab of their own.
+
+- **Subscripts**: `label_with_subscripts()` turns a label containing `A<digits>`
+  or `OD<digits>` ("A550", "OD600", "A550 relative to Uninfected", "log10 A550")
+  into a plotmath expression with the digits as a subscript; a label without such
+  a token is returned unchanged, so nothing else changes. New checkbox
+  `axis_subscripts` ("Typeset wavelength as subscript"), on by default and set by
+  the journal preset; the **Legacy look** turns it off, which keeps the v2.9 output
+  byte-identical. It applies to the main figure, the analysis figures' y labels,
+  the heatmap key and the dose-response axis. Metric facet strips, the Figure
+  Legend Text and the report captions stay plain text ("A550"). Plotmath ignores
+  the *Italic axis labels* setting for a converted label.
+- **Statistics tab** (after Dashboard), one collapsible section each: summary
+  statistics (time, sample, mean, SD, n, SEM, 95% CI half-width; searchable with
+  25 rows per page when the `DT` package is installed, a striped table otherwise;
+  capped at 2000 rows on screen, the CSV has all), curve metrics with the metric
+  definitions, per-replicate metrics, and the replicate comparison (the same
+  pairwise, omnibus and post-hoc tables as the Analysis tab, with the notes). Each
+  has its own CSV button (`downloadStatsCSV_tab`, `downloadMetricsCSV_tab`,
+  `downloadReplicateMetricsCSV_tab`, `downloadAnalysisStatsCSV_tab`) sharing the
+  content function of the sidebar button.
+- **Methods text**: `methods_text` box (6 rows, empty by default). **Draft from
+  current settings** writes a paragraph from the settings: measurement and time
+  unit, n, how the mean and the error statistic were computed, the metric
+  definitions (μmax window, peak mode and smoothing, lysis threshold), and the
+  statistical tests (method, Holm, reference). It overwrites only an empty box,
+  or when **replace existing text** is ticked. The text is yours to edit; when
+  non-empty it appears as a **Methods** section before the statistics in the
+  HTML and PDF reports, and **Download methods (.txt)** saves it. New defaults:
+  `axis_subscripts`, `methods_text`, `methods_replace`. New optional package: `DT`.
+- **No panel letter unless you set one**: `panel_label` and `analysis_panel_label`
+  now start empty (the journal preset sets a label only from its own *Panel label*
+  field, empty by default), so the startup figures carry no "a" / "b". The Figure
+  Legend Text then has no "(a) " prefix, and the sized file names use "main" /
+  the figure type (`lysis_curve_main_...`, `metric_summary_metric_summary_...`).
+  The composer keeps its a, b, c letters (composing is an explicit request); the
+  new checkbox `compose_tags` ("Add panel letters", on by default) turns them off,
+  and the report caption then says "N panels" instead of "Panels a-N".
+- Tests: `tests/test_v211_analysis.R` covers the subscript helper, the SVG text
+  elements (a smaller "550" next to "A" with the checkbox on, a single "A550"
+  with it off), the Statistics tab outputs, `draft_methods_text()` and the
+  Methods section of the reports.
+
 ## v2.15.0 — 2026-10-19
 
 **Square panels.** The plotting panel is now a fixed size and the figure is

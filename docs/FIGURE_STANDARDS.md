@@ -17,7 +17,7 @@ manuscript without re-editing every figure.
 | Font | Arial | Nature: "standard fonts such as Arial or Helvetica". Arial ships with macOS and Windows, so an SVG that names it opens identically in Inkscape on both. |
 | Axis titles | 7 pt | Nature: text between 5 and 7 pt; Cell Press: 6–8 pt. |
 | Tick labels, legend | 6 pt | same |
-| Panel label | 8 pt bold, top-left | Nature's panel-label style ("a", "b", ...). |
+| Panel label | none by default; 8 pt bold, top-left when you set one (the composer adds a, b, c unless "Add panel letters" is off) | Nature's panel-label style ("a", "b", ...). |
 | Data lines | 0.75 pt | Nature: lines and strokes between 0.25 and 1 pt. |
 | Axes, border, error bars | 0.5 pt | same |
 | Points | 1.2 (≈1 mm) | legible at 89 mm without hiding error bars |
@@ -28,6 +28,11 @@ manuscript without re-editing every figure.
 | Y tick labels | 0.01, 0.1, 1 (trailing zeros trimmed) | reads like a published log axis |
 | Error caption on the artwork | off | the measure and *n* go in the **Figure Legend Text** box (and the manuscript legend), not on the panel |
 | Export | SVG, 600 dpi for rasters | SVG for Inkscape; 600 dpi line art for TIFF submissions (ASM: 300–600 dpi) |
+
+One exception to the sizes above: with **Typeset wavelength as subscript** on (the
+default), the digits of "A550" are drawn by R's plotmath at 70 % of the axis title,
+4.9 pt at 7 pt. That is a hair under Nature's 5 pt floor for text; set the axis
+title to 7.2 pt or more, or untick the box, if a journal checks it.
 
 Everything the preset sets is an ordinary control afterwards. Adjust, then
 **Save Settings** to keep the result as a reusable style file for the next

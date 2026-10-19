@@ -69,7 +69,7 @@ Packages are add-ons that the app depends on. You only need to do this once.
 install.packages(c(
   "shiny", "tidyverse", "ggpubr", "scales",
   "ggrepel", "ggprism", "svglite", "jsonlite",
-  "officer", "rvg", "gifski", "base64enc", "gridExtra", "ragg", "patchwork"
+  "officer", "rvg", "gifski", "base64enc", "gridExtra", "ragg", "patchwork", "DT"
 ))
 ```
 
@@ -81,7 +81,7 @@ If you see any errors mentioning a specific package, try installing that package
 install.packages("package_name_here")
 ```
 
-**Note:** The `officer`, `rvg`, `gifski`, `base64enc`, `gridExtra` and `ragg` packages are optional. Without them, the PowerPoint, GIF, HTML-report and PDF-report buttons (respectively) will be disabled, and PNG/TIFF exports fall back to R's built-in devices; everything else works fine.
+**Note:** The `officer`, `rvg`, `gifski`, `base64enc`, `gridExtra`, `ragg` and `DT` packages are optional. Without them, the PowerPoint, GIF, HTML-report and PDF-report buttons (respectively) will be disabled, PNG/TIFF exports fall back to R's built-in devices, and the Statistics tab shows a plain table instead of a searchable one; everything else works fine.
 
 ---
 
@@ -201,13 +201,24 @@ This is useful when you want to apply the same visual style to different dataset
 
 The app now **starts in the journal standard**: Nature single column
 (89 x 65 mm), Arial 7 / 6 pt, 0.75 / 0.5 pt lines, SVG, the "True export size"
-preview (zoomed to fit the window) and an `a` panel label. A bar above the tabs
+preview (zoomed to fit the window) and no panel letter (set one under *Panel label* if you want it). A bar above the tabs
 always shows what will be exported and warns when the settings are not
 journal-standard. Sample colours come from the Okabe-Ito palette (the
 Colorblind-friendly palette) unless you set a colour per sample. You only need
 the preset below to change the journal or the width; **Legacy look (v2.9
 defaults)** in the same section restores the old 10 x 8 in, 20 pt, PDF start,
 and **Clear & Reset** returns to the journal standard.
+
+### Subscript axis labels
+
+The y-axis label is free text, and a wavelength in it is typeset as a subscript:
+"A550" becomes A₅₅₀ and "OD600" becomes OD₆₀₀, also inside a longer label ("A550
+relative to Uninfected", "log10 A550"). It applies to the main figure and to the
+y labels of the analysis figures, the heatmap key and the dose-response axis.
+Untick **Typeset wavelength as subscript** (Labels & Formatting) to keep plain
+text; the **Legacy look** does. Metric facet titles, the Figure Legend Text and
+the report captions always stay plain text, and a converted label is drawn in
+plain face whatever *Italic axis labels* says.
 
 ### Square panels
 
@@ -281,7 +292,8 @@ Tick the panels (the main lysis curve plus any analysis figures; they are laid
 out in the order listed), choose 1 or 2 columns, the width (the double or
 single column of the journal selected under *Journal Figure Preset*, or a
 custom width in mm), the height of each panel row and the panel-label size and
-case. The tab shows the resulting size in mm (and warns when the height is more
+case. The composer adds a, b, c letters (composing a multi-panel figure is an
+explicit request); untick **Add panel letters** to leave them off. The tab shows the resulting size in mm (and warns when the height is more
 than the journal allows), previews it at true size, and **Download composed
 figure** writes it in the chosen export format (SVG for Inkscape, TIFF with
 LZW, ...). Panels are rendered at their native size, so axis and legend text
@@ -332,7 +344,7 @@ The main panel has three tabs. **Lysis curve** is the figure described above.
 **Analysis figures** draws the companion panels a lysis-curve paper usually
 needs, in exactly the same style (fonts, line weights, legend, colours, export
 size and journal preset) as the main figure, so they assemble in Inkscape
-without rescaling. Pick a figure, set its panel label (default `b`) and use
+without rescaling. Pick a figure, set its panel label (empty by default; the file name then uses the figure type) and use
 **Download figure**:
 
 - **Metric summary** — one facet per chosen metric (lysis onset, OD drop,
@@ -378,6 +390,24 @@ figure size and font; key metrics per sample (± SD across replicates); the
 lysis curve, growth rate, normalized OD (or replicate overlay) and metric
 summary as small multiples; the statistics; and the Experiment Notebook
 fields you have filled in.
+
+### Statistics tab
+
+The **Statistics** tab (after Dashboard) puts the descriptive statistics where you
+can read and download them without opening the sidebar. Each section collapses:
+**Summary statistics** (time, sample, mean, SD, n, SEM, 95% CI half-width; with
+the `DT` package installed the table is searchable and paged at 25 rows, and
+`n` counts only non-missing replicate values), **Curve metrics (mean curve)** with
+the definition of every metric below it, **Per-replicate metrics (mean ± SD)**, and
+**Replicate comparison** (the same pairwise, omnibus and post-hoc tables as the
+Analysis figures tab; method, reference and metric are set there). Every section
+has its own CSV button. **Methods text (editable)** starts empty: **Draft from
+current settings** writes a methods paragraph (measurement, replicates and n,
+how the mean and error statistic were computed, the μmax window, peak mode,
+lysis threshold and smoothing, and the statistical tests) that you then edit
+freely. It overwrites only an empty box unless **replace existing text** is
+ticked. A non-empty text is included in the HTML and PDF reports as a **Methods**
+section before the statistics, and **Download methods (.txt)** saves it.
 
 ---
 

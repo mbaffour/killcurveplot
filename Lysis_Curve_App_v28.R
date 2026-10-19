@@ -1,6 +1,21 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.16.0 -- Subscript axis labels and a Statistics tab:
+#   SUBSCRIPTS      -- label_with_subscripts(): a y label with a wavelength token (A550, OD600,
+#                      "A550 relative to Uninfected", "log10 A550") becomes plotmath A[550] / OD[600];
+#                      labels without a token stay character. Checkbox axis_subscripts (default on;
+#                      the Legacy look turns it off, so the v2.9 output stays byte-identical). Applied
+#                      to the main figure, the analysis figures' y labels, the heatmap key and the
+#                      dose-response axis; facet strips, the Figure Legend Text and report captions
+#                      stay plain text.
+#   STATISTICS TAB  -- new main-panel tab after Dashboard: summary statistics (DT table with search
+#                      when DT is installed), curve metrics + definitions, per-replicate metrics,
+#                      the replicate comparison (same builders as the Analysis tab), each with a CSV
+#                      button, and an editable Methods text (draft_methods_text() fills it from the
+#                      current settings). A non-empty Methods text is a "Methods" section in the HTML
+#                      and PDF reports and downloads as .txt.
+#
 # v2.15.0 -- Square panels: "fixed panel size" is the new standard (panel_size_mode):
 #   the plotting panel is exactly panel_width_mm x panel_height_mm (65 x 65 mm by default) and the
 #   figure is sized AROUND it (axes, labels and an outside legend make it wider), via
@@ -206,11 +221,12 @@ has_base64enc <- requireNamespace("base64enc", quietly = TRUE)
 has_gridExtra <- requireNamespace("gridExtra", quietly = TRUE)
 has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 has_patchwork <- requireNamespace("patchwork", quietly = TRUE)
+has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: searchable summary-statistics table
 
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.15.0"
+APP_VERSION <- "2.16.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -740,6 +756,11 @@ STATS_DEFINITIONS <- paste0(
   "Stars: *** p < 0.001, ** p < 0.01, * p < 0.05, ns = not significant. With three ",
   "biological replicates power is low: a non-significant result is not evidence of no difference.")
 
+# How the summary-statistics columns are computed (the Statistics tab; same wording as the README).
+STATS_N_NOTE <- paste0("Per sample and time point: mean, SD, n, SEM = SD / \u221an, and the 95% CI half-width ",
+                       "(t\u2080.\u2089\u2087\u2085,\u2099\u208b\u2081 \u00d7 SEM). n counts only non-missing replicate values; ",
+                       "with a single replicate SD, SEM and CI are NA.")
+
 # One-sentence description of what was tested and how.
 stats_lead_text <- function(analysis) {
   st <- analysis$stats
@@ -811,6 +832,12 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df, analysis = NU
     paste0("<h2>Experiment notebook</h2>",
            html_table(meta$notebook_df, class = "wrap prov")) else ""
 
+  # v2.16: the editable methods paragraph (Statistics tab), only when there is text; paragraphs split on blank lines
+  methods_html <- if (nzchar(trimws(meta$methods %||% "")))
+    paste0("<h2>Methods</h2>",
+           paste0("<p class='methods'>", gsub("\n", "<br/>",
+                    html_escape(trimws(strsplit(meta$methods, "\n[ \t]*\n")[[1]])), fixed = TRUE), "</p>", collapse = "")) else ""
+
   font_pt <- meta$font_pt %||% 14
 
   paste0(
@@ -831,6 +858,7 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df, analysis = NU
   tr:nth-child(even) td { background: #fafbfc; }
   img.figure { max-width: 100%; height: auto; border: 1px solid #dee2e6; }
   .notes { background: #fff9db; border: 1px solid #ffe066; border-radius: 6px; padding: 12px; }
+  .methods { text-align: justify; line-height: 1.5; }
   .prov td:first-child { font-weight: bold; background: #f1f3f5; }
   table.wrap td { white-space: normal; }
   footer { margin-top: 40px; color: #adb5bd; font-size: 0.8em; border-top: 1px solid #dee2e6; padding-top: 8px; }
@@ -851,6 +879,7 @@ notes_html,
 <tr><td>Error display</td><td>",    html_escape(meta$error_txt),   "</td></tr>
 </table></div>",
 notebook_html,
+methods_html,
 "<h2>Figure</h2>
 <img class='figure' src='data:image/png;base64,", img_b64, "' alt='Lysis curve figure'/>
 ", analysis_html, "<h2>Summary statistics</h2>
@@ -921,6 +950,19 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
     gw <- grid::convertWidth(sum(g$widths), "npc", valueOnly = TRUE)
     vp <- if (gw > 0.98) grid::viewport(y = 0.5, width = 0.98 / gw) else grid::viewport(y = 0.5)
     grid::pushViewport(vp); grid::grid.draw(g); grid::popViewport()
+  }
+
+  # ── Methods pages (v2.16; only when the Statistics tab's text box is non-empty) ──
+  if (nzchar(trimws(meta$methods %||% ""))) {
+    paras <- trimws(strsplit(meta$methods, "\n[ \t]*\n")[[1]])
+    wrapped <- unlist(lapply(paras, function(s) c(strwrap(s, 100), "")), use.names = FALSE)
+    per_page <- 46L
+    for (p0 in seq(1L, length(wrapped), by = per_page)) {
+      grid::grid.newpage()
+      grid::grid.text("Methods", y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
+      grid::grid.text(paste(wrapped[p0:min(p0 + per_page - 1L, length(wrapped))], collapse = "\n"), x = 0.04, y = 0.92,
+                      just = c("left", "top"), gp = grid::gpar(fontsize = 9.5 * fscale, lineheight = 1.3))
+    }
   }
 
   # ── Figure page ──
@@ -1237,7 +1279,8 @@ journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_ran
     show_error_caption = FALSE,   # the Figure Legend Text box carries measure + n instead
     custom_aspect_ratio = FALSE,
     # v2.15: the panel itself has the fixed size; the figure grows around it
-    panel_size_mode = "fixed", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE
+    panel_size_mode = "fixed", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE,
+    axis_subscripts = TRUE        # v2.16: A550 -> A[550] in axis labels (the Legacy look keeps plain text)
   )
   # v2.12: caps as a fraction of the x range, so the look is the same whether
   # time is in minutes or hours (x_range kept for callers; no longer needed)
@@ -1349,7 +1392,7 @@ fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
 }
 # Panels laid out as an ncol-column grid of fixed-panel gtables (each placed top-left in a cell as
 # wide / tall as the largest one), with a, b, c tags at each cell's top-left corner.
-compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a") {
+compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE) {
   n <- length(items); ncol <- max(1, min(ncol, n)); nrow <- ceiling(n / ncol)
   sz <- vapply(items, function(g) attr(g, "size_mm"), numeric(2))
   cw <- max(sz[1, ]); ch <- max(sz[2, ])
@@ -1361,6 +1404,7 @@ compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", 
                         vp = grid::viewport(x = 0, y = 1, width = grid::unit(sz[1, i], "mm"),
                                             height = grid::unit(sz[2, i], "mm"), just = c("left", "top")))
     master <- gtable::gtable_add_grob(master, cell, t = r, l = cc, name = paste0("cell-", i), clip = "off")
+    if (!isTRUE(tags_on)) next   # v2.16: "Add panel letters" off
     tag <- grid::textGrob(tags[i], x = grid::unit(0.5, "mm"), y = grid::unit(1, "npc") - grid::unit(0.5, "mm"),
                           hjust = 0, vjust = 1,
                           gp = grid::gpar(fontsize = tag_size, fontface = "bold", fontfamily = font))
@@ -1424,6 +1468,41 @@ metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
   else if (m %in% c("od_drop", "residual_od", "max_od", "final_od")) paste0(base, " (", ylab, ")")
   else if (m == "auc") paste0(base, " (", ylab, " \u00d7 ", tunit, ")")
   else base
+}
+
+# v2.16: typeset the wavelength in an absorbance label as a subscript (A550 -> A[550], OD600 ->
+# OD[600]). A label with such a token ("A550", "OD600", "A550 relative to Uninfected", "log10 A550",
+# "OD drop (A550)") becomes a plotmath call: the token is letters[digits] and the rest stays quoted
+# text, joined with "~" (a space) where the text had whitespace and "*" (no space) where it did
+# not. Labels without a token come back unchanged (character), so output without one is identical.
+label_with_subscripts <- function(x) {
+  if (!is.character(x) || length(x) != 1L || is.na(x)) return(x)
+  m <- gregexpr("(?<![A-Za-z0-9])(OD|A)([0-9]+)(?![A-Za-z0-9])", x, perl = TRUE)[[1]]
+  if (m[1] == -1L) return(x)
+  # raw segments in order: text between tokens (whitespace kept) and the tokens themselves
+  raw <- character(0); is_tok <- logical(0); pos <- 1L
+  for (i in seq_along(m)) {
+    if (as.integer(m[i]) > pos) { raw <- c(raw, substr(x, pos, m[i] - 1L)); is_tok <- c(is_tok, FALSE) }
+    raw <- c(raw, substr(x, m[i], m[i] + attr(m, "match.length")[i] - 1L)); is_tok <- c(is_tok, TRUE)
+    pos <- as.integer(m[i]) + attr(m, "match.length")[i]
+  }
+  if (pos <= nchar(x)) { raw <- c(raw, substr(x, pos, nchar(x))); is_tok <- c(is_tok, FALSE) }
+  keep <- is_tok | nzchar(trimws(raw))                        # whitespace-only text between two tokens only spaces them
+  part <- function(i) {
+    if (!is_tok[i]) return(trimws(raw[i]))
+    base <- sub("[0-9]+$", "", raw[i]); dig <- sub("^[A-Za-z]+", "", raw[i])
+    call("[", as.name(base), if (identical(as.character(as.numeric(dig)), dig)) as.numeric(dig) else dig)
+  }
+  idx <- which(keep)
+  out <- part(idx[1])
+  for (k in seq_along(idx)[-1]) {
+    i0 <- idx[k - 1L]; i1 <- idx[k]
+    between <- paste0(substr(raw[i0], nchar(raw[i0]), nchar(raw[i0])),            # last char before, first after,
+                      if (i1 - i0 > 1L) raw[(i0 + 1L):(i1 - 1L)] else "",         # and any dropped whitespace text
+                      substr(raw[i1], 1L, 1L))
+    out <- call(if (grepl("\\s", between)) "~" else "*", out, part(i1))
+  }
+  out
 }
 
 sig_stars <- function(p)
@@ -1649,7 +1728,7 @@ LEGACY_BASE <- list(
   # v2.13.0 figure composer
   compose_panels = c("main", "metric_summary", "growth_rate", "normalized"),
   compose_ncol = "2", compose_width = "double", compose_width_mm = 183,
-  compose_panel_height_mm = 60, compose_tag_size = 8, compose_tag_case = "a",
+  compose_panel_height_mm = 60, compose_tag_size = 8, compose_tag_case = "a", compose_tags = TRUE,   # v2.16: panel letters in the composer (explicit request, on)
   metrics_lysis_threshold_pct = 5,    # v2.12.4: decline from peak that counts as lysis (%)
   metrics_peak_mode = "global",       # v2.12.2: "first_local" for regrowth / resistance curves
   blank_od               = 0,         # KC-7: off by default
@@ -1661,10 +1740,12 @@ LEGACY_BASE <- list(
   legend_box_border = TRUE, legend_key_mm = 0, panel_label = "", panel_label_size = 8,
   panel_size_mode = "fit", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE,   # v2.15
   theme_base_pt = 0, y_tick_label_style = "legacy",
+  axis_subscripts = FALSE,            # v2.16: journal preset TRUE; plain "A550" in the Legacy look
+  methods_text = "", methods_replace = FALSE,   # v2.16 Statistics tab: editable methods paragraph
   # v2.11 analysis / dashboard inputs
   analysis_type = "metric_summary", analysis_metrics = c("lysis_time", "od_drop"),
   analysis_dose_metric = "lysis_time", analysis_norm_mode = "reference",
-  analysis_panel_label = "b", stats_method = "welch", stats_mark = TRUE, moi_override = "",
+  analysis_panel_label = "", stats_method = "welch", stats_mark = TRUE, moi_override = "",
   # v2.12 error display
   error_bar_color = "sample", show_replicate_points = FALSE, error_log_floor = TRUE,
   error_cap_relative = FALSE,
@@ -1682,7 +1763,7 @@ LEGACY_BASE <- list(
 
 # The inputs the journal preset sets, at their legacy values.
 legacy_preset_settings <- function() LEGACY_BASE[names(journal_preset_settings(89, 65))]
-APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65, panel_label = "a"))
+APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65))   # v2.16: no panel letter unless the user sets one
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
@@ -1896,6 +1977,8 @@ ui <- fluidPage(
                        h4("Labels & Formatting", class = "panel-title"),
                        textInput("x_axis_label",  "X-axis Label:",  "Time (minutes)"),
                        textInput("y_axis_label",  "Y-axis Label:",  "A550"),
+                       checkboxInput("axis_subscripts", "Typeset wavelength as subscript (A550 -> A\u2085\u2085\u2080)",
+                                     APP_DEFAULTS$axis_subscripts),
                        textInput("plot_title",    "Plot Title:",    ""),
                        textInput("plot_subtitle", "Plot Subtitle:", ""),
                        h5("Gridlines", style = "margin-top:12px;"),
@@ -2440,7 +2523,7 @@ ui <- fluidPage(
                 selectInput("analysis_type", "Figure:",
                             choices = ANALYSIS_FIGURE_CHOICES,
                             selected = "metric_summary"),
-                textInput("analysis_panel_label", "Panel label:", "b")
+                textInput("analysis_panel_label", "Panel label:", APP_DEFAULTS$analysis_panel_label, placeholder = "b")
               ),
               column(3,
                 conditionalPanel("input.analysis_type == 'metric_summary'",
@@ -2534,6 +2617,7 @@ ui <- fluidPage(
                 conditionalPanel("input.panel_size_mode == 'fixed'",
                   p(style = "font-size:.8em;color:#777;", "Fixed panel size: every panel keeps its panel size and the composed figure is as wide and tall as the grid of cells needs."))),
               column(4,
+                checkboxInput("compose_tags", "Add panel letters", APP_DEFAULTS$compose_tags),
                 numericInput("compose_tag_size", "Panel label size (pt):", 8, 4, 20, 0.5),
                 radioButtons("compose_tag_case", "Panel labels:",
                              choices = c("a, b, c" = "a", "A, B, C" = "A"), selected = "a", inline = TRUE),
@@ -2570,6 +2654,54 @@ ui <- fluidPage(
           tableOutput("dash_stats"),
           h4("Experiment", style = "margin-top:16px;"),
           uiOutput("dash_notebook")
+        ),
+        # ── Statistics (v2.16): the descriptive statistics, reviewable without the sidebar ──
+        tabPanel("Statistics", br(),
+          p(style = "font-size:.85em;color:#555;",
+            "Everything the reports and CSV downloads contain, in one place: review it here, ",
+            "download each table, and edit the Methods paragraph that goes into the reports."),
+          tags$details(open = NA, class = "stats-section",
+            tags$summary(tags$b("Summary statistics")),
+            div(class = "panel-section",
+              uiOutput("stats_tab_summary_note"),
+              if (has_DT) DT::DTOutput("stats_tab_summary") else div(style = "overflow-x:auto;", tableOutput("stats_tab_summary")),
+              p(style = "font-size:.78em;color:#777;margin-top:6px;", STATS_N_NOTE),
+              downloadButton("downloadStatsCSV_tab", "Summary statistics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Curve metrics (mean curve)")),
+            div(class = "panel-section",
+              div(style = "overflow-x:auto;", tableOutput("stats_tab_metrics")),
+              h5("Metric definitions"),
+              tableOutput("stats_tab_metric_defs"),
+              downloadButton("downloadMetricsCSV_tab", "Curve metrics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Per-replicate metrics (mean \u00b1 SD)")),
+            div(class = "panel-section",
+              div(style = "overflow-x:auto;", tableOutput("stats_tab_repmetrics")),
+              downloadButton("downloadReplicateMetricsCSV_tab", "Per-replicate metrics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Replicate comparison")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "The same tables as the Analysis figures tab: the test method, the reference sample and ",
+                "the metric are set there (Statistics, and the figure's metric) and under Stats & Reports."),
+              uiOutput("stats_tab_notes"),
+              tableOutput("stats_tab_pairwise"),
+              tableOutput("stats_tab_omnibus"),
+              tableOutput("stats_tab_posthoc"),
+              downloadButton("downloadAnalysisStatsCSV_tab", "Replicate statistics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Methods text (editable)")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Draft a methods paragraph from the current settings, then edit it freely. A non-empty ",
+                "text is included in the HTML and PDF reports as a Methods section, before the statistics."),
+              textAreaInput("methods_text", NULL, value = APP_DEFAULTS$methods_text, rows = 6, width = "100%",
+                            placeholder = "Click 'Draft from current settings', or write your own."),
+              fluidRow(
+                column(4, actionButton("methods_draft", "Draft from current settings")),
+                column(4, checkboxInput("methods_replace", "replace existing text", APP_DEFAULTS$methods_replace)),
+                column(4, downloadButton("downloadMethodsTxt", "Download methods (.txt)")))))
         )
       )
     )
@@ -2612,6 +2744,12 @@ server <- function(input, output, session) {
     settings_status   = NULL,
     style_page        = 1L      # current page in Variable Styling panel (pagination)
   )
+  
+  # v2.16: y-axis-derived labels (main figure, analysis figures, dose-response, heatmap key) go through
+  # this so the wavelength can be typeset as a subscript. Plain text when the box is off (and in the
+  # Figure Legend Text, the facet strips and the report captions, which never use it).
+  axis_y_label <- function(txt)
+    if (isTRUE(input$axis_subscripts)) label_with_subscripts(txt) else txt
   
   # ── Palette helpers ──────────────────────────────────────────────────────────
   get_palette_colors <- function(pal, n) {
@@ -4004,7 +4142,7 @@ server <- function(input, output, session) {
 
     p + coord_cartesian(clip = "off") +
       labs(x        = input$x_axis_label,
-           y        = input$y_axis_label,
+           y        = axis_y_label(input$y_axis_label),
            # v2.10: with journal spacing (theme_base_pt > 0) a blank title is NULL,
            # so no empty title row (~5 mm) is reserved above the panel. Legacy
            # spacing keeps "" so pre-2.10 figures reproduce exactly.
@@ -4601,7 +4739,7 @@ server <- function(input, output, session) {
           geom_hline(yintercept = 1, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
           geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7) +
           base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
-          labs(x = input$x_axis_label, y = paste0(input$y_axis_label, " relative to ", ref_lab))
+          labs(x = input$x_axis_label, y = axis_y_label(paste0(input$y_axis_label, " relative to ", ref_lab)))
       },
       replicate_overlay = {
         rp <- prepare_replicate_data(); pd <- prepare_plot_data()
@@ -4613,7 +4751,7 @@ server <- function(input, output, session) {
                     linewidth = lw * 0.5, alpha = 0.45) +
           geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable,
                                    group = variable), linewidth = lw * 1.3) +
-          base_scales + labs(x = input$x_axis_label, y = input$y_axis_label)
+          base_scales + labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
         if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels()) else g
       },
       dose_response = {
@@ -4664,7 +4802,7 @@ server <- function(input, output, session) {
           base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
           scale_x_log10(labels = scales::label_number(drop0trailing = TRUE, big.mark = ""),
                         expand = if (length(series_levels) > 1) expansion(mult = c(0.05, 0.35)) else waiver()) +
-          labs(x = "MOI", y = metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD"))
+          labs(x = "MOI", y = axis_y_label(metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
         g
       },
       landmarks = {
@@ -4709,7 +4847,7 @@ server <- function(input, output, session) {
           guides(fill = "none", color = guide_legend(order = 1, override.aes = list(shape = NA)),
                  linetype = guide_legend(order = 1),
                  shape = guide_legend(order = 2, override.aes = list(color = "black", fill = "grey60"))) +
-          labs(x = input$x_axis_label, y = input$y_axis_label)
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
         if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels()) else g
       },
       heatmap = {
@@ -4718,7 +4856,7 @@ server <- function(input, output, session) {
         logit <- identical(input$y_scale_type, "log")
         pd$fillv <- if (logit) log10(pmax(pd$mean_value, 1e-6)) else pd$mean_value
         ggplot(pd, aes(x = time, y = variable, fill = fillv)) + geom_tile() +
-          scale_fill_viridis_c(name = if (logit) paste0("log10 ", input$y_axis_label) else input$y_axis_label) +
+          scale_fill_viridis_c(name = axis_y_label(if (logit) paste0("log10 ", input$y_axis_label) else input$y_axis_label)) +
           labs(x = input$x_axis_label, y = NULL)
       },
       stop("Unknown analysis figure type"))
@@ -4767,11 +4905,12 @@ server <- function(input, output, session) {
   # tag is removed, panels are free()d from alignment (an outside legend would
   # otherwise squeeze the panels beside it), and patchwork adds a, b, c tags in the
   # journal's panel-label style.
-  compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a") {
+  compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE) {
     if (!has_patchwork) stop("The figure composer needs the 'patchwork' package: install.packages('patchwork')")
     panels <- lapply(panels, function(p) patchwork::free(p + labs(tag = NULL)))
-    patchwork::wrap_plots(panels, ncol = ncol) +
-      patchwork::plot_annotation(tag_levels = tag_case) &
+    w <- patchwork::wrap_plots(panels, ncol = ncol)
+    if (!isTRUE(tags_on)) return(w)    # v2.16: "Add panel letters" off: no a, b, c
+    w + patchwork::plot_annotation(tag_levels = tag_case) &
       theme(plot.tag = element_text(size = tag_size, face = "bold", family = font))
   }
   is_placeholder_plot <- function(p) {
@@ -4820,12 +4959,14 @@ server <- function(input, output, session) {
       # v2.15: every panel keeps its fixed panel size; the grid is as wide / tall as its cells need
       items <- lapply(names(plots), function(ty) fixed_figure(plots[[ty]] + labs(tag = NULL), ty))
       g <- compose_fixed_figure(items, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
-                                font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a")
+                                font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a",
+                                tags_on = isTRUE(input$compose_tags %||% TRUE))
       w_mm <- attr(g, "size_mm")[1]; h_mm <- attr(g, "size_mm")[2]
       g
     } else if (n >= 1)
       compose_figure(plots, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
-                     font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a")
+                     font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a",
+                     tags_on = isTRUE(input$compose_tags %||% TRUE))
     else NULL
     list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
          types = names(plots), width_mm = w_mm, height_mm = h_mm)
@@ -4888,27 +5029,29 @@ server <- function(input, output, session) {
     else notes <- c("No comparison possible yet: load data with 2+ replicates per sample.", notes)
     div(lapply(notes, function(n) div(class = "stats-note", n)))
   }
-  output$analysis_stats_notes   <- renderUI({ req(rv$data); stats_notes_ui(analysis_stats_current()) })
-  output$analysis_stats_table   <- renderTable({ req(rv$data); fmt_stats_table(analysis_stats_current()$pairwise) },
-                                               striped = TRUE, spacing = "xs")
-  output$analysis_stats_omnibus <- renderTable({ req(rv$data); fmt_stats_table(analysis_stats_current()$omnibus) },
-                                               striped = TRUE, spacing = "xs")
-  output$analysis_stats_posthoc <- renderTable({ req(rv$data); fmt_stats_table(analysis_stats_current()$posthoc) },
-                                               striped = TRUE, spacing = "xs")
-  output$downloadAnalysisStatsCSV <- downloadHandler(
-    filename = function() paste0("replicate_stats_", analysis_stat_metric(), "_",
-                                 format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content = function(file) {
-      st <- analysis_stats_current()
-      con <- file(file, open = "w", encoding = "UTF-8"); on.exit(close(con))
-      writeLines(paste0("# metric,", st$metric, " ; method,", input$stats_method %||% "welch",
-                        " ; reference,", input$metrics_ref_sample %||% ""), con)
-      for (w in st$warnings) writeLines(paste0("# ", w), con)
-      if (!is.null(st$pairwise)) { writeLines("# pairwise", con); write.csv(st$pairwise, con, row.names = FALSE) }
-      if (!is.null(st$omnibus))  { writeLines("# omnibus",  con); write.csv(st$omnibus,  con, row.names = FALSE) }
-      if (!is.null(st$posthoc))  { writeLines("# posthoc (Tukey HSD)", con); write.csv(st$posthoc, con, row.names = FALSE) }
-    }
-  )
+  # v2.16: one builder per table, used by the Analysis tab and the Statistics tab (own output ids)
+  stats_notes_build    <- function() { req(rv$data); stats_notes_ui(analysis_stats_current()) }
+  stats_pairwise_build <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$pairwise) }
+  stats_omnibus_build  <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$omnibus) }
+  stats_posthoc_build  <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$posthoc) }
+  output$analysis_stats_notes   <- renderUI(stats_notes_build())
+  output$analysis_stats_table   <- renderTable(stats_pairwise_build(), striped = TRUE, spacing = "xs")
+  output$analysis_stats_omnibus <- renderTable(stats_omnibus_build(),  striped = TRUE, spacing = "xs")
+  output$analysis_stats_posthoc <- renderTable(stats_posthoc_build(),  striped = TRUE, spacing = "xs")
+  analysis_stats_csv_name <- function() paste0("replicate_stats_", analysis_stat_metric(), "_",
+                                               format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+  analysis_stats_csv_content <- function(file) {
+    st <- analysis_stats_current()
+    con <- file(file, open = "w", encoding = "UTF-8"); on.exit(close(con))
+    writeLines(paste0("# metric,", st$metric, " ; method,", input$stats_method %||% "welch",
+                      " ; reference,", input$metrics_ref_sample %||% ""), con)
+    for (w in st$warnings) writeLines(paste0("# ", w), con)
+    if (!is.null(st$pairwise)) { writeLines("# pairwise", con); write.csv(st$pairwise, con, row.names = FALSE) }
+    if (!is.null(st$omnibus))  { writeLines("# omnibus",  con); write.csv(st$omnibus,  con, row.names = FALSE) }
+    if (!is.null(st$posthoc))  { writeLines("# posthoc (Tukey HSD)", con); write.csv(st$posthoc, con, row.names = FALSE) }
+  }
+  output$downloadAnalysisStatsCSV     <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
+  output$downloadAnalysisStatsCSV_tab <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
   
   # ── Dashboard (v2.11) ───────────────────────────────────────────────────────
   output$dash_cards <- renderUI({
@@ -5021,14 +5164,15 @@ server <- function(input, output, session) {
                stringsAsFactors = FALSE)
   }
 
-  output$downloadStatsCSV <- downloadHandler(
-    filename = function()
-      paste0("summary_stats_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content = function(file) {
-      req(rv$data, input$selected_samples)
-      write.csv(stats_table_export(), file, row.names = FALSE)
-    }
-  )
+  # v2.16: each CSV has one filename / content function, shared by the sidebar button and the
+  # Statistics tab button (a Shiny output id can only be bound once, so each has a second id).
+  stats_csv_name   <- function() paste0("summary_stats_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+  stats_csv_content <- function(file) {
+    req(rv$data, input$selected_samples)
+    write.csv(stats_table_export(), file, row.names = FALSE)
+  }
+  output$downloadStatsCSV     <- downloadHandler(filename = stats_csv_name, content = stats_csv_content)
+  output$downloadStatsCSV_tab <- downloadHandler(filename = stats_csv_name, content = stats_csv_content)
 
   curve_metrics_current <- function() {
     compute_curve_metrics(prepare_plot_data(),
@@ -5056,14 +5200,13 @@ server <- function(input, output, session) {
                     "small negative reading after blank subtraction.")))
   })
 
-  output$downloadMetricsCSV <- downloadHandler(
-    filename = function()
-      paste0("curve_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content = function(file) {
-      req(rv$data, input$selected_samples)
-      write.csv(curve_metrics_current(), file, row.names = FALSE)
-    }
-  )
+  metrics_csv_name <- function() paste0("curve_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+  metrics_csv_content <- function(file) {
+    req(rv$data, input$selected_samples)
+    write.csv(curve_metrics_current(), file, row.names = FALSE)
+  }
+  output$downloadMetricsCSV     <- downloadHandler(filename = metrics_csv_name, content = metrics_csv_content)
+  output$downloadMetricsCSV_tab <- downloadHandler(filename = metrics_csv_name, content = metrics_csv_content)
 
   # KC-4: per-replicate metrics (mean +/- SD across replicates), additive
   # alongside curve_metrics_current() above.
@@ -5075,13 +5218,147 @@ server <- function(input, output, session) {
                               lysis_threshold    = lysis_threshold_current())
   }
 
-  output$downloadReplicateMetricsCSV <- downloadHandler(
-    filename = function()
-      paste0("replicate_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content = function(file) {
-      req(rv$data, input$selected_samples)
-      write.csv(replicate_metrics_current(), file, row.names = FALSE)
+  repmetrics_csv_name <- function() paste0("replicate_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+  repmetrics_csv_content <- function(file) {
+    req(rv$data, input$selected_samples)
+    write.csv(replicate_metrics_current(), file, row.names = FALSE)
+  }
+  output$downloadReplicateMetricsCSV     <- downloadHandler(filename = repmetrics_csv_name, content = repmetrics_csv_content)
+  output$downloadReplicateMetricsCSV_tab <- downloadHandler(filename = repmetrics_csv_name, content = repmetrics_csv_content)
+
+  # ── Statistics tab (v2.16) ───────────────────────────────────────────────────
+  # The descriptive statistics and metrics, reviewable and downloadable without the sidebar; the
+  # replicate comparison uses the same builders as the Analysis tab (own output ids). Outputs in a
+  # tab that is not showing are not computed, so this costs nothing until it is opened.
+  STATS_TAB_MAX_ROWS <- 2000L
+  stats_tab_summary_df <- function() { req(rv$data, input$selected_samples); stats_table_export() }
+  output$stats_tab_summary_note <- renderUI({
+    n <- nrow(stats_tab_summary_df())
+    if (n > STATS_TAB_MAX_ROWS)
+      p(class = "stats-note", sprintf("The first %s of %s rows are shown; the CSV has all of them.",
+                                      STATS_TAB_MAX_ROWS, format(n, big.mark = ",")))
+  })
+  if (has_DT) {
+    output$stats_tab_summary <- DT::renderDT({
+      df <- utils::head(stats_tab_summary_df(), STATS_TAB_MAX_ROWS)
+      df$n <- as.integer(df$n)
+      DT::formatRound(DT::datatable(df, rownames = FALSE, options = list(pageLength = 25, searching = TRUE, scrollX = TRUE)),
+                      intersect(c("mean", "sd", "sem", "ci95_half_width"), names(df)), digits = 4)
+    }, server = FALSE)   # rows (capped) travel with the widget: the search box filters in the browser
+  } else {
+    output$stats_tab_summary <- renderTable({
+      df <- utils::head(stats_tab_summary_df(), STATS_TAB_MAX_ROWS)
+      df$n <- as.integer(df$n); df$time <- as.character(df$time)   # whole numbers, not 15.0000
+      df
+    }, striped = TRUE, digits = 4, spacing = "xs")
+  }
+  # 4 significant figures, "NA" for missing; whole numbers stay whole
+  tab_sig <- function(df, sig = 4) {
+    for (cc in names(df)) if (is.numeric(df[[cc]]))
+      df[[cc]] <- vapply(df[[cc]], function(v) if (is.finite(v)) format(signif(v, sig), trim = TRUE, scientific = FALSE) else "NA", "")
+    df
+  }
+  output$stats_tab_metrics <- renderTable({
+    req(rv$data, input$selected_samples); m <- curve_metrics_current(); req(m); tab_sig(m)
+  }, striped = TRUE, spacing = "xs")
+  output$stats_tab_metric_defs <- renderTable({
+    req(rv$data, input$selected_samples); m <- curve_metrics_current(); req(m)
+    keys <- intersect(names(METRIC_DEFINITIONS), colnames(m))
+    data.frame(Metric = keys, Definition = unname(METRIC_DEFINITIONS[keys]), stringsAsFactors = FALSE)
+  }, striped = TRUE, spacing = "xs")
+  output$stats_tab_repmetrics <- renderTable({
+    req(rv$data, input$selected_samples); m <- replicate_metrics_current(); req(m); tab_sig(m)
+  }, striped = TRUE, spacing = "xs")
+  output$stats_tab_notes    <- renderUI(stats_notes_build())
+  output$stats_tab_pairwise <- renderTable(stats_pairwise_build(), striped = TRUE, spacing = "xs")
+  output$stats_tab_omnibus  <- renderTable(stats_omnibus_build(),  striped = TRUE, spacing = "xs")
+  output$stats_tab_posthoc  <- renderTable(stats_posthoc_build(),  striped = TRUE, spacing = "xs")
+
+  # Methods paragraph drafted from the current settings: what was measured, how the mean and the
+  # error statistic were computed, how the metrics were defined and which tests were run. Plain text
+  # (the y label keeps its "A550"); the user edits it and the reports include what is in the box.
+  draft_methods_text <- function() {
+    if (is.null(rv$data) || !length(input$selected_samples)) return("")
+    pd <- tryCatch(prepare_plot_data(), error = function(e) NULL)
+    if (is.null(pd) || nrow(pd) == 0) return("")
+    nb <- function(id) { v <- input[[id]]; if (is.null(v) || !nzchar(trimws(as.character(v)))) NULL else trimws(as.character(v)) }
+    samps <- input$selected_samples
+    ylab  <- nb("y_axis_label") %||% "optical density"
+    tunit <- time_unit_from_label(input$x_axis_label)
+    n_rng <- suppressWarnings(range(pd$n, na.rm = TRUE))
+    n_txt <- if (!all(is.finite(n_rng))) "replicate"
+             else if (n_rng[1] == n_rng[2]) paste0(n_rng[1], " replicate", if (n_rng[1] == 1) "" else "s")
+             else paste0(n_rng[1], "–", n_rng[2], " replicates")
+    et <- input$error_type %||% "sem"; em <- input$error_multiplier %||% 1
+    mult <- if (is.numeric(em) && is.finite(em) && em != 1) paste0(em, " × ") else ""
+    shown <- if (identical(input$error_display_mode, "shadow")) "shaded bands" else "error bars"
+    err <- switch(et,
+      sd   = paste0("Mean curves are shown with ", shown, " of ", mult, "the standard deviation (SD) of the replicates."),
+      sem  = paste0("Mean curves are shown with ", shown, " of ", mult, "the standard error of the mean (SEM = SD / √n)."),
+      ci95 = paste0("Mean curves are shown with ", shown, " of ", mult, "the 95% confidence interval of the mean (t₀.₉₇₅,ₙ₋₁ × SEM)."),
+      "Mean curves are shown without an error statistic.")
+    s1 <- paste0(
+      if (!is.null(nb("nb_host_strain")))
+        paste0("Growth of ", nb("nb_host_strain"),
+               if (!is.null(nb("nb_phage_plasmid"))) paste0(" infected with ", nb("nb_phage_plasmid")) else "",
+               if (!is.null(nb("nb_moi"))) paste0(" (MOI ", nb("nb_moi"), ")") else "",
+               if (!is.null(nb("nb_media"))) paste0(" in ", nb("nb_media")) else "",
+               if (!is.null(nb("nb_temperature"))) paste0(" at ", nb("nb_temperature"), " °C") else "",
+               " was followed as ", ylab, " over time (", tunit, ").")
+      else paste0("Culture density was measured as ", ylab, " over time (", tunit, ")."),
+      " ", length(samps), " sample", if (length(samps) == 1) "" else "s",
+      " (", if (length(samps) <= 8) paste(samps, collapse = ", ") else paste0(paste(samps[1:8], collapse = ", "), ", ..."),
+      ") were measured in ", n_txt, " each.")
+    blank <- input$blank_od %||% 0
+    s2 <- paste0(
+      if (is.numeric(blank) && is.finite(blank) && blank != 0) paste0("Readings were blank-corrected by subtracting ", blank, ". ") else "",
+      if (isTRUE(input$enable_time_filter)) "Only the displayed time window was analysed. " else "",
+      "At each time point the mean of the replicates was plotted. ", err)
+    win <- input$metrics_smooth_window %||% 5
+    pw  <- input$metrics_peak_smooth_window %||% 1
+    thr <- lysis_threshold_current() * 100
+    first_local <- identical(input$metrics_peak_mode %||% "global", "first_local")
+    s3 <- paste0(
+      "Curve metrics were computed from each sample's mean curve. The maximum specific growth rate (μmax) is the largest ",
+      "slope of ln(", ylab, ") against time in a centred rolling-regression window of ", win, " points, and the doubling time is ln 2 / μmax. ",
+      "The peak was taken as ",
+      if (first_local) "the first maximum followed by a decline of more than 10%" else "the global maximum of the curve",
+      if (is.numeric(pw) && pw > 1) paste0(" (curves smoothed with a ", pw, "-point window for peak detection)") else " (no smoothing for peak detection)",
+      ", and lysis onset as the first time after the peak at which the value fell more than ", thr, "% below it. ",
+      "Per-replicate metrics were computed the same way on each replicate curve and are reported as mean ± SD.")
+    ref <- input$metrics_ref_sample %||% ""
+    nonpar <- identical(input$stats_method %||% "welch", "nonparametric")
+    st_metric <- tryCatch(metric_label(analysis_stat_metric()), error = function(e) "the per-replicate metric")
+    s4 <- paste0(
+      if (length(samps) < 2) "No statistical comparison was made (a single sample)."
+      else paste0(
+        if (nzchar(ref) && ref %in% samps) paste0("Each sample was compared with the reference sample '", ref, "'")
+        else "All pairs of samples were compared",
+        " on the per-replicate metric '", st_metric, "' using ",
+        if (nonpar) "the Mann–Whitney U test" else "Welch's t-test (unequal variances)",
+        "; p values were adjusted for multiple comparisons by the Holm method, and effect sizes are reported as Hedges' g with the 95% confidence interval of the difference.",
+        if (length(samps) >= 3)
+          paste0(" Differences among three or more groups were tested with ",
+                 if (nonpar) "the Kruskal–Wallis test." else "one-way ANOVA followed by Tukey's HSD.")
+        else ""))
+    s5 <- paste0("Analysis and figures were produced with the Lysis Curve OD Visualization App v", APP_VERSION,
+                 " (R ", R.version$major, ".", R.version$minor, ").")
+    paste(c(s1, s2, s3, s4, s5), collapse = " ")
+  }
+  observeEvent(input$methods_draft, {
+    if (is.null(rv$data) || !length(input$selected_samples)) {
+      guard_notify("methods_draft", "Load data and select samples first: the methods text is drafted from them.")
+      return(invisible(NULL))
     }
+    if (nzchar(trimws(input$methods_text %||% "")) && !isTRUE(input$methods_replace)) {
+      guard_notify("methods_draft", "The box already has text. Tick 'replace existing text' to overwrite it with a new draft.")
+      return(invisible(NULL))
+    }
+    updateTextAreaInput(session, "methods_text", value = draft_methods_text())
+  })
+  output$downloadMethodsTxt <- downloadHandler(
+    filename = function() paste0("methods_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"),
+    content  = function(file) writeLines(enc2utf8(input$methods_text %||% ""), file, useBytes = TRUE)
   )
 
   # Shared metadata for both report formats
@@ -5173,6 +5450,7 @@ server <- function(input, output, session) {
                        else "Lysis Curve Analysis Report",
          author      = input$report_author,
          notes       = input$report_notes,
+         methods     = trimws(input$methods_text %||% ""),   # v2.16: edited on the Statistics tab
          generated   = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
          data_file   = rv$data_source %||% "(unknown)",
          format      = if (rv$is_long_format) "long" else
@@ -5269,7 +5547,7 @@ server <- function(input, output, session) {
     comp <- if (has_patchwork) tryCatch(compose_info(), error = function(e) NULL) else NULL
     if (!is.null(comp) && comp$n >= 2) {
       f <- list(type = "composed", title = "Composed figure",
-                caption = paste0("Panels a-", letters[comp$n], " composed in the app at ",
+                caption = paste0(if (isTRUE(input$compose_tags %||% TRUE)) paste0("Panels a-", letters[comp$n]) else paste0(comp$n, " panels"), " composed in the app at ",
                                  round(comp$width_mm), " x ", round(comp$height_mm), " mm (",
                                  comp$ncol, " column", if (comp$ncol == 1) "" else "s", "): ",
                                  paste(names(COMPOSE_PANEL_CHOICES)[match(comp$types, COMPOSE_PANEL_CHOICES)],
