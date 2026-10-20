@@ -3006,6 +3006,311 @@ apply_sample_time_windows <- function(df, windows) {
 
 # ── end v2.18 engine ──
 
+# ── v2.20 engine: curve phases, bootstrap intervals, curve differences ──
+# Pure functions (no Shiny session), tested by tests/test_v220_engine.R, documented in
+# docs/PHASES_AND_BOOTSTRAP.md. They do not change any existing metric: every phase
+# boundary is read back from compute_one_curve_metrics(), so the phases agree with the
+# reported numbers (and with the landmarks figure).
+
+# Centered rolling ln-OD slope, built exactly as compute_one_curve_metrics() builds the one
+# behind mu_max / lag_phase (positive readings only; a window touching a reading <= 0 gets no
+# slope). Returns NULL when the engine would not compute one (fewer than 3 points in the window).
+phase_ln_slopes <- function(t, od, smooth_window = 5) {
+  n   <- length(t)
+  win <- min(smooth_window, n)
+  if (!(n >= win && win >= 3)) return(NULL)
+  pos <- is.finite(od) & od > 0
+  lo  <- rep(NA_real_, n); lo[pos] <- log(od[pos])
+  rs  <- tryCatch(rolling_slope(t, lo, win), error = function(e) rep(NA_real_, n))
+  if (any(is.finite(od) & od <= 0)) {
+    off <- floor((win - 1) / 2)
+    for (s in seq_len(n - win + 1)) {
+      idx <- s:(s + win - 1)
+      if (any(!pos[idx])) rs[s + off] <- NA_real_
+    }
+  }
+  rs
+}
+
+# Growth / lysis phases of ONE curve, reconstructed from compute_one_curve_metrics().
+#   lag           t[1] -> lag_phase
+#   exponential   lag_phase -> first time after the fastest-growth window at which the rolling
+#                 ln-slope falls below 50 % of mu_max (the peak if that is earlier / never)
+#   deceleration  that time -> start of the stationary run, else -> lysis onset, else -> t[n]
+#   stationary    the longest contiguous run of points >= 95 % of the peak (the run behind
+#                 stat_phase_dur), clipped to start no earlier than the exponential end; it runs to
+#                 lysis onset, or to t[n] when no lysis is detected; omitted when the run does not
+#                 exist or lysis starts at/inside it
+#   lysis         lysis_time -> trough (the post-peak minimum behind residual_od)
+#   recovery      trough -> t[n] when recovery_slope is finite
+#   post-lysis    trough -> t[n] otherwise
+# Phases that do not apply, or have zero length, are omitted; the rest are contiguous and
+# cover t[1]..t[n]. A curve with no measurable growth (mu_max NA) is one "lag" phase.
+curve_phases <- function(t, od, smooth_window = 5, peak_mode = "global", lysis_threshold = 0.05) {
+  empty <- data.frame(phase = character(0), t_start = numeric(0), t_end = numeric(0),
+                      od_start = numeric(0), od_end = numeric(0), duration = numeric(0),
+                      stringsAsFactors = FALSE)
+  ok <- is.finite(t) & is.finite(od)
+  t <- t[ok]; od <- od[ok]
+  o <- order(t); t <- t[o]; od <- od[o]
+  n <- length(t)
+  if (n < 2 || t[n] <= t[1]) return(empty)
+
+  m <- compute_one_curve_metrics(t, od, "x", smooth_window = smooth_window, peak_mode = peak_mode,
+                                 lysis_threshold = lysis_threshold)
+  t1 <- t[1]; tn <- t[n]
+  emit <- function(ph, b) {
+    keep <- b[-1] > b[-length(b)]
+    ph <- ph[keep]; s <- b[-length(b)][keep]; e <- b[-1][keep]
+    if (!length(ph)) return(empty)
+    data.frame(phase = ph, t_start = s, t_end = e,
+               od_start = stats::approx(t, od, xout = s, ties = mean, rule = 2)$y,
+               od_end   = stats::approx(t, od, xout = e, ties = mean, rule = 2)$y,
+               duration = e - s, stringsAsFactors = FALSE)
+  }
+  lag_only <- function() emit("lag", c(t1, tn))
+  if (!is.finite(m$mu_max)) return(lag_only())
+
+  # peak and trough indices, recovered the way the engine anchors them
+  pk_idx <- which(t == m$time_max_od)[1]
+  if (is.na(pk_idx)) return(lag_only())
+  t_pk <- t[pk_idx]
+
+  # lag -> exponential
+  t_lag <- min(max(m$lag_phase, t1), t_pk)
+  if (!is.finite(t_lag)) t_lag <- t1
+
+  # exponential end: first rolling slope < 50 % of mu_max after the fastest-growth window
+  t_exp <- t_pk
+  rs <- phase_ln_slopes(t, od, smooth_window)
+  if (!is.null(rs)) {
+    valid <- which(is.finite(rs) & rs > 1e-10)
+    if (length(valid) && isTRUE(all.equal(max(rs[valid]), m$mu_max))) {
+      mu_idx <- valid[which.max(rs[valid])]
+      after  <- which(seq_len(n) > mu_idx & is.finite(rs) & rs < 0.5 * m$mu_max)
+      if (length(after)) t_exp <- min(t[after[1]], t_pk)
+    }
+  }
+  t_exp <- max(t_exp, t_lag)
+
+  lys <- m$lysis_time
+  has_lysis <- is.finite(lys)
+
+  # trough (post-peak minimum), as for residual_od / lysis_rate
+  t_tr <- NA_real_
+  if (has_lysis && pk_idx < n) {
+    post <- (pk_idx + 1):n
+    t_tr <- t[pk_idx + which.min(od[post])]
+  }
+
+  # stationary: the longest >= 95 %-of-peak run (the one behind stat_phase_dur)
+  s0 <- NA_real_
+  run <- if (pk_idx > 1) longest_true_run(od >= 0.95 * m$max_od) else NULL
+  if (!is.null(run) && run[["end"]] > run[["start"]]) {
+    r0 <- t[run[["start"]]]; r1 <- t[run[["end"]]]
+    s0 <- max(r0, t_exp)
+    end_ref <- if (has_lysis) lys else tn
+    if (!(r1 > t_exp && s0 < end_ref && (!has_lysis || r1 <= lys + 1e-9))) s0 <- NA_real_
+  }
+  has_stat <- is.finite(s0)
+
+  if (has_lysis) {
+    t_tr <- max(t_tr, lys)
+    x    <- if (has_stat) s0 else lys
+    b <- c(t1, t_lag, t_exp, x, lys, t_tr, tn)
+    nm <- c("lag", "exponential", "deceleration", "stationary", "lysis",
+            if (is.finite(m$recovery_slope)) "recovery" else "post-lysis")
+  } else {
+    x <- if (has_stat) s0 else tn
+    b <- c(t1, t_lag, t_exp, x, tn)
+    nm <- c("lag", "exponential", "deceleration", "stationary")
+  }
+  b <- cummax(pmin(pmax(b, t1), tn))
+  emit(nm, b)
+}
+
+# curve_phases() for every sample of a mean-curve frame (time, variable, mean_value);
+# returns the stacked rows with a leading `sample` column. `...` goes to curve_phases().
+curve_phases_by_sample <- function(pd, ...) {
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  out <- lapply(unique(as.character(pd$variable)), function(v) {
+    g <- pd[as.character(pd$variable) == v, , drop = FALSE]
+    ph <- curve_phases(g$time, g$mean_value, ...)
+    if (nrow(ph) == 0) return(NULL)
+    cbind(sample = v, ph, stringsAsFactors = FALSE)
+  })
+  out <- out[!vapply(out, is.null, logical(1))]
+  if (!length(out)) return(NULL)
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# Percentile-bootstrap confidence intervals for mean-curve metrics, resampling REPLICATES.
+# rep_pd: long un-averaged data (time, variable, replicate, value). For each sample the replicate
+# curves are drawn with replacement (n_replicates draws), averaged at every time point, and the
+# metrics engine is run on that resampled mean curve; the interval is the percentile interval of
+# the finite draws. `estimate` is the metric of the observed mean curve (what the Curve Metrics
+# table reports). NA interval when the sample has < 2 replicates or < 20 finite draws.
+# The draws for one sample depend only on `seed` and the sample's replicate count, so they do
+# not change when other samples are loaded. The caller's RNG state is left untouched.
+bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.95,
+                              smooth_window = 5, peak_smooth_window = 1,
+                              peak_mode = "global", lysis_threshold = 0.05) {
+  cols <- c("sample", "metric", "estimate", "boot_mean", "ci_low", "ci_high",
+            "n_replicates", "n_boot_ok", "method")
+  empty <- data.frame(sample = character(0), metric = character(0), estimate = numeric(0),
+                      boot_mean = numeric(0), ci_low = numeric(0), ci_high = numeric(0),
+                      n_replicates = integer(0), n_boot_ok = integer(0), method = character(0),
+                      stringsAsFactors = FALSE)
+  if (is.null(rep_pd) || nrow(rep_pd) == 0 || !length(metrics)) return(empty)
+  n_boot <- as.integer(n_boot)
+  if (!is.finite(n_boot) || n_boot < 1) stop("n_boot must be a positive integer")
+  if (!is.finite(conf) || conf <= 0 || conf >= 1) stop("conf must be between 0 and 1")
+  metrics <- unique(as.character(metrics))
+  probe <- compute_one_curve_metrics(c(0, 1, 2, 3, 4, 5), c(1, 2, 3, 4, 5, 6), "probe")
+  bad <- setdiff(metrics, names(probe))
+  if (length(bad)) stop("unknown metric(s): ", paste(bad, collapse = ", "))
+  alpha <- (1 - conf) / 2
+
+  # keep the caller's RNG stream intact
+  had_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = globalenv(), inherits = FALSE) else NULL
+  on.exit({
+    if (had_seed) assign(".Random.seed", old_seed, envir = globalenv())
+    else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
+  }, add = TRUE)
+
+  metric_vec <- function(tv, ov, nm) {
+    ok <- is.finite(tv) & is.finite(ov)
+    r <- tryCatch(compute_one_curve_metrics(tv[ok], ov[ok], nm, smooth_window, peak_smooth_window,
+                                            peak_mode, lysis_threshold),
+                  error = function(e) NULL)
+    if (is.null(r)) return(rep(NA_real_, length(metrics)))
+    vapply(metrics, function(k) suppressWarnings(as.numeric(r[[k]][1])), numeric(1))
+  }
+
+  rep_pd <- rep_pd[is.finite(rep_pd$time), , drop = FALSE]
+  out <- lapply(unique(as.character(rep_pd$variable)), function(v) {
+    g     <- rep_pd[as.character(rep_pd$variable) == v, , drop = FALSE]
+    times <- sort(unique(g$time))
+    reps  <- unique(g$replicate[is.finite(g$value)])
+    R     <- length(reps)
+    na_row <- function(est) data.frame(sample = v, metric = metrics, estimate = est,
+                                       boot_mean = NA_real_, ci_low = NA_real_, ci_high = NA_real_,
+                                       n_replicates = R, n_boot_ok = 0L, method = "percentile",
+                                       stringsAsFactors = FALSE)
+    if (R == 0) return(na_row(rep(NA_real_, length(metrics))))
+    # time x replicate matrix, and its 0/1 "observed" companion
+    M <- matrix(NA_real_, length(times), R)
+    gi <- is.finite(g$value)
+    M[cbind(match(g$time[gi], times), match(g$replicate[gi], reps))] <- g$value[gi]
+    obs <- !is.na(M); M0 <- M; M0[!obs] <- 0
+    storage.mode(obs) <- "numeric"
+    est_curve <- rowSums(M0) / rowSums(obs)
+    estimate  <- metric_vec(times, est_curve, v)
+    if (R < 2) return(na_row(estimate))
+
+    set.seed(seed)
+    idx <- matrix(sample.int(R, R * n_boot, replace = TRUE), nrow = R)            # R x n_boot
+    cnt <- vapply(seq_len(n_boot), function(b) tabulate(idx[, b], nbins = R), numeric(R))  # R x n_boot
+    curves <- (M0 %*% cnt) / (obs %*% cnt)                                         # time x n_boot
+    key <- apply(cnt, 2, paste, collapse = ",")
+    # identical resamples (few replicates => few distinct resamples) give identical curves: run
+    # the engine once per distinct resample
+    uk <- unique(key)
+    first <- match(uk, key)
+    res <- vapply(first, function(b) metric_vec(times, curves[, b], v), numeric(length(metrics)))
+    res <- matrix(res, nrow = length(metrics))
+    draws <- res[, match(key, uk), drop = FALSE]                                   # metrics x n_boot
+
+    rows <- lapply(seq_along(metrics), function(i) {
+      x <- draws[i, ]; x <- x[is.finite(x)]
+      okn <- length(x)
+      good <- okn >= 20
+      qs <- if (good) stats::quantile(x, c(alpha, 1 - alpha), names = FALSE, type = 7) else c(NA_real_, NA_real_)
+      data.frame(sample = v, metric = metrics[i], estimate = estimate[i],
+                 boot_mean = if (good) mean(x) else NA_real_,
+                 ci_low = qs[1], ci_high = qs[2], n_replicates = R, n_boot_ok = okn,
+                 method = "percentile", stringsAsFactors = FALSE)
+    })
+    do.call(rbind, rows)
+  })
+  res <- do.call(rbind, c(out, list(make.row.names = FALSE)))
+  res$n_boot_ok <- as.integer(res$n_boot_ok); res$n_replicates <- as.integer(res$n_replicates)
+  res[, cols, drop = FALSE]
+}
+
+# Curve difference versus a reference sample, per time point.
+# pd: time, variable, mean_value (mean curves). mode "difference": diff = mean - reference mean;
+# "log2_ratio": diff = log2(mean / reference mean), NA where either mean is <= 0. With rep_pd
+# (time, variable, replicate, value) every time point also gets a Welch two-sample t-test of the
+# sample's replicates against the reference's (on the raw readings; on log2 readings for
+# "log2_ratio", positive readings only), Holm-adjusted across the sample's time points. The
+# reference's own rows have diff 0 and NA p. Exploratory: n is small and the tests are per time
+# point. Returns sample, time, mean_value, ref_mean, diff[, n, n_ref, p, p_adj_holm, stars].
+curve_difference <- function(pd, ref_sample, rep_pd = NULL, mode = c("difference", "log2_ratio")) {
+  mode <- match.arg(mode)
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  pd <- pd[is.finite(pd$time), , drop = FALSE]
+  if (is.null(ref_sample) || !nzchar(ref_sample) || !ref_sample %in% as.character(pd$variable))
+    stop("reference sample '", ref_sample, "' is not in the data")
+  rg <- pd[as.character(pd$variable) == ref_sample & is.finite(pd$mean_value), , drop = FALSE]
+  ref_mean <- tapply(rg$mean_value, rg$time, mean)
+  dfn <- function(x, r) {
+    if (mode == "difference") x - r
+    else ifelse(is.finite(x) & is.finite(r) & x > 0 & r > 0, log2(x / r), NA_real_)
+  }
+  out <- do.call(rbind, lapply(unique(as.character(pd$variable)), function(v) {
+    g <- pd[as.character(pd$variable) == v, , drop = FALSE]
+    g <- g[order(g$time), , drop = FALSE]
+    r <- unname(ref_mean[match(as.character(g$time), names(ref_mean))])
+    d <- if (v == ref_sample) ifelse(is.finite(g$mean_value) & is.finite(r), 0, NA_real_) else dfn(g$mean_value, r)
+    data.frame(sample = v, time = g$time, mean_value = g$mean_value, ref_mean = r, diff = d,
+               stringsAsFactors = FALSE)
+  }))
+  rownames(out) <- NULL
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(out)
+
+  rep_pd <- rep_pd[is.finite(rep_pd$time) & is.finite(rep_pd$value), , drop = FALSE]
+  vals <- function(v, tm) {
+    x <- rep_pd$value[as.character(rep_pd$variable) == v & rep_pd$time == tm]
+    if (mode == "log2_ratio") log2(x[x > 0]) else x
+  }
+  n_s <- n_r <- p <- rep(NA_real_, nrow(out))
+  for (i in seq_len(nrow(out))) {
+    x <- vals(out$sample[i], out$time[i])
+    y <- vals(ref_sample, out$time[i])
+    n_s[i] <- length(x); n_r[i] <- length(y)
+    if (out$sample[i] == ref_sample || length(x) < 2 || length(y) < 2) next
+    p[i] <- tryCatch(stats::t.test(x, y, var.equal = FALSE)$p.value, error = function(e) NA_real_)
+  }
+  out$n <- as.integer(n_s); out$n_ref <- as.integer(n_r)
+  out$p <- p
+  out$p_adj_holm <- NA_real_
+  for (v in unique(out$sample)) {
+    ix <- which(out$sample == v)
+    out$p_adj_holm[ix] <- stats::p.adjust(out$p[ix], method = "holm")
+  }
+  out$stars <- sig_stars(out$p_adj_holm)
+  out$stars[is.na(out$p_adj_holm)] <- NA_character_
+  out
+}
+
+# First time at which each sample separates from the reference: the earliest time with
+# p_adj_holm < alpha in a curve_difference() table that carries p-values. NA if none (and for
+# the reference itself). Returns sample, first_separation_time, one row per sample.
+first_separation_time <- function(x, alpha = 0.05) {
+  if (is.null(x) || nrow(x) == 0) return(data.frame(sample = character(0), first_separation_time = numeric(0)))
+  if (!"p_adj_holm" %in% names(x)) stop("x needs p-values: call curve_difference() with rep_pd")
+  smp <- unique(as.character(x$sample))
+  data.frame(sample = smp,
+             first_separation_time = vapply(smp, function(v) {
+               s <- x$sample == v & is.finite(x$p_adj_holm) & x$p_adj_holm < alpha
+               if (any(s)) min(x$time[s]) else NA_real_
+             }, numeric(1), USE.NAMES = FALSE),
+             stringsAsFactors = FALSE)
+}
+# ── end v2.20 engine ──
+
 # ── v2.19: helpers for the Curve fitting tab, the phenotype heatmap and the extraction tables ──
 # Pure functions (no Shiny state), tested in tests/test_v219_integration.R. See docs/FITS_AND_EXTRACTION.md.
 
