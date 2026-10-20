@@ -222,6 +222,107 @@ check("on the demo replicate metrics: rows for >= 20 metrics, BH over the whole 
       length(unique(real$table$metric)) >= 20 &&
       isTRUE(all.equal(real$table$p_adj_bh_across, p.adjust(real$table$p, "BH"))))
 
+# ── 4. Extraction helpers ─────────────────────────────────────────────────────
+cat("\n--- OD at fixed times ---\n")
+line <- do.call(rbind, lapply(1:3, function(r)
+  data.frame(time = c(0, 10, 20, 30), variable = "L", replicate = r, value = r * c(0, 10, 20, 30) + 1, stringsAsFactors = FALSE)))
+ox <- env$od_at_times(line, c(-5, 0, 5, 12.5, 30, 35))
+check("od_at_times: columns time_requested, sample, replicate, value; 6 times x 3 replicates",
+      identical(names(ox), c("time_requested", "sample", "replicate", "value")) && nrow(ox) == 18)
+exp_val <- function(r, tm) ifelse(tm < 0 | tm > 30, NA_real_, r * tm + 1)
+check("straight line: interpolated values are exact",
+      isTRUE(all.equal(ox$value, exp_val(ox$replicate, ox$time_requested))))
+check("outside a curve's own range gives NA (never extrapolated)", all(is.na(ox$value[ox$time_requested %in% c(-5, 35)])))
+on <- env$od_at_times(line, c(4, 6, 14, 100), method = "nearest")
+check("nearest: the reading at the closest sampled time (4 -> t0, 6 -> t10, 14 -> t10), NA beyond the range",
+      isTRUE(all.equal(on$value[on$replicate == 2], c(1, 21, 21, NA))))
+ragged <- rbind(line, data.frame(time = c(0, 20), variable = "R", replicate = 1, value = c(1, 3)))
+rg <- env$od_at_times(ragged, 10)
+check("each curve uses its own range and points (sparse curve interpolates across its gap)",
+      near(rg$value[rg$sample == "R"], 2) && near(rg$value[rg$sample == "L" & rg$replicate == 1], 11))
+check("non-finite values are ignored", { b <- line; b$value[b$time == 10 & b$replicate == 1] <- NA
+  near(env$od_at_times(b, 10)$value[1], 11) })      # interpolated across the missing point 0 -> 20 for replicate 1
+check("empty input gives an empty frame", nrow(env$od_at_times(line[0, ], c(1, 2))) == 0)
+su <- env$summarise_od_at_times(ox)
+s12 <- su[su$time_requested == 12.5, ]
+v12 <- 1:3 * 12.5 + 1
+check("summarise_od_at_times: mean, sd, n, sem, ci95 per time and sample",
+      identical(names(su), c("time_requested", "sample", "mean", "sd", "n", "sem", "ci95")) && nrow(su) == 6 &&
+      near(s12$mean, mean(v12)) && near(s12$sd, sd(v12)) && s12$n == 3 && near(s12$sem, sd(v12) / sqrt(3)) &&
+      near(s12$ci95, qt(0.975, 2) * sd(v12) / sqrt(3)))
+check("summary: all-NA time gives n = 0 and NA mean / sd", { s <- su[su$time_requested == 35, ]; s$n == 0 && is.na(s$mean) && is.na(s$sd) })
+one <- env$summarise_od_at_times(data.frame(time_requested = 1, sample = "z", replicate = 1, value = 4))
+check("summary: a single replicate has NA sd / sem / ci95 but a mean", one$n == 1 && near(one$mean, 4) && is.na(one$sd) && is.na(one$ci95))
+
+cat("\n--- time to an OD threshold ---\n")
+ramp <- data.frame(time = c(0, 10, 20, 30, 40, 50), variable = "P", replicate = 1,
+                   value = c(0.1, 0.3, 0.9, 0.9, 0.5, 0.1), stringsAsFactors = FALSE)
+check("up: first upward crossing, linearly interpolated (0.6 between t10 0.3 and t20 0.9 -> 15)",
+      near(env$time_to_od(ramp, 0.6, "up")$time, 15))
+check("down: first downward crossing (0.6 between t30 0.9... falls past it between 30 (0.9) and 40 (0.5): 37.5)",
+      near(env$time_to_od(ramp, 0.6, "down")$time, 37.5))
+check("a threshold never reached gives NA", is.na(env$time_to_od(ramp, 5, "up")$time) && is.na(env$time_to_od(ramp, 0.95, "down")$time))
+check("a curve that starts above the threshold has no 'up' crossing (not reported at t = 0)",
+      is.na(env$time_to_od(ramp, 0.05, "up")$time))
+check("exactly at the threshold counts as at-or-above: 'up' to 0.9 is t = 20", near(env$time_to_od(ramp, 0.9, "up")$time, 20))
+dbl <- data.frame(time = 0:8, variable = "D", replicate = 1, value = c(1, 0.4, 1, 0.8, 0.2, 0.2, 0.2, 0.2, 0.2))
+check("down without `after` takes the FIRST crossing, with after = 'peak' only crossings from the peak on",
+      near(env$time_to_od(dbl, 0.5, "down")$time, 0 + (1 - 0.5) / (1 - 0.4)) &&
+      near(env$time_to_od(dbl, 0.5, "down", after = "peak")$time, 0 + (1 - 0.5) / (1 - 0.4)) &&     # the peak is the first maximum (t = 0)
+      TRUE)
+dbl$value[1] <- 0.9                       # peak is now t = 2
+pk <- env$time_to_od(dbl, 0.5, "down", after = "peak")$time
+check("after = 'peak': skips the early dip and finds the post-peak crossing (3 -> 4: 0.8 -> 0.2 at 3.5)", near(pk, 3.5))
+check("after = a time: the search starts at the first point at or after it",
+      near(env$time_to_od(dbl, 0.5, "down", after = 2.5)$time, 3.5) && is.na(env$time_to_od(dbl, 0.5, "down", after = 99)$time))
+dm <- demo_frames("lysis")
+td <- env$time_to_od(dm$rep_pd, 0.15, "down", after = "peak")
+check("demo phage curves: time_to_od down after the peak is a time between the peak and the trough",
+      { ok <- TRUE
+        for (i in seq_len(nrow(td))) {
+          if (td$sample[i] == "Uninfected") next
+          cv <- dm$rep_pd[dm$rep_pd$variable == td$sample[i] & dm$rep_pd$replicate == td$replicate[i], ]
+          cv <- cv[order(cv$time), ]
+          t_pk <- cv$time[which.max(cv$value)]; t_tr <- cv$time[which.min(cv$value)]
+          ok <- ok && is.finite(td$time[i]) && td$time[i] > t_pk && td$time[i] < t_tr
+        }
+        ok })
+check("demo: the uninfected control (no collapse) never crosses 0.15 downward after its peak",
+      all(is.na(td$time[td$sample == "Uninfected"])))
+check("demo: time-to-OD result has sample, replicate, time (9 curves)", nrow(td) == 9 && all(c("sample", "replicate", "time") %in% names(td)))
+st <- env$summarise_time_to_od(td)
+check("summarise_time_to_od: one row per sample with mean, sd, n, sem, ci95, n_curves",
+      nrow(st) == 3 && all(c("sample", "mean", "sd", "n", "sem", "ci95", "n_curves") %in% names(st)) &&
+      st$n[st$sample == "Uninfected"] == 0 && st$n_curves[st$sample == "Uninfected"] == 3 &&
+      st$n[st$sample == "Phage MOI 10"] == 3 &&
+      near(st$mean[st$sample == "Phage MOI 10"], mean(td$time[td$sample == "Phage MOI 10"])))
+check("earlier lysis at a higher MOI: mean crossing time MOI 10 < MOI 0.1",
+      st$mean[st$sample == "Phage MOI 10"] < st$mean[st$sample == "Phage MOI 0.1"])
+
+cat("\n--- per-sample time windows ---\n")
+w_df <- data.frame(time = rep(0:10, 3), variable = rep(c("A", "B", "C"), each = 11), mean_value = 1, stringsAsFactors = FALSE)
+w <- env$apply_sample_time_windows(w_df, list(A = c(2, 5), B = c(NA, 3)))
+check("window c(2, 5): sample A keeps t = 2..5", identical(sort(w$time[w$variable == "A"]), 2:5))
+check("NA bound means no limit: B c(NA, 3) keeps t = 0..3", identical(sort(w$time[w$variable == "B"]), 0:3))
+check("a sample without a window is untouched", identical(w[w$variable == "C", ], w_df[w_df$variable == "C", ]))
+check("NULL bound and an upper-only window", {
+  w2 <- env$apply_sample_time_windows(w_df, list(A = c(8, NULL), B = list(NULL, 2)))
+  identical(sort(w2$time[w2$variable == "A"]), 8:10) && identical(sort(w2$time[w2$variable == "B"]), 0:2) })
+check("no windows / NULL / unknown sample leaves the frame as it was",
+      identical(env$apply_sample_time_windows(w_df, list()), w_df) && identical(env$apply_sample_time_windows(w_df, NULL), w_df) &&
+      identical(env$apply_sample_time_windows(w_df, list(Z = c(1, 2))), w_df))
+rw <- env$apply_sample_time_windows(dm$rep_pd, list("Phage MOI 10" = c(30, 90)))
+check("works on the replicate frame: only the windowed sample changes, all its replicates trimmed alike",
+      all(rw$time[rw$variable == "Phage MOI 10"] >= 30 & rw$time[rw$variable == "Phage MOI 10"] <= 90) &&
+      nrow(rw[rw$variable == "Phage MOI 10", ]) == 3 * 5 &&
+      identical(rw[rw$variable != "Phage MOI 10", ], dm$rep_pd[dm$rep_pd$variable != "Phage MOI 10", ]))
+check("a window with no points gives a zero-row frame for that sample, others intact",
+      { w3 <- env$apply_sample_time_windows(w_df, list(A = c(100, 200))); sum(w3$variable == "A") == 0 && sum(w3$variable != "A") == 22 })
+check("windows then fits: the fit sees only the windowed points",
+      { dd <- env$apply_sample_time_windows(dm$pd, list(Uninfected = c(0, 90)))
+        f <- env$fit_growth_models_by_sample(dd[dd$variable == "Uninfected", ], models = "gompertz", until = "all")
+        f$n_points == sum(dd$variable == "Uninfected") })
+
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed ============\n", pass, fail))
 if (fail > 0) quit(status = 1)

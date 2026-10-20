@@ -2738,6 +2738,122 @@ compare_all_metrics <- function(rm, metrics = NULL, ref_sample = NULL, method = 
   list(table = tab[, cols], warnings = warns)
 }
 
+# ── Extraction: OD at fixed times, time to an OD threshold, per-sample time windows ──
+# One list element per (sample, replicate) curve of a replicate frame (time, variable, replicate,
+# value); non-finite values dropped, time-sorted.
+extraction_curves <- function(rep_pd) {
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(list())
+  rep_pd <- rep_pd[is.finite(rep_pd$time) & is.finite(rep_pd$value), , drop = FALSE]
+  if (nrow(rep_pd) == 0) return(list())
+  rep_pd <- rep_pd[order(as.character(rep_pd$variable), rep_pd$replicate, rep_pd$time), , drop = FALSE]
+  key <- paste(as.character(rep_pd$variable), rep_pd$replicate, sep = "\r")
+  lapply(split(rep_pd, factor(key, levels = unique(key))), function(g)
+    list(sample = as.character(g$variable[1]), replicate = g$replicate[1], t = g$time, y = g$value))
+}
+
+# Value of every replicate curve at the requested times: linear interpolation between the bracketing
+# points ("interpolate") or the reading at the nearest sampled time ("nearest"). A time outside a
+# curve's own range [first time, last time] gives NA (never extrapolated).
+od_at_times <- function(rep_pd, times, method = c("interpolate", "nearest")) {
+  method <- match.arg(method)
+  times  <- as.numeric(times)
+  curves <- extraction_curves(rep_pd)
+  out <- lapply(curves, function(cv) {
+    inside <- times >= min(cv$t) & times <= max(cv$t)
+    v <- rep(NA_real_, length(times))
+    if (method == "interpolate") {
+      if (length(cv$t) >= 2)
+        v[inside] <- suppressWarnings(stats::approx(cv$t, cv$y, xout = times[inside], ties = mean)$y)
+      else v[inside & times == cv$t[1]] <- cv$y[1]
+    } else {
+      v[inside] <- vapply(times[inside], function(x) cv$y[which.min(abs(cv$t - x))], numeric(1))
+    }
+    data.frame(time_requested = times, sample = cv$sample, replicate = cv$replicate, value = v,
+               stringsAsFactors = FALSE)
+  })
+  if (!length(out))
+    return(data.frame(time_requested = numeric(0), sample = character(0), replicate = numeric(0),
+                      value = numeric(0), stringsAsFactors = FALSE))
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# mean, SD, n (non-missing replicates), SEM and the 95 % CI half-width (t(0.975, n - 1) x SEM, as in the
+# app's summary statistics) of a value column, per group. SD / SEM / CI are NA with fewer than 2 values.
+summarise_replicate_values <- function(x, value_col, group_cols) {
+  if (is.null(x) || nrow(x) == 0) return(NULL)
+  g <- interaction(x[group_cols], drop = TRUE, lex.order = TRUE)
+  rows <- lapply(split(seq_len(nrow(x)), g), function(ix) {
+    v <- x[[value_col]][ix]; v <- v[is.finite(v)]; n <- length(v)
+    sd_v <- if (n >= 2) stats::sd(v) else NA_real_
+    sem  <- if (n >= 2) sd_v / sqrt(n) else NA_real_
+    cbind(x[ix[1], group_cols, drop = FALSE],
+          data.frame(mean = if (n) mean(v) else NA_real_, sd = sd_v, n = n, sem = sem,
+                     ci95 = if (n >= 2) stats::qt(0.975, n - 1) * sem else NA_real_), row.names = NULL)
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+summarise_od_at_times <- function(x) summarise_replicate_values(x, "value", c("time_requested", "sample"))
+
+# First time each replicate curve crosses `threshold`, with linear interpolation between the two
+# bracketing points. "up": the curve goes from below the threshold to at-or-above it; "down": from
+# at-or-above to below. A curve that STARTS on the far side has no crossing until it comes back, so
+# it is not reported as crossing at its first time. `after` limits the search to the part of the curve
+# from "peak" (the first maximum) onward, or from a time (numeric); NA when there is no crossing.
+time_to_od <- function(rep_pd, threshold, direction = c("up", "down"), after = NULL) {
+  direction <- match.arg(direction)
+  curves <- extraction_curves(rep_pd)
+  rows <- lapply(curves, function(cv) {
+    t <- cv$t; y <- cv$y; n <- length(t)
+    first <- 1L
+    if (!is.null(after) && !(length(after) == 1 && is.na(after))) {
+      first <- if (identical(after, "peak")) which.max(y) else which(t >= as.numeric(after))[1]
+      if (is.na(first)) first <- n + 1L
+    }
+    tc <- NA_real_
+    if (n >= 2 && first < n) for (i in (first + 1L):n) {
+      a <- y[i - 1L]; b <- y[i]
+      hit <- if (direction == "up") a < threshold && b >= threshold else a >= threshold && b < threshold
+      if (hit) { tc <- t[i - 1L] + (threshold - a) / (b - a) * (t[i] - t[i - 1L]); break }
+    }
+    data.frame(sample = cv$sample, replicate = cv$replicate, time = tc, threshold = threshold,
+               direction = direction, stringsAsFactors = FALSE)
+  })
+  if (!length(rows))
+    return(data.frame(sample = character(0), replicate = numeric(0), time = numeric(0),
+                      threshold = numeric(0), direction = character(0), stringsAsFactors = FALSE))
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# Per sample: mean, SD, n (replicates that crossed), SEM and 95 % CI half-width of the crossing time,
+# plus n_curves (replicates examined).
+summarise_time_to_od <- function(x) {
+  s <- summarise_replicate_values(x, "time", "sample")
+  if (is.null(s)) return(NULL)
+  s$n_curves <- as.integer(table(factor(x$sample, levels = unique(x$sample)))[as.character(s$sample)])
+  s
+}
+
+# Keep, for each sample named in `windows`, only the rows with time inside its window. windows is a
+# named list sample -> c(min, max); a NULL, missing or NA bound means no limit on that side; samples
+# without an entry are untouched. Works on the mean frame and the replicate frame (columns `variable`
+# and `time`).
+apply_sample_time_windows <- function(df, windows) {
+  if (is.null(df) || nrow(df) == 0 || length(windows) == 0 || is.null(names(windows))) return(df)
+  samp <- as.character(df$variable)
+  keep <- rep(TRUE, nrow(df))
+  for (s in intersect(names(windows), unique(samp))) {
+    w  <- windows[[s]]
+    if (is.list(w)) w <- vapply(w, function(x) if (length(x) == 1) suppressWarnings(as.numeric(x)) else NA_real_, numeric(1))
+    w  <- suppressWarnings(as.numeric(w))
+    lo <- if (length(w) >= 1 && is.finite(w[1])) w[1] else -Inf
+    hi <- if (length(w) >= 2 && is.finite(w[2])) w[2] else Inf
+    sel <- samp == s
+    keep[sel] <- df$time[sel] >= lo & df$time[sel] <= hi
+  }
+  df[keep, , drop = FALSE]
+}
+
 # ── end v2.18 engine ──
 
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
