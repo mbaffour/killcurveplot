@@ -246,10 +246,14 @@ testServer(app, {
   eb_d <- layer_data(p_fl, which(layer_names(p_fl) == "GeomErrorbar")[1])
   check("bars that cross zero are floored at the axis minimum (10^-2), not dropped",
         nrow(eb_d) > 0 && all(eb_d$ymin >= log10(0.01) - 1e-9) && any(abs(eb_d$ymin - log10(0.01)) < 1e-9))
-  session$setInputs(error_log_floor = FALSE)
+  session$setInputs(error_log_floor = FALSE, y_oob = "censor")   # v2.17: under the default "squish" they would be clipped to the floor
   eb_d2 <- layer_data(generate_plot(), which(layer_names(generate_plot()) == "GeomErrorbar")[1])
-  check("with the floor off, those bars are dropped (old behaviour)",
+  check("with the floor off and out-of-range readings dropped (legacy), those bars are dropped (old behaviour)",
         sum(is.finite(eb_d2$ymin)) < sum(is.finite(eb_d$ymin)))
+  session$setInputs(y_oob = "squish")
+  eb_d3 <- layer_data(generate_plot(), which(layer_names(generate_plot()) == "GeomErrorbar")[1])
+  check("v2.17: with 'clip to the floor' even those bars are kept (drawn down to the floor)",
+        sum(is.finite(eb_d3$ymin)) == sum(is.finite(eb_d$ymin)))
   session$setInputs(error_log_floor = TRUE, error_multiplier = 1, error_type = "sem")
   session$setInputs(legend_order = "selected")
   p_ord <- generate_plot()
@@ -373,8 +377,15 @@ testServer(app, {
   check("dashboard table never prints '\u2014 \u00b1' (NA mean-curve value shown as a dash alone)",
         !grepl("\u2014 \u00b1", tbl_r, fixed = TRUE) && grepl("Uninfected", tbl_r))
   rm_r <- replicate_metrics_current()
-  check("(the regression case is real: the Uninfected replicate SD of lysis onset is finite although the mean-curve value is NA)",
-        is.finite(rm_r$lysis_time_sd[rm_r$sample == "Uninfected"]))
+  # LC-3: this used to assert the regression case was reachable (a finite replicate SD of
+  # lysis onset on the Uninfected control although the mean-curve value is NA), because a
+  # single 5 % dip on 4 %-CV noise scored an uninfected replicate as lysing. That false
+  # positive is exactly what the noise-aware, sustained rule removes: no Uninfected
+  # replicate reports a lysis onset any more. The "— ±" guard in dash_metrics_table is
+  # kept for real data; here we assert the corrected behaviour.
+  check("LC-3: no Uninfected replicate reports a (false) lysis onset, so its SD is NA like the mean-curve value",
+        is.na(rm_r$lysis_time_sd[rm_r$sample == "Uninfected"]) &&
+        is.na(rm_r$lysis_time_mean[rm_r$sample == "Uninfected"]))
   check("dashboard table keeps 'value \u00b1 sd' for finite values", grepl("\u00b1", tbl_r, fixed = TRUE))
   if (env$has_base64enc) {
     meta <- report_meta(); meta$generated <- "2026-10-19 00:00:00"
@@ -409,19 +420,25 @@ pd_l <- do.call(rbind, lapply(unique(colnames(demo_l)[-1]), function(vn)
   data.frame(time = demo_l$Time, variable = vn, mean_value = rowMeans(demo_l[, colnames(demo_l) == vn, drop = FALSE]))))
 check("compute_curve_metrics: explicit lysis_threshold = 0.05 equals the default output",
       identical(env$compute_curve_metrics(pd_l), env$compute_curve_metrics(pd_l, lysis_threshold = 0.05)))
-rp_l <- data.frame(time = rep(0:8, 2), variable = "P", replicate = rep(1:2, each = 9),
-                   value = rep(c(0.05, 0.2, 0.5, 0.8, 1.0, 0.94, 1.0, 1.0, 1.0), 2))
+# LC-3: a lysis dip must now be SUSTAINED (2 consecutive points past the
+# detection threshold) and a lone 6 % dip on a plateau is noise by design, so
+# the plateau-with-a-dip fixture has a 2-point 6 % dip, and enough flat plateau
+# for the median-based curve_noise_sd() to be ~0 (on a short curve the dip and the
+# growth shoulder are over half of the second differences and inflate the noise floor).
+pl6 <- c(0.05, 0.2, 0.5, 0.8, rep(1.0, 10), 0.94, 0.94, rep(1.0, 9))  # plateau with a sustained 6 % dip
+n6  <- length(pl6)
+rp_l <- data.frame(time = rep(seq_len(n6) - 1L, 2), variable = "P", replicate = rep(1:2, each = n6),
+                   value = rep(pl6, 2))
 check("replicate rows and summary: explicit 0.05 equals the default",
       identical(env$compute_replicate_metric_rows(rp_l), env$compute_replicate_metric_rows(rp_l, lysis_threshold = 0.05)) &&
       identical(env$compute_replicate_metrics(rp_l), env$compute_replicate_metrics(rp_l, lysis_threshold = 0.05)))
-pl6 <- c(0.05, 0.2, 0.5, 0.8, 1.0, 0.94, 1.0, 1.0, 1.0)   # plateau with a single 6 % dip
-l05 <- env$compute_one_curve_metrics(0:8, pl6, "P", lysis_threshold = 0.05)
-l10 <- env$compute_one_curve_metrics(0:8, pl6, "P", lysis_threshold = 0.10)
+l05 <- env$compute_one_curve_metrics(seq_len(n6) - 1L, pl6, "P", lysis_threshold = 0.05)
+l10 <- env$compute_one_curve_metrics(seq_len(n6) - 1L, pl6, "P", lysis_threshold = 0.10)
 check("plateau with a 6 % dip: lysis_time is finite at a 5 % threshold and NA at 10 %",
       is.finite(l05$lysis_time) && is.na(l10$lysis_time) && is.na(l10$od_drop) && is.finite(l05$od_drop))
 check("lysis threshold is threaded through compute_curve_metrics and the replicate functions",
-      is.finite(env$compute_curve_metrics(data.frame(time = 0:8, variable = "P", mean_value = pl6))$lysis_time) &&
-      is.na(env$compute_curve_metrics(data.frame(time = 0:8, variable = "P", mean_value = pl6), lysis_threshold = 0.10)$lysis_time) &&
+      is.finite(env$compute_curve_metrics(data.frame(time = seq_len(n6) - 1L, variable = "P", mean_value = pl6))$lysis_time) &&
+      is.na(env$compute_curve_metrics(data.frame(time = seq_len(n6) - 1L, variable = "P", mean_value = pl6), lysis_threshold = 0.10)$lysis_time) &&
       all(is.na(env$compute_replicate_metric_rows(rp_l, lysis_threshold = 0.10)$lysis_time)) &&
       all(is.finite(env$compute_replicate_metric_rows(rp_l)$lysis_time)) &&
       is.na(env$compute_replicate_metrics(rp_l, lysis_threshold = 0.10)$lysis_time_mean))
@@ -664,8 +681,11 @@ testServer(app, {
   tag_txt <- grepl("font-weight: bold", txt) & grepl("font-size: 8.00px", txt) & grepl(">[a-d]</text>", txt)
   check("composed SVG: four bold 8 pt panel tags a-d (and no 'b' left over from the analysis panel's own label)",
         sum(tag_txt) == 4 && setequal(sub(".*>([a-d])</text>.*", "\\1", txt[tag_txt]), c("a", "b", "c", "d")))
-  check("composed SVG: all text is Arial 6-8 pt without textLength",
-        all(grepl('font-family: "Arial"', txt)) && all(szs >= 6 - 1e-6 & szs <= 8 + 1e-6) && !any(grepl("textLength", txt)))
+  # v2.16: the wavelength subscripts of the y labels (main figure and normalized OD) are 0.7 x the 7 pt axis title;
+  # plotmath draws the "~" space of "A550 relative to ..." as a blank text element in the Symbol font (ignored here)
+  sub_c <- abs(szs - 0.7 * 7) < 0.01
+  check("composed SVG: all text is Arial 6-8 pt (the two wavelength subscripts at 4.9 pt excepted) without textLength",
+        all(grepl('font-family: "Arial"', txt[!grepl(">\\s+</text>", txt)])) && sum(sub_c) == 2 && all((szs >= 6 - 1e-6 & szs <= 8 + 1e-6) | sub_c) && !any(grepl("textLength", txt)))
   # upper-case tags and a custom tag size
   session$setInputs(compose_tag_case = "A", compose_tag_size = 7)
   svg_u <- of("composed_upper.svg"); iu <- compose_info()
@@ -745,8 +765,11 @@ testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "demo")
   do.call(session$setInputs, fit_defaults)          # the startup state, no preset pressed
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected")
-  check("main download name at startup: lysis_curve_a_89x65mm.svg", identical(main_download_name(), "lysis_curve_a_89x65mm.svg"))
-  check("analysis download name at startup: metric_summary_b_89x65mm.svg", identical(analysis_download_name(), "metric_summary_b_89x65mm.svg"))
+  check("no panel letter by default (v2.16): both panel-label defaults are empty", identical(input$panel_label, "") && identical(input$analysis_panel_label, ""))
+  check("main download name at startup: lysis_curve_main_89x65mm.svg", identical(main_download_name(), "lysis_curve_main_89x65mm.svg"))
+  check("analysis download name at startup: metric_summary_metric_summary_89x65mm.svg", identical(analysis_download_name(), "metric_summary_metric_summary_89x65mm.svg"))
+  check("the startup Figure Legend Text has no '(a) ' prefix and the startup figure has no tag",
+        !grepl("^\\(", output$figure_legend_text) && is.null(generate_plot()$labels$tag))
   check("composed download name: figure_composed_183x120mm.svg", identical(composed_download_name(), "figure_composed_183x120mm.svg"))
   check("file names carry no timestamp", all(!grepl("[0-9]{8}", c(main_download_name(), analysis_download_name(), composed_download_name()))))
   session$setInputs(panel_label = "", analysis_panel_label = "", analysis_type = "growth_rate", export_format = "png")
@@ -962,6 +985,150 @@ testServer(app, {
         ci$n == 4 && ci$ncol == 2 && inherits(ci$plot, "gtable") &&
         abs(ci$width_mm - 2 * grid::convertWidth(ci$plot$widths[1], "mm", valueOnly = TRUE)) < 1e-6 &&
         abs(ci$width_mm - attr(ci$plot, "size_mm")[1]) < 1e-6 && ci$width_mm > 2 * 65)
+})
+
+# ── v2.16: subscript axis labels ─────────────────────────────────────────────
+cat("\n--- v2.16: wavelength subscripts in axis labels ---\n")
+lws <- env$label_with_subscripts
+check("label_with_subscripts('A550') is a call (plotmath A[550])", is.call(lws("A550")) && identical(lws("A550"), quote(A[550])))
+check("label_with_subscripts('OD600') is a call (plotmath OD[600])", identical(lws("OD600"), quote(OD[600])))
+check("label_with_subscripts('Absorbance') is returned unchanged (character, identical)", identical(lws("Absorbance"), "Absorbance"))
+check("'A550 relative to Uninfected' -> A[550] ~ \"relative to Uninfected\"",
+      identical(lws("A550 relative to Uninfected"), bquote(A[550] ~ "relative to Uninfected")))
+check("'log10 A550' -> \"log10\" ~ A[550]", identical(lws("log10 A550"), bquote("log10" ~ A[550])))
+check("'OD drop (A550)' keeps the parenthesis tight (no space inserted)", identical(lws("OD drop (A550)"), bquote("OD drop (" * A[550] * ")")))
+check("a token inside a word or followed by letters is left alone (BA550, A550nm), as are NA and ''",
+      identical(lws("BA550"), "BA550") && identical(lws("A550nm"), "A550nm") && identical(lws(""), "") && is.na(lws(NA_character_)))
+check("axis_subscripts: APP_DEFAULTS TRUE, Legacy look FALSE", isTRUE(env$APP_DEFAULTS$axis_subscripts) && isFALSE(env$legacy_preset_settings()$axis_subscripts))
+check("the Typeset-wavelength checkbox is in the Labels & Formatting panel",
+      grepl('id="axis_subscripts"', as.character(env$ui), fixed = TRUE) && grepl("Typeset wavelength as subscript", as.character(env$ui), fixed = TRUE))
+svg_text <- function(p, w = 4, h = 3) {
+  f <- tempfile(fileext = ".svg"); quiet(ggsave(f, p, device = env$export_device("svg"), width = w, height = h, units = "in", bg = "white", limitsize = FALSE))
+  grep("<text", readLines(f), value = TRUE)
+}
+txt_of <- function(t) sub("</text>.*", "", sub(".*>", "", sub("</text>$", "", t)))
+size_of <- function(t) as.numeric(sub(".*font-size: ([0-9.]+)px.*", "\\1", t))
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected")
+  tx <- svg_text(main_plot_obj(), export_size_in()[1], export_size_in()[2])
+  lab <- sub("<.*", "", sub(".*>(?=[^>]*</text>)", "", tx, perl = TRUE))
+  i550 <- which(lab == "550"); iA <- which(lab == "A")
+  check("default session SVG: the y label is drawn as 'A' plus a separate '550' text element",
+        length(i550) == 1 && length(iA) == 1 && !any(lab == "A550"))
+  check("default session SVG: the '550' subscript is smaller than the 'A' (and text stays editable, no textLength)",
+        length(i550) == 1 && length(iA) == 1 && size_of(tx[i550]) < size_of(tx[iA]) && !any(grepl("textLength", tx)))
+  for (ty in c("normalized", "replicate_overlay", "landmarks", "heatmap")) {
+    session$setInputs(analysis_type = ty)
+    ap <- generate_analysis_plot(ty)
+    nm <- if (ty == "heatmap") ap$scales$get_scales("fill")$name else ap$labels$y
+    check(paste("analysis figure", ty, "gets the subscript label (a call) and still renders"),
+          is.call(nm) && inherits(ap, "ggplot") && is.null(plot_error(ap)) && length(svg_text(ap)) > 3)
+  }
+  session$setInputs(analysis_type = "metric_summary", analysis_metrics = c("od_drop"))
+  fm <- generate_analysis_plot("metric_summary")
+  check("metric facet labels stay plain text (factor levels with 'A550'), the facet strip is not plotmath",
+        is.character(levels(fm$data$metric)) && any(grepl("A550", levels(fm$data$metric), fixed = TRUE)))
+  session$setInputs(axis_subscripts = FALSE)
+  tx2 <- svg_text(main_plot_obj(), export_size_in()[1], export_size_in()[2])
+  lab2 <- sub("<.*", "", sub(".*>(?=[^>]*</text>)", "", tx2, perl = TRUE))
+  check("axis_subscripts = FALSE: the SVG has a single 'A550' text element and no '550' element",
+        sum(lab2 == "A550") == 1 && !any(lab2 == "550"))
+  check("the Figure Legend Text keeps plain 'A550' either way", grepl("A550", output$figure_legend_text, fixed = TRUE))
+})
+
+# ── v2.16: Statistics tab and editable methods text ──────────────────────────
+cat("\n--- v2.16: Statistics tab and methods text ---\n")
+ui_chr <- as.character(env$ui)
+tab_titles <- regmatches(ui_chr, gregexpr('data-value="[^"]+"', ui_chr))[[1]]
+check("the Statistics tab comes right after Dashboard",
+      match('data-value="Statistics"', tab_titles) == match('data-value="Dashboard"', tab_titles) + 1L)
+check("the tab has the five sections, the _tab download buttons and the methods controls",
+      all(vapply(c("Summary statistics", "Curve metrics (mean curve)", "Per-replicate metrics", "Replicate comparison", "Methods text (editable)",
+                   'id="downloadStatsCSV_tab"', 'id="downloadMetricsCSV_tab"', 'id="downloadReplicateMetricsCSV_tab"',
+                   'id="downloadAnalysisStatsCSV_tab"', 'id="downloadMethodsTxt"', 'id="methods_text"', 'id="methods_draft"',
+                   'id="methods_replace"'), function(k) grepl(k, ui_chr, fixed = TRUE), logical(1))) &&
+      grepl("<details open", ui_chr, fixed = TRUE))
+check("methods_text = '' and methods_replace = FALSE in APP_DEFAULTS",
+      identical(env$APP_DEFAULTS$methods_text, "") && isFALSE(env$APP_DEFAULTS$methods_replace))
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected")
+  ser <- function(o) paste(as.character(o), collapse = " ")
+  check("summary-statistics table renders HTML/JSON containing 'Uninfected'", grepl("Uninfected", ser(output$stats_tab_summary), fixed = TRUE))
+  check("summary table carries the exported columns",
+        all(vapply(c("time", "sample", "mean", "sd", "n", "sem", "ci95_half_width"), function(k) grepl(k, ser(output$stats_tab_summary), fixed = TRUE), TRUE)))
+  check("curve-metrics table and the metric-definitions table render",
+        grepl("Uninfected", ser(output$stats_tab_metrics), fixed = TRUE) && grepl("mu_max", ser(output$stats_tab_metric_defs), fixed = TRUE) &&
+        grepl("Definition", ser(output$stats_tab_metric_defs), fixed = TRUE))
+  check("per-replicate metrics table renders", grepl("n_replicates", ser(output$stats_tab_repmetrics), fixed = TRUE))
+  check("replicate comparison on the tab reuses the Analysis tab builders (same notes, same pairwise table)",
+        identical(ser(output$stats_tab_notes), ser(output$analysis_stats_notes)) &&
+        identical(ser(output$stats_tab_pairwise), ser(output$analysis_stats_table)))
+  for (id in c("downloadStatsCSV_tab", "downloadMetricsCSV_tab", "downloadReplicateMetricsCSV_tab", "downloadAnalysisStatsCSV_tab", "downloadMethodsTxt"))
+    check(paste(id, "output is registered"), !is.null(tryCatch(output[[id]], error = function(e) NULL)))
+  m1 <- draft_methods_text()
+  check("draft_methods_text() is one non-empty string", is.character(m1) && length(m1) == 1 && nzchar(m1))
+  check("the draft names SEM (default error type), Welch's test and the mu_max window (5 points)",
+        grepl("SEM", m1, fixed = TRUE) && grepl("Welch", m1, fixed = TRUE) && grepl("μmax", m1, fixed = TRUE) && grepl("window of 5 points", m1, fixed = TRUE))
+  check("the draft states the measurement (A550, min), n and the reference sample, with plain 'A550'",
+        grepl("A550", m1, fixed = TRUE) && grepl("(min)", m1, fixed = TRUE) && grepl("3 replicates", m1, fixed = TRUE) && grepl("'Uninfected'", m1, fixed = TRUE))
+  session$setInputs(error_type = "sd", stats_method = "nonparametric", metrics_smooth_window = 7, metrics_lysis_threshold_pct = 10)
+  m2 <- draft_methods_text()
+  check("the draft follows the settings: SD, Mann-Whitney, 7-point window, 10 % threshold",
+        grepl("standard deviation (SD)", m2, fixed = TRUE) && !grepl("SEM", m2, fixed = TRUE) && grepl("Mann", m2, fixed = TRUE) &&
+        grepl("window of 7 points", m2, fixed = TRUE) && grepl("10% below", m2, fixed = TRUE))
+  session$setInputs(error_type = "sem", stats_method = "welch", metrics_smooth_window = 5, metrics_lysis_threshold_pct = 5)
+  # reports: Methods section only when the text box has text
+  session$setInputs(methods_text = "")
+  h0 <- html_report_string()
+  check("HTML report has no Methods heading while the box is empty", !grepl("<h2>Methods</h2>", h0, fixed = TRUE))
+  session$setInputs(methods_text = "We measured A550 in triplicate.\n\nGrowth <curves> were analysed in R.")
+  h1 <- html_report_string()
+  check("HTML report has a Methods heading with the text (escaped, one paragraph per blank line) once it is non-empty",
+        grepl("<h2>Methods</h2>", h1, fixed = TRUE) && grepl("We measured A550 in triplicate.", h1, fixed = TRUE) &&
+        grepl("Growth &lt;curves&gt; were analysed in R.", h1, fixed = TRUE))
+  check("the Methods section comes before the statistics tables",
+        regexpr("<h2>Methods</h2>", h1, fixed = TRUE) < regexpr("<h2>Summary statistics</h2>", h1, fixed = TRUE))
+  pdf_f <- tempfile(fileext = ".pdf"); pdf_f0 <- tempfile(fileext = ".pdf")
+  session$setInputs(methods_text = paste(rep("A long methods sentence about the growth curves.", 200), collapse = " "))
+  pdf_report_file(pdf_f)
+  session$setInputs(methods_text = ""); pdf_report_file(pdf_f0)
+  check("PDF report builds with a (multi-page) Methods section, and is larger than without it", file.exists(pdf_f) && file.size(pdf_f) > file.size(pdf_f0))
+  session$setInputs(methods_text = "My own text")
+  session$setInputs(methods_draft = 1)   # box not empty and 'replace' off: must not error (a notification explains)
+  check("the draft button with existing text and replace off is a safe no-op", TRUE)
+})
+
+# ── v2.16: no panel letter unless asked for; the composer's letters can be switched off ──
+cat("\n--- v2.16: panel letters ---\n")
+check("compose_tags is in APP_DEFAULTS (TRUE) and has a checkbox; no figure/analysis panel letter by default",
+      isTRUE(env$APP_DEFAULTS$compose_tags) && grepl('id="compose_tags"', as.character(env$ui), fixed = TRUE) &&
+      identical(env$APP_DEFAULTS$panel_label, "") && identical(env$APP_DEFAULTS$analysis_panel_label, "") &&
+      identical(env$journal_preset_settings(89, 65)$panel_label, "") && identical(env$journal_preset_settings(89, 65, "c")$panel_label, "c"))
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "demo")
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected",
+                    compose_panels = c("main", "growth_rate"))
+  tag_els <- function(p, w, h) { tx <- svg_text(p, w, h); tx[grepl("font-weight: bold", tx) & grepl("font-size: 8.00px", tx) & grepl(">[A-Za-z]</text>", tx)] }
+  check("startup main figure SVG has no panel letter", length(tag_els(main_plot_obj(), export_size_in()[1], export_size_in()[2])) == 0)
+  ci <- compose_info(); szc <- c(ci$width_mm, ci$height_mm) / 25.4
+  check("composer: panel letters a, b by default (explicit request for a multi-panel figure)", length(tag_els(ci$plot, szc[1], szc[2])) == 2)
+  session$setInputs(compose_tags = FALSE)
+  ci <- compose_info(); szc <- c(ci$width_mm, ci$height_mm) / 25.4
+  check("composer with 'Add panel letters' off: no letters (fixed panels)", length(tag_els(ci$plot, szc[1], szc[2])) == 0)
+  session$setInputs(panel_size_mode = "fit", export_units = "mm", export_width = 89, export_height = 65)
+  check("composer with letters off: no letters (fit mode / patchwork)", { ci <- compose_info()
+    length(tag_els(ci$plot, ci$width_mm / 25.4, ci$height_mm / 25.4)) == 0 })
+  session$setInputs(compose_tags = TRUE)
+  check("composer with letters on (fit mode / patchwork): a, b", { ci <- compose_info()
+    length(tag_els(ci$plot, ci$width_mm / 25.4, ci$height_mm / 25.4)) == 2 })
+  session$setInputs(panel_label = "x")
+  check("an explicit panel label still prefixes the Figure Legend Text and names the file",
+        startsWith(output$figure_legend_text, "(x) ") && grepl("^lysis_curve_x_", main_download_name()))
 })
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))

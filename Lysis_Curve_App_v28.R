@@ -1,6 +1,35 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.17.0 -- Log-axis clipping, QC flags, notebook exports, figure bundle, threshold line, gradients:
+#   LOG-AXIS CLIPPING -- y_oob: a reading below the log-axis floor is drawn ON the floor (squish, the default
+#                        and the journal preset) instead of being deleted (censor, the Legacy look).
+#   QC FLAGS          -- qc_flags(): CEILING / NEGATIVE / GAP / FLAT_REFERENCE; sidebar list, Dashboard and a
+#                        "QC flags" section in the HTML and PDF reports. Input qc_od_ceiling.
+#   NOTES / LEGEND    -- the Figure Legend Text is a paragraph under the main figure in the reports;
+#                        notebook .txt and one-row .csv downloads; notebook fields Passage #, Inducer
+#                        concentration, Other condition.
+#   FIGURE BUNDLE     -- one .zip: figure (SVG + PDF), composed SVG, settings.json, tidy source data,
+#                        summary statistics, curve metrics, legend, methods, README.
+#   THRESHOLD LINE    -- horizontal OD line with an optional label (Time Point Markers section).
+#   GRADIENTS         -- "Blues" and "Blue to red" dose-gradient palettes (control black) for MOI series.
+#   ROBUSTNESS        -- samples that match no loaded column give zero-row frames, not an error.
+#
+# v2.16.0 -- Subscript axis labels and a Statistics tab:
+#   SUBSCRIPTS      -- label_with_subscripts(): a y label with a wavelength token (A550, OD600,
+#                      "A550 relative to Uninfected", "log10 A550") becomes plotmath A[550] / OD[600];
+#                      labels without a token stay character. Checkbox axis_subscripts (default on;
+#                      the Legacy look turns it off, so the v2.9 output stays byte-identical). Applied
+#                      to the main figure, the analysis figures' y labels, the heatmap key and the
+#                      dose-response axis; facet strips, the Figure Legend Text and report captions
+#                      stay plain text.
+#   STATISTICS TAB  -- new main-panel tab after Dashboard: summary statistics (DT table with search
+#                      when DT is installed), curve metrics + definitions, per-replicate metrics,
+#                      the replicate comparison (same builders as the Analysis tab), each with a CSV
+#                      button, and an editable Methods text (draft_methods_text() fills it from the
+#                      current settings). A non-empty Methods text is a "Methods" section in the HTML
+#                      and PDF reports and downloads as .txt.
+#
 # v2.15.0 -- Square panels: "fixed panel size" is the new standard (panel_size_mode):
 #   the plotting panel is exactly panel_width_mm x panel_height_mm (65 x 65 mm by default) and the
 #   figure is sized AROUND it (axes, labels and an outside legend make it wider), via
@@ -206,11 +235,12 @@ has_base64enc <- requireNamespace("base64enc", quietly = TRUE)
 has_gridExtra <- requireNamespace("gridExtra", quietly = TRUE)
 has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 has_patchwork <- requireNamespace("patchwork", quietly = TRUE)
+has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: searchable summary-statistics table
 
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.15.0"
+APP_VERSION <- "2.17.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -247,15 +277,243 @@ detect_csv_locale <- function(path) {
   if (grepl(";", first_line, fixed = TRUE)) "eu" else "us"
 }
 
+# Ingest hardening (ported from the companion app's read_csv_smart(),
+# coerce_sentinel_columns(), parse_time_column(), infer_wide_replicates() and
+# detect_replicate_column(); see docs/PORTED_FROM_LYSIS_CURVE_APP.md).
+
+# Field counts of the non-blank lines of a file, WITH their raw line numbers
+# (read.csv's `skip` counts raw lines, blank ones included). Counts come from
+# strsplit(), which drops trailing empty fields: a preamble line padded with
+# commas out to the table width ("Software Version,3.08,,,,") therefore still
+# counts as narrow, which is what the preamble test needs.
+csv_line_field_counts <- function(path, sep, n = 500) {
+  raw <- tryCatch(readLines(path, n = n, warn = FALSE), error = function(e) character(0))
+  keep <- which(nzchar(trimws(raw)))
+  list(line = keep, text = raw[keep],
+       fc = vapply(raw[keep], function(l) length(strsplit(l, sep, fixed = TRUE)[[1]]),
+                   integer(1), USE.NAMES = FALSE))
+}
+
+# Raw-line index (0-based, i.e. read.csv's `skip`) of the table header when the
+# file starts with a reader preamble: the first non-blank line is NARROWER than
+# the widest field count that occurs at least twice. 0 for an ordinary file.
+csv_preamble_skip <- function(path, sep = ",") {
+  z <- csv_line_field_counts(path, sep)
+  if (length(z$fc) < 3) return(0L)
+  tab <- table(z$fc[z$fc > 1])
+  rep_counts <- as.integer(names(tab)[tab >= 2])
+  if (!length(rep_counts)) return(0L)
+  modal <- max(rep_counts)
+  if (z$fc[1] >= modal) return(0L)
+  as.integer(z$line[which(z$fc == modal)[1]] - 1L)
+}
+
+# Delimiter / preamble sniffing. Tries comma, semicolon and tab; the table is
+# the block of lines with the LARGEST field count that occurs at least twice
+# (a reader preamble is a handful of narrow lines above a wide table, so a modal
+# count would sometimes pick the preamble); everything above its first line is
+# skipped. The plain read.csv() is tried first and kept whenever it produces
+# something sane (>= 2 columns, rows, and no preamble), so ordinary files take
+# exactly the path they always did. Errors are worded for a bench scientist.
+# Deviation from the companion app: `skip` is computed on RAW line numbers (the
+# original filtered blank lines out first, so a blank line inside a preamble
+# made read.csv skip too few lines).
+read_csv_smart <- function(path) {
+  plain <- tryCatch(read.csv(path, stringsAsFactors = FALSE, check.names = FALSE),
+                    error = function(e) NULL)
+  if (!is.null(plain) && ncol(plain) >= 2 && nrow(plain) > 0 && csv_preamble_skip(path, ",") == 0L)
+    return(list(data = plain, sep = ",", dec = ".", skip = 0L, sniffed = FALSE))
+
+  raw <- tryCatch(readLines(path, n = 500, warn = FALSE), error = function(e) character(0))
+  keep  <- which(nzchar(trimws(raw)))
+  lines <- raw[keep]
+  if (length(lines) == 0) stop("The file is empty.", call. = FALSE)
+
+  nf <- function(sep) vapply(lines, function(l)
+    length(strsplit(l, sep, fixed = TRUE)[[1]]), integer(1), USE.NAMES = FALSE)
+
+  # European Excel writes 0,05 for 0.05. With a comma separator that is
+  # unparseable by construction -- the header has k fields and every data row
+  # has more -- so diagnose it instead of guessing.
+  fc_comma <- nf(",")
+  if (length(fc_comma) >= 2 && fc_comma[1] >= 2 &&
+      all(fc_comma[-1] > fc_comma[1]) &&
+      any(grepl("[0-9],[0-9]", lines[-1])))
+    stop("The header has ", fc_comma[1], " comma-separated fields but the data ",
+         "rows have more. This looks like a European CSV written with decimal ",
+         "commas (0,05 rather than 0.05); re-export it with a semicolon ",
+         "separator or with decimal points.", call. = FALSE)
+
+  best <- NULL
+  for (sep in c(",", ";", "\t")) {
+    fc  <- nf(sep)
+    tab <- table(fc[fc > 1])
+    if (!length(tab)) next
+    rep_counts <- as.integer(names(tab)[tab >= 2])
+    modal <- if (length(rep_counts)) max(rep_counts)
+             else as.integer(names(tab)[which.max(tab)])
+    if (modal <= 1) next
+    score <- sum(fc == modal) * modal
+    if (is.null(best) || score > best$score)
+      best <- list(sep = sep, modal = modal, fc = fc, score = score)
+  }
+  if (is.null(best))
+    stop("Could not find a consistent column separator (comma, semicolon and ",
+         "tab were all tried). Check that the file is a plain-text table.",
+         call. = FALSE)
+
+  skip <- as.integer(keep[which(best$fc == best$modal)[1]] - 1L)   # raw lines above the header
+
+  # decimal comma only makes sense when the separator is not a comma
+  dec  <- "."
+  body <- lines[best$fc == best$modal][-1]
+  if (length(body) && best$sep != "," &&
+      sum(grepl("[0-9],[0-9]", body)) >= 0.5 * length(body))
+    dec <- ","
+
+  data <- tryCatch(
+    read.csv(path, sep = best$sep, dec = dec, skip = skip,
+             stringsAsFactors = FALSE, check.names = FALSE),
+    error = function(e)
+      stop("Could not read the file even after detecting a '",
+           if (best$sep == "\t") "tab" else best$sep, "' separator and ",
+           skip, " header line(s) to skip: ", conditionMessage(e), call. = FALSE))
+  list(data = data, sep = best$sep, dec = dec, skip = skip, sniffed = TRUE)
+}
+
+# The app's reader. The locale-aware attempt (KC-11: semicolon/decimal-comma
+# files) is tried first and kept whenever it yields >= 2 columns, rows and no
+# reader preamble, so those files parse exactly as before; otherwise (a parse
+# error, a single column because the wrong locale was picked, or a preamble above
+# the header) the separator/preamble sniffer read_csv_smart() takes over.
 read_csv_locale_aware <- function(path, locale = "auto") {
   loc <- if (identical(locale, "auto")) detect_csv_locale(path) else locale
   sep <- if (identical(loc, "eu")) ";" else ","
   dec <- if (identical(loc, "eu")) "," else "."
-  tryCatch(
+  plain <- tryCatch(
     read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = FALSE),
-    error = function(e)
-      read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE)
-  )
+    error = function(e) tryCatch(
+      read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE),
+      error = function(e2) NULL))
+  if (!is.null(plain) && ncol(plain) >= 2 && nrow(plain) > 0 && csv_preamble_skip(path, sep) == 0L)
+    return(plain)
+  smart <- tryCatch(read_csv_smart(path), error = function(e) e)
+  if (inherits(smart, "error")) {
+    if (!is.null(plain)) return(plain)       # nothing better than the locale-aware parse
+    stop(smart)
+  }
+  smart$data
+}
+
+# Strings a reader writes into a well that went out of range (Gen5 OVRFLW,
+# i-control OVER, SoftMax Pro #SAT) make read.csv() type the whole column as
+# character, and detect_od_column_idx()'s is.numeric() fallback then dropped that
+# entire sample without a word. Coerce a mostly-numeric character column to
+# numeric, every unparseable cell becoming NA and being reported, so one bad well
+# costs one time point instead of the whole curve. min_numeric_frac keeps genuine
+# text columns (notes, sample labels) out; skip_cols protects the time column and
+# any group / replicate column. Returns list(data, report) where report is NULL or
+# a data.frame(sample, time, value) of the cells set to NA.
+coerce_sentinel_columns <- function(data, skip_cols = character(0),
+                                    time_values = NULL,
+                                    min_numeric_frac = 0.5) {
+  report <- list()
+  if (is.null(data) || ncol(data) == 0) return(list(data = data, report = NULL))
+  for (j in seq_along(data)) {
+    nm  <- colnames(data)[j]
+    if (nm %in% skip_cols) next
+    col <- data[[j]]
+    if (is.numeric(col) || !(is.character(col) || is.factor(col))) next
+    txt <- trimws(as.character(col))
+    txt[is.na(txt)] <- ""
+    num <- suppressWarnings(as.numeric(txt))
+    nonblank <- nzchar(txt)
+    if (!any(nonblank)) next
+    if (sum(is.finite(num) & nonblank) / sum(nonblank) < min_numeric_frac) next
+    bad <- which(nonblank & !is.finite(num))
+    if (length(bad))
+      report[[length(report) + 1]] <- data.frame(
+        sample = nm,
+        time   = if (!is.null(time_values) && length(time_values) == nrow(data))
+                   as.character(time_values[bad]) else as.character(bad),
+        value  = txt[bad], stringsAsFactors = FALSE)
+    data[[j]] <- num
+  }
+  list(data = data,
+       report = if (length(report)) do.call(rbind, report) else NULL)
+}
+
+# BioTek Gen5 and Tecan i-control write elapsed time as 0:15:00, and an Excel
+# round-trip turns the column into a full datetime. Both are non-numeric, so the
+# is.finite() row filter used to delete EVERY row. Returns list(values, converted,
+# unit): values in MINUTES when converted (clock durations H:MM[:SS[.s]], or
+# date-times as minutes from the earliest timestamp), otherwise the numeric
+# values as they were.
+parse_time_column <- function(x) {
+  txt  <- trimws(as.character(x))
+  txt[is.na(txt)] <- ""
+  keep <- nzchar(txt)
+  num  <- suppressWarnings(as.numeric(txt))
+  if (any(keep) && all(is.finite(num[keep])))
+    return(list(values = num, converted = FALSE, unit = NA_character_))
+
+  out <- rep(NA_real_, length(txt))
+
+  # 1. clock durations H:MM / H:MM:SS (optionally with fractional seconds)
+  is_clock <- grepl("^[0-9]{1,5}:[0-9]{1,2}(:[0-9]{1,2}([.][0-9]+)?)?$", txt)
+  if (any(is_clock)) {
+    out[is_clock] <- vapply(strsplit(txt[is_clock], ":", fixed = TRUE), function(p) {
+      p <- suppressWarnings(as.numeric(p))
+      if (length(p) == 2) p[1] * 60 + p[2] else p[1] * 60 + p[2] + p[3] / 60
+    }, numeric(1))
+    out[is.finite(num)] <- num[is.finite(num)]
+    return(list(values = out, converted = TRUE, unit = "minutes"))
+  }
+
+  # 2. datetimes -> minutes elapsed from the earliest timestamp
+  fmts <- c("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
+            "%m/%d/%Y %H:%M")
+  for (f in fmts) {
+    pt <- suppressWarnings(as.POSIXct(txt, format = f, tz = "UTC"))
+    if (sum(!is.na(pt)) >= max(2, 0.8 * sum(keep)))
+      return(list(values = as.numeric(difftime(pt, min(pt, na.rm = TRUE), units = "mins")),
+                  converted = TRUE, unit = "minutes"))
+  }
+
+  # 3. whatever was already numeric; the caller decides what to do with the rest
+  out[is.finite(num)] <- num[is.finite(num)]
+  list(values = out, converted = FALSE, unit = NA_character_)
+}
+
+# Replicates in WIDE format from repeated (stacked) time blocks: the time counter
+# restarts for each replicate block. Returns list(reps = number of blocks,
+# block_id = per-row block number); reps/block_id NULL when the time column is
+# unreadable.
+infer_wide_replicates <- function(data, time_col) {
+  if (is.null(data) || nrow(data) == 0) return(list(reps = NULL, block_id = NULL))
+  t_vec <- suppressWarnings(as.numeric(as.character(data[[time_col]])))
+  if (all(is.na(t_vec))) return(list(reps = NULL, block_id = NULL))
+  resets <- which(diff(t_vec) < 0)
+  if (length(resets) == 0) return(list(reps = 1L, block_id = rep(1L, nrow(data))))
+  block_starts <- c(1L, resets + 1L)
+  block_ends   <- c(resets, nrow(data))
+  block_id <- integer(nrow(data))
+  for (i in seq_along(block_starts)) block_id[block_starts[i]:block_ends[i]] <- i
+  list(reps = length(block_starts), block_id = block_id)
+}
+
+# A replicate / well column in LONG format (never the time, group or value column).
+detect_replicate_column <- function(data, time_col, group_col, value_col) {
+  if (is.null(data) || nrow(data) == 0) return(NULL)
+  ignore_cols <- c(time_col, group_col, value_col)
+  names_lower <- tolower(colnames(data))
+  rep_hits <- names_lower %in% c("replicate", "rep", "rep_id", "replicate_id",
+                                 "well", "well_id", "wellid",
+                                 "technical_replicate", "biological_replicate", "repeat")
+  rep_cols <- setdiff(colnames(data)[rep_hits], ignore_cols)
+  if (length(rep_cols) > 0) return(rep_cols[1])
+  NULL
 }
 
 parse_excluded_timepoints <- function(text, all_timepoints) {
@@ -323,6 +581,118 @@ moving_average <- function(y, w) {
   }, numeric(1))
 }
 
+# LC-3 (ported from curve_noise_sd() in "Lysis Curve Ap 26.03.13.R"): robust
+# point-to-point noise SD from second differences. For white noise the second
+# difference y[i] - 2y[i+1] + y[i+2] has variance 6*sigma^2, so
+# sigma = median(|d2|) * 1.4826 / sqrt(6). The MEDIAN is what makes it usable:
+# real curvature (growth shoulder, lysis kink) shows up in a handful of large
+# second differences and cannot inflate the noise floor. Returns 0 when there
+# are fewer than 5 finite points (too little data to estimate anything).
+curve_noise_sd <- function(y) {
+  y <- y[is.finite(y)]
+  n <- length(y)
+  if (n < 5) return(0)
+  d2 <- y[1:(n - 2)] - 2 * y[2:(n - 1)] + y[3:n]
+  s  <- stats::median(abs(d2)) * 1.4826 / sqrt(6)
+  if (!is.finite(s) || s < 0) return(0)
+  s
+}
+
+# LC-3: number of consecutive post-peak points that must sit below the lysis
+# detection threshold before a decline counts as lysis. One point below a fixed
+# 5 % of peak scored a clean 4 %-CV uninfected control as lysing in 39 % of
+# simulated runs (and the app's own demo Uninfected replicates).
+LYSIS_SUSTAIN_PTS <- 2L
+
+# LC-17: start/end indices of the longest contiguous TRUE run in `flag`
+# (first one on ties), or NULL when there is none. Used for stat_phase_dur.
+longest_true_run <- function(flag) {
+  flag <- !is.na(flag) & flag
+  if (!any(flag)) return(NULL)
+  r <- rle(flag)
+  ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1L
+  k <- which(r$values)
+  k <- k[which.max(r$lengths[k])]
+  c(start = starts[k], end = ends[k])
+}
+
+# ── New metrics (ported from the companion app, step 2) ──────────────────────
+# 3-point centered moving mean with the RAW value kept at the two edges (and
+# wherever the mean is not finite) -- the smoothing calculate_growth_metrics()
+# uses to find the first prominent peak. Deliberately NOT moving_average(y, 3),
+# whose edge windows shrink instead of falling back to the raw point.
+smooth3_raw_edges <- function(y) {
+  n <- length(y)
+  if (n < 3) return(y)
+  sm <- rep(NA_real_, n)
+  sm[2:(n - 1)] <- (y[1:(n - 2)] + y[2:(n - 1)] + y[3:n]) / 3
+  ifelse(is.finite(sm), sm, y)
+}
+
+# Port of first_prominent_peak_idx(): index of the EARLIEST local maximum of
+# `sm` whose topographic prominence reaches `prom_min`, or NA when there is
+# none. A regrowing culture's global maximum can be its SECOND peak, so
+# anything anchored on which.max() misses the first one.
+first_prominent_peak_idx <- function(sm, prom_min) {
+  n <- length(sm)
+  if (n < 3 || !is.finite(prom_min)) return(NA_integer_)
+  cand <- which(sm[2:(n - 1)] >  sm[1:(n - 2)] &
+                sm[2:(n - 1)] >= sm[3:n]) + 1L
+  for (pk in cand) {
+    p_val <- sm[pk]
+    # walk out both ways until a higher point (or the curve end) is met; the
+    # prominence is the drop to the shallower of the two saddles
+    li <- pk
+    while (li > 1 && sm[li - 1] <= p_val) li <- li - 1
+    ri <- pk
+    while (ri < n && sm[ri + 1] <= p_val) ri <- ri + 1
+    left_min  <- min(sm[li:pk], na.rm = TRUE)
+    right_min <- min(sm[pk:ri], na.rm = TRUE)
+    prom <- p_val - max(left_min, right_min)
+    if (is.finite(prom) && prom >= prom_min) return(pk)
+  }
+  NA_integer_
+}
+
+# Port of the centroid block: EXACT trapezoid-strip centroids of the area
+# under the curve (each consecutive pair of points is a trapezoid whose own
+# centroid is known in closed form; the curve centroid is the area-weighted
+# mean of the strip centroids). Returns c(x, y); NA, NA for < 2 points or a
+# non-positive total area.
+curve_centroid <- function(t_vec, od_vec) {
+  n <- length(t_vec)
+  if (n < 2) return(c(x = NA_real_, y = NA_real_))
+  h_s <- diff(t_vec)
+  a_s <- head(od_vec, -1)
+  b_s <- tail(od_vec, -1)
+  A_s <- h_s * (a_s + b_s) / 2
+  ab  <- a_s + b_s
+  xbar_s <- ifelse(ab == 0, head(t_vec, -1) + h_s / 2,
+                   head(t_vec, -1) + h_s * (a_s + 2 * b_s) / (3 * ab))
+  ybar_s <- ifelse(ab == 0, 0, (a_s^2 + a_s * b_s + b_s^2) / (3 * ab))
+  A_tot  <- sum(A_s, na.rm = TRUE)
+  if (!is.finite(A_tot) || A_tot <= 0) return(c(x = NA_real_, y = NA_real_))
+  c(x = sum(xbar_s * A_s, na.rm = TRUE) / A_tot,
+    y = sum(ybar_s * A_s, na.rm = TRUE) / A_tot)
+}
+
+# Port of the extinction block: first time the curve falls below the floor
+# `thr` (default 0.05 OD, as in the reference), linearly interpolated between
+# the last point at/above it and the first below. A curve that STARTS below the
+# floor reports its first time point. NA when it never falls below.
+curve_extinction_time <- function(t_vec, od_vec, thr = 0.05) {
+  n <- length(t_vec)
+  thr <- suppressWarnings(as.numeric(thr))
+  if (n < 1 || length(thr) != 1 || !is.finite(thr)) return(NA_real_)
+  if (isTRUE(od_vec[1] < thr)) return(t_vec[1])
+  if (n < 2) return(NA_real_)
+  cross <- which(od_vec[-1] < thr & od_vec[-n] >= thr)
+  if (length(cross) == 0) return(NA_real_)
+  j  <- cross[1]
+  y0 <- od_vec[j]; y1 <- od_vec[j + 1]; x0 <- t_vec[j]; x1 <- t_vec[j + 1]
+  if (y0 == y1) x1 else x0 + (x1 - x0) * (y0 - thr) / (y0 - y1)
+}
+
 # KC-4: the full per-curve metrics engine, factored out into its own function
 # so the EXACT SAME formulas run on a per-replicate curve
 # (compute_replicate_metrics(), below) as on the mean curve
@@ -371,7 +741,8 @@ first_local_peak_index <- function(peak_vec) {
 compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
                                       smooth_window = 5, peak_smooth_window = 1,
                                       peak_mode = c("global", "first_local"),
-                                      lysis_threshold = 0.05) {
+                                      lysis_threshold = 0.05,
+                                      extinction_threshold = 0.05) {
     peak_mode <- match.arg(peak_mode)
     n_pts  <- length(t_vec)
     peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
@@ -427,24 +798,66 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
     doubling_time <- if (is.finite(mu_max) && mu_max > 0) log(2) / mu_max else NA_real_
 
     # ── Stationary phase duration: time spent within 95% of max OD ───────────
+    # LC-17: the LONGEST CONTIGUOUS run of points >= 95 % of the peak, not the
+    # span from the first to the last such point. The span ran straight
+    # through a lysis trough (or any dip) between two separate near-peak
+    # episodes -- the opposite of "time spent near the maximum". A single
+    # near-peak point gives no duration (NA), as before.
     stat_phase_dur <- NA_real_
     if (max_idx > 1) {
-      near_max <- which(od_vec >= 0.95 * max_od)
-      if (length(near_max) >= 2)
-        stat_phase_dur <- t_vec[max(near_max)] - t_vec[min(near_max)]
+      run <- longest_true_run(is.finite(od_vec) & od_vec >= 0.95 * max_od)
+      if (!is.null(run) && run[["end"]] > run[["start"]])
+        stat_phase_dur <- t_vec[run[["end"]]] - t_vec[run[["start"]]]
     }
 
-    # ── Lysis detection (paper method) ───────────────────────────────────────
-    # onset = first post-peak point whose decline from peak exceeds 5% of peak;
+    # ── Lysis detection ──────────────────────────────────────────────────────
+    # Detection and reporting are deliberately separate (LC-3 / LC-9; ported
+    # from calculate_growth_metrics() in the companion app).
+    #   DETECT (LC-3): the post-peak decline must exceed
+    #     max(lysis_threshold * peak, 3 * curve_noise_sd(od))
+    #     for LYSIS_SUSTAIN_PTS consecutive points. A single point 5 % below
+    #     a noisy peak is noise, not lysis.
+    #   REPORT (LC-9): once lysis is called, lysis_time is the LINEARLY
+    #     INTERPOLATED time at which the curve first falls lysis_threshold *
+    #     peak below the peak (the noise term is NOT in the interpolation, so
+    #     the number does not move with the curve's noise). The old value was
+    #     the first sampled point already past the threshold -- late by up to
+    #     one acquisition interval and not comparable across sampling rates.
     # rate  = linear-regression slope from peak to the post-peak trough
     lysis_time <- NA_real_; lysis_rate <- NA_real_
     od_drop <- NA_real_; residual_od <- NA_real_; recovery_slope <- NA_real_
+    noise_sd <- curve_noise_sd(od_vec)
     if (max_idx < n_pts) {
       post_peak  <- (max_idx + 1):n_pts
+      detect_thr <- max(lysis_threshold * max_od, 3 * noise_sd)
+      report_thr <- lysis_threshold * max_od
       od_decline <- max_od - od_vec[post_peak]
-      lysis_idx  <- which(od_decline > lysis_threshold * max_od)
-      if (length(lysis_idx) > 0) {
-        lysis_time <- t_vec[post_peak[lysis_idx[1]]]
+      below      <- is.finite(od_decline) & od_decline > detect_thr
+      need       <- as.integer(LYSIS_SUSTAIN_PTS)
+      onset      <- NA_integer_
+      if (length(below) >= need) {
+        runs <- vapply(seq_len(length(below) - need + 1L),
+                       function(i) all(below[i:(i + need - 1L)]), logical(1))
+        if (any(runs)) onset <- which(runs)[1]
+      }
+      # A decline of more than half the peak is lysis even when the series ends
+      # right after it (e.g. a sample read only until it lysed): the sustained-
+      # run rule guards against noise, not against an unambiguous crash.
+      if (is.na(onset)) {
+        big <- is.finite(od_decline) & od_decline > 0.5 * max_od
+        if (any(big)) onset <- which(big)[1]
+      }
+      if (!is.na(onset)) {
+        # the report level is crossed at or before the sustained run starts
+        cross   <- which(is.finite(od_decline) & od_decline > report_thr &
+                         seq_along(od_decline) <= onset)
+        abs_idx <- post_peak[if (length(cross)) cross[1] else onset]
+        level   <- max_od - report_thr
+        y0 <- od_vec[abs_idx - 1L]; y1 <- od_vec[abs_idx]
+        x0 <- t_vec[abs_idx - 1L];  x1 <- t_vec[abs_idx]
+        lysis_time <- if (is.finite(y0) && is.finite(y1) && y0 > level && y0 > y1)
+                        x0 + (x1 - x0) * (y0 - level) / (y0 - y1)
+                      else t_vec[abs_idx]
         trough_idx <- max_idx + which.min(od_vec[post_peak])
         if (trough_idx > max_idx) {
           lw <- max_idx:trough_idx
@@ -493,6 +906,26 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       }
     }
 
+    # ── First prominent peak, extinction time, area centroid (companion-app port) ──
+    # first_peak_od / t_first_peak: the earliest local maximum of the lightly
+    # (3-point) smoothed curve whose prominence is >= 5 % of that curve's range
+    # (Blazanin et al., PNAS 2025). The definition is deliberately the plain
+    # published one (no noise term; AUDIT LC-18). With no prominent peak (or
+    # < 3 points) it falls back to the GLOBAL maximum, as the reference does,
+    # whatever peak_mode is. The reported OD is the raw value at that index.
+    fp_idx <- NA_integer_
+    if (n_pts >= 3 && all(is.finite(od_vec))) {
+      sm_vec   <- smooth3_raw_edges(od_vec)
+      sm_range <- diff(range(sm_vec))
+      fp_idx   <- tryCatch(first_prominent_peak_idx(sm_vec, 0.05 * sm_range),
+                           error = function(e) NA_integer_)
+    }
+    if (is.na(fp_idx)) fp_idx <- which.max(od_vec)
+    first_peak_od <- od_vec[fp_idx]
+    t_first_peak  <- t_vec[fp_idx]
+    extinction_time <- curve_extinction_time(t_vec, od_vec, extinction_threshold)
+    cen <- curve_centroid(t_vec, od_vec)
+
     data.frame(
       sample          = sample_name,
       n_timepoints    = n_pts,
@@ -526,6 +959,11 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       t_half_max_decline        = t50,
       steepest_decline_rate     = dec_rate,
       steepest_decline_interval = dec_int,
+      first_peak_od   = first_peak_od,
+      t_first_peak    = t_first_peak,
+      extinction_time = extinction_time,
+      centroid_x      = unname(cen[["x"]]),
+      centroid_y      = unname(cen[["y"]]),
       stringsAsFactors = FALSE
     )
 }
@@ -534,12 +972,13 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
 # present in the data) the five reference-normalised infection metrics are added.
 compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
                                   peak_smooth_window = 1, peak_mode = "global",
-                                  lysis_threshold = 0.05) {
+                                  lysis_threshold = 0.05, extinction_threshold = 0.05) {
   if (is.null(pd) || nrow(pd) == 0) return(NULL)
   pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
   out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
     compute_one_curve_metrics(g$time, g$mean_value, g$variable[1],
-                              smooth_window, peak_smooth_window, peak_mode, lysis_threshold)
+                              smooth_window, peak_smooth_window, peak_mode, lysis_threshold,
+                              extinction_threshold)
   })
   m <- do.call(rbind, c(out, list(make.row.names = FALSE)))
 
@@ -558,8 +997,108 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
     m$relative_max_od    <- if (is.finite(ref_max_od) && ref_max_od > 0)
       m$max_od / ref_max_od else NA_real_
     m$lysis_onset_delta  <- m$lysis_time - m$lag_phase
+    m$centroid_index     <- centroid_index_vs_ref(m$centroid_x, m$centroid_y, ref$centroid_x, ref$centroid_y)
+    lv <- calculate_local_virulence(pd, ref_sample, smooth_window)
+    m$local_virulence    <- if (is.null(lv)) NA_real_ else lv$local_virulence[match(m$sample, lv$sample)]
   }
   m
+}
+
+# Centroid Index (Hosseini et al. 2024; port of calculate_infection_metrics()):
+# 1 - (cx * cy) / (ref_cx * ref_cy). The denominator is the MEAN of the reference
+# curves' cx*cy products, not the product of the column means: with one reference
+# curve the two coincide, with replicates only this form makes the reference's own
+# index average to exactly 0 (E[XY] != E[X]E[Y]). NA when the reference product is
+# not a positive finite number.
+centroid_index_vs_ref <- function(cx, cy, ref_cx, ref_cy) {
+  ref_prod <- mean(ref_cx * ref_cy, na.rm = TRUE)
+  if (!is.finite(ref_prod) || ref_prod <= 0) return(rep(NA_real_, length(cx)))
+  1 - (cx * cy) / ref_prod
+}
+
+# Storms local virulence (PHAGE 1(1):27-36, 2020), port of
+# calculate_local_virulence(): the "virulence index" area ratio
+# 1 - A_sample / A_reference, integrated only up to the onset of stationary phase
+# (t_stat) in the REFERENCE culture -- unlike infection_strength, which integrates
+# the whole run. t_stat defaults to the first time AFTER the reference's mu_max
+# window at which the reference's centered rolling ln-slope falls below 10 % of
+# mu_max (the run's last time when there is none); `t_stat_override` replaces it.
+# Operates on time / variable / mean_value[, replicate] data so it also works per
+# replicate; the reference curve is the mean over the reference's replicates at each
+# time. Returns sample[, replicate], local_virulence, t_stat_used; NULL when the
+# reference is absent. The reference sample's own value is 0.
+calculate_local_virulence <- function(pd, ref_sample, smooth_window = 5,
+                                      t_stat_override = NULL) {
+  if (is.null(pd) || nrow(pd) == 0 || is.null(ref_sample) || !nzchar(ref_sample)) return(NULL)
+  if (!ref_sample %in% pd$variable) return(NULL)
+  has_rep <- "replicate" %in% names(pd)
+
+  rg <- pd[pd$variable == ref_sample & is.finite(pd$time) & is.finite(pd$mean_value), , drop = FALSE]
+  if (nrow(rg) == 0) return(NULL)
+  t_ref  <- sort(unique(rg$time))
+  od_ref <- vapply(t_ref, function(tt) mean(rg$mean_value[rg$time == tt]), numeric(1))
+  n_ref  <- length(t_ref)
+  if (n_ref < 2) return(NULL)
+
+  t_stat <- t_ref[n_ref]
+  win <- min(smooth_window, n_ref)
+  if (n_ref >= win && win >= 3) {
+    # same non-positive-OD rule as mu_max: a window containing a reading <= 0 has no slope
+    pos_ref <- od_ref > 0
+    log_od  <- rep(NA_real_, n_ref); log_od[pos_ref] <- log(od_ref[pos_ref])
+    roll <- tryCatch(rolling_slope(t_ref, log_od, win), error = function(e) rep(NA_real_, n_ref))
+    off <- floor((win - 1) / 2)
+    for (s in seq_len(n_ref - win + 1)) {
+      idx <- s:(s + win - 1)
+      if (any(!pos_ref[idx])) roll[s + off] <- NA_real_
+    }
+    valid <- which(is.finite(roll) & roll > 1e-10)
+    if (length(valid) > 0) {
+      mu_max_ref <- max(roll[valid])
+      mu_idx     <- valid[which.max(roll[valid])]
+      after <- which(seq_len(n_ref) > mu_idx & is.finite(roll) & roll < 0.10 * mu_max_ref)
+      if (length(after) > 0) t_stat <- t_ref[after[1]]
+    }
+  }
+  if (!is.null(t_stat_override)) {
+    ov <- suppressWarnings(as.numeric(t_stat_override))
+    if (length(ov) == 1 && is.finite(ov)) t_stat <- ov
+  }
+
+  # trapezoid integral up to t_cut, interpolating a point AT t_cut
+  area_to <- function(tt, yy, t_cut) {
+    ok <- is.finite(tt) & is.finite(yy)
+    tt <- tt[ok]; yy <- yy[ok]
+    o  <- order(tt); tt <- tt[o]; yy <- yy[o]
+    if (length(tt) < 2) return(NA_real_)
+    keep <- which(tt <= t_cut)
+    if (length(keep) == 0) return(NA_real_)
+    k  <- max(keep)
+    tk <- tt[seq_len(k)]; yk <- yy[seq_len(k)]
+    if (k < length(tt) && tt[k] < t_cut) {
+      frac <- (t_cut - tt[k]) / (tt[k + 1] - tt[k])
+      tk <- c(tk, t_cut)
+      yk <- c(yk, yy[k] + frac * (yy[k + 1] - yy[k]))
+    }
+    if (length(tk) < 2) return(NA_real_)
+    sum(diff(tk) * (head(yk, -1) + tail(yk, -1)) / 2)
+  }
+  A0 <- area_to(t_ref, od_ref, t_stat)
+
+  key <- if (has_rep) interaction(pd$variable, pd$replicate, drop = TRUE, lex.order = TRUE)
+         else factor(pd$variable)
+  rows <- lapply(split(seq_len(nrow(pd)), key, drop = TRUE), function(ix) {
+    d  <- pd[ix, , drop = FALSE]
+    Ai <- area_to(d$time, d$mean_value, t_stat)
+    r  <- data.frame(sample = d$variable[1],
+                     local_virulence = if (is.finite(A0) && A0 > 0 && is.finite(Ai)) 1 - Ai / A0 else NA_real_,
+                     t_stat_used = t_stat, stringsAsFactors = FALSE)
+    if (has_rep) r$replicate <- d$replicate[1]
+    r
+  })
+  res <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  res[, if (has_rep) c("sample", "replicate", "local_virulence", "t_stat_used")
+        else c("sample", "local_virulence", "t_stat_used"), drop = FALSE]
 }
 
 # KC-4: compute_curve_metrics() above runs the metrics engine ONCE per
@@ -611,6 +1150,15 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
     rm$infection_strength <- if (is.finite(ref_auc) && ref_auc > 0) 1 - rm$auc / ref_auc    else NA_real_
     rm$relative_mu_max    <- if (is.finite(ref_mu)  && ref_mu  > 0) rm$mu_max / ref_mu      else NA_real_
     rm$relative_max_od    <- if (is.finite(ref_max) && ref_max > 0) rm$max_od / ref_max     else NA_real_
+    # centroid index: per replicate vs the reference's mean cx*cy product
+    rm$centroid_index     <- centroid_index_vs_ref(rm$centroid_x, rm$centroid_y, ref$centroid_x, ref$centroid_y)
+    # local virulence: each replicate's area to t_stat vs the reference's replicate-mean curve
+    lv <- calculate_local_virulence(
+      data.frame(time = rep_pd$time, variable = rep_pd$variable, replicate = rep_pd$replicate,
+                 mean_value = rep_pd$value, stringsAsFactors = FALSE),
+      ref_sample, smooth_window)
+    rm$local_virulence    <- if (is.null(lv)) NA_real_ else
+      lv$local_virulence[match(paste(rm$sample, rm$replicate), paste(lv$sample, lv$replicate))]
   }
   rm
 }
@@ -653,8 +1201,8 @@ METRIC_DEFINITIONS <- c(
   n_nonpositive_od = "Count of time points with OD <= 0 (e.g. a blank-subtraction artefact). Any mu_max rolling window touching one of these is excluded rather than clamped, so mu_max/doubling_time/lag_phase may be NA or based on fewer windows when this is > 0",
   doubling_time   = "ln(2) / mu_max; NA when there is no growth phase",
   lag_phase       = "First time at which the rolling ln-slope reaches 10% of mu_max",
-  stat_phase_dur  = "Time spanned by all points within 95% of the peak",
-  lysis_time      = "Lysis onset: first post-peak time at which the decline from peak exceeds the lysis threshold (adjustable, default 5%) of the peak; NA if the curve never declines past that",
+  stat_phase_dur  = "Duration of the longest contiguous run of points within 95% of the peak (separate near-peak episodes are not joined across a dip)",
+  lysis_time      = "Lysis onset: linearly interpolated time at which the mean falls the lysis threshold (adjustable, default 5%) of the peak below the peak. Called only when the post-peak decline exceeds max(threshold x peak, 3 x the curve's noise SD) for 2 consecutive points, so noise on an uninfected plateau is not scored as lysis; NA otherwise",
   lysis_rate      = "Linear-regression slope of the mean from the peak to the post-peak trough (negative = decline)",
   od_drop         = "Peak minus post-peak minimum (absolute decline)",
   residual_od     = "Post-peak minimum (residual OD after lysis) -- this is the post-lysis floor; see global_min_od for the curve's overall minimum",
@@ -666,11 +1214,18 @@ METRIC_DEFINITIONS <- c(
   t_half_max_decline = "First time after the peak at which the mean falls below 50% of the peak (linear interpolation); NA if never",
   steepest_decline_rate = "Most negative slope between consecutive mean points",
   steepest_decline_interval = "Time interval over which the steepest decline occurs",
+  first_peak_od   = "OD at the first prominent peak: the earliest local maximum of the 3-point smoothed curve whose prominence is at least 5% of the curve's range (Blazanin et al., PNAS 2025); the global maximum when there is no prominent peak. Unlike max_od it is not displaced by regrowth that overtakes the first peak",
+  t_first_peak    = "Time of the first prominent peak (see first_peak_od)",
+  extinction_time = "First time the mean falls below the extinction floor (0.05 OD), linearly interpolated between the last point at or above it and the first below; the first time point if the curve starts below the floor; NA if it never falls below (Blazanin et al., PNAS 2025)",
+  centroid_x      = "Time coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
+  centroid_y      = "OD coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
   relative_growth    = "auc / auc(reference sample)",
   infection_strength = "1 - auc / auc(reference sample)",
   relative_mu_max    = "mu_max / mu_max(reference sample)",
   relative_max_od    = "max_od / max_od(reference sample)",
-  lysis_onset_delta  = "lysis_time - lag_phase"
+  lysis_onset_delta  = "lysis_time - lag_phase",
+  centroid_index     = "1 - (centroid_x * centroid_y) / (centroid_x * centroid_y of the reference sample); Centroid Index, Hosseini et al. 2024 (0 for the reference itself)",
+  local_virulence    = "Storms local virulence: 1 - area under the mean curve / area under the reference curve, both integrated only up to the onset of stationary phase in the reference (first time after its fastest growth that its rolling ln-slope falls below 10% of mu_max; the last time if none); 0 for the reference itself (Storms et al., PHAGE 2020)"
 )
 
 # ── Report helpers ────────────────────────────────────────────────────────────
@@ -709,6 +1264,67 @@ html_table <- function(df, digits = 5, class = NULL) {
          paste0(body, collapse = ""), "</tbody></table></div>")
 }
 
+# ── v2.17: data quality flags ────────────────────────────────────────────────
+# Cheap sanity checks, one row (sample, flag, detail) per problem; zero rows when the data are clean.
+#   CEILING         a replicate reading above the OD ceiling (plate-reader linearity is lost)
+#   NEGATIVE        a replicate reading <= 0 (blank over-subtraction; no logarithm)
+#   GAP             a time step at least 2x the median step of that sample (a missing reading)
+#   FLAT_REFERENCE  the reference sample's max OD is below 2x its initial OD (it barely grew, so every
+#                   ratio to it is unreliable)
+# rep_pd: prepare_replicate_data() (time, variable, replicate, value); pd: prepare_plot_data() (the mean
+# curves). Ported from the companion app's qc_flags(), reduced to the checks that matter for a plotter.
+# "At least 2x" (not "more than"): one missing reading in a regular series makes exactly 2x the median step.
+qc_flags <- function(rep_pd, pd, ref_sample = NULL, ceiling = 2.5) {
+  empty <- data.frame(sample = character(0), flag = character(0), detail = character(0),
+                      stringsAsFactors = FALSE)
+  ceiling <- suppressWarnings(as.numeric(ceiling))
+  if (length(ceiling) != 1 || !is.finite(ceiling)) ceiling <- 2.5
+  rows <- list()
+  add <- function(s, f, d)
+    rows[[length(rows) + 1L]] <<- data.frame(sample = s, flag = f, detail = d, stringsAsFactors = FALSE)
+  num <- function(x) signif(x, 4)
+
+  if (!is.null(rep_pd) && nrow(rep_pd) > 0 && all(c("variable", "value") %in% names(rep_pd))) {
+    for (s in unique(as.character(rep_pd$variable))) {
+      v <- rep_pd$value[as.character(rep_pd$variable) == s]
+      v <- v[is.finite(v)]
+      if (!length(v)) next
+      if (any(v > ceiling))
+        add(s, "CEILING", paste0(sum(v > ceiling), " reading(s) above OD ", format(ceiling, trim = TRUE),
+                                 " (max ", num(max(v)), "): plate-reader linearity is lost at high OD; dilute or calibrate"))
+      if (any(v <= 0))
+        add(s, "NEGATIVE", paste0(sum(v <= 0), " reading(s) <= 0 (min ", num(min(v)),
+                                  "): blank over-subtraction? They cannot be drawn on a log axis"))
+    }
+  }
+
+  if (!is.null(pd) && nrow(pd) > 0 && all(c("time", "variable", "mean_value") %in% names(pd))) {
+    for (s in unique(as.character(pd$variable))) {
+      d  <- pd[as.character(pd$variable) == s & is.finite(pd$time) & is.finite(pd$mean_value), , drop = FALSE]
+      if (nrow(d) == 0) next
+      d  <- d[order(d$time), , drop = FALSE]
+      tt <- sort(unique(d$time))
+      if (length(tt) >= 3) {
+        dts <- diff(tt); med <- stats::median(dts)
+        if (is.finite(med) && med > 0) {
+          gi <- which(dts >= 2 * med * (1 - 1e-9))
+          if (length(gi))
+            add(s, "GAP", paste0("time step(s) of at least 2x the median step (", num(med), ") after t = ",
+                                 paste(num(tt[gi]), collapse = ", "), ": a reading is missing or was excluded"))
+        }
+      }
+      if (!is.null(ref_sample) && length(ref_sample) == 1 && !is.na(ref_sample) && nzchar(ref_sample) &&
+          identical(s, as.character(ref_sample))) {
+        init <- d$mean_value[1]; mx <- max(d$mean_value)
+        if (is.finite(init) && init > 0 && mx < 2 * init)
+          add(s, "FLAT_REFERENCE", paste0("the reference barely grew (max OD ", num(mx), " < 2 x initial OD ",
+                                          num(init), "): ratios to it (normalized OD, infection strength) are unreliable"))
+      }
+    }
+  }
+  if (!length(rows)) empty else do.call(rbind, rows)
+}
+
 # ── v2.11.1: analysis figures + replicate statistics in the reports ──────────
 # Both report builders take an optional `analysis` list (NULL = omitted, and
 # the output is byte-identical to v2.11.0):
@@ -739,6 +1355,11 @@ STATS_DEFINITIONS <- paste0(
   "or more groups; they compare distributions by rank and do not assume normality. ",
   "Stars: *** p < 0.001, ** p < 0.01, * p < 0.05, ns = not significant. With three ",
   "biological replicates power is low: a non-significant result is not evidence of no difference.")
+
+# How the summary-statistics columns are computed (the Statistics tab; same wording as the README).
+STATS_N_NOTE <- paste0("Per sample and time point: mean, SD, n, SEM = SD / \u221an, and the 95% CI half-width ",
+                       "(t\u2080.\u2089\u2087\u2085,\u2099\u208b\u2081 \u00d7 SEM). n counts only non-missing replicate values; ",
+                       "with a single replicate SD, SEM and CI are NA.")
 
 # One-sentence description of what was tested and how.
 stats_lead_text <- function(analysis) {
@@ -811,6 +1432,21 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df, analysis = NU
     paste0("<h2>Experiment notebook</h2>",
            html_table(meta$notebook_df, class = "wrap prov")) else ""
 
+  # v2.16: the editable methods paragraph (Statistics tab), only when there is text; paragraphs split on blank lines
+  methods_html <- if (nzchar(trimws(meta$methods %||% "")))
+    paste0("<h2>Methods</h2>",
+           paste0("<p class='methods'>", gsub("\n", "<br/>",
+                    html_escape(trimws(strsplit(meta$methods, "\n[ \t]*\n")[[1]])), fixed = TRUE), "</p>", collapse = "")) else ""
+
+  # v2.17: QC flags (after provenance) and the figure legend (right under the main figure); both are
+  # omitted when the meta list does not carry them
+  qc_html <- if (is.null(meta$qc_df)) "" else
+    paste0("<h2>QC flags</h2>",
+           if (nrow(meta$qc_df) == 0) "<p>No data quality flags were raised (readings above the OD ceiling, readings <= 0, time-step gaps, a flat reference).</p>"
+           else html_table(meta$qc_df, class = "wrap"))
+  legend_html <- if (nzchar(trimws(meta$legend %||% "")))
+    paste0("<h3>Figure legend</h3><p class='legend'>", gsub("\n", "<br/>", html_escape(trimws(meta$legend))), "</p>") else ""
+
   font_pt <- meta$font_pt %||% 14
 
   paste0(
@@ -831,6 +1467,8 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df, analysis = NU
   tr:nth-child(even) td { background: #fafbfc; }
   img.figure { max-width: 100%; height: auto; border: 1px solid #dee2e6; }
   .notes { background: #fff9db; border: 1px solid #ffe066; border-radius: 6px; padding: 12px; }
+  .methods { text-align: justify; line-height: 1.5; }
+  .legend { text-align: justify; line-height: 1.45; font-size: 0.92em; color: #343a40; }
   .prov td:first-child { font-weight: bold; background: #f1f3f5; }
   table.wrap td { white-space: normal; }
   footer { margin-top: 40px; color: #adb5bd; font-size: 0.8em; border-top: 1px solid #dee2e6; padding-top: 8px; }
@@ -850,10 +1488,12 @@ notes_html,
 <tr><td>Time filtering</td><td>",   html_escape(meta$filter_txt),  "</td></tr>
 <tr><td>Error display</td><td>",    html_escape(meta$error_txt),   "</td></tr>
 </table></div>",
+qc_html,
 notebook_html,
+methods_html,
 "<h2>Figure</h2>
 <img class='figure' src='data:image/png;base64,", img_b64, "' alt='Lysis curve figure'/>
-", analysis_html, "<h2>Summary statistics</h2>
+", legend_html, analysis_html, "<h2>Summary statistics</h2>
 <p>Per sample and time point, computed from the currently loaded (and filtered) data.
 SEM = SD / &radic;n; 95% CI = t<sub>0.975, n-1</sub> &times; SEM.</p>",
 html_table(stats_df),
@@ -901,12 +1541,25 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
             paste0("Time column: ",     meta$time_col),
             paste0("Samples: ",         meta$samples_txt),
             paste0("Time filtering: ",  meta$filter_txt),
-            paste0("Error display: ",   meta$error_txt))
+            paste0("Error display: ",   meta$error_txt),
+            if (!is.null(meta$qc_df))   # v2.17
+              paste0("QC flags: ", if (nrow(meta$qc_df) == 0) "none" else paste0(nrow(meta$qc_df), " (listed on the next page)")))
   grid::grid.text(paste(prov, collapse = "\n"), y = 0.68, just = "top",
                   gp = grid::gpar(fontsize = 11 * fscale, lineheight = 1.4))
   if (nzchar(trimws(meta$notes %||% ""))) {
     grid::grid.text(paste0("Notes:\n", meta$notes), y = 0.40, just = "top",
                     gp = grid::gpar(fontsize = 10 * fscale, lineheight = 1.3, col = "grey20"))
+  }
+
+  # ── QC flags page (v2.17; only when a flag was raised) ──
+  if (!is.null(meta$qc_df) && nrow(meta$qc_df) > 0) {
+    q <- meta$qc_df
+    lines <- unlist(lapply(seq_len(nrow(q)), function(i)
+      c(strwrap(paste0(q$flag[i], "  ", q$sample[i], ": ", q$detail[i]), 105, exdent = 4), "")), use.names = FALSE)
+    grid::grid.newpage()
+    grid::grid.text("QC flags", y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
+    grid::grid.text(paste(lines, collapse = "\n"), x = 0.04, y = 0.92, just = c("left", "top"),
+                    gp = grid::gpar(fontsize = 9.5 * fscale, lineheight = 1.3))
   }
 
   # ── Experiment notebook page (only when fields were filled in) ──
@@ -923,12 +1576,47 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
     grid::pushViewport(vp); grid::grid.draw(g); grid::popViewport()
   }
 
+  # ── Methods pages (v2.16; only when the Statistics tab's text box is non-empty) ──
+  if (nzchar(trimws(meta$methods %||% ""))) {
+    paras <- trimws(strsplit(meta$methods, "\n[ \t]*\n")[[1]])
+    wrapped <- unlist(lapply(paras, function(s) c(strwrap(s, 100), "")), use.names = FALSE)
+    per_page <- 46L
+    for (p0 in seq(1L, length(wrapped), by = per_page)) {
+      grid::grid.newpage()
+      grid::grid.text("Methods", y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
+      grid::grid.text(paste(wrapped[p0:min(p0 + per_page - 1L, length(wrapped))], collapse = "\n"), x = 0.04, y = 0.92,
+                      just = c("left", "top"), gp = grid::gpar(fontsize = 9.5 * fscale, lineheight = 1.3))
+    }
+  }
+
   # ── Figure page ──
+  # v2.17: the figure legend sits right under the figure (a continuation page when the figure leaves no room)
+  legend_txt <- trimws(meta$legend %||% "")
+  has_legend <- nzchar(legend_txt)
+  pg_in <- grDevices::dev.size("in")
+  legend_wrapped <- if (has_legend)
+    paste(c("Figure legend", strwrap(legend_txt, max(40, floor(pg_in[1] * 0.92 * 15)))), collapse = "\n") else ""
+  draw_legend <- function(y) grid::grid.text(legend_wrapped, x = 0.04, y = y, just = c("left", "top"),
+                                             gp = grid::gpar(fontsize = 9 * fscale, lineheight = 1.3, col = "grey20"))
   if (inherits(plot_obj, "gtable") && !is.null(attr(plot_obj, "size_mm"))) {   # v2.15: fixed-panel figure at its size
     grid::grid.newpage()
     sz <- attr(plot_obj, "size_mm")
-    grid::pushViewport(grid::viewport(width = grid::unit(sz[1], "mm"), height = grid::unit(sz[2], "mm")))
-    grid::grid.draw(plot_obj); grid::popViewport()
+    if (has_legend) {
+      fig_h_npc <- sz[2] / 25.4 / pg_in[2]
+      grid::pushViewport(grid::viewport(y = 0.97, just = "top", width = grid::unit(sz[1], "mm"), height = grid::unit(sz[2], "mm")))
+      grid::grid.draw(plot_obj); grid::popViewport()
+      leg_y <- 0.97 - fig_h_npc - 0.03
+      n_lines <- length(strsplit(legend_wrapped, "\n")[[1]])
+      if (leg_y - n_lines * 9 * fscale * 1.3 / 72 / pg_in[2] > 0.02) draw_legend(leg_y)
+      else { grid::grid.newpage(); draw_legend(0.95) }
+    } else {
+      grid::pushViewport(grid::viewport(width = grid::unit(sz[1], "mm"), height = grid::unit(sz[2], "mm")))
+      grid::grid.draw(plot_obj); grid::popViewport()
+    }
+  } else if (has_legend) {
+    grid::grid.newpage()
+    print(plot_obj, newpage = FALSE, vp = grid::viewport(y = 1, height = 0.8, just = "top"))
+    draw_legend(0.17)
   } else print(plot_obj)
 
   # ── Analysis figure pages (v2.11.1): title, figure, caption; one per page ──
@@ -1237,7 +1925,10 @@ journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_ran
     show_error_caption = FALSE,   # the Figure Legend Text box carries measure + n instead
     custom_aspect_ratio = FALSE,
     # v2.15: the panel itself has the fixed size; the figure grows around it
-    panel_size_mode = "fixed", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE
+    panel_size_mode = "fixed", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE,
+    axis_subscripts = TRUE,       # v2.16: A550 -> A[550] in axis labels (the Legacy look keeps plain text)
+    y_oob = "squish",             # v2.17: a reading below the log-axis floor is drawn on the floor, not deleted
+    enable_threshold = FALSE      # v2.17: no threshold line (the Legacy look and the preset both clear it)
   )
   # v2.12: caps as a fraction of the x range, so the look is the same whether
   # time is in minutes or hours (x_range kept for callers; no longer needed)
@@ -1349,7 +2040,7 @@ fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
 }
 # Panels laid out as an ncol-column grid of fixed-panel gtables (each placed top-left in a cell as
 # wide / tall as the largest one), with a, b, c tags at each cell's top-left corner.
-compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a") {
+compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE) {
   n <- length(items); ncol <- max(1, min(ncol, n)); nrow <- ceiling(n / ncol)
   sz <- vapply(items, function(g) attr(g, "size_mm"), numeric(2))
   cw <- max(sz[1, ]); ch <- max(sz[2, ])
@@ -1361,6 +2052,7 @@ compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", 
                         vp = grid::viewport(x = 0, y = 1, width = grid::unit(sz[1, i], "mm"),
                                             height = grid::unit(sz[2, i], "mm"), just = c("left", "top")))
     master <- gtable::gtable_add_grob(master, cell, t = r, l = cc, name = paste0("cell-", i), clip = "off")
+    if (!isTRUE(tags_on)) next   # v2.16: "Add panel letters" off
     tag <- grid::textGrob(tags[i], x = grid::unit(0.5, "mm"), y = grid::unit(1, "npc") - grid::unit(0.5, "mm"),
                           hjust = 0, vjust = 1,
                           gp = grid::gpar(fontsize = tag_size, fontface = "bold", fontfamily = font))
@@ -1401,7 +2093,14 @@ ANALYSIS_METRIC_LABELS <- c(
   relative_growth    = "Relative growth",
   infection_strength = "Infection strength",
   relative_mu_max    = "Relative μmax",
-  relative_max_od    = "Relative peak OD"
+  relative_max_od    = "Relative peak OD",
+  first_peak_od      = "First-peak OD",
+  t_first_peak       = "Time of first peak",
+  extinction_time    = "Extinction time",
+  centroid_x         = "Centroid time",
+  centroid_y         = "Centroid OD",
+  centroid_index     = "Centroid index",
+  local_virulence    = "Local virulence"
 )
 # The analysis figures, with the labels the Analysis tab and the figure composer both use.
 ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
@@ -1416,14 +2115,51 @@ metric_label <- function(m) { l <- unname(ANALYSIS_METRIC_LABELS[m]); ifelse(is.
 # Axis / facet label with units, from the x-axis time unit and the y-axis label.
 metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
   base <- metric_label(m)
-  if (m %in% c("lysis_time", "t_half_max_decline", "doubling_time", "lag_phase", "time_max_od"))
+  if (m %in% c("lysis_time", "t_half_max_decline", "doubling_time", "lag_phase", "time_max_od",
+               "t_first_peak", "extinction_time", "centroid_x"))
     paste0(base, " (", tunit, ")")
   else if (m == "mu_max") paste0("\u03bcmax (", tunit, "\u207b\u00b9)")
   else if (m %in% c("lysis_rate", "recovery_slope"))
     paste0(base, " (", ylab, " per ", tunit, ")")
-  else if (m %in% c("od_drop", "residual_od", "max_od", "final_od")) paste0(base, " (", ylab, ")")
+  else if (m %in% c("od_drop", "residual_od", "max_od", "final_od", "first_peak_od", "centroid_y"))
+    paste0(base, " (", ylab, ")")
   else if (m == "auc") paste0(base, " (", ylab, " \u00d7 ", tunit, ")")
   else base
+}
+
+# v2.16: typeset the wavelength in an absorbance label as a subscript (A550 -> A[550], OD600 ->
+# OD[600]). A label with such a token ("A550", "OD600", "A550 relative to Uninfected", "log10 A550",
+# "OD drop (A550)") becomes a plotmath call: the token is letters[digits] and the rest stays quoted
+# text, joined with "~" (a space) where the text had whitespace and "*" (no space) where it did
+# not. Labels without a token come back unchanged (character), so output without one is identical.
+label_with_subscripts <- function(x) {
+  if (!is.character(x) || length(x) != 1L || is.na(x)) return(x)
+  m <- gregexpr("(?<![A-Za-z0-9])(OD|A)([0-9]+)(?![A-Za-z0-9])", x, perl = TRUE)[[1]]
+  if (m[1] == -1L) return(x)
+  # raw segments in order: text between tokens (whitespace kept) and the tokens themselves
+  raw <- character(0); is_tok <- logical(0); pos <- 1L
+  for (i in seq_along(m)) {
+    if (as.integer(m[i]) > pos) { raw <- c(raw, substr(x, pos, m[i] - 1L)); is_tok <- c(is_tok, FALSE) }
+    raw <- c(raw, substr(x, m[i], m[i] + attr(m, "match.length")[i] - 1L)); is_tok <- c(is_tok, TRUE)
+    pos <- as.integer(m[i]) + attr(m, "match.length")[i]
+  }
+  if (pos <= nchar(x)) { raw <- c(raw, substr(x, pos, nchar(x))); is_tok <- c(is_tok, FALSE) }
+  keep <- is_tok | nzchar(trimws(raw))                        # whitespace-only text between two tokens only spaces them
+  part <- function(i) {
+    if (!is_tok[i]) return(trimws(raw[i]))
+    base <- sub("[0-9]+$", "", raw[i]); dig <- sub("^[A-Za-z]+", "", raw[i])
+    call("[", as.name(base), if (identical(as.character(as.numeric(dig)), dig)) as.numeric(dig) else dig)
+  }
+  idx <- which(keep)
+  out <- part(idx[1])
+  for (k in seq_along(idx)[-1]) {
+    i0 <- idx[k - 1L]; i1 <- idx[k]
+    between <- paste0(substr(raw[i0], nchar(raw[i0]), nchar(raw[i0])),            # last char before, first after,
+                      if (i1 - i0 > 1L) raw[(i0 + 1L):(i1 - 1L)] else "",         # and any dropped whitespace text
+                      substr(raw[i1], 1L, 1L))
+    out <- call(if (grepl("\\s", between)) "~" else "*", out, part(i1))
+  }
+  out
 }
 
 sig_stars <- function(p)
@@ -1649,7 +2385,7 @@ LEGACY_BASE <- list(
   # v2.13.0 figure composer
   compose_panels = c("main", "metric_summary", "growth_rate", "normalized"),
   compose_ncol = "2", compose_width = "double", compose_width_mm = 183,
-  compose_panel_height_mm = 60, compose_tag_size = 8, compose_tag_case = "a",
+  compose_panel_height_mm = 60, compose_tag_size = 8, compose_tag_case = "a", compose_tags = TRUE,   # v2.16: panel letters in the composer (explicit request, on)
   metrics_lysis_threshold_pct = 5,    # v2.12.4: decline from peak that counts as lysis (%)
   metrics_peak_mode = "global",       # v2.12.2: "first_local" for regrowth / resistance curves
   blank_od               = 0,         # KC-7: off by default
@@ -1661,10 +2397,16 @@ LEGACY_BASE <- list(
   legend_box_border = TRUE, legend_key_mm = 0, panel_label = "", panel_label_size = 8,
   panel_size_mode = "fit", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE,   # v2.15
   theme_base_pt = 0, y_tick_label_style = "legacy",
+  axis_subscripts = FALSE,            # v2.16: journal preset TRUE; plain "A550" in the Legacy look
+  methods_text = "", methods_replace = FALSE,   # v2.16 Statistics tab: editable methods paragraph
+  y_oob = "censor",                   # v2.17: journal preset "squish" (clip to the axis floor); Legacy look drops them
+  enable_threshold = FALSE, threshold_value = 0.1, threshold_label = "",   # v2.17: horizontal OD threshold line
+  threshold_color = "grey40", threshold_linetype = "dashed",
+  qc_od_ceiling = 2.5,                # v2.17: QC flag CEILING above this OD
   # v2.11 analysis / dashboard inputs
   analysis_type = "metric_summary", analysis_metrics = c("lysis_time", "od_drop"),
   analysis_dose_metric = "lysis_time", analysis_norm_mode = "reference",
-  analysis_panel_label = "b", stats_method = "welch", stats_mark = TRUE, moi_override = "",
+  analysis_panel_label = "", stats_method = "welch", stats_mark = TRUE, moi_override = "",
   # v2.12 error display
   error_bar_color = "sample", show_replicate_points = FALSE, error_log_floor = TRUE,
   error_cap_relative = FALSE,
@@ -1676,13 +2418,57 @@ LEGACY_BASE <- list(
   nb_moi = "", nb_replicate = "", nb_media = "", nb_temperature = "",
   nb_time_inf = "", nb_inducer = "", nb_observations = "", nb_issues = "",
   nb_next_steps = "", nb_tags = "",
+  nb_passage = "", nb_inducer_conc = "", nb_other_condition = "",   # v2.17
   nb_custom_key1 = "", nb_custom_val1 = "", nb_custom_key2 = "", nb_custom_val2 = "",
   nb_custom_key3 = "", nb_custom_val3 = ""
 )
 
 # The inputs the journal preset sets, at their legacy values.
 legacy_preset_settings <- function() LEGACY_BASE[names(journal_preset_settings(89, 65))]
-APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65, panel_label = "a"))
+APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65))   # v2.16: no panel letter unless the user sets one
+# ── Figure bundle archive (v2.17) ─────────────────────────────────────────────
+# "zip" when the zip package or a zip binary is available, else "tar" (utils::tar, always there).
+bundle_archive_kind <- function()
+  if (requireNamespace("zip", quietly = TRUE) || nzchar(Sys.which("zip"))) "zip" else "tar"
+# Archive the folder `folder` found in `root` into `archive` (the folder is the top level of the archive).
+write_bundle_archive <- function(archive, root, folder, kind = bundle_archive_kind()) {
+  archive <- normalizePath(archive, mustWork = FALSE)
+  if (identical(kind, "zip") && requireNamespace("zip", quietly = TRUE)) {
+    zip::zip(archive, files = folder, root = root)
+  } else if (identical(kind, "zip")) {
+    owd <- setwd(root); on.exit(setwd(owd), add = TRUE)
+    utils::zip(archive, files = folder, flags = "-r9Xq")
+  } else {
+    owd <- setwd(root); on.exit(setwd(owd), add = TRUE)
+    utils::tar(archive, files = folder, compression = "none")
+  }
+  invisible(archive)
+}
+
+# ── Palettes ──────────────────────────────────────────────────────────────────
+# n colours for a named palette. v2.17: "blues" and "blue_red" are dose gradients for MOI series:
+# the first sample (usually the uninfected control) is black and the n - 1 others run along the
+# ramp from low to high dose (light to dark blue, or blue to red).
+get_palette_colors <- function(pal, n) {
+  gradient <- function(ends) {
+    if (n <= 1) return(rep_len("#000000", n))
+    c("#000000", grDevices::colorRampPalette(ends)(n - 1))
+  }
+  switch(pal,
+         viridis     = scales::viridis_pal(option = "D")(n),
+         plasma      = scales::viridis_pal(option = "C")(n),
+         colorblind  = rep_len(c("#000000","#E69F00","#56B4E9","#009E73",
+                                 "#F0E442","#0072B2","#D55E00","#CC79A7"), n),
+         publication = rep_len(c("#E41A1C","#377EB8","#4DAF4A","#984EA3",
+                                 "#FF7F00","#FFFF33","#A65628","#F781BF"), n),
+         rainbow     = rainbow(n),
+         gray        = gray.colors(n, start = 0.15, end = 0.85),
+         blues       = gradient(c("#c6dbef", "#08306b")),
+         blue_red    = gradient(c("#2166ac", "#b2182b")),
+         NULL
+  )
+}
+
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
@@ -1812,6 +2598,7 @@ ui <- fluidPage(
                      actionButton("load_demo", "Load Demo Data", icon = icon("flask"),
                                   style = "flex:1 1 45%;font-size:.85em;")),
                  uiOutput("data_summary_ui"),
+                 uiOutput("qc_flags_ui"),
 
                  # ── Settings ─────────────────────────────────────────────────────────────
                  div(class = "panel-section",
@@ -1887,6 +2674,13 @@ ui <- fluidPage(
                                           column(6, numericInput("y_max", "Y-max:", value = 2))
                                         )
                        ),
+                       selectInput("y_oob", "Readings below the axis floor:",
+                                   choices = c("Clip to the floor (recommended)" = "squish",
+                                               "Drop (legacy)"                   = "censor"),
+                                   selected = APP_DEFAULTS$y_oob),
+                       p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+                         "A post-lysis reading below the log-axis floor is drawn ON the floor instead of ",
+                         "being deleted (the old behaviour, 'Drop'), so the curve and its points stay visible."),
                        sliderInput("x_expand_left",   "X Left Expand:",   0, 0.1, 0,    0.01),
                        sliderInput("x_expand_right",  "X Right Expand:",  0, 0.1, 0.05, 0.01),
                        sliderInput("y_expand_bottom", "Y Bottom Expand:", 0, 0.1, 0,    0.01),
@@ -1896,6 +2690,8 @@ ui <- fluidPage(
                        h4("Labels & Formatting", class = "panel-title"),
                        textInput("x_axis_label",  "X-axis Label:",  "Time (minutes)"),
                        textInput("y_axis_label",  "Y-axis Label:",  "A550"),
+                       checkboxInput("axis_subscripts", "Typeset wavelength as subscript (A550 -> A\u2085\u2085\u2080)",
+                                     APP_DEFAULTS$axis_subscripts),
                        textInput("plot_title",    "Plot Title:",    ""),
                        textInput("plot_subtitle", "Plot Subtitle:", ""),
                        h5("Gridlines", style = "margin-top:12px;"),
@@ -2047,6 +2843,24 @@ ui <- fluidPage(
                        conditionalPanel(condition = "input.enable_time_markers == true",
                                         numericInput("marker_count", "Number of Markers:", 1, 1, 10),
                                         uiOutput("time_marker_settings")
+                       ),
+                       hr(),
+                       checkboxInput("enable_threshold", "Show a horizontal threshold line (OD)", APP_DEFAULTS$enable_threshold),
+                       conditionalPanel(condition = "input.enable_threshold == true",
+                                        numericInput("threshold_value", "Threshold (OD):", APP_DEFAULTS$threshold_value, step = 0.01),
+                                        textInput("threshold_label", "Label (blank = none):", APP_DEFAULTS$threshold_label),
+                                        fluidRow(
+                                          column(6, selectInput("threshold_color", "Colour:",
+                                                                choices = c("Grey" = "grey40", "Black" = "black", "Red" = "firebrick",
+                                                                            "Blue" = "steelblue4", "Green" = "darkgreen"),
+                                                                selected = APP_DEFAULTS$threshold_color)),
+                                          column(6, selectInput("threshold_linetype", "Line type:",
+                                                                choices = c("Dashed" = "dashed", "Dotted" = "dotted", "Solid" = "solid",
+                                                                            "Dot-dash" = "dotdash"),
+                                                                selected = APP_DEFAULTS$threshold_linetype))
+                                        ),
+                                        p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+                                          "Drawn at the axis-line weight; the label sits at the right end in the axis-text size.")
                        )
                    )
                  ),
@@ -2062,7 +2876,9 @@ ui <- fluidPage(
                                                 "Colorblind-friendly" = "colorblind",
                                                 "Publication"         = "publication",
                                                 "Rainbow"             = "rainbow",
-                                                "Grayscale"           = "gray"),
+                                                "Grayscale"           = "gray",
+                                                "Blues (dose gradient)"        = "blues",
+                                                "Blue to red (dose gradient)"  = "blue_red"),
                                    selected = APP_DEFAULTS$color_palette),
                        htmlOutput("palette_preview")
                    )
@@ -2239,6 +3055,12 @@ ui <- fluidPage(
                        uiOutput("export_size_note"),
                        numericInput("export_dpi", "DPI (raster formats):", APP_DEFAULTS$export_dpi, 72, 1200),
                        downloadButton("downloadPlot", "Download Image"),
+                       br(), br(),
+                       downloadButton("downloadFigureBundle", "Download figure bundle (.zip)", style = "width:100%;"),
+                       p(style = "font-size:.78em;color:#777;margin-top:4px;",
+                         "Everything a figure submission needs in one file: the figure (SVG + PDF) at the current size, ",
+                         "the composed figure (SVG, if two or more panels are selected), settings.json, the tidy source data, ",
+                         "summary statistics, curve metrics, the legend text, the methods text and a README."),
                        hr(),
                        h4("PowerPoint Export", class = "panel-title"),
                        p(style = "font-size:.85em;color:#666;",
@@ -2289,13 +3111,18 @@ ui <- fluidPage(
                          column(6, textInput("nb_replicate", "Replicate / Batch:", ""))
                        ),
                        fluidRow(
+                         column(6, textInput("nb_passage",        "Passage #:", "")),
+                         column(6, textInput("nb_inducer_conc",   "Inducer concentration:", ""))
+                       ),
+                       fluidRow(
                          column(6, textInput("nb_media",       "Growth Medium:", "")),
                          column(6, textInput("nb_temperature", "Temperature (°C):", ""))
                        ),
                        fluidRow(
                          column(6, textInput("nb_time_inf", "Time of Infection/Induction:", "")),
-                         column(6, textInput("nb_inducer",  "Inducer (+ conc.):", ""))
-                       )
+                         column(6, textInput("nb_inducer",  "Inducer:", ""))
+                       ),
+                       textInput("nb_other_condition", "Other condition:", "")
                    ),
                    div(class = "panel-section",
                        h4("Notes", class = "panel-title"),
@@ -2317,6 +3144,16 @@ ui <- fluidPage(
                          column(5, textInput("nb_custom_key3", "Key:",   "", placeholder = "Field")),
                          column(7, textInput("nb_custom_val3", "Value:", ""))
                        )
+                   ),
+                   div(class = "panel-section",
+                       h4("Notebook Downloads", class = "panel-title"),
+                       downloadButton("download_notebook_txt", "Download notebook (.txt)", style = "width:100%;"),
+                       br(), br(),
+                       downloadButton("download_notebook_csv", "Download notebook row (.csv)", style = "width:100%;"),
+                       p(style = "font-size:.78em;color:#777;margin-top:4px;",
+                         "The .txt lists every filled notebook field (key: value per line) followed by the figure legend ",
+                         "text and the methods text. The .csv is ONE row with one column per filled field (custom keys ",
+                         "become column names): append it to your master experiment spreadsheet.")
                    )
                  ),
 
@@ -2355,6 +3192,8 @@ ui <- fluidPage(
                        numericInput("metrics_smooth_window",
                                     "μmax smoothing window (points):", 5, 3, 15, 1),
                        uiOutput("nonpositive_od_warning_ui"),
+                       numericInput("qc_od_ceiling", "QC: flag readings above OD:", APP_DEFAULTS$qc_od_ceiling, 0.1, 10, 0.1),
+                       uiOutput("qc_flags_ui_metrics"),
                        numericInput("metrics_peak_smooth_window",
                                     "Peak-detection smoothing window (points, 1 = off):",
                                     1, 1, 15, 2),
@@ -2440,7 +3279,7 @@ ui <- fluidPage(
                 selectInput("analysis_type", "Figure:",
                             choices = ANALYSIS_FIGURE_CHOICES,
                             selected = "metric_summary"),
-                textInput("analysis_panel_label", "Panel label:", "b")
+                textInput("analysis_panel_label", "Panel label:", APP_DEFAULTS$analysis_panel_label, placeholder = "b")
               ),
               column(3,
                 conditionalPanel("input.analysis_type == 'metric_summary'",
@@ -2534,6 +3373,7 @@ ui <- fluidPage(
                 conditionalPanel("input.panel_size_mode == 'fixed'",
                   p(style = "font-size:.8em;color:#777;", "Fixed panel size: every panel keeps its panel size and the composed figure is as wide and tall as the grid of cells needs."))),
               column(4,
+                checkboxInput("compose_tags", "Add panel letters", APP_DEFAULTS$compose_tags),
                 numericInput("compose_tag_size", "Panel label size (pt):", 8, 4, 20, 0.5),
                 radioButtons("compose_tag_case", "Panel labels:",
                              choices = c("a, b, c" = "a", "A, B, C" = "A"), selected = "a", inline = TRUE),
@@ -2550,10 +3390,11 @@ ui <- fluidPage(
         # ── Dashboard (v2.11) ─────────────────────────────────────────────────
         tabPanel("Dashboard", br(),
           uiOutput("dash_cards"),
+          uiOutput("dash_qc"),
           h4("Key metrics per sample", style = "margin-top:16px;"),
           p(style = "font-size:.8em;color:#777;margin-top:-4px;",
             "From the mean curve; lysis onset and OD drop also show \u00b1 SD across replicates. ",
-            "Full tables: Stats & Reports \u2192 CSV downloads."),
+            "Full tables, per-replicate metrics and the replicate statistics: see the Statistics tab."),
           tableOutput("dash_metrics_table"),
           uiOutput("dash_size_note"),
           fluidRow(
@@ -2570,6 +3411,54 @@ ui <- fluidPage(
           tableOutput("dash_stats"),
           h4("Experiment", style = "margin-top:16px;"),
           uiOutput("dash_notebook")
+        ),
+        # ── Statistics (v2.16): the descriptive statistics, reviewable without the sidebar ──
+        tabPanel("Statistics", br(),
+          p(style = "font-size:.85em;color:#555;",
+            "Everything the reports and CSV downloads contain, in one place: review it here, ",
+            "download each table, and edit the Methods paragraph that goes into the reports."),
+          tags$details(open = NA, class = "stats-section",
+            tags$summary(tags$b("Summary statistics")),
+            div(class = "panel-section",
+              uiOutput("stats_tab_summary_note"),
+              if (has_DT) DT::DTOutput("stats_tab_summary") else div(style = "overflow-x:auto;", tableOutput("stats_tab_summary")),
+              p(style = "font-size:.78em;color:#777;margin-top:6px;", STATS_N_NOTE),
+              downloadButton("downloadStatsCSV_tab", "Summary statistics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Curve metrics (mean curve)")),
+            div(class = "panel-section",
+              div(style = "overflow-x:auto;", tableOutput("stats_tab_metrics")),
+              h5("Metric definitions"),
+              tableOutput("stats_tab_metric_defs"),
+              downloadButton("downloadMetricsCSV_tab", "Curve metrics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Per-replicate metrics (mean \u00b1 SD)")),
+            div(class = "panel-section",
+              div(style = "overflow-x:auto;", tableOutput("stats_tab_repmetrics")),
+              downloadButton("downloadReplicateMetricsCSV_tab", "Per-replicate metrics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Replicate comparison")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "The same tables as the Analysis figures tab: the test method, the reference sample and ",
+                "the metric are set there (Statistics, and the figure's metric) and under Stats & Reports."),
+              uiOutput("stats_tab_notes"),
+              tableOutput("stats_tab_pairwise"),
+              tableOutput("stats_tab_omnibus"),
+              tableOutput("stats_tab_posthoc"),
+              downloadButton("downloadAnalysisStatsCSV_tab", "Replicate statistics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Methods text (editable)")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Draft a methods paragraph from the current settings, then edit it freely. A non-empty ",
+                "text is included in the HTML and PDF reports as a Methods section, before the statistics."),
+              textAreaInput("methods_text", NULL, value = APP_DEFAULTS$methods_text, rows = 6, width = "100%",
+                            placeholder = "Click 'Draft from current settings', or write your own."),
+              fluidRow(
+                column(4, actionButton("methods_draft", "Draft from current settings")),
+                column(4, checkboxInput("methods_replace", "replace existing text", APP_DEFAULTS$methods_replace)),
+                column(4, downloadButton("downloadMethodsTxt", "Download methods (.txt)")))))
         )
       )
     )
@@ -2613,20 +3502,11 @@ server <- function(input, output, session) {
     style_page        = 1L      # current page in Variable Styling panel (pagination)
   )
   
-  # ── Palette helpers ──────────────────────────────────────────────────────────
-  get_palette_colors <- function(pal, n) {
-    switch(pal,
-           viridis     = scales::viridis_pal(option = "D")(n),
-           plasma      = scales::viridis_pal(option = "C")(n),
-           colorblind  = rep_len(c("#000000","#E69F00","#56B4E9","#009E73",
-                                   "#F0E442","#0072B2","#D55E00","#CC79A7"), n),
-           publication = rep_len(c("#E41A1C","#377EB8","#4DAF4A","#984EA3",
-                                   "#FF7F00","#FFFF33","#A65628","#F781BF"), n),
-           rainbow     = rainbow(n),
-           gray        = gray.colors(n, start = 0.15, end = 0.85),
-           NULL
-    )
-  }
+  # v2.16: y-axis-derived labels (main figure, analysis figures, dose-response, heatmap key) go through
+  # this so the wavelength can be typeset as a subscript. Plain text when the box is off (and in the
+  # Figure Legend Text, the facet strips and the report captions, which never use it).
+  axis_y_label <- function(txt)
+    if (isTRUE(input$axis_subscripts)) label_with_subscripts(txt) else txt
   
   # v2.10: warn when the chosen font family is not installed -- every device
   # would silently substitute another face, and the SVG would name a font the
@@ -2737,25 +3617,61 @@ server <- function(input, output, session) {
 
   # Shared ingestion for both file upload and demo data
   ingest_data <- function(data, source_name) {
-    rv$is_long_format <- is_long_format_detect(data)
     rv$time_col       <- detect_time_column(data)
     rv$col_map        <- NULL
+    rv$replicate_col  <- NULL    # long format: replicate / well column, when the file has one
+    rv$n_blocks       <- NULL    # wide format: stacked time blocks (replicates), when > 1
+    rv$block_id       <- NULL
+    notes <- character(0)
+
+    # Elapsed time as 0:15:00 (Gen5 / i-control) or a full date-time: convert to minutes
+    # so the numeric time handling downstream (filters, axis range) just works.
+    pt <- parse_time_column(data[[rv$time_col]])
+    if (isTRUE(pt$converted)) {
+      data[[rv$time_col]] <- pt$values
+      notes <- c(notes, paste0("Time column '", rv$time_col, "' was written as clock time / date-time; converted to minutes."))
+    }
+
+    # A well that went out of range (OVER / OVRFLW / #SAT) makes read.csv type the whole
+    # column as text: keep the column, turn just those cells into NA. The time column and
+    # any group / replicate column are left alone.
+    group_names <- c("variable","Variable","condition","Condition","treatment","Treatment",
+                     "sample","Sample","group","Group")
+    rep_names   <- colnames(data)[tolower(colnames(data)) %in%
+                     c("replicate","rep","rep_id","replicate_id","well","well_id","wellid",
+                       "technical_replicate","biological_replicate","repeat")]
+    cs <- coerce_sentinel_columns(data, skip_cols = c(rv$time_col, group_names, rep_names),
+                                  time_values = data[[rv$time_col]])
+    data <- cs$data
+    if (!is.null(cs$report))
+      notes <- c(notes, paste0(nrow(cs$report), " non-numeric reading(s) (",
+                               paste(utils::head(unique(cs$report$value), 3), collapse = ", "),
+                               ") were treated as missing; affected column(s): ",
+                               paste(unique(cs$report$sample), collapse = ", "), "."))
+    rv$sentinel_report <- cs$report
+
+    rv$is_long_format <- is_long_format_detect(data)
 
     if (rv$is_long_format) {
-      potential <- c("variable","Variable","condition","Condition","treatment","Treatment",
-                     "sample","Sample","group","Group")
+      potential <- group_names
       found     <- potential[potential %in% colnames(data)]
+      rep_col0  <- detect_replicate_column(data, rv$time_col, NULL, NULL)
       group_col <- if (length(found) > 0) found[1] else {
         dv    <- sapply(data, function(x) length(unique(x)) / nrow(data))
-        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), rv$time_col)
-        if (length(cands)) cands[1] else setdiff(colnames(data), rv$time_col)[1]
+        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), c(rv$time_col, rep_col0))
+        if (length(cands)) cands[1] else setdiff(colnames(data), c(rv$time_col, rep_col0))[1]
       }
-      vc <- detect_od_columns(data, c(rv$time_col, group_col))
+      # the replicate column must never be taken for the value column (a numeric "rep"
+      # column would win the is.numeric() fallback)
+      rep_col <- detect_replicate_column(data, rv$time_col, group_col, NULL)
+      vc <- detect_od_columns(data, c(rv$time_col, group_col, rep_col))
       if (length(vc) > 1) vc <- vc[1]
-      rv$group_col   <- group_col
-      rv$value_col   <- vc
-      rv$od_vars     <- as.character(unique(data[[group_col]]))
-      rv$od_vars_raw <- rv$od_vars
+      rep_col <- detect_replicate_column(data, rv$time_col, group_col, vc)
+      rv$group_col     <- group_col
+      rv$value_col     <- vc
+      rv$replicate_col <- rep_col
+      rv$od_vars       <- as.character(unique(data[[group_col]]))
+      rv$od_vars_raw   <- rv$od_vars
     } else {
       # Index-based detection keeps ALL replicate columns, including
       # duplicates of the same name (v2.8 REPLICATE FIX).
@@ -2765,9 +3681,23 @@ server <- function(input, output, session) {
       rv$col_map     <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
       rv$od_vars     <- oc
       rv$od_vars_raw <- oc
+      # Stacked replicate blocks (the time counter restarts for each block): every block is
+      # one more replicate of every sample at each time point. prepare_plot_data() already
+      # pools rows that share a time stamp; the block id lets prepare_replicate_data() keep
+      # the blocks apart as separate replicate curves.
+      wb <- infer_wide_replicates(data, rv$time_col)
+      if (!is.null(wb$reps) && wb$reps > 1) {
+        rv$n_blocks <- wb$reps
+        rv$block_id <- wb$block_id
+        notes <- c(notes, paste0("Detected ", wb$reps, " stacked time blocks (the time column restarts); ",
+                                 "each block is treated as one replicate."))
+      }
     }
     rv$data        <- data
     rv$data_source <- source_name
+    # Tell the user what was repaired on load (best effort: no notification channel in tests)
+    for (nt in notes)
+      tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)
 
     tr <- range(suppressWarnings(as.numeric(as.character(data[[rv$time_col]]))), na.rm = TRUE)
     updateNumericInput(session, "x_min", value = tr[1])
@@ -2815,7 +3745,7 @@ server <- function(input, output, session) {
   data_size_info <- function() {
     ntp <- length(rv$all_timepoints); ns <- length(rv$od_vars)
     nrep <- if (isTRUE(rv$is_long_format)) max(1, round(nrow(rv$data) / max(1, ntp * ns)))
-            else max(1, lengths(rv$col_map))
+            else max(1, lengths(rv$col_map)) * max(1, rv$n_blocks %||% 1)
     list(ntp = ntp, ns = ns, nrep = nrep, cells = as.numeric(ntp) * ns * nrep)
   }
   DATA_WARN_TIMEPOINTS <- 5000; DATA_WARN_SAMPLES <- 200; DASHBOARD_MAX_CELLS <- 2e6
@@ -2862,10 +3792,8 @@ server <- function(input, output, session) {
   # Saves global visual settings AND per-sample aesthetics keyed by sample name.
   # Explicitly excluded: file path, loaded CSV, sample selection, time filter range —
   # anything that belongs to the data rather than the visualization.
-  output$saveSettings <- downloadHandler(
-    filename = function()
-      paste0("plot_settings_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".json"),
-    content = function(file) {
+  # v2.17: the settings document as a list, shared by the Save Settings download and the figure bundle
+  settings_json_list <- function() {
       all_inputs <- reactiveValuesToList(input)
       
       # Inputs that belong to the data/session — never saved
@@ -2910,14 +3838,17 @@ server <- function(input, output, session) {
         }
       }
       
-      out <- list(
+      list(
         version           = APP_VERSION,
         saved_at          = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
         global_settings   = global_settings,
         sample_aesthetics = sample_aesthetics
       )
-      write_json(out, file, pretty = TRUE, auto_unbox = TRUE)
-    }
+  }
+  output$saveSettings <- downloadHandler(
+    filename = function()
+      paste0("plot_settings_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".json"),
+    content = function(file) write_json(settings_json_list(), file, pretty = TRUE, auto_unbox = TRUE)
   )
   
   # ── Settings: Load ───────────────────────────────────────────────────────────
@@ -3384,6 +4315,15 @@ server <- function(input, output, session) {
   }
   
   # ── Data prep ────────────────────────────────────────────────────────────────
+  # Zero-row frames with the usual columns: what prepare_plot_data() / prepare_replicate_data()
+  # return when the selected samples match nothing that is loaded (for instance for a moment when a
+  # new file replaces the old one), so every consumer sees "no data" instead of an error.
+  empty_plot_data <- function()
+    tibble::tibble(time = numeric(0), variable = character(0), mean_value = numeric(0),
+                   sd_value = numeric(0), n = integer(0), sem_value = numeric(0), ci95_value = numeric(0))
+  empty_replicate_data <- function()
+    data.frame(time = numeric(0), variable = character(0), replicate = integer(0), value = numeric(0),
+               stringsAsFactors = FALSE)
   prepare_plot_data <- function(samples = NULL) {
     req(rv$data, rv$time_col, input$selected_samples)
     samps <- if (!is.null(samples)) samples else input$selected_samples
@@ -3392,6 +4332,7 @@ server <- function(input, output, session) {
       d  <- apply_time_filters(rv$data, rv$time_col)
       # Pre-filter rows to only requested samples before any grouping
       d  <- d[d[[rv$group_col]] %in% samps, , drop = FALSE]
+      if (nrow(d) == 0) return(empty_plot_data())
       pd <- d %>%
         group_by(across(all_of(c(rv$time_col, rv$group_col)))) %>%
         summarise(mean_value = mean(.data[[rv$value_col]], na.rm = TRUE),
@@ -3411,6 +4352,7 @@ server <- function(input, output, session) {
     } else {
       d    <- apply_time_filters(rv$data, rv$time_col)
       meas <- intersect(rv$od_vars_raw, samps)
+      if (length(meas) == 0) return(empty_plot_data())
       # v2.8 REPLICATE FIX: resolve sample columns BY POSITION via rv$col_map
       # so replicate columns sharing one name all contribute. Name-based
       # subsetting (d[, meas]) silently picked only the FIRST column per name.
@@ -3454,6 +4396,7 @@ server <- function(input, output, session) {
       req(rv$group_col, rv$value_col)
       d <- apply_time_filters(rv$data, rv$time_col)
       d <- d[d[[rv$group_col]] %in% samps, , drop = FALSE]
+      if (nrow(d) == 0) return(empty_replicate_data())
       d <- d[order(d[[rv$group_col]], d[[rv$time_col]]), , drop = FALSE]
       # Long files have no explicit replicate-ID column: the nth row within
       # each (sample, time) cell is treated as "replicate n". This assumes
@@ -3462,6 +4405,13 @@ server <- function(input, output, session) {
       # exported in the same replicate order, the common case).
       rep_idx <- ave(seq_len(nrow(d)),
                      d[[rv$group_col]], d[[rv$time_col]], FUN = seq_along)
+      # When the file has a replicate / well column, that column is the replicate identity
+      # (dense rank of its values within each sample) instead of the occurrence order.
+      if (!is.null(rv$replicate_col) && rv$replicate_col %in% colnames(d)) {
+        rc <- d[[rv$replicate_col]]
+        rep_idx <- ave(seq_len(nrow(d)), d[[rv$group_col]],
+                       FUN = function(ix) match(rc[ix], sort(unique(rc[ix]))))
+      }
       out <- data.frame(time      = d[[rv$time_col]],
                         variable  = d[[rv$group_col]],
                         replicate = rep_idx,
@@ -3470,16 +4420,26 @@ server <- function(input, output, session) {
     } else {
       d    <- apply_time_filters(rv$data, rv$time_col)
       meas <- intersect(rv$od_vars_raw, samps)
+      if (length(meas) == 0) return(empty_replicate_data())
       t_vec <- d[[rv$time_col]]
+      # Stacked time blocks (rv$block_id, set at ingest) are replicates too: the replicate
+      # index of (column r, block b) is (b - 1) * ncols + r, so no replicate curve ever
+      # holds the same time point twice. rows are matched by their original row names,
+      # which the time filters preserve.
+      blk <- if (!is.null(rv$block_id)) rv$block_id[suppressWarnings(as.integer(rownames(d)))] else NULL
+      if (!is.null(blk) && (length(blk) != nrow(d) || anyNA(blk))) blk <- NULL
       pieces <- lapply(meas, function(vn) {
         idxs <- rv$col_map[[vn]]
         if (is.null(idxs)) idxs <- which(colnames(d) == vn)
-        bind_rows(lapply(seq_along(idxs), function(r)
-          data.frame(time      = t_vec, variable = vn, replicate = r,
-                    value     = suppressWarnings(as.numeric(as.character(d[[idxs[r]]]))),
-                    stringsAsFactors = FALSE)))
+        bind_rows(lapply(seq_along(idxs), function(r) {
+          vals <- suppressWarnings(as.numeric(as.character(d[[idxs[r]]])))
+          data.frame(time      = t_vec, variable = vn,
+                     replicate = if (is.null(blk)) r else (blk - 1L) * length(idxs) + r,
+                     value     = vals, stringsAsFactors = FALSE)
+        }))
       })
       out <- bind_rows(pieces)
+      if (nrow(out) == 0) return(empty_replicate_data())
     }
     # KC-7: see prepare_plot_data() above -- same constant blank offset,
     # applied per replicate value here since this frame is un-averaged.
@@ -3621,6 +4581,10 @@ server <- function(input, output, session) {
     layers
   }
   
+  # v2.17: what happens to a reading outside the y limits (below the log-axis floor in particular)
+  y_oob_fn <- function()
+    if (identical(input$y_oob %||% "squish", "censor")) scales::censor else scales::squish
+
   # v2.10: tick-label style for log axes. "legacy" is ggplot2's default (0.10).
   y_tick_labels <- function() {
     switch(input$y_tick_label_style %||% "legacy",
@@ -3695,6 +4659,22 @@ server <- function(input, output, session) {
       }
     }
     
+    # v2.17: horizontal OD threshold line (ported from the companion app), with an optional label at
+    # the right end in the axis-text size. Not drawn at or below 0 on a log axis.
+    thr <- suppressWarnings(as.numeric(input$threshold_value))
+    if (isTRUE(input$enable_threshold) && length(thr) == 1 && is.finite(thr) &&
+        !(identical(input$y_scale_type, "log") && thr <= 0)) {
+      thr_col <- input$threshold_color %||% "grey40"
+      p <- p + geom_hline(yintercept = thr, linetype = input$threshold_linetype %||% "dashed",
+                          color = thr_col, linewidth = pt2lw(input$axis_line_pt %||% 0.5))
+      thr_lbl <- trimws(input$threshold_label %||% "")
+      if (nzchar(thr_lbl) && any(is.finite(plot_data$time)))
+        p <- p + geom_text(data = data.frame(x = max(plot_data$time, na.rm = TRUE), y = thr, label = thr_lbl),
+                           aes(x = x, y = y, label = label), inherit.aes = FALSE, hjust = 1, vjust = -0.4,
+                           color = thr_col, size = (input$axis_text_font_size %||% 8) / 2.835,
+                           family = if (nzchar(input$font_family %||% "")) input$font_family else "")
+    }
+
     # Error bars / shadow
     # Track whether shadow/ribbon mode is used so we can unify the fill scale
     # with the points layer later (ggplot2 only allows ONE scale per aesthetic).
@@ -3943,6 +4923,7 @@ server <- function(input, output, session) {
       p <- p + scale_x_continuous(limits = x_lims, expand = x_exp)
     }
     
+    y_oob <- y_oob_fn()   # v2.17: readings outside the axis limits are clipped to them ("squish") or dropped ("censor")
     if (input$y_scale_type == "log") {
       y_labs <- y_tick_labels()
       if (isTRUE(input$use_advanced_ticks)) {
@@ -3951,22 +4932,22 @@ server <- function(input, output, session) {
         if (!is.finite(maxE - minE) || maxE < minE || maxE - minE > 20) {
           # v2.14.1: a nonsensical or enormous exponent range: default minor breaks
           guard_notify("tick_guard", "The log axis exponent range is too wide (or reversed) for minor ticks; default breaks are used.")
-          p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs, guide = guide_prism_minor())
+          p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs, guide = guide_prism_minor(), oob = y_oob)
         } else {
         ymn <- c(rep(1:9, maxE-minE+1) * 10^rep(minE:maxE, each=9))
         if (maxE >= 0) ymn <- c(ymn, 10^(maxE+1))
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, minor_breaks = ymn,
-                               labels = y_labs, guide = guide_prism_minor())
+                               labels = y_labs, guide = guide_prism_minor(), oob = y_oob)
         }
       } else {
-        p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs)
+        p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs, oob = y_oob)
       }
     } else if (input$y_scale_type == "sqrt") {
-      p <- p + scale_y_sqrt(limits = y_lims, expand = y_exp)
+      p <- p + scale_y_sqrt(limits = y_lims, expand = y_exp, oob = y_oob)
     } else if (input$y_scale_type == "reverse") {
-      p <- p + scale_y_reverse(limits = y_lims, expand = y_exp)
+      p <- p + scale_y_reverse(limits = y_lims, expand = y_exp, oob = y_oob)
     } else {
-      p <- p + scale_y_continuous(limits = y_lims, expand = y_exp)
+      p <- p + scale_y_continuous(limits = y_lims, expand = y_exp, oob = y_oob)
     }
     
     bs     <- input$theme_base_pt %||% 0
@@ -4004,7 +4985,7 @@ server <- function(input, output, session) {
 
     p + coord_cartesian(clip = "off") +
       labs(x        = input$x_axis_label,
-           y        = input$y_axis_label,
+           y        = axis_y_label(input$y_axis_label),
            # v2.10: with journal spacing (theme_base_pt > 0) a blank title is NULL,
            # so no empty title row (~5 mm) is reserved above the panel. Legacy
            # spacing keeps "" so pre-2.10 figures reproduce exactly.
@@ -4412,11 +5393,12 @@ server <- function(input, output, session) {
   # ── Figure legend text (v2.10) ──────────────────────────────────────────────
   # Journals put the measure, n and the error definition in the legend, not on
   # the artwork. Drafted from the plot state + Experiment Notebook; edit freely.
-  output$figure_legend_text <- renderText({
-    if (is.null(rv$data) || is.null(input$selected_samples))
-      return("Load data and select samples to draft a legend.")
+  # v2.17: one function, shared by the box, the reports, the notebook download and the figure bundle.
+  # Returns the drafted paragraph, or "" when there is nothing to describe yet.
+  figure_legend_string <- function() {
+    if (is.null(rv$data) || is.null(input$selected_samples)) return("")
     pd <- tryCatch(prepare_plot_data(), error = function(e) NULL)
-    if (is.null(pd) || nrow(pd) == 0) return("Load data and select samples to draft a legend.")
+    if (is.null(pd) || nrow(pd) == 0) return("")
     aes_v <- resolve_aesthetics(input$selected_samples)
     nb    <- function(id) { v <- input[[id]]
                             if (is.null(v) || !nzchar(trimws(as.character(v)))) NULL else trimws(as.character(v)) }
@@ -4453,6 +5435,10 @@ server <- function(input, output, session) {
       sprintf("Readings are blank-corrected (−%s).", blank) else NULL
     s6 <- if (isTRUE(input$enable_time_filter)) "Only the displayed time window was analysed." else NULL
     paste(c(s1, s2, s3, s4, s5, s6), collapse = " ")
+  }
+  output$figure_legend_text <- renderText({
+    txt <- figure_legend_string()
+    if (nzchar(txt)) txt else "Load data and select samples to draft a legend."
   })
 
   # ── Analysis figures (v2.11) ─────────────────────────────────────────────────
@@ -4601,7 +5587,7 @@ server <- function(input, output, session) {
           geom_hline(yintercept = 1, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
           geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7) +
           base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
-          labs(x = input$x_axis_label, y = paste0(input$y_axis_label, " relative to ", ref_lab))
+          labs(x = input$x_axis_label, y = axis_y_label(paste0(input$y_axis_label, " relative to ", ref_lab)))
       },
       replicate_overlay = {
         rp <- prepare_replicate_data(); pd <- prepare_plot_data()
@@ -4613,8 +5599,8 @@ server <- function(input, output, session) {
                     linewidth = lw * 0.5, alpha = 0.45) +
           geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable,
                                    group = variable), linewidth = lw * 1.3) +
-          base_scales + labs(x = input$x_axis_label, y = input$y_axis_label)
-        if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels()) else g
+          base_scales + labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       dose_response = {
         rm     <- replicate_metric_rows_current()
@@ -4664,7 +5650,7 @@ server <- function(input, output, session) {
           base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
           scale_x_log10(labels = scales::label_number(drop0trailing = TRUE, big.mark = ""),
                         expand = if (length(series_levels) > 1) expansion(mult = c(0.05, 0.35)) else waiver()) +
-          labs(x = "MOI", y = metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD"))
+          labs(x = "MOI", y = axis_y_label(metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
         g
       },
       landmarks = {
@@ -4709,8 +5695,8 @@ server <- function(input, output, session) {
           guides(fill = "none", color = guide_legend(order = 1, override.aes = list(shape = NA)),
                  linetype = guide_legend(order = 1),
                  shape = guide_legend(order = 2, override.aes = list(color = "black", fill = "grey60"))) +
-          labs(x = input$x_axis_label, y = input$y_axis_label)
-        if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels()) else g
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       heatmap = {
         pd <- prepare_plot_data()
@@ -4718,7 +5704,7 @@ server <- function(input, output, session) {
         logit <- identical(input$y_scale_type, "log")
         pd$fillv <- if (logit) log10(pmax(pd$mean_value, 1e-6)) else pd$mean_value
         ggplot(pd, aes(x = time, y = variable, fill = fillv)) + geom_tile() +
-          scale_fill_viridis_c(name = if (logit) paste0("log10 ", input$y_axis_label) else input$y_axis_label) +
+          scale_fill_viridis_c(name = axis_y_label(if (logit) paste0("log10 ", input$y_axis_label) else input$y_axis_label)) +
           labs(x = input$x_axis_label, y = NULL)
       },
       stop("Unknown analysis figure type"))
@@ -4767,11 +5753,12 @@ server <- function(input, output, session) {
   # tag is removed, panels are free()d from alignment (an outside legend would
   # otherwise squeeze the panels beside it), and patchwork adds a, b, c tags in the
   # journal's panel-label style.
-  compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a") {
+  compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE) {
     if (!has_patchwork) stop("The figure composer needs the 'patchwork' package: install.packages('patchwork')")
     panels <- lapply(panels, function(p) patchwork::free(p + labs(tag = NULL)))
-    patchwork::wrap_plots(panels, ncol = ncol) +
-      patchwork::plot_annotation(tag_levels = tag_case) &
+    w <- patchwork::wrap_plots(panels, ncol = ncol)
+    if (!isTRUE(tags_on)) return(w)    # v2.16: "Add panel letters" off: no a, b, c
+    w + patchwork::plot_annotation(tag_levels = tag_case) &
       theme(plot.tag = element_text(size = tag_size, face = "bold", family = font))
   }
   is_placeholder_plot <- function(p) {
@@ -4820,12 +5807,14 @@ server <- function(input, output, session) {
       # v2.15: every panel keeps its fixed panel size; the grid is as wide / tall as its cells need
       items <- lapply(names(plots), function(ty) fixed_figure(plots[[ty]] + labs(tag = NULL), ty))
       g <- compose_fixed_figure(items, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
-                                font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a")
+                                font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a",
+                                tags_on = isTRUE(input$compose_tags %||% TRUE))
       w_mm <- attr(g, "size_mm")[1]; h_mm <- attr(g, "size_mm")[2]
       g
     } else if (n >= 1)
       compose_figure(plots, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
-                     font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a")
+                     font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a",
+                     tags_on = isTRUE(input$compose_tags %||% TRUE))
     else NULL
     list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
          types = names(plots), width_mm = w_mm, height_mm = h_mm)
@@ -4888,27 +5877,29 @@ server <- function(input, output, session) {
     else notes <- c("No comparison possible yet: load data with 2+ replicates per sample.", notes)
     div(lapply(notes, function(n) div(class = "stats-note", n)))
   }
-  output$analysis_stats_notes   <- renderUI({ req(rv$data); stats_notes_ui(analysis_stats_current()) })
-  output$analysis_stats_table   <- renderTable({ req(rv$data); fmt_stats_table(analysis_stats_current()$pairwise) },
-                                               striped = TRUE, spacing = "xs")
-  output$analysis_stats_omnibus <- renderTable({ req(rv$data); fmt_stats_table(analysis_stats_current()$omnibus) },
-                                               striped = TRUE, spacing = "xs")
-  output$analysis_stats_posthoc <- renderTable({ req(rv$data); fmt_stats_table(analysis_stats_current()$posthoc) },
-                                               striped = TRUE, spacing = "xs")
-  output$downloadAnalysisStatsCSV <- downloadHandler(
-    filename = function() paste0("replicate_stats_", analysis_stat_metric(), "_",
-                                 format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content = function(file) {
-      st <- analysis_stats_current()
-      con <- file(file, open = "w", encoding = "UTF-8"); on.exit(close(con))
-      writeLines(paste0("# metric,", st$metric, " ; method,", input$stats_method %||% "welch",
-                        " ; reference,", input$metrics_ref_sample %||% ""), con)
-      for (w in st$warnings) writeLines(paste0("# ", w), con)
-      if (!is.null(st$pairwise)) { writeLines("# pairwise", con); write.csv(st$pairwise, con, row.names = FALSE) }
-      if (!is.null(st$omnibus))  { writeLines("# omnibus",  con); write.csv(st$omnibus,  con, row.names = FALSE) }
-      if (!is.null(st$posthoc))  { writeLines("# posthoc (Tukey HSD)", con); write.csv(st$posthoc, con, row.names = FALSE) }
-    }
-  )
+  # v2.16: one builder per table, used by the Analysis tab and the Statistics tab (own output ids)
+  stats_notes_build    <- function() { req(rv$data); stats_notes_ui(analysis_stats_current()) }
+  stats_pairwise_build <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$pairwise) }
+  stats_omnibus_build  <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$omnibus) }
+  stats_posthoc_build  <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$posthoc) }
+  output$analysis_stats_notes   <- renderUI(stats_notes_build())
+  output$analysis_stats_table   <- renderTable(stats_pairwise_build(), striped = TRUE, spacing = "xs")
+  output$analysis_stats_omnibus <- renderTable(stats_omnibus_build(),  striped = TRUE, spacing = "xs")
+  output$analysis_stats_posthoc <- renderTable(stats_posthoc_build(),  striped = TRUE, spacing = "xs")
+  analysis_stats_csv_name <- function() paste0("replicate_stats_", analysis_stat_metric(), "_",
+                                               format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+  analysis_stats_csv_content <- function(file) {
+    st <- analysis_stats_current()
+    con <- file(file, open = "w", encoding = "UTF-8"); on.exit(close(con))
+    writeLines(paste0("# metric,", st$metric, " ; method,", input$stats_method %||% "welch",
+                      " ; reference,", input$metrics_ref_sample %||% ""), con)
+    for (w in st$warnings) writeLines(paste0("# ", w), con)
+    if (!is.null(st$pairwise)) { writeLines("# pairwise", con); write.csv(st$pairwise, con, row.names = FALSE) }
+    if (!is.null(st$omnibus))  { writeLines("# omnibus",  con); write.csv(st$omnibus,  con, row.names = FALSE) }
+    if (!is.null(st$posthoc))  { writeLines("# posthoc (Tukey HSD)", con); write.csv(st$posthoc, con, row.names = FALSE) }
+  }
+  output$downloadAnalysisStatsCSV     <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
+  output$downloadAnalysisStatsCSV_tab <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
   
   # ── Dashboard (v2.11) ───────────────────────────────────────────────────────
   output$dash_cards <- renderUI({
@@ -4995,8 +5986,9 @@ server <- function(input, output, session) {
   output$dash_notebook <- renderUI({
     fields <- c(nb_exp_id = "Experiment", nb_experimenter = "Experimenter", nb_project = "Project",
                 nb_exp_type = "Type", nb_host_strain = "Host", nb_phage_plasmid = "Phage / plasmid",
-                nb_moi = "MOI", nb_replicate = "Replicates", nb_media = "Medium",
+                nb_moi = "MOI", nb_replicate = "Replicates", nb_passage = "Passage #", nb_media = "Medium",
                 nb_temperature = "Temperature (°C)", nb_time_inf = "Time of infection",
+                nb_inducer_conc = "Inducer concentration", nb_other_condition = "Other condition",
                 nb_observations = "Observations")
     vals <- vapply(names(fields), function(id) { v <- input[[id]]; if (is.null(v)) "" else trimws(as.character(v)) }, "")
     keep <- nzchar(vals)
@@ -5021,14 +6013,15 @@ server <- function(input, output, session) {
                stringsAsFactors = FALSE)
   }
 
-  output$downloadStatsCSV <- downloadHandler(
-    filename = function()
-      paste0("summary_stats_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content = function(file) {
-      req(rv$data, input$selected_samples)
-      write.csv(stats_table_export(), file, row.names = FALSE)
-    }
-  )
+  # v2.16: each CSV has one filename / content function, shared by the sidebar button and the
+  # Statistics tab button (a Shiny output id can only be bound once, so each has a second id).
+  stats_csv_name   <- function() paste0("summary_stats_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+  stats_csv_content <- function(file) {
+    req(rv$data, input$selected_samples)
+    write.csv(stats_table_export(), file, row.names = FALSE)
+  }
+  output$downloadStatsCSV     <- downloadHandler(filename = stats_csv_name, content = stats_csv_content)
+  output$downloadStatsCSV_tab <- downloadHandler(filename = stats_csv_name, content = stats_csv_content)
 
   curve_metrics_current <- function() {
     compute_curve_metrics(prepare_plot_data(),
@@ -5056,14 +6049,35 @@ server <- function(input, output, session) {
                     "small negative reading after blank subtraction.")))
   })
 
-  output$downloadMetricsCSV <- downloadHandler(
-    filename = function()
-      paste0("curve_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content = function(file) {
-      req(rv$data, input$selected_samples)
-      write.csv(curve_metrics_current(), file, row.names = FALSE)
-    }
-  )
+  # v2.17: data quality flags (CEILING / NEGATIVE / GAP / FLAT_REFERENCE) for the current selection:
+  # a compact list in the sidebar, on the Dashboard and in the reports. NULL when they cannot be computed.
+  qc_current <- function() {
+    if (is.null(rv$data) || !length(input$selected_samples)) return(NULL)
+    tryCatch(qc_flags(prepare_replicate_data(), prepare_plot_data(),
+                      ref_sample = input$metrics_ref_sample %||% "",
+                      ceiling    = input$qc_od_ceiling %||% 2.5),
+             error = function(e) NULL)
+  }
+  qc_flags_ui_build <- function() {
+    q <- qc_current()
+    if (is.null(q) || nrow(q) == 0) return(NULL)
+    div(style = "background:#fff3cd;border:1px solid #ffe69c;border-radius:4px;padding:6px 8px;margin:4px 0 8px;font-size:.78em;color:#664d03;",
+        tags$b(paste0("Data quality flags (", nrow(q), ")")),
+        tags$ul(style = "margin:4px 0 0;padding-left:16px;",
+                lapply(seq_len(nrow(q)), function(i)
+                  tags$li(tags$b(q$flag[i]), " ", q$sample[i], ": ", q$detail[i]))))
+  }
+  output$qc_flags_ui         <- renderUI(qc_flags_ui_build())
+  output$qc_flags_ui_metrics <- renderUI(qc_flags_ui_build())
+  output$dash_qc             <- renderUI(qc_flags_ui_build())
+
+  metrics_csv_name <- function() paste0("curve_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+  metrics_csv_content <- function(file) {
+    req(rv$data, input$selected_samples)
+    write.csv(curve_metrics_current(), file, row.names = FALSE)
+  }
+  output$downloadMetricsCSV     <- downloadHandler(filename = metrics_csv_name, content = metrics_csv_content)
+  output$downloadMetricsCSV_tab <- downloadHandler(filename = metrics_csv_name, content = metrics_csv_content)
 
   # KC-4: per-replicate metrics (mean +/- SD across replicates), additive
   # alongside curve_metrics_current() above.
@@ -5075,12 +6089,280 @@ server <- function(input, output, session) {
                               lysis_threshold    = lysis_threshold_current())
   }
 
-  output$downloadReplicateMetricsCSV <- downloadHandler(
-    filename = function()
-      paste0("replicate_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content = function(file) {
+  repmetrics_csv_name <- function() paste0("replicate_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+  repmetrics_csv_content <- function(file) {
+    req(rv$data, input$selected_samples)
+    write.csv(replicate_metrics_current(), file, row.names = FALSE)
+  }
+  output$downloadReplicateMetricsCSV     <- downloadHandler(filename = repmetrics_csv_name, content = repmetrics_csv_content)
+  output$downloadReplicateMetricsCSV_tab <- downloadHandler(filename = repmetrics_csv_name, content = repmetrics_csv_content)
+
+  # ── Statistics tab (v2.16) ───────────────────────────────────────────────────
+  # The descriptive statistics and metrics, reviewable and downloadable without the sidebar; the
+  # replicate comparison uses the same builders as the Analysis tab (own output ids). Outputs in a
+  # tab that is not showing are not computed, so this costs nothing until it is opened.
+  STATS_TAB_MAX_ROWS <- 2000L
+  stats_tab_summary_df <- function() { req(rv$data, input$selected_samples); stats_table_export() }
+  output$stats_tab_summary_note <- renderUI({
+    n <- nrow(stats_tab_summary_df())
+    if (n > STATS_TAB_MAX_ROWS)
+      p(class = "stats-note", sprintf("The first %s of %s rows are shown; the CSV has all of them.",
+                                      STATS_TAB_MAX_ROWS, format(n, big.mark = ",")))
+  })
+  if (has_DT) {
+    output$stats_tab_summary <- DT::renderDT({
+      df <- utils::head(stats_tab_summary_df(), STATS_TAB_MAX_ROWS)
+      df$n <- as.integer(df$n)
+      DT::formatRound(DT::datatable(df, rownames = FALSE, options = list(pageLength = 25, searching = TRUE, scrollX = TRUE)),
+                      intersect(c("mean", "sd", "sem", "ci95_half_width"), names(df)), digits = 4)
+    }, server = FALSE)   # rows (capped) travel with the widget: the search box filters in the browser
+  } else {
+    output$stats_tab_summary <- renderTable({
+      df <- utils::head(stats_tab_summary_df(), STATS_TAB_MAX_ROWS)
+      df$n <- as.integer(df$n); df$time <- as.character(df$time)   # whole numbers, not 15.0000
+      df
+    }, striped = TRUE, digits = 4, spacing = "xs")
+  }
+  # 4 significant figures, "NA" for missing; whole numbers stay whole
+  tab_sig <- function(df, sig = 4) {
+    for (cc in names(df)) if (is.numeric(df[[cc]]))
+      df[[cc]] <- vapply(df[[cc]], function(v) if (is.finite(v)) format(signif(v, sig), trim = TRUE, scientific = FALSE) else "NA", "")
+    df
+  }
+  output$stats_tab_metrics <- renderTable({
+    req(rv$data, input$selected_samples); m <- curve_metrics_current(); req(m); tab_sig(m)
+  }, striped = TRUE, spacing = "xs")
+  output$stats_tab_metric_defs <- renderTable({
+    req(rv$data, input$selected_samples); m <- curve_metrics_current(); req(m)
+    keys <- intersect(names(METRIC_DEFINITIONS), colnames(m))
+    data.frame(Metric = keys, Definition = unname(METRIC_DEFINITIONS[keys]), stringsAsFactors = FALSE)
+  }, striped = TRUE, spacing = "xs")
+  output$stats_tab_repmetrics <- renderTable({
+    req(rv$data, input$selected_samples); m <- replicate_metrics_current(); req(m); tab_sig(m)
+  }, striped = TRUE, spacing = "xs")
+  output$stats_tab_notes    <- renderUI(stats_notes_build())
+  output$stats_tab_pairwise <- renderTable(stats_pairwise_build(), striped = TRUE, spacing = "xs")
+  output$stats_tab_omnibus  <- renderTable(stats_omnibus_build(),  striped = TRUE, spacing = "xs")
+  output$stats_tab_posthoc  <- renderTable(stats_posthoc_build(),  striped = TRUE, spacing = "xs")
+
+  # Methods paragraph drafted from the current settings: what was measured, how the mean and the
+  # error statistic were computed, how the metrics were defined and which tests were run. Plain text
+  # (the y label keeps its "A550"); the user edits it and the reports include what is in the box.
+  draft_methods_text <- function() {
+    if (is.null(rv$data) || !length(input$selected_samples)) return("")
+    pd <- tryCatch(prepare_plot_data(), error = function(e) NULL)
+    if (is.null(pd) || nrow(pd) == 0) return("")
+    nb <- function(id) { v <- input[[id]]; if (is.null(v) || !nzchar(trimws(as.character(v)))) NULL else trimws(as.character(v)) }
+    samps <- input$selected_samples
+    ylab  <- nb("y_axis_label") %||% "optical density"
+    tunit <- time_unit_from_label(input$x_axis_label)
+    n_rng <- suppressWarnings(range(pd$n, na.rm = TRUE))
+    n_txt <- if (!all(is.finite(n_rng))) "replicate"
+             else if (n_rng[1] == n_rng[2]) paste0(n_rng[1], " replicate", if (n_rng[1] == 1) "" else "s")
+             else paste0(n_rng[1], "–", n_rng[2], " replicates")
+    et <- input$error_type %||% "sem"; em <- input$error_multiplier %||% 1
+    mult <- if (is.numeric(em) && is.finite(em) && em != 1) paste0(em, " × ") else ""
+    shown <- if (identical(input$error_display_mode, "shadow")) "shaded bands" else "error bars"
+    err <- switch(et,
+      sd   = paste0("Mean curves are shown with ", shown, " of ", mult, "the standard deviation (SD) of the replicates."),
+      sem  = paste0("Mean curves are shown with ", shown, " of ", mult, "the standard error of the mean (SEM = SD / √n)."),
+      ci95 = paste0("Mean curves are shown with ", shown, " of ", mult, "the 95% confidence interval of the mean (t₀.₉₇₅,ₙ₋₁ × SEM)."),
+      "Mean curves are shown without an error statistic.")
+    s1 <- paste0(
+      if (!is.null(nb("nb_host_strain")))
+        paste0("Growth of ", nb("nb_host_strain"),
+               if (!is.null(nb("nb_phage_plasmid"))) paste0(" infected with ", nb("nb_phage_plasmid")) else "",
+               if (!is.null(nb("nb_moi"))) paste0(" (MOI ", nb("nb_moi"), ")") else "",
+               if (!is.null(nb("nb_media"))) paste0(" in ", nb("nb_media")) else "",
+               if (!is.null(nb("nb_temperature"))) paste0(" at ", nb("nb_temperature"), " °C") else "",
+               " was followed as ", ylab, " over time (", tunit, ").")
+      else paste0("Culture density was measured as ", ylab, " over time (", tunit, ")."),
+      " ", length(samps), " sample", if (length(samps) == 1) "" else "s",
+      " (", if (length(samps) <= 8) paste(samps, collapse = ", ") else paste0(paste(samps[1:8], collapse = ", "), ", ..."),
+      ") were measured in ", n_txt, " each.")
+    blank <- input$blank_od %||% 0
+    s2 <- paste0(
+      if (is.numeric(blank) && is.finite(blank) && blank != 0) paste0("Readings were blank-corrected by subtracting ", blank, ". ") else "",
+      if (isTRUE(input$enable_time_filter)) "Only the displayed time window was analysed. " else "",
+      "At each time point the mean of the replicates was plotted. ", err)
+    win <- input$metrics_smooth_window %||% 5
+    pw  <- input$metrics_peak_smooth_window %||% 1
+    thr <- lysis_threshold_current() * 100
+    first_local <- identical(input$metrics_peak_mode %||% "global", "first_local")
+    s3 <- paste0(
+      "Curve metrics were computed from each sample's mean curve. The maximum specific growth rate (μmax) is the largest ",
+      "slope of ln(", ylab, ") against time in a centred rolling-regression window of ", win, " points, and the doubling time is ln 2 / μmax. ",
+      "The peak was taken as ",
+      if (first_local) "the first maximum followed by a decline of more than 10%" else "the global maximum of the curve",
+      if (is.numeric(pw) && pw > 1) paste0(" (curves smoothed with a ", pw, "-point window for peak detection)") else " (no smoothing for peak detection)",
+      ", and lysis onset as the first time after the peak at which the value fell more than ", thr, "% below it. ",
+      "Per-replicate metrics were computed the same way on each replicate curve and are reported as mean ± SD.")
+    ref <- input$metrics_ref_sample %||% ""
+    nonpar <- identical(input$stats_method %||% "welch", "nonparametric")
+    st_metric <- tryCatch(metric_label(analysis_stat_metric()), error = function(e) "the per-replicate metric")
+    s4 <- paste0(
+      if (length(samps) < 2) "No statistical comparison was made (a single sample)."
+      else paste0(
+        if (nzchar(ref) && ref %in% samps) paste0("Each sample was compared with the reference sample '", ref, "'")
+        else "All pairs of samples were compared",
+        " on the per-replicate metric '", st_metric, "' using ",
+        if (nonpar) "the Mann–Whitney U test" else "Welch's t-test (unequal variances)",
+        "; p values were adjusted for multiple comparisons by the Holm method, and effect sizes are reported as Hedges' g with the 95% confidence interval of the difference.",
+        if (length(samps) >= 3)
+          paste0(" Differences among three or more groups were tested with ",
+                 if (nonpar) "the Kruskal–Wallis test." else "one-way ANOVA followed by Tukey's HSD.")
+        else ""))
+    s5 <- paste0("Analysis and figures were produced with the Lysis Curve OD Visualization App v", APP_VERSION,
+                 " (R ", R.version$major, ".", R.version$minor, ").")
+    paste(c(s1, s2, s3, s4, s5), collapse = " ")
+  }
+  observeEvent(input$methods_draft, {
+    if (is.null(rv$data) || !length(input$selected_samples)) {
+      guard_notify("methods_draft", "Load data and select samples first: the methods text is drafted from them.")
+      return(invisible(NULL))
+    }
+    if (nzchar(trimws(input$methods_text %||% "")) && !isTRUE(input$methods_replace)) {
+      guard_notify("methods_draft", "The box already has text. Tick 'replace existing text' to overwrite it with a new draft.")
+      return(invisible(NULL))
+    }
+    updateTextAreaInput(session, "methods_text", value = draft_methods_text())
+  })
+  output$downloadMethodsTxt <- downloadHandler(
+    filename = function() paste0("methods_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"),
+    content  = function(file) writeLines(enc2utf8(input$methods_text %||% ""), file, useBytes = TRUE)
+  )
+
+  # v2.17: every Experiment Notebook field as a named list (label = value), custom keys appended under
+  # their own names. Shared by the reports and the two notebook downloads.
+  notebook_pairs <- function() {
+    nb_pairs <- list(
+      "Experiment ID"      = input$nb_exp_id,
+      "Date"               = as.character(input$nb_date %||% ""),
+      "Experimenter"       = input$nb_experimenter,
+      "Project"            = input$nb_project,
+      "Lab / Institution"  = input$nb_institution,
+      "Experiment type"    = input$nb_exp_type,
+      "Host strain(s)"     = input$nb_host_strain,
+      "Phage / plasmid"    = input$nb_phage_plasmid,
+      "MOI"                = input$nb_moi,
+      "Replicate / batch"  = input$nb_replicate,
+      "Passage #"          = input$nb_passage,
+      "Growth medium"      = input$nb_media,
+      "Temperature (°C)"   = input$nb_temperature,
+      "Time of infection/induction" = input$nb_time_inf,
+      "Inducer"            = input$nb_inducer,
+      "Inducer concentration" = input$nb_inducer_conc,
+      "Other condition"    = input$nb_other_condition,
+      "Observations / results" = input$nb_observations,
+      "Issues / anomalies" = input$nb_issues,
+      "Next steps"         = input$nb_next_steps,
+      "Tags"               = input$nb_tags
+    )
+    for (i in 1:3) {
+      k <- input[[paste0("nb_custom_key", i)]]
+      v <- input[[paste0("nb_custom_val", i)]]
+      if (nzchar(trimws(k %||% ""))) nb_pairs[[trimws(k)]] <- v %||% ""
+    }
+    nb_pairs
+  }
+  # only the non-empty fields, as character
+  notebook_filled <- function() {
+    nb_pairs <- notebook_pairs()
+    keep <- vapply(nb_pairs, function(v) nzchar(trimws(v %||% "")), logical(1))
+    vapply(nb_pairs[keep], function(v) trimws(as.character(v)), character(1))
+  }
+
+  # ── Notebook downloads (v2.17) ───────────────────────────────────────────────
+  # .txt: every filled notebook field as "key: value", then the figure legend text and the methods text.
+  # .csv: one row, one column per filled field (custom keys become column names), for pasting into a
+  # master experiment spreadsheet.
+  notebook_file_stem <- function() {
+    id <- gsub("[^A-Za-z0-9_-]+", "_", trimws(input$nb_exp_id %||% ""))
+    paste0("notebook", if (nzchar(id)) paste0("_", id) else "", "_", format(Sys.time(), "%Y%m%d"))
+  }
+  notebook_txt_lines <- function() {
+    f <- notebook_filled()
+    kv <- vapply(seq_along(f), function(i) paste0(names(f)[i], ": ", gsub("\n", "\n    ", f[[i]])), character(1))
+    leg <- trimws(figure_legend_string()); mth <- trimws(input$methods_text %||% "")
+    c("EXPERIMENT NOTEBOOK", paste0("Exported ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                                    " (Lysis Curve OD Visualization App v", APP_VERSION, ")"), "",
+      if (length(kv)) kv else "(no notebook fields filled in)",
+      if (nzchar(leg)) c("", "FIGURE LEGEND", leg),
+      if (nzchar(mth)) c("", "METHODS", mth))
+  }
+  output$download_notebook_txt <- downloadHandler(
+    filename = function() paste0(notebook_file_stem(), ".txt"),
+    content  = function(file) writeLines(enc2utf8(notebook_txt_lines()), file, useBytes = TRUE)
+  )
+  notebook_row_df <- function() {
+    f <- notebook_filled()
+    if (!length(f)) return(data.frame(note = "no notebook fields filled in", stringsAsFactors = FALSE))
+    as.data.frame(as.list(f), check.names = FALSE, stringsAsFactors = FALSE)
+  }
+  output$download_notebook_csv <- downloadHandler(
+    filename = function() paste0(notebook_file_stem(), ".csv"),
+    content  = function(file) utils::write.csv(notebook_row_df(), file, row.names = FALSE, fileEncoding = "UTF-8")
+  )
+
+  # ── Figure bundle (v2.17) ────────────────────────────────────────────────────
+  # One archive per figure: the main figure (SVG + PDF at the current size, the same code as the image
+  # download), the composed figure (SVG, when two or more panels are selected), the settings, the tidy source
+  # data, the summary statistics and curve metrics, the legend and methods text, and a README.
+  bundle_size_mm <- function() round(export_size_in() * 25.4)
+  bundle_folder_name <- function() { mm <- bundle_size_mm(); sprintf("figure_bundle_%dx%dmm", mm[1], mm[2]) }
+  output$downloadFigureBundle <- downloadHandler(
+    filename = function() paste0(bundle_folder_name(), ".", bundle_archive_kind()),
+    content  = function(file) {
       req(rv$data, input$selected_samples)
-      write.csv(replicate_metrics_current(), file, row.names = FALSE)
+      sz   <- export_size_in()
+      tmp  <- tempfile("bundle_"); dir.create(tmp)
+      on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+      fold <- bundle_folder_name(); dir <- file.path(tmp, fold); dir.create(dir)
+      made <- character(0)
+      main_obj <- main_plot_obj()
+      for (fmt in c("svg", "pdf")) {
+        fn <- paste0("figure_main.", fmt)
+        ggsave(file.path(dir, fn), plot = main_obj, device = export_device(fmt), width = sz[1], height = sz[2],
+               units = "in", bg = "white", limitsize = FALSE)
+        made <- c(made, fn)
+      }
+      comp <- if (has_patchwork) tryCatch(compose_info(), error = function(e) NULL) else NULL
+      if (!is.null(comp) && !is.null(comp$plot) && comp$n >= 2) {
+        ggsave(file.path(dir, "figure_composed.svg"), plot = comp$plot, device = export_device("svg"),
+               width = comp$width_mm, height = comp$height_mm, units = "mm", bg = "white", limitsize = FALSE)
+        made <- c(made, "figure_composed.svg")
+      }
+      write_json(settings_json_list(), file.path(dir, "settings.json"), pretty = TRUE, auto_unbox = TRUE)
+      rp <- prepare_replicate_data()
+      src <- data.frame(time = rp$time, sample = as.character(rp$variable), replicate = rp$replicate,
+                        value = rp$value, stringsAsFactors = FALSE)
+      utils::write.csv(src, file.path(dir, "source_data_tidy.csv"), row.names = FALSE)
+      utils::write.csv(stats_table_export(), file.path(dir, "summary_statistics.csv"), row.names = FALSE)
+      cm <- tryCatch(curve_metrics_current(), error = function(e) NULL)
+      if (!is.null(cm)) utils::write.csv(cm, file.path(dir, "curve_metrics.csv"), row.names = FALSE)
+      leg <- trimws(figure_legend_string())
+      writeLines(enc2utf8(leg), file.path(dir, "figure_legend.txt"), useBytes = TRUE)
+      mth <- trimws(input$methods_text %||% "")
+      if (nzchar(mth)) writeLines(enc2utf8(mth), file.path(dir, "methods.txt"), useBytes = TRUE)
+      mm <- bundle_size_mm()
+      files <- c(made, "settings.json", "source_data_tidy.csv", "summary_statistics.csv",
+                 if (!is.null(cm)) "curve_metrics.csv", "figure_legend.txt", if (nzchar(mth)) "methods.txt", "README.txt")
+      writeLines(enc2utf8(c(
+        "FIGURE BUNDLE",
+        paste0("Lysis Curve OD Visualization App v", APP_VERSION),
+        paste0("Created: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+        paste0("Data source: ", rv$data_source %||% "(unknown)"),
+        paste0("Samples: ", paste(input$selected_samples, collapse = ", ")),
+        sprintf("Figure size: %d x %d mm (%.2f x %.2f in)", mm[1], mm[2], sz[1], sz[2]),
+        sprintf("Fonts: %s; title %s pt, axis labels %s pt, axis text %s pt, legend %s pt",
+                input$font_family %||% "sans", input$title_font_size %||% "", input$axis_label_font_size %||% "",
+                input$axis_text_font_size %||% "", input$legend_font_size %||% ""),
+        "",
+        "Files:", paste0("  ", files),
+        "",
+        "settings.json can be loaded back with Load Settings to reproduce the figure's look.")),
+        file.path(dir, "README.txt"), useBytes = TRUE)
+      write_bundle_archive(file, tmp, fold)
     }
   )
 
@@ -5135,31 +6417,7 @@ server <- function(input, output, session) {
                 }, error = function(e) "not available")),
       stringsAsFactors = FALSE)
     # ── Experiment notebook: collect non-empty fields ─────────────────────────
-    nb_pairs <- list(
-      "Experiment ID"      = input$nb_exp_id,
-      "Date"               = as.character(input$nb_date %||% ""),
-      "Experimenter"       = input$nb_experimenter,
-      "Project"            = input$nb_project,
-      "Lab / Institution"  = input$nb_institution,
-      "Experiment type"    = input$nb_exp_type,
-      "Host strain(s)"     = input$nb_host_strain,
-      "Phage / plasmid"    = input$nb_phage_plasmid,
-      "MOI"                = input$nb_moi,
-      "Replicate / batch"  = input$nb_replicate,
-      "Growth medium"      = input$nb_media,
-      "Temperature (°C)"   = input$nb_temperature,
-      "Time of infection/induction" = input$nb_time_inf,
-      "Inducer"            = input$nb_inducer,
-      "Observations / results" = input$nb_observations,
-      "Issues / anomalies" = input$nb_issues,
-      "Next steps"         = input$nb_next_steps,
-      "Tags"               = input$nb_tags
-    )
-    for (i in 1:3) {
-      k <- input[[paste0("nb_custom_key", i)]]
-      v <- input[[paste0("nb_custom_val", i)]]
-      if (nzchar(trimws(k %||% ""))) nb_pairs[[trimws(k)]] <- v %||% ""
-    }
+    nb_pairs <- notebook_pairs()
     keep <- vapply(nb_pairs, function(v) nzchar(trimws(v %||% "")), logical(1))
     # Date always has a default; only emit the notebook when a real field is set
     notebook_df <- if (any(keep & names(nb_pairs) != "Date" &
@@ -5173,6 +6431,9 @@ server <- function(input, output, session) {
                        else "Lysis Curve Analysis Report",
          author      = input$report_author,
          notes       = input$report_notes,
+         methods     = trimws(input$methods_text %||% ""),   # v2.16: edited on the Statistics tab
+         legend      = figure_legend_string(),               # v2.17: the Figure Legend Text, under the main figure
+         qc_df       = qc_current(),                         # v2.17: QC flags section (NULL when not computable)
          generated   = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
          data_file   = rv$data_source %||% "(unknown)",
          format      = if (rv$is_long_format) "long" else
@@ -5269,7 +6530,7 @@ server <- function(input, output, session) {
     comp <- if (has_patchwork) tryCatch(compose_info(), error = function(e) NULL) else NULL
     if (!is.null(comp) && comp$n >= 2) {
       f <- list(type = "composed", title = "Composed figure",
-                caption = paste0("Panels a-", letters[comp$n], " composed in the app at ",
+                caption = paste0(if (isTRUE(input$compose_tags %||% TRUE)) paste0("Panels a-", letters[comp$n]) else paste0(comp$n, " panels"), " composed in the app at ",
                                  round(comp$width_mm), " x ", round(comp$height_mm), " mm (",
                                  comp$ncol, " column", if (comp$ncol == 1) "" else "s", "): ",
                                  paste(names(COMPOSE_PANEL_CHOICES)[match(comp$types, COMPOSE_PANEL_CHOICES)],

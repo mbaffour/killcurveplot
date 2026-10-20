@@ -163,7 +163,10 @@ testServer(app, {
   check("SVG text carries NO textLength (Inkscape edits do not stretch)", !any(grepl("textLength", txt)))
   check("SVG text is Arial", all(grepl('font-family: "Arial"', txt)))
   sizes <- as.numeric(sub('.*font-size: ([0-9.]+)px.*', '\\1', txt))
-  check("SVG text sizes are all 6-8 pt", all(sizes >= 6 - 1e-6 & sizes <= 8 + 1e-6))
+  # v2.16: the wavelength subscript of the y label (A[550]) is plotmath, drawn at 0.7 x the 7 pt axis title = 4.9 pt
+  is_subscript <- abs(sizes - 0.7 * 7) < 0.01
+  check("SVG text sizes are all 6-8 pt (the one wavelength subscript, 0.7 x the axis title, excepted)",
+        sum(is_subscript) <= 1 && all((sizes >= 6 - 1e-6 & sizes <= 8 + 1e-6) | is_subscript))
   check("SVG tick labels are 6 pt and axis titles 7 pt",
         any(abs(sizes - 6) < 1e-6) && any(abs(sizes - 7) < 1e-6))
   check("panel label 'a' present in bold 8 pt",
@@ -240,7 +243,7 @@ check("APP_DEFAULTS = the Nature single-column preset (89 x 65 mm, SVG, Arial, i
       env$APP_DEFAULTS$export_height == 65 && identical(env$APP_DEFAULTS$export_format, "svg") &&
       identical(env$APP_DEFAULTS$font_family, "Arial") && identical(env$APP_DEFAULTS$legend_position, "inside-auto") &&
       identical(env$APP_DEFAULTS$preview_mode, "wysiwyg") && identical(env$APP_DEFAULTS$color_palette, "colorblind") &&
-      identical(env$APP_DEFAULTS$panel_label, "a"))
+      identical(env$APP_DEFAULTS$panel_label, "") && identical(env$APP_DEFAULTS$analysis_panel_label, ""))
 check("the legacy preset is the old look (10 x 8 in, PDF, 20 pt, canvas)",
       identical(env$legacy_preset_settings()$export_units, "in") && env$legacy_preset_settings()$export_width == 10 &&
       env$legacy_preset_settings()$axis_label_font_size == 20 && identical(env$legacy_preset_settings()$export_format, "pdf") &&
@@ -267,9 +270,9 @@ check("UI starts with SVG, Arial and the auto legend selected",
 check("UI starts with axis text 6, axis labels 7 and spacing base 7 pt",
       identical(ui_value("axis_text_font_size"), "6") && identical(ui_value("axis_label_font_size"), "7") &&
       identical(ui_value("theme_base_pt"), "7"))
-check("UI starts with the Okabe-Ito palette, trimmed log labels and the panel label 'a'",
+check("UI starts with the Okabe-Ito palette, trimmed log labels and no panel label (v2.16)",
       identical(ui_selected("color_palette"), "colorblind") && identical(ui_selected("y_tick_label_style"), "trim") &&
-      identical(ui_value("panel_label"), "a"))
+      identical(ui_value("panel_label"), ""))
 check("every journal-preset input has a start value equal to the preset in the UI HTML (numeric ones)",
       all(vapply(c("title_font_size", "legend_font_size", "axis_line_pt", "tick_length_mm", "legend_key_mm", "panel_label_size", "export_dpi"),
                  function(id) isTRUE(as.numeric(ui_value(id)) == env$APP_DEFAULTS[[id]]), logical(1))))
@@ -290,8 +293,10 @@ testServer(app, {
   w_pt <- as.numeric(sub(".*width='([0-9.]+)pt'.*", "\\1", grep("<svg", x0, value = TRUE)[1]))
   check("startup export: SVG width equals the computed figure width (panel 65 mm + axes), not a fixed 89 mm",
         abs(w_pt / 72 * 25.4 - sz[1] * 25.4) < 0.1 && sz[1] * 25.4 > 65 && sz[1] * 25.4 < 100)
-  check("startup export: all text 6-8 pt Arial, no textLength",
-        length(t0) > 5 && all(grepl('font-family: "Arial"', t0)) && all(s0 >= 6 - 1e-6 & s0 <= 8 + 1e-6) && !any(grepl("textLength", t0)))
+  sub0 <- abs(s0 - 0.7 * 7) < 0.01   # v2.16: the wavelength subscript of the y label is 0.7 x the 7 pt axis title
+  check("startup export: all text 6-8 pt Arial (one wavelength subscript at 4.9 pt excepted), no textLength",
+        length(t0) > 5 && all(grepl('font-family: "Arial"', t0)) && sum(sub0) <= 1 &&
+        all((s0 >= 6 - 1e-6 & s0 <= 8 + 1e-6) | sub0) && !any(grepl("textLength", t0)))
 })
 
 # ── Byte-identical default output vs the pre-v2.10 app ──────────────────────

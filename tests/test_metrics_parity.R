@@ -55,8 +55,16 @@ for (w in c(3, 4, 5, 6)) {
 }
 
 # ── Extract reference functions from the paper app source (best-effort) ─────
-ref_file <- Sys.getenv("REF_APP",
-                       file.path("..", "lysis-curve-app", "Lysis Curve Ap 26.03.13.R"))
+# Default location: the sibling clone. A git worktree under .claude/worktrees/<name>/
+# is four directories deeper than the main checkout, so that location is tried too.
+ref_name <- "Lysis Curve Ap 26.03.13.R"
+ref_candidates <- c(file.path("..", "lysis-curve-app", ref_name),
+                    file.path("..", "..", "..", "..", "lysis-curve-app", ref_name))
+ref_file <- Sys.getenv("REF_APP", "")
+if (!nzchar(ref_file)) {
+  hit <- ref_candidates[file.exists(ref_candidates)]
+  ref_file <- if (length(hit)) hit[1] else ref_candidates[1]
+}
 ref_env  <- new.env()
 ref_ok   <- FALSE
 ref_status <- NULL
@@ -74,7 +82,22 @@ if (!file.exists(ref_file)) {
       stop("anchor pattern not found -- the reference source has changed shape")
     ref_src[s:(e - 1)]
   }
+  # Helper functions / constants the reference engine calls (noise estimate, peak
+  # finder, sustain length, ...). Extracted by PARSING the file and evaluating just
+  # the named top-level assignments, which is robust to the line-slicing grab()
+  # below going stale when a helper is added or moved.
+  grab_defs <- function(names_wanted) {
+    exprs <- parse(file = ref_file, keep.source = FALSE)
+    for (e in exprs)
+      if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) &&
+          as.character(e[[2]]) %in% names_wanted)
+        eval(e, envir = ref_env)
+    invisible(NULL)
+  }
   ref_ok <- tryCatch({
+    grab_defs(c("curve_noise_sd", "LYSIS_SUSTAIN_PTS", "first_prominent_peak_idx",
+                  "calculate_local_virulence", "coerce_sentinel_columns", "parse_time_column",
+                  "infer_wide_replicates", "detect_replicate_column", "read_csv_smart"))
     eval(parse(text = grab("^calculate_growth_metrics <- function",
                            "Derivative data")), envir = ref_env)
     eval(parse(text = grab("^calculate_infection_metrics <- function",
@@ -127,7 +150,9 @@ curves <- list(
 
 shared_cols <- c("initial_od","max_od","time_max_od","final_od","auc","mu_max",
                  "doubling_time","lag_phase","stat_phase_dur","lysis_time",
-                 "lysis_rate","od_drop","residual_od","recovery_slope")
+                 "lysis_rate","od_drop","residual_od","recovery_slope",
+                 # ported new metrics (first peak / extinction / centroid)
+                 "first_peak_od","t_first_peak","extinction_time","centroid_x","centroid_y")
 
 both_equal <- function(a, b) {
   (is.na(a) && is.na(b)) || isTRUE(all.equal(a, b, tolerance = 1e-9))
@@ -165,6 +190,39 @@ if (isTRUE(ref_ok)) {
       "of them) --", ref_status, "\n")
 }
 
+# ── Ingest helpers ported from the reference (step 3) ────────────────────────
+if (isTRUE(ref_ok)) {
+  dsent <- data.frame(Time = 1:4, A = c("0.1", "OVER", "0.3", "0.4"), N = c("a", "b", "c", "d"),
+                      B = c("0.5", "#SAT", "OVRFLW", "0.8"), stringsAsFactors = FALSE)
+  check("coerce_sentinel_columns matches the reference",
+        isTRUE(all.equal(ref_env$coerce_sentinel_columns(dsent, "Time", c(0, 10, 20, 30)),
+                         env$coerce_sentinel_columns(dsent, "Time", c(0, 10, 20, 30)))))
+  tx <- list(c("0:00:00", "0:15:00", "1:00:30", "1:30"),
+             c("2026-03-01 10:00:00", "2026-03-01 10:30:00", "2026-03-01 12:00:00"),
+             c("0", "15", "30"), c("a", "b"))
+  check("parse_time_column matches the reference (clock, date-time, numeric, text)",
+        all(vapply(tx, function(x) isTRUE(all.equal(ref_env$parse_time_column(x), env$parse_time_column(x))), logical(1))))
+  dblk <- data.frame(Time = c(0, 10, 20, 0, 10, 20), x = 1)
+  check("infer_wide_replicates matches the reference",
+        isTRUE(all.equal(ref_env$infer_wide_replicates(dblk, "Time"), env$infer_wide_replicates(dblk, "Time"))))
+  dlong <- data.frame(Time = 1, Sample = "a", Replicate = 1, OD = 1)
+  check("detect_replicate_column matches the reference",
+        identical(ref_env$detect_replicate_column(dlong, "Time", "Sample", "OD"),
+                  env$detect_replicate_column(dlong, "Time", "Sample", "OD")))
+  # read_csv_smart: a TAB-separated file with a preamble (no blank lines), which the
+  # reference's plain read.csv() parses to one column, so the reference sniffs too. Two
+  # deliberate deviations are not compared here: (1) the port counts RAW lines for
+  # read.csv's `skip` (blank lines inside a preamble); (2) the port also sniffs when a
+  # comma-parse "succeeds" on garbage -- the reference keeps that junk 2-column table
+  # for a comma preamble above a comma table.
+  fp <- tempfile(fileext = ".txt")
+  writeLines(c("Software Version\t3.08", "Experiment\tkinetic", "Reader\tH1", "Time\tA\tB",
+               paste0(seq(0, 50, by = 10), "\t0.", 1:6, "\t0.", 2:7)), fp)
+  rs <- ref_env$read_csv_smart(fp); ns <- env$read_csv_smart(fp)
+  check("read_csv_smart matches the reference on a preamble file without blank lines",
+        isTRUE(all.equal(rs$data, ns$data)) && identical(rs$skip, ns$skip) && identical(rs$sep, ns$sep))
+}
+
 # ── Infection metrics on multi-sample data ───────────────────────────────────
 # Building `multi` and running compute_curve_metrics() on it needs no
 # reference, so this — and everything below that only reads `new_i` — runs
@@ -192,6 +250,24 @@ if (isTRUE(ref_ok)) {
     if (!both_equal(a, b)) { cat("  MISMATCH", cc, "Infected:", a, "vs", b, "\n"); ok <- FALSE }
   }
   check("infection metrics match reference on its non-buggy row", ok)
+  # centroid_index (reference calculate_infection_metrics) and local_virulence
+  # (reference calculate_local_virulence) on both samples
+  ok <- TRUE
+  for (smp in c("Infected", "Uninfected")) {
+    a <- ref_i$centroid_index[ref_i$sample == smp]; b <- new_i$centroid_index[new_i$sample == smp]
+    if (!both_equal(a, b)) { cat("  MISMATCH centroid_index", smp, ":", a, "vs", b, "\n"); ok <- FALSE }
+  }
+  check("centroid_index matches the reference (both samples)", ok)
+  ref_lv <- ref_env$calculate_local_virulence(multi, "Uninfected", smooth_window = 5)
+  ok <- TRUE
+  for (smp in c("Infected", "Uninfected")) {
+    a <- ref_lv$local_virulence[ref_lv$sample == smp]; b <- new_i$local_virulence[new_i$sample == smp]
+    if (!both_equal(a, b)) { cat("  MISMATCH local_virulence", smp, ":", a, "vs", b, "\n"); ok <- FALSE }
+  }
+  check("local_virulence matches the reference (both samples)", ok)
+  check("local_virulence t_stat matches the reference",
+        both_equal(ref_lv$t_stat_used[1],
+                   env$calculate_local_virulence(multi, "Uninfected", 5)$t_stat_used[1]))
 } else {
   cat("SKIPPING infection-metrics reference comparison --", ref_status, "\n")
 }
@@ -216,7 +292,8 @@ check("infection metrics absent for unknown reference",
 
 # ── Hand-computed spot checks (independent of both implementations) ──────────
 m4 <- env$compute_curve_metrics(curves$short4, smooth_window = 5)
-check("short4: lysis_time = 20 (first >5% decline post-peak)", m4$lysis_time == 20)
+# LC-9: interpolated crossing of the 5 % level (0.38) between t=10 (0.4) and t=20 (0.2) = 11, not the first sampled point past it (20)
+check("short4: lysis_time = 11 (interpolated 5% decline crossing, LC-9)", both_equal(m4$lysis_time, 11))
 check("short4: od_drop = 0.35", both_equal(m4$od_drop, 0.35))
 check("short4: residual_od = 0.05", both_equal(m4$residual_od, 0.05))
 check("short4: lysis_rate = -0.0175 (lm slope peak->trough)",
