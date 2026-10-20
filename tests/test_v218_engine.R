@@ -142,6 +142,86 @@ nb <- env$best_model(rbind(cbind(data.frame(sample = "x"), flat), cbind(data.fra
 check("best_model: a sample where nothing converged keeps one row with model NA",
       nrow(nb) == 2 && is.na(nb$model[nb$sample == "x"]) && identical(nb$model[nb$sample == "y"], "logistic"))
 
+# ── 2. Phenotype matrix ───────────────────────────────────────────────────────
+cat("\n--- phenotype matrix ---\n")
+rm_demo <- env$compute_replicate_metric_rows(d$rep_pd, ref_sample = "Uninfected")
+cm_demo <- env$compute_curve_metrics(d$pd, ref_sample = "Uninfected")
+pm <- env$phenotype_matrix(cm_demo)
+check("returns matrix, raw and dropped",
+      is.list(pm) && all(c("matrix", "raw", "dropped") %in% names(pm)) && is.matrix(pm$matrix) && is.matrix(pm$raw))
+check("shape: 3 samples (rownames) x kept metrics, same dims for raw",
+      nrow(pm$matrix) == 3 && setequal(rownames(pm$matrix), c("Uninfected", "Phage MOI 10", "Phage MOI 0.1")) &&
+      identical(dim(pm$matrix), dim(pm$raw)) && ncol(pm$matrix) >= 5)
+check("columns are labelled with metric_label()", identical(colnames(pm$matrix), as.character(env$metric_label(pm$metrics))) && "Peak OD" %in% colnames(pm$matrix))
+check("bookkeeping columns are never metrics",
+      !any(c("sample", "n_timepoints", "t_start", "t_end", "replicate") %in% pm$metrics) &&
+      !any(c("n_timepoints", "t_start", "t_end") %in% colnames(pm$raw)))
+check("z columns have mean 0 and SD 1 (NA cells aside)",
+      all(vapply(seq_len(ncol(pm$matrix)), function(j) { v <- pm$matrix[, j]; v <- v[is.finite(v)]
+        near(mean(v), 0, 1e-9) && near(sd(v), 1, 1e-9) }, logical(1))))
+check("raw holds the unscaled values", near(pm$raw[1, "Peak OD"] , cm_demo$max_od[match(rownames(pm$raw)[1], cm_demo$sample)], 1e-12))
+pr <- env$phenotype_matrix(cm_demo, scale = "range")
+check("range scale maps every column to 0-1 (min 0, max 1)",
+      all(vapply(seq_len(ncol(pr$matrix)), function(j) { v <- pr$matrix[, j]; v <- v[is.finite(v)]
+        near(min(v), 0) && near(max(v), 1) }, logical(1))))
+pn <- env$phenotype_matrix(cm_demo, scale = "none")
+check("scale 'none' equals raw", isTRUE(all.equal(pn$matrix, pn$raw)))
+toy <- data.frame(sample = c("a", "b", "c"), x = c(1, 2, 4), const = c(5, 5, 5), allna = NA_real_,
+                  txt = c("u", "v", "w"), n_timepoints = 10, stringsAsFactors = FALSE)
+pt <- env$phenotype_matrix(toy)
+check("constant, all-NA metrics are dropped (and reported); text and n_timepoints are not metrics",
+      identical(colnames(pt$matrix), "x") && setequal(pt$dropped, c("const", "allna")) && !"txt" %in% pt$dropped)
+check("explicit metrics: unknown / non-numeric / constant ones go to dropped",
+      { p2 <- env$phenotype_matrix(toy, metrics = c("x", "const", "txt", "nope")); identical(p2$metrics, "x") && setequal(p2$dropped, c("const", "txt", "nope")) })
+check("z of c(1, 2, 4) is (x - mean) / sd", isTRUE(all.equal(unname(pt$matrix[, 1]), (c(1, 2, 4) - mean(c(1, 2, 4))) / sd(c(1, 2, 4)))))
+pm_rep <- env$phenotype_matrix(rm_demo)
+check("a replicate-level table is averaged per sample (3 rows)", nrow(pm_rep$matrix) == 3)
+check("empty / NULL input gives an empty matrix, not an error", nrow(env$phenotype_matrix(NULL)$matrix) == 0 && nrow(env$phenotype_matrix(toy[0, ])$matrix) == 0)
+
+# ── 3. All-metrics statistics ─────────────────────────────────────────────────
+cat("\n--- all-metrics statistics ---\n")
+set.seed(3)
+rm_syn <- do.call(rbind, lapply(c("Control", "Drug A", "Drug B"), function(s)
+  data.frame(sample = s, replicate = 1:4, n_timepoints = 10, t_start = 0, t_end = 100,
+             max_od = rnorm(4, c(Control = 1, "Drug A" = 0.7, "Drug B" = 0.95)[[s]], 0.05),
+             auc = rnorm(4, c(Control = 80, "Drug A" = 50, "Drug B" = 78)[[s]], 4),
+             mu_max = rnorm(4, 0.03, 0.002), stringsAsFactors = FALSE)))
+rm_syn$all_na <- NA_real_
+ca <- env$compare_all_metrics(rm_syn, ref_sample = "Control")
+tb <- ca$table
+check("table has the documented columns",
+      all(c("metric", "metric_label", "sample", "versus", "n", "n_versus", "mean", "mean_versus", "difference",
+            "hedges_g", "p", "p_adj_holm", "p_adj_bh_across", "stars") %in% names(tb)))
+check("default metrics = numeric columns minus sample / n_timepoints / t_start / t_end / replicate",
+      setequal(unique(tb$metric), c("max_od", "auc", "mu_max")))
+check("2 comparisons vs the reference x 3 metrics = 6 rows", nrow(tb) == 6 && all(tb$versus == "Control"))
+check("metric_label matches metric_label()", all(tb$metric_label == env$metric_label(tb$metric)))
+same <- vapply(unique(tb$metric), function(m) {
+  one <- env$compare_replicate_metric(rm_syn, m, ref_sample = "Control")$pairwise
+  sub <- tb[tb$metric == m, ]
+  isTRUE(all.equal(sub[, c("sample", "versus", "n", "n_versus", "mean", "mean_versus", "difference", "hedges_g", "p", "p_adj_holm")],
+                   one[, c("sample", "versus", "n", "n_versus", "mean", "mean_versus", "difference", "hedges_g", "p", "p_adj_holm")],
+                   check.attributes = FALSE)) && identical(sub$stars, one$stars)
+}, logical(1))
+check("per-metric rows equal compare_replicate_metric()'s (values, Holm p, stars)", all(same))
+check("p_adj_bh_across equals p.adjust(p, 'BH') over the whole table", isTRUE(all.equal(tb$p_adj_bh_across, p.adjust(tb$p, "BH"))))
+check("BH across tests is never smaller than the raw p and never above 1", all(tb$p_adj_bh_across >= tb$p - 1e-15) && all(tb$p_adj_bh_across <= 1))
+check("stars follow p_adj_holm", identical(tb$stars, env$sig_stars(tb$p_adj_holm)))
+check("the drug A effect on max_od and auc is detected, drug B is not (Holm within metric)",
+      all(tb$p_adj_holm[tb$metric == "max_od" & tb$sample == "Drug A"] < 0.05) &&
+      tb$p_adj_holm[tb$metric == "max_od" & tb$sample == "Drug B"] > 0.05)
+cw <- env$compare_all_metrics(rm_syn, metrics = "auc", method = "nonparametric")
+check("no reference + non-parametric: all pairs (3) with the Mann-Whitney test, one metric",
+      nrow(cw$table) == 3 && all(cw$table$test == "Mann-Whitney") && identical(unique(cw$table$metric), "auc"))
+check("metrics with no usable test (all NA) add a warning, not a row",
+      { w <- env$compare_all_metrics(rm_syn, metrics = c("max_od", "all_na")); nrow(w$table) == 3 && any(grepl("at least two", w$warnings)) })
+check("NULL / empty input returns an empty table and a warning",
+      { e <- env$compare_all_metrics(NULL); nrow(e$table) == 0 && length(e$warnings) == 1 && "p_adj_bh_across" %in% names(e$table) })
+real <- env$compare_all_metrics(rm_demo, ref_sample = "Uninfected")
+check("on the demo replicate metrics: rows for >= 20 metrics, BH over the whole table",
+      length(unique(real$table$metric)) >= 20 &&
+      isTRUE(all.equal(real$table$p_adj_bh_across, p.adjust(real$table$p, "BH"))))
+
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed ============\n", pass, fail))
 if (fail > 0) quit(status = 1)

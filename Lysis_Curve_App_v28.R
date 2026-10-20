@@ -2655,6 +2655,89 @@ best_model <- function(fit_table) {
   do.call(rbind, c(rows, list(make.row.names = FALSE)))
 }
 
+# ── Phenotype matrix (metrics x samples heatmap) ─────────────────────────────
+# Columns of a metrics table that are bookkeeping, not phenotypes.
+PHENOTYPE_NON_METRICS <- c("sample", "n_timepoints", "t_start", "t_end", "replicate", "n_replicates")
+
+# Numeric columns of a metrics table that are candidate metrics (bookkeeping columns removed).
+numeric_metric_columns <- function(df) {
+  if (is.null(df) || ncol(df) == 0) return(character(0))
+  setdiff(names(df)[vapply(df, is.numeric, logical(1))], PHENOTYPE_NON_METRICS)
+}
+
+# samples x metrics matrix of a sample-level metrics table (compute_curve_metrics output; a replicate
+# table is averaged per sample). scale = "z": each column centred on its mean and divided by its SD
+# across samples; "range": each column mapped to 0-1 (min -> 0, max -> 1); "none": as is. A metric that
+# is all NA or constant across samples (SD 0, so z and range are undefined), or that is not a numeric
+# column of metrics_df, is not returned and is listed in `dropped` (by its column name).
+phenotype_matrix <- function(metrics_df, metrics = NULL, scale = c("z", "range", "none")) {
+  scale <- match.arg(scale)
+  empty <- list(matrix = matrix(numeric(0), 0, 0), raw = matrix(numeric(0), 0, 0), dropped = character(0),
+                metrics = character(0))
+  if (is.null(metrics_df) || nrow(metrics_df) == 0 || !"sample" %in% names(metrics_df)) return(empty)
+  cand <- if (is.null(metrics)) numeric_metric_columns(metrics_df) else as.character(metrics)
+  usable <- cand[cand %in% names(metrics_df) & vapply(cand, function(m) is.numeric(metrics_df[[m]]), logical(1))]
+  dropped <- setdiff(cand, usable)
+  samples <- unique(as.character(metrics_df$sample))
+  raw <- vapply(usable, function(m)
+    vapply(samples, function(s) {
+      v <- metrics_df[[m]][as.character(metrics_df$sample) == s]
+      v <- v[is.finite(v)]
+      if (length(v)) mean(v) else NA_real_
+    }, numeric(1)), numeric(length(samples)))
+  raw <- matrix(raw, nrow = length(samples), ncol = length(usable), dimnames = list(samples, usable))
+  varies <- vapply(seq_len(ncol(raw)), function(j) {
+    v <- raw[, j]; v <- v[is.finite(v)]
+    length(v) >= 2 && diff(range(v)) > 0
+  }, logical(1))
+  dropped <- c(dropped, colnames(raw)[!varies])
+  raw <- raw[, varies, drop = FALSE]
+  kept <- colnames(raw)
+  mat <- switch(scale,
+    z     = apply(raw, 2, function(v) (v - mean(v, na.rm = TRUE)) / sd(v, na.rm = TRUE)),
+    range = apply(raw, 2, function(v) (v - min(v, na.rm = TRUE)) / (max(v, na.rm = TRUE) - min(v, na.rm = TRUE))),
+    none  = raw)
+  mat <- matrix(mat, nrow = nrow(raw), ncol = ncol(raw))
+  lab <- if (length(kept)) as.character(metric_label(kept)) else character(0)
+  dimnames(mat) <- list(rownames(raw), lab)
+  dimnames(raw) <- list(rownames(raw), lab)
+  list(matrix = mat, raw = raw, dropped = dropped, metrics = kept)
+}
+
+# ── All-metrics statistics ───────────────────────────────────────────────────
+# compare_replicate_metric() for every metric (default: every numeric column of the replicate metrics
+# table except sample / n_timepoints / t_start / t_end / replicate), stacked into one long table.
+# p_adj_holm is the per-metric Holm adjustment from compare_replicate_metric (so it is identical to the
+# Analysis tab); p_adj_bh_across is Benjamini-Hochberg over ALL tests in the table (every metric x
+# comparison), an EXPLORATORY false-discovery control for scanning many metrics at once.
+# stars come from p_adj_holm.
+compare_all_metrics <- function(rm, metrics = NULL, ref_sample = NULL, method = c("welch", "nonparametric")) {
+  method <- match.arg(method)
+  cols <- c("metric", "metric_label", "sample", "versus", "n", "n_versus", "mean", "mean_versus", "difference",
+            "hedges_g", "p", "p_adj_holm", "p_adj_bh_across", "stars", "ci_low", "ci_high", "test")
+  empty <- data.frame(metric = character(0), metric_label = character(0), sample = character(0),
+                      versus = character(0), n = integer(0), n_versus = integer(0), mean = numeric(0),
+                      mean_versus = numeric(0), difference = numeric(0), hedges_g = numeric(0), p = numeric(0),
+                      p_adj_holm = numeric(0), p_adj_bh_across = numeric(0), stars = character(0),
+                      ci_low = numeric(0), ci_high = numeric(0), test = character(0), stringsAsFactors = FALSE)
+  if (is.null(rm) || nrow(rm) == 0) return(list(table = empty, warnings = "No replicate metrics to compare."))
+  if (is.null(metrics)) metrics <- numeric_metric_columns(rm)
+  metrics <- metrics[metrics %in% names(rm)]
+  warns <- character(0); parts <- list()
+  for (m in metrics) {
+    res <- compare_replicate_metric(rm, m, ref_sample = ref_sample, method = method)
+    lab <- as.character(metric_label(m))
+    if (length(res$warnings)) warns <- c(warns, paste0(lab, ": ", res$warnings))
+    pw <- res$pairwise
+    if (is.null(pw) || nrow(pw) == 0) next
+    parts[[length(parts) + 1L]] <- cbind(data.frame(metric = m, metric_label = lab, stringsAsFactors = FALSE), pw)
+  }
+  if (!length(parts)) return(list(table = empty, warnings = warns))
+  tab <- do.call(rbind, c(parts, list(make.row.names = FALSE)))
+  tab$p_adj_bh_across <- p.adjust(tab$p, method = "BH")
+  list(table = tab[, cols], warnings = warns)
+}
+
 # ── end v2.18 engine ──
 
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
