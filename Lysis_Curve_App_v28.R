@@ -2519,6 +2519,393 @@ get_palette_colors <- function(pal, n) {
   )
 }
 
+# ── v2.18 engine: growth fits, phenotype matrix, all-metrics statistics, extraction ──
+# Pure functions (no Shiny state): the UI calls them. See docs/FITS_AND_EXTRACTION.md.
+
+# ── Growth-model fits (Zwietering 1990 / Baranyi-Roberts 1994) ───────────────
+# Every fit is made on the CHANGE from the first reading: y(t) = ln(od(t) / od(t0)) (log_transform =
+# TRUE) or od(t) - od(t0), against tt = t - t0, so the fitted function is f(tt) - f(0) and
+# od(t) = od(t0) * exp(f(tt) - f(0)). For Baranyi f(0) = 0 already. A is therefore the asymptote of f
+# (in ln-OD units, or OD units without the log), mu_max the maximum slope of f (per time unit; a
+# specific growth rate on the log scale) and lag = lambda a DURATION from the first time point.
+gm_logistic <- function(tt, A, mu, lag)       # modified logistic, Zwietering 1990
+  A / (1 + exp(4 * mu / A * (lag - tt) + 2)) - A / (1 + exp(4 * mu / A * lag + 2))
+gm_gompertz <- function(tt, A, mu, lag)       # modified Gompertz, Zwietering 1990
+  A * exp(-exp(mu * exp(1) / A * (lag - tt) + 1)) - A * exp(-exp(mu * exp(1) / A * lag + 1))
+gm_baranyi  <- function(tt, A, mu, lag) {     # Baranyi-Roberts, y0 = 0, h0 = mu * lag, ymax = A
+  h0 <- mu * lag
+  At <- tt + log(exp(-mu * tt) + exp(-h0) - exp(-mu * tt - h0)) / mu      # adjustment function A(t)
+  mu * At - log1p(exp(mu * At - A) - exp(-A))
+}
+GROWTH_MODEL_FUNS <- list(logistic = gm_logistic, gompertz = gm_gompertz, baranyi = gm_baranyi)
+
+# One output row. t0 / log_transform / until are extra columns predict_growth_model() needs.
+gm_fit_row <- function(model, converged = FALSE, n_points = NA_integer_, A = NA_real_, mu_max = NA_real_,
+                       lag = NA_real_, y0 = NA_real_, rss = NA_real_, aic = NA_real_, bic = NA_real_,
+                       r2 = NA_real_, se = c(NA_real_, NA_real_, NA_real_), message = NA_character_,
+                       t0 = NA_real_, log_transform = TRUE, until = "peak") {
+  data.frame(model = model, converged = converged, n_points = as.integer(n_points), A = A, mu_max = mu_max,
+             lag = lag, y0 = y0, rss = rss, aic = aic, bic = bic, r2 = r2,
+             se_A = se[1], se_mu_max = se[2], se_lag = se[3], message = as.character(message),
+             t0 = t0, log_transform = log_transform, until = until, stringsAsFactors = FALSE)
+}
+
+# Fit one or more growth models to a single curve; never errors (a failed model returns
+# converged = FALSE, NA parameters and the reason in `message`).
+#   until = "peak": only the points up to and including the maximum of od are used, so a lysis
+#                   curve is never fitted through its collapse; "all": every point.
+#   Starting values: mu_max = largest centered rolling ln-slope (rolling_slope, window 5), lag = the
+#   engine's rule (first time that slope reaches 10 % of mu_max) or the tangent intercept, A = max(y).
+fit_growth_models <- function(t, od, models = c("logistic", "gompertz", "baranyi"),
+                              until = c("peak", "all"), log_transform = TRUE) {
+  until  <- match.arg(until)
+  models <- match.arg(models, names(GROWTH_MODEL_FUNS), several.ok = TRUE)
+  fail_all <- function(msg, n = 0L, t0 = NA_real_, y0 = NA_real_)
+    do.call(rbind, lapply(models, function(m)
+      gm_fit_row(m, n_points = n, message = msg, y0 = y0, t0 = t0, log_transform = log_transform, until = until)))
+  ok <- is.finite(t) & is.finite(od)
+  t <- as.numeric(t)[ok]; od <- as.numeric(od)[ok]
+  if (length(t) == 0) return(fail_all("no finite data"))
+  o <- order(t); t <- t[o]; od <- od[o]
+  note <- NA_character_
+  if (log_transform) {
+    pos <- od > 0
+    if (!any(pos)) return(fail_all("no positive OD readings (cannot take the logarithm)"))
+    if (any(!pos)) {
+      note <- sprintf("%d non-positive reading(s) dropped before the log transform", sum(!pos))
+      t <- t[pos]; od <- od[pos]
+    }
+  }
+  if (length(od) > 0 && diff(range(od)) == 0)
+    return(fail_all("no growth (flat curve)", length(od), t[1], od[1]))
+  if (until == "peak") { k <- which.max(od); t <- t[seq_len(k)]; od <- od[seq_len(k)] }
+  n <- length(t); od0 <- od[1]; t0 <- t[1]
+  if (n < 4)
+    return(fail_all(sprintf("too few points (%d; need at least 4)%s", n,
+                            if (until == "peak") " up to the peak" else ""), n, t0, od0))
+  if (n < 6) note <- paste(stats::na.omit(c(note, sprintf("only %d points: parameters are poorly determined", n))), collapse = "; ")
+  y  <- if (log_transform) log(od / od0) else od - od0
+  tt <- t - t0
+  if (!is.finite(max(y)) || max(y) <= 1e-8 * max(1, abs(od0)))
+    return(fail_all("no growth up to the peak (flat or declining curve)", n, t0, od0))
+
+  # starting values
+  win <- min(5L, n)
+  rs  <- if (win >= 3) tryCatch(rolling_slope(tt, y, win), error = function(e) rep(NA_real_, n)) else rep(NA_real_, n)
+  if (!any(is.finite(rs) & rs > 0)) rs <- c(NA_real_, diff(y) / diff(tt))   # very short curve: consecutive slopes
+  rs_ok <- which(is.finite(rs) & rs > 0)
+  if (length(rs_ok) == 0) return(fail_all("no positive growth slope", n, t0, od0))
+  kmax  <- rs_ok[which.max(rs[rs_ok])]
+  mu0   <- rs[kmax]
+  lag_rule <- tt[which(rs >= 0.10 * mu0 & is.finite(rs))[1]]
+  lag_tan  <- min(max(tt[kmax] - y[kmax] / mu0, 0), max(tt))
+  lag_starts <- unique(pmin(pmax(c(lag_rule, lag_tan), 0), max(tt)))
+  ymax <- max(y)
+  A_ub <- 5 * ymax
+  starts <- unlist(lapply(c(1, 1.5), function(f) lapply(lag_starts, function(l)
+    c(A = f * ymax, mu = mu0, lag = l))), recursive = FALSE)
+  lower <- c(A = ymax * 1e-3, mu = mu0 * 1e-3, lag = 0)
+  upper <- c(A = A_ub, mu = mu0 * 20, lag = max(tt))
+  dat   <- data.frame(tt = tt, y = y)
+  sst   <- sum((y - mean(y))^2)
+  ctl   <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(y^2), 1e-12), warnOnly = FALSE)
+
+  rows <- lapply(models, function(m) {
+    form <- stats::as.formula(paste0("y ~ gm_", m, "(tt, A, mu, lag)"))
+    best <- NULL; best_rss <- Inf; last_err <- "did not converge"
+    for (st in starts) {
+      for (alg in c("port", "default")) {
+        st_c <- if (alg == "port") pmin(pmax(st, lower), upper) else st
+        fit <- tryCatch(suppressWarnings(
+          if (alg == "port") stats::nls(form, data = dat, start = as.list(st_c), algorithm = "port",
+                                        lower = lower, upper = upper, control = ctl)
+          else stats::nls(form, data = dat, start = as.list(st_c), control = ctl)),
+          error = function(e) { last_err <<- conditionMessage(e); NULL })
+        if (is.null(fit)) next
+        cf <- stats::coef(fit)
+        if (!all(is.finite(cf)) || cf[["A"]] <= 0 || cf[["mu"]] <= 0 || cf[["lag"]] < -1e-8 * max(1, max(tt))) next
+        r <- sum(stats::resid(fit)^2)
+        if (is.finite(r) && r < best_rss) { best <- fit; best_rss <- r }
+        break                                  # port first; the default algorithm only if port failed
+      }
+    }
+    if (is.null(best))
+      return(gm_fit_row(m, n_points = n, y0 = od0, t0 = t0, log_transform = log_transform, until = until,
+                        message = paste0("did not converge: ", gsub("\\s+", " ", last_err))))
+    cf  <- stats::coef(best)
+    se  <- tryCatch(suppressWarnings(unname(summary(best)$coefficients[, "Std. Error"])),
+                    error = function(e) rep(NA_real_, 3))
+    if (length(se) != 3) se <- rep(NA_real_, 3)
+    k_par <- 4L                                           # A, mu_max, lag + the residual variance
+    aic <- n * (log(2 * pi) + 1 + log(max(best_rss, 1e-30) / n)) + 2 * k_par
+    bic <- n * (log(2 * pi) + 1 + log(max(best_rss, 1e-30) / n)) + log(n) * k_par
+    msg <- note
+    if (cf[["A"]] >= 0.99 * A_ub)
+      msg <- paste(stats::na.omit(c(msg, "asymptote at its upper bound (no plateau reached in the fitted points)")), collapse = "; ")
+    gm_fit_row(m, TRUE, n, A = unname(cf["A"]), mu_max = unname(cf["mu"]), lag = unname(cf["lag"]), y0 = od0,
+               rss = best_rss, aic = aic, bic = bic, r2 = if (sst > 0) 1 - best_rss / sst else NA_real_,
+               se = se, message = msg, t0 = t0, log_transform = log_transform, until = until)
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# Predicted OD of one fit row (as returned by fit_growth_models) at times t, starting from baseline
+# od0 (use fit_row$y0 for the fitted curve itself). Back-transformed (od0 * exp(.)) when the fit was
+# made on the ln scale; all NA for a model that did not converge.
+predict_growth_model <- function(fit_row, t, od0) {
+  fit_row <- fit_row[1, , drop = FALSE]
+  if (!isTRUE(fit_row$converged)) return(rep(NA_real_, length(t)))
+  fun <- GROWTH_MODEL_FUNS[[as.character(fit_row$model)]]
+  t0  <- if ("t0" %in% names(fit_row) && is.finite(fit_row$t0)) fit_row$t0 else 0
+  lg  <- if ("log_transform" %in% names(fit_row)) isTRUE(fit_row$log_transform) else TRUE
+  f   <- fun(t - t0, fit_row$A, fit_row$mu_max, fit_row$lag)
+  if (lg) od0 * exp(f) else od0 + f
+}
+
+# Stacked fits per sample from the app's mean-curve frame (time, variable, mean_value).
+fit_growth_models_by_sample <- function(pd, ...) {
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  out <- lapply(unique(as.character(pd$variable)), function(s) {
+    g <- pd[as.character(pd$variable) == s, , drop = FALSE]
+    cbind(data.frame(sample = s, stringsAsFactors = FALSE), fit_growth_models(g$time, g$mean_value, ...))
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# Stacked fits per sample and replicate from the replicate frame (time, variable, replicate, value).
+fit_growth_models_by_replicate <- function(rep_pd, ...) {
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(NULL)
+  key <- unique(data.frame(sample = as.character(rep_pd$variable), replicate = rep_pd$replicate,
+                           stringsAsFactors = FALSE))
+  out <- lapply(seq_len(nrow(key)), function(i) {
+    g <- rep_pd[as.character(rep_pd$variable) == key$sample[i] & rep_pd$replicate == key$replicate[i], , drop = FALSE]
+    cbind(data.frame(sample = key$sample[i], replicate = key$replicate[i], stringsAsFactors = FALSE),
+          fit_growth_models(g$time, g$value, ...))
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# The converged model with the lowest AIC, one row per sample (and per replicate when the table has a
+# replicate column). A group with no converged model keeps one row with model = NA and the
+# parameters NA.
+best_model <- function(fit_table) {
+  if (is.null(fit_table) || nrow(fit_table) == 0) return(fit_table)
+  keys <- intersect(c("sample", "replicate"), names(fit_table))
+  key_str <- if (length(keys)) do.call(paste, c(lapply(fit_table[keys], as.character), sep = "\r")) else rep("all", nrow(fit_table))
+  rows <- lapply(unique(key_str), function(k) {
+    g  <- fit_table[key_str == k, , drop = FALSE]
+    ok <- which(g$converged %in% TRUE & !is.na(g$aic))
+    if (length(ok)) return(g[ok[which.min(g$aic[ok])], , drop = FALSE])
+    g <- g[1, , drop = FALSE]
+    keep <- c(keys, "n_points", "message", "t0", "log_transform", "until", "y0")
+    for (cc in setdiff(names(g), keep)) g[[cc]] <- if (is.character(g[[cc]])) NA_character_ else NA
+    g$converged <- FALSE
+    g
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# ── Phenotype matrix (metrics x samples heatmap) ─────────────────────────────
+# Columns of a metrics table that are bookkeeping, not phenotypes.
+PHENOTYPE_NON_METRICS <- c("sample", "n_timepoints", "t_start", "t_end", "replicate", "n_replicates")
+
+# Numeric columns of a metrics table that are candidate metrics (bookkeeping columns removed).
+numeric_metric_columns <- function(df) {
+  if (is.null(df) || ncol(df) == 0) return(character(0))
+  setdiff(names(df)[vapply(df, is.numeric, logical(1))], PHENOTYPE_NON_METRICS)
+}
+
+# samples x metrics matrix of a sample-level metrics table (compute_curve_metrics output; a replicate
+# table is averaged per sample). scale = "z": each column centred on its mean and divided by its SD
+# across samples; "range": each column mapped to 0-1 (min -> 0, max -> 1); "none": as is. A metric that
+# is all NA or constant across samples (SD 0, so z and range are undefined), or that is not a numeric
+# column of metrics_df, is not returned and is listed in `dropped` (by its column name).
+phenotype_matrix <- function(metrics_df, metrics = NULL, scale = c("z", "range", "none")) {
+  scale <- match.arg(scale)
+  empty <- list(matrix = matrix(numeric(0), 0, 0), raw = matrix(numeric(0), 0, 0), dropped = character(0),
+                metrics = character(0))
+  if (is.null(metrics_df) || nrow(metrics_df) == 0 || !"sample" %in% names(metrics_df)) return(empty)
+  cand <- if (is.null(metrics)) numeric_metric_columns(metrics_df) else as.character(metrics)
+  usable <- cand[cand %in% names(metrics_df) & vapply(cand, function(m) is.numeric(metrics_df[[m]]), logical(1))]
+  dropped <- setdiff(cand, usable)
+  samples <- unique(as.character(metrics_df$sample))
+  raw <- vapply(usable, function(m)
+    vapply(samples, function(s) {
+      v <- metrics_df[[m]][as.character(metrics_df$sample) == s]
+      v <- v[is.finite(v)]
+      if (length(v)) mean(v) else NA_real_
+    }, numeric(1)), numeric(length(samples)))
+  raw <- matrix(raw, nrow = length(samples), ncol = length(usable), dimnames = list(samples, usable))
+  varies <- vapply(seq_len(ncol(raw)), function(j) {
+    v <- raw[, j]; v <- v[is.finite(v)]
+    length(v) >= 2 && diff(range(v)) > 0
+  }, logical(1))
+  dropped <- c(dropped, colnames(raw)[!varies])
+  raw <- raw[, varies, drop = FALSE]
+  kept <- colnames(raw)
+  mat <- switch(scale,
+    z     = apply(raw, 2, function(v) (v - mean(v, na.rm = TRUE)) / sd(v, na.rm = TRUE)),
+    range = apply(raw, 2, function(v) (v - min(v, na.rm = TRUE)) / (max(v, na.rm = TRUE) - min(v, na.rm = TRUE))),
+    none  = raw)
+  mat <- matrix(mat, nrow = nrow(raw), ncol = ncol(raw))
+  lab <- if (length(kept)) as.character(metric_label(kept)) else character(0)
+  dimnames(mat) <- list(rownames(raw), lab)
+  dimnames(raw) <- list(rownames(raw), lab)
+  list(matrix = mat, raw = raw, dropped = dropped, metrics = kept)
+}
+
+# ── All-metrics statistics ───────────────────────────────────────────────────
+# compare_replicate_metric() for every metric (default: every numeric column of the replicate metrics
+# table except sample / n_timepoints / t_start / t_end / replicate), stacked into one long table.
+# p_adj_holm is the per-metric Holm adjustment from compare_replicate_metric (so it is identical to the
+# Analysis tab); p_adj_bh_across is Benjamini-Hochberg over ALL tests in the table (every metric x
+# comparison), an EXPLORATORY false-discovery control for scanning many metrics at once.
+# stars come from p_adj_holm.
+compare_all_metrics <- function(rm, metrics = NULL, ref_sample = NULL, method = c("welch", "nonparametric")) {
+  method <- match.arg(method)
+  cols <- c("metric", "metric_label", "sample", "versus", "n", "n_versus", "mean", "mean_versus", "difference",
+            "hedges_g", "p", "p_adj_holm", "p_adj_bh_across", "stars", "ci_low", "ci_high", "test")
+  empty <- data.frame(metric = character(0), metric_label = character(0), sample = character(0),
+                      versus = character(0), n = integer(0), n_versus = integer(0), mean = numeric(0),
+                      mean_versus = numeric(0), difference = numeric(0), hedges_g = numeric(0), p = numeric(0),
+                      p_adj_holm = numeric(0), p_adj_bh_across = numeric(0), stars = character(0),
+                      ci_low = numeric(0), ci_high = numeric(0), test = character(0), stringsAsFactors = FALSE)
+  if (is.null(rm) || nrow(rm) == 0) return(list(table = empty, warnings = "No replicate metrics to compare."))
+  if (is.null(metrics)) metrics <- numeric_metric_columns(rm)
+  metrics <- metrics[metrics %in% names(rm)]
+  warns <- character(0); parts <- list()
+  for (m in metrics) {
+    res <- compare_replicate_metric(rm, m, ref_sample = ref_sample, method = method)
+    lab <- as.character(metric_label(m))
+    if (length(res$warnings)) warns <- c(warns, paste0(lab, ": ", res$warnings))
+    pw <- res$pairwise
+    if (is.null(pw) || nrow(pw) == 0) next
+    parts[[length(parts) + 1L]] <- cbind(data.frame(metric = m, metric_label = lab, stringsAsFactors = FALSE), pw)
+  }
+  if (!length(parts)) return(list(table = empty, warnings = warns))
+  tab <- do.call(rbind, c(parts, list(make.row.names = FALSE)))
+  tab$p_adj_bh_across <- p.adjust(tab$p, method = "BH")
+  list(table = tab[, cols], warnings = warns)
+}
+
+# ── Extraction: OD at fixed times, time to an OD threshold, per-sample time windows ──
+# One list element per (sample, replicate) curve of a replicate frame (time, variable, replicate,
+# value); non-finite values dropped, time-sorted.
+extraction_curves <- function(rep_pd) {
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(list())
+  rep_pd <- rep_pd[is.finite(rep_pd$time) & is.finite(rep_pd$value), , drop = FALSE]
+  if (nrow(rep_pd) == 0) return(list())
+  rep_pd <- rep_pd[order(as.character(rep_pd$variable), rep_pd$replicate, rep_pd$time), , drop = FALSE]
+  key <- paste(as.character(rep_pd$variable), rep_pd$replicate, sep = "\r")
+  lapply(split(rep_pd, factor(key, levels = unique(key))), function(g)
+    list(sample = as.character(g$variable[1]), replicate = g$replicate[1], t = g$time, y = g$value))
+}
+
+# Value of every replicate curve at the requested times: linear interpolation between the bracketing
+# points ("interpolate") or the reading at the nearest sampled time ("nearest"). A time outside a
+# curve's own range [first time, last time] gives NA (never extrapolated).
+od_at_times <- function(rep_pd, times, method = c("interpolate", "nearest")) {
+  method <- match.arg(method)
+  times  <- as.numeric(times)
+  curves <- extraction_curves(rep_pd)
+  out <- lapply(curves, function(cv) {
+    inside <- times >= min(cv$t) & times <= max(cv$t)
+    v <- rep(NA_real_, length(times))
+    if (method == "interpolate") {
+      if (length(cv$t) >= 2)
+        v[inside] <- suppressWarnings(stats::approx(cv$t, cv$y, xout = times[inside], ties = mean)$y)
+      else v[inside & times == cv$t[1]] <- cv$y[1]
+    } else {
+      v[inside] <- vapply(times[inside], function(x) cv$y[which.min(abs(cv$t - x))], numeric(1))
+    }
+    data.frame(time_requested = times, sample = cv$sample, replicate = cv$replicate, value = v,
+               stringsAsFactors = FALSE)
+  })
+  if (!length(out))
+    return(data.frame(time_requested = numeric(0), sample = character(0), replicate = numeric(0),
+                      value = numeric(0), stringsAsFactors = FALSE))
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# mean, SD, n (non-missing replicates), SEM and the 95 % CI half-width (t(0.975, n - 1) x SEM, as in the
+# app's summary statistics) of a value column, per group. SD / SEM / CI are NA with fewer than 2 values.
+summarise_replicate_values <- function(x, value_col, group_cols) {
+  if (is.null(x) || nrow(x) == 0) return(NULL)
+  g <- interaction(x[group_cols], drop = TRUE, lex.order = TRUE)
+  rows <- lapply(split(seq_len(nrow(x)), g), function(ix) {
+    v <- x[[value_col]][ix]; v <- v[is.finite(v)]; n <- length(v)
+    sd_v <- if (n >= 2) stats::sd(v) else NA_real_
+    sem  <- if (n >= 2) sd_v / sqrt(n) else NA_real_
+    cbind(x[ix[1], group_cols, drop = FALSE],
+          data.frame(mean = if (n) mean(v) else NA_real_, sd = sd_v, n = n, sem = sem,
+                     ci95 = if (n >= 2) stats::qt(0.975, n - 1) * sem else NA_real_), row.names = NULL)
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+summarise_od_at_times <- function(x) summarise_replicate_values(x, "value", c("time_requested", "sample"))
+
+# First time each replicate curve crosses `threshold`, with linear interpolation between the two
+# bracketing points. "up": the curve goes from below the threshold to at-or-above it; "down": from
+# at-or-above to below. A curve that STARTS on the far side has no crossing until it comes back, so
+# it is not reported as crossing at its first time. `after` limits the search to the part of the curve
+# from "peak" (the first maximum) onward, or from a time (numeric); NA when there is no crossing.
+time_to_od <- function(rep_pd, threshold, direction = c("up", "down"), after = NULL) {
+  direction <- match.arg(direction)
+  curves <- extraction_curves(rep_pd)
+  rows <- lapply(curves, function(cv) {
+    t <- cv$t; y <- cv$y; n <- length(t)
+    first <- 1L
+    if (!is.null(after) && !(length(after) == 1 && is.na(after))) {
+      first <- if (identical(after, "peak")) which.max(y) else which(t >= as.numeric(after))[1]
+      if (is.na(first)) first <- n + 1L
+    }
+    tc <- NA_real_
+    if (n >= 2 && first < n) for (i in (first + 1L):n) {
+      a <- y[i - 1L]; b <- y[i]
+      hit <- if (direction == "up") a < threshold && b >= threshold else a >= threshold && b < threshold
+      if (hit) { tc <- t[i - 1L] + (threshold - a) / (b - a) * (t[i] - t[i - 1L]); break }
+    }
+    data.frame(sample = cv$sample, replicate = cv$replicate, time = tc, threshold = threshold,
+               direction = direction, stringsAsFactors = FALSE)
+  })
+  if (!length(rows))
+    return(data.frame(sample = character(0), replicate = numeric(0), time = numeric(0),
+                      threshold = numeric(0), direction = character(0), stringsAsFactors = FALSE))
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# Per sample: mean, SD, n (replicates that crossed), SEM and 95 % CI half-width of the crossing time,
+# plus n_curves (replicates examined).
+summarise_time_to_od <- function(x) {
+  s <- summarise_replicate_values(x, "time", "sample")
+  if (is.null(s)) return(NULL)
+  s$n_curves <- as.integer(table(factor(x$sample, levels = unique(x$sample)))[as.character(s$sample)])
+  s
+}
+
+# Keep, for each sample named in `windows`, only the rows with time inside its window. windows is a
+# named list sample -> c(min, max); a NULL, missing or NA bound means no limit on that side; samples
+# without an entry are untouched. Works on the mean frame and the replicate frame (columns `variable`
+# and `time`).
+apply_sample_time_windows <- function(df, windows) {
+  if (is.null(df) || nrow(df) == 0 || length(windows) == 0 || is.null(names(windows))) return(df)
+  samp <- as.character(df$variable)
+  keep <- rep(TRUE, nrow(df))
+  for (s in intersect(names(windows), unique(samp))) {
+    w  <- windows[[s]]
+    if (is.list(w)) w <- vapply(w, function(x) if (length(x) == 1) suppressWarnings(as.numeric(x)) else NA_real_, numeric(1))
+    w  <- suppressWarnings(as.numeric(w))
+    lo <- if (length(w) >= 1 && is.finite(w[1])) w[1] else -Inf
+    hi <- if (length(w) >= 2 && is.finite(w[2])) w[2] else Inf
+    sel <- samp == s
+    keep[sel] <- df$time[sel] >= lo & df$time[sel] <= hi
+  }
+  df[keep, , drop = FALSE]
+}
+
+# ── end v2.18 engine ──
+
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {

@@ -158,6 +158,10 @@ source: per-sample ratios (the reference recycled the first sample's values
 via a length-1 `ifelse()`, fixed upstream 2026-08-19) and the 1e-10 μmax
 epsilon.
 
+## Growth-model fits, phenotype matrix, all-metrics statistics and extraction (v2.18 engine)
+
+Beyond the rolling-window metrics above, the engine has pure functions for model-based growth fits (modified logistic, modified Gompertz and Baranyi-Roberts, fitted up to the peak so lysis curves are not fitted through the collapse, with the AIC-best model per sample), a samples x metrics phenotype matrix for heatmaps (z, range or no scaling), `compare_all_metrics()` (every metric's replicate comparison in one table, with an exploratory Benjamini-Hochberg adjustment across all tests next to the per-metric Holm p), and extraction helpers (OD at fixed times, time to cross an OD threshold, per-sample time windows). Their equations and definitions are in [`FITS_AND_EXTRACTION.md`](FITS_AND_EXTRACTION.md); the metrics in this file are unchanged by them.
+
 ## Tests
 
 ```bash
