@@ -2469,6 +2469,194 @@ get_palette_colors <- function(pal, n) {
   )
 }
 
+# ── v2.18 engine: growth fits, phenotype matrix, all-metrics statistics, extraction ──
+# Pure functions (no Shiny state): the UI calls them. See docs/FITS_AND_EXTRACTION.md.
+
+# ── Growth-model fits (Zwietering 1990 / Baranyi-Roberts 1994) ───────────────
+# Every fit is made on the CHANGE from the first reading: y(t) = ln(od(t) / od(t0)) (log_transform =
+# TRUE) or od(t) - od(t0), against tt = t - t0, so the fitted function is f(tt) - f(0) and
+# od(t) = od(t0) * exp(f(tt) - f(0)). For Baranyi f(0) = 0 already. A is therefore the asymptote of f
+# (in ln-OD units, or OD units without the log), mu_max the maximum slope of f (per time unit; a
+# specific growth rate on the log scale) and lag = lambda a DURATION from the first time point.
+gm_logistic <- function(tt, A, mu, lag)       # modified logistic, Zwietering 1990
+  A / (1 + exp(4 * mu / A * (lag - tt) + 2)) - A / (1 + exp(4 * mu / A * lag + 2))
+gm_gompertz <- function(tt, A, mu, lag)       # modified Gompertz, Zwietering 1990
+  A * exp(-exp(mu * exp(1) / A * (lag - tt) + 1)) - A * exp(-exp(mu * exp(1) / A * lag + 1))
+gm_baranyi  <- function(tt, A, mu, lag) {     # Baranyi-Roberts, y0 = 0, h0 = mu * lag, ymax = A
+  h0 <- mu * lag
+  At <- tt + log(exp(-mu * tt) + exp(-h0) - exp(-mu * tt - h0)) / mu      # adjustment function A(t)
+  mu * At - log1p(exp(mu * At - A) - exp(-A))
+}
+GROWTH_MODEL_FUNS <- list(logistic = gm_logistic, gompertz = gm_gompertz, baranyi = gm_baranyi)
+
+# One output row. t0 / log_transform / until are extra columns predict_growth_model() needs.
+gm_fit_row <- function(model, converged = FALSE, n_points = NA_integer_, A = NA_real_, mu_max = NA_real_,
+                       lag = NA_real_, y0 = NA_real_, rss = NA_real_, aic = NA_real_, bic = NA_real_,
+                       r2 = NA_real_, se = c(NA_real_, NA_real_, NA_real_), message = NA_character_,
+                       t0 = NA_real_, log_transform = TRUE, until = "peak") {
+  data.frame(model = model, converged = converged, n_points = as.integer(n_points), A = A, mu_max = mu_max,
+             lag = lag, y0 = y0, rss = rss, aic = aic, bic = bic, r2 = r2,
+             se_A = se[1], se_mu_max = se[2], se_lag = se[3], message = as.character(message),
+             t0 = t0, log_transform = log_transform, until = until, stringsAsFactors = FALSE)
+}
+
+# Fit one or more growth models to a single curve; never errors (a failed model returns
+# converged = FALSE, NA parameters and the reason in `message`).
+#   until = "peak": only the points up to and including the maximum of od are used, so a lysis
+#                   curve is never fitted through its collapse; "all": every point.
+#   Starting values: mu_max = largest centered rolling ln-slope (rolling_slope, window 5), lag = the
+#   engine's rule (first time that slope reaches 10 % of mu_max) or the tangent intercept, A = max(y).
+fit_growth_models <- function(t, od, models = c("logistic", "gompertz", "baranyi"),
+                              until = c("peak", "all"), log_transform = TRUE) {
+  until  <- match.arg(until)
+  models <- match.arg(models, names(GROWTH_MODEL_FUNS), several.ok = TRUE)
+  fail_all <- function(msg, n = 0L, t0 = NA_real_, y0 = NA_real_)
+    do.call(rbind, lapply(models, function(m)
+      gm_fit_row(m, n_points = n, message = msg, y0 = y0, t0 = t0, log_transform = log_transform, until = until)))
+  ok <- is.finite(t) & is.finite(od)
+  t <- as.numeric(t)[ok]; od <- as.numeric(od)[ok]
+  if (length(t) == 0) return(fail_all("no finite data"))
+  o <- order(t); t <- t[o]; od <- od[o]
+  note <- NA_character_
+  if (log_transform) {
+    pos <- od > 0
+    if (!any(pos)) return(fail_all("no positive OD readings (cannot take the logarithm)"))
+    if (any(!pos)) {
+      note <- sprintf("%d non-positive reading(s) dropped before the log transform", sum(!pos))
+      t <- t[pos]; od <- od[pos]
+    }
+  }
+  if (length(od) > 0 && diff(range(od)) == 0)
+    return(fail_all("no growth (flat curve)", length(od), t[1], od[1]))
+  if (until == "peak") { k <- which.max(od); t <- t[seq_len(k)]; od <- od[seq_len(k)] }
+  n <- length(t); od0 <- od[1]; t0 <- t[1]
+  if (n < 4)
+    return(fail_all(sprintf("too few points (%d; need at least 4)%s", n,
+                            if (until == "peak") " up to the peak" else ""), n, t0, od0))
+  if (n < 6) note <- paste(stats::na.omit(c(note, sprintf("only %d points: parameters are poorly determined", n))), collapse = "; ")
+  y  <- if (log_transform) log(od / od0) else od - od0
+  tt <- t - t0
+  if (!is.finite(max(y)) || max(y) <= 1e-8 * max(1, abs(od0)))
+    return(fail_all("no growth up to the peak (flat or declining curve)", n, t0, od0))
+
+  # starting values
+  win <- min(5L, n)
+  rs  <- if (win >= 3) tryCatch(rolling_slope(tt, y, win), error = function(e) rep(NA_real_, n)) else rep(NA_real_, n)
+  if (!any(is.finite(rs) & rs > 0)) rs <- c(NA_real_, diff(y) / diff(tt))   # very short curve: consecutive slopes
+  rs_ok <- which(is.finite(rs) & rs > 0)
+  if (length(rs_ok) == 0) return(fail_all("no positive growth slope", n, t0, od0))
+  kmax  <- rs_ok[which.max(rs[rs_ok])]
+  mu0   <- rs[kmax]
+  lag_rule <- tt[which(rs >= 0.10 * mu0 & is.finite(rs))[1]]
+  lag_tan  <- min(max(tt[kmax] - y[kmax] / mu0, 0), max(tt))
+  lag_starts <- unique(pmin(pmax(c(lag_rule, lag_tan), 0), max(tt)))
+  ymax <- max(y)
+  A_ub <- 5 * ymax
+  starts <- unlist(lapply(c(1, 1.5), function(f) lapply(lag_starts, function(l)
+    c(A = f * ymax, mu = mu0, lag = l))), recursive = FALSE)
+  lower <- c(A = ymax * 1e-3, mu = mu0 * 1e-3, lag = 0)
+  upper <- c(A = A_ub, mu = mu0 * 20, lag = max(tt))
+  dat   <- data.frame(tt = tt, y = y)
+  sst   <- sum((y - mean(y))^2)
+  ctl   <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(y^2), 1e-12), warnOnly = FALSE)
+
+  rows <- lapply(models, function(m) {
+    form <- stats::as.formula(paste0("y ~ gm_", m, "(tt, A, mu, lag)"))
+    best <- NULL; best_rss <- Inf; last_err <- "did not converge"
+    for (st in starts) {
+      for (alg in c("port", "default")) {
+        st_c <- if (alg == "port") pmin(pmax(st, lower), upper) else st
+        fit <- tryCatch(suppressWarnings(
+          if (alg == "port") stats::nls(form, data = dat, start = as.list(st_c), algorithm = "port",
+                                        lower = lower, upper = upper, control = ctl)
+          else stats::nls(form, data = dat, start = as.list(st_c), control = ctl)),
+          error = function(e) { last_err <<- conditionMessage(e); NULL })
+        if (is.null(fit)) next
+        cf <- stats::coef(fit)
+        if (!all(is.finite(cf)) || cf[["A"]] <= 0 || cf[["mu"]] <= 0 || cf[["lag"]] < -1e-8 * max(1, max(tt))) next
+        r <- sum(stats::resid(fit)^2)
+        if (is.finite(r) && r < best_rss) { best <- fit; best_rss <- r }
+        break                                  # port first; the default algorithm only if port failed
+      }
+    }
+    if (is.null(best))
+      return(gm_fit_row(m, n_points = n, y0 = od0, t0 = t0, log_transform = log_transform, until = until,
+                        message = paste0("did not converge: ", gsub("\\s+", " ", last_err))))
+    cf  <- stats::coef(best)
+    se  <- tryCatch(suppressWarnings(unname(summary(best)$coefficients[, "Std. Error"])),
+                    error = function(e) rep(NA_real_, 3))
+    if (length(se) != 3) se <- rep(NA_real_, 3)
+    k_par <- 4L                                           # A, mu_max, lag + the residual variance
+    aic <- n * (log(2 * pi) + 1 + log(max(best_rss, 1e-30) / n)) + 2 * k_par
+    bic <- n * (log(2 * pi) + 1 + log(max(best_rss, 1e-30) / n)) + log(n) * k_par
+    msg <- note
+    if (cf[["A"]] >= 0.99 * A_ub)
+      msg <- paste(stats::na.omit(c(msg, "asymptote at its upper bound (no plateau reached in the fitted points)")), collapse = "; ")
+    gm_fit_row(m, TRUE, n, A = unname(cf["A"]), mu_max = unname(cf["mu"]), lag = unname(cf["lag"]), y0 = od0,
+               rss = best_rss, aic = aic, bic = bic, r2 = if (sst > 0) 1 - best_rss / sst else NA_real_,
+               se = se, message = msg, t0 = t0, log_transform = log_transform, until = until)
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# Predicted OD of one fit row (as returned by fit_growth_models) at times t, starting from baseline
+# od0 (use fit_row$y0 for the fitted curve itself). Back-transformed (od0 * exp(.)) when the fit was
+# made on the ln scale; all NA for a model that did not converge.
+predict_growth_model <- function(fit_row, t, od0) {
+  fit_row <- fit_row[1, , drop = FALSE]
+  if (!isTRUE(fit_row$converged)) return(rep(NA_real_, length(t)))
+  fun <- GROWTH_MODEL_FUNS[[as.character(fit_row$model)]]
+  t0  <- if ("t0" %in% names(fit_row) && is.finite(fit_row$t0)) fit_row$t0 else 0
+  lg  <- if ("log_transform" %in% names(fit_row)) isTRUE(fit_row$log_transform) else TRUE
+  f   <- fun(t - t0, fit_row$A, fit_row$mu_max, fit_row$lag)
+  if (lg) od0 * exp(f) else od0 + f
+}
+
+# Stacked fits per sample from the app's mean-curve frame (time, variable, mean_value).
+fit_growth_models_by_sample <- function(pd, ...) {
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  out <- lapply(unique(as.character(pd$variable)), function(s) {
+    g <- pd[as.character(pd$variable) == s, , drop = FALSE]
+    cbind(data.frame(sample = s, stringsAsFactors = FALSE), fit_growth_models(g$time, g$mean_value, ...))
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# Stacked fits per sample and replicate from the replicate frame (time, variable, replicate, value).
+fit_growth_models_by_replicate <- function(rep_pd, ...) {
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(NULL)
+  key <- unique(data.frame(sample = as.character(rep_pd$variable), replicate = rep_pd$replicate,
+                           stringsAsFactors = FALSE))
+  out <- lapply(seq_len(nrow(key)), function(i) {
+    g <- rep_pd[as.character(rep_pd$variable) == key$sample[i] & rep_pd$replicate == key$replicate[i], , drop = FALSE]
+    cbind(data.frame(sample = key$sample[i], replicate = key$replicate[i], stringsAsFactors = FALSE),
+          fit_growth_models(g$time, g$value, ...))
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# The converged model with the lowest AIC, one row per sample (and per replicate when the table has a
+# replicate column). A group with no converged model keeps one row with model = NA and the
+# parameters NA.
+best_model <- function(fit_table) {
+  if (is.null(fit_table) || nrow(fit_table) == 0) return(fit_table)
+  keys <- intersect(c("sample", "replicate"), names(fit_table))
+  key_str <- if (length(keys)) do.call(paste, c(lapply(fit_table[keys], as.character), sep = "\r")) else rep("all", nrow(fit_table))
+  rows <- lapply(unique(key_str), function(k) {
+    g  <- fit_table[key_str == k, , drop = FALSE]
+    ok <- which(g$converged %in% TRUE & !is.na(g$aic))
+    if (length(ok)) return(g[ok[which.min(g$aic[ok])], , drop = FALSE])
+    g <- g[1, , drop = FALSE]
+    keep <- c(keys, "n_points", "message", "t0", "log_transform", "until", "y0")
+    for (cc in setdiff(names(g), keep)) g[[cc]] <- if (is.character(g[[cc]])) NA_character_ else NA
+    g$converged <- FALSE
+    g
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# ── end v2.18 engine ──
+
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
