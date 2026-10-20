@@ -169,7 +169,7 @@ All settings are in the left sidebar, organized into collapsible sections. Click
 
 **Axis Settings** — Change between linear, logarithmic, square root, or reverse axis scales. Customize tick marks, axis labels, fonts, and gridlines. The default Y-axis is logarithmic (common for OD data). *Readings below the axis floor* (new in v2.17) decides what happens to a post-lysis reading that falls below the log-axis minimum: **Clip to the floor** (the default) draws it on the floor so the curve and its points stay visible, **Drop (legacy)** deletes it as earlier versions did (the Legacy look keeps this).
 
-**Time Point Filtering** — Restrict the displayed time range or exclude specific time points (e.g., removing an outlier at time 0).
+**Time Point Filtering** — Restrict the displayed time range or exclude specific time points (e.g., removing an outlier at time 0). New in v2.18: under the global filter, a **per-sample time window** table gives every selected sample its own *from* and *to* time (blank = no limit), for example to cut a sample at the point where it crashes or to drop a late contaminated reading of one well type. The windows are applied after the global filter (and also when it is off) to the figures, statistics, metrics and exports; they are saved with the settings and listed in the report provenance, the figure legend text and the methods text.
 
 **Region Highlighting** — Add colored rectangular regions to highlight specific areas of the plot (e.g., a growth phase).
 
@@ -183,7 +183,7 @@ All settings are in the left sidebar, organized into collapsible sections. Click
 
 **Error Bars / Shadow** — Display variability as error bars (T-shaped or lines) or as a shaded ribbon around each line. Choose between SD, SEM, or 95% CI. If you only have one replicate per sample per time point, error bars will simply not appear (there's no variability to show).
 
-**Variable Styling** — Fine-tune each sample individually: set its color (from presets, HEX code, or RGB sliders), point shape (circle, square, triangle, etc.), line type (solid, dashed, dotted, etc.), and legend label.
+**Variable Styling** — Fine-tune each sample individually: set its color (from presets, HEX code, or RGB sliders), point shape (circle, square, triangle, etc.), line type (solid, dashed, dotted, etc.), and legend label. New in v2.18: a free-text **Group** per sample (for example the phage, host or medium). Tick **One panel per group (main figure)** and the lysis curve is split into one panel per group with shared axes and the group name above each panel (needs two or more different groups; samples without a group go to "Other"); with *fixed panel size* the panel area you set is divided among the panels. In **Compose figure**, the panel **Lysis curve, one panel per group** adds one separate single-group figure per group, lettered a, b, c in group order. Groups are saved with the settings.
 
 ### Saving and Loading Settings
 
@@ -325,6 +325,8 @@ Expand the **Plot Dimensions & Export** section.
 
 **Figure bundle (new in v2.17).** **"Download figure bundle (.zip)"** (`figure_bundle_<W>x<H>mm.zip`) packs everything a figure submission needs: the main figure as SVG and PDF at the current size, the composed figure as SVG (when two or more panels are selected in the composer), `settings.json` (the same document as Save Settings), `source_data_tidy.csv` (time, sample, replicate, value), `summary_statistics.csv`, `curve_metrics.csv`, `figure_legend.txt`, `methods.txt` (when the Statistics tab's methods box has text) and a `README.txt` with the app version, date, data source, figure size and fonts. If neither the `zip` package nor a `zip` program is available it is written as a `.tar` instead.
 
+**Download all figures (new in v2.18).** **"Download all figures (.zip)"** (`all_figures_<W>x<H>mm.zip`) writes one SVG and one PNG of the main figure, of every analysis figure that can be drawn for the current data and of the composed figure, each at the size it has in the app and under the same sized file names as the single downloads, plus `figure_legend.txt` and `methods.txt` (the Statistics tab's text, or the drafted paragraph when that box is empty). A figure that is not available (for example the normalized OD without a reference sample) is not written; `SKIPPED.txt` in the archive lists it with the reason.
+
 Recommended settings: use the **Journal Figure Preset** above (column width
 in mm, SVG) and finish in Inkscape. For a quick slide figure, PNG at 300 dpi
 and the pixel canvas are fine.
@@ -369,6 +371,12 @@ without rescaling. Pick a figure, set its panel label (empty by default; the fil
 - **Curve landmarks** — lag end, μmax window centre, peak, lysis onset, half
   of peak and trough drawn on each mean curve, so every number in the Curve
   Metrics CSV can be checked by eye before it is reported.
+- **Metric explorer** (v2.18) — any curve metric against any other (default
+  lysis onset against OD drop), one point per sample: the mean with error bars
+  in both directions (the main figure's error measure), and with *Per
+  replicate* the replicate values as open circles. Optional sample-name labels
+  at the points and a log x and / or y axis. Samples with no value for one of
+  the metrics (a relative metric needs a reference sample) are left out.
 
 All of these show the **same error measure as the main figure** (SD, SEM or
 95% CI from the Error Bars panel) and the same sample order. A rendered set of

@@ -654,8 +654,8 @@ check("compose inputs have APP_DEFAULTS entries (compose_panels is a character v
       identical(env$APP_DEFAULTS$compose_ncol, "2") && identical(env$APP_DEFAULTS$compose_width, "double") &&
       env$APP_DEFAULTS$compose_panel_height_mm == 60 && env$APP_DEFAULTS$compose_tag_size == 8 &&
       identical(env$APP_DEFAULTS$compose_tag_case, "a") && is.numeric(env$APP_DEFAULTS$compose_width_mm))
-check("compose panel choices: main first, then the analysis figures with the Analysis tab's labels",
-      identical(unname(env$COMPOSE_PANEL_CHOICES), c("main", unname(env$ANALYSIS_FIGURE_CHOICES))) &&
+check("compose panel choices: main first, v2.18's one-panel-per-group, then the analysis figures with the Analysis tab's labels",
+      identical(unname(env$COMPOSE_PANEL_CHOICES), c("main", "main_by_group", unname(env$ANALYSIS_FIGURE_CHOICES))) &&
       identical(names(env$COMPOSE_PANEL_CHOICES)[1], "Lysis curve (main)"))
 testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "demo")

@@ -1,5 +1,51 @@
 # Changelog
 
+## v2.18.0 — 2026-10-20
+
+**Per-sample time windows, sample groups and facets, metric explorer, download all figures.**
+
+- **Per-sample time windows**: Time Point Filtering has a table under the global filter
+  with a *from* and a *to* box per selected sample (`tw_min_<id>`, `tw_max_<id>`; blank =
+  no limit). `apply_time_windows_inputs(df)` drops the rows of each sample outside its
+  window in `prepare_plot_data()` and `prepare_replicate_data()`, right after the global
+  time filter (and also when the global filter is off), keeping the `variable` and `time`
+  columns, so every figure, statistic, metric and export follows. The windows are saved in
+  Save Settings (per sample, like the legend label; a blank limit is simply not written),
+  restored by Load Settings, reset by Clear, and listed in the report provenance, the
+  Figure Legend Text and the drafted methods.
+- **Sample groups and facets**: a per-sample **Group** text box in Variable Styling
+  (`group_<id>`, saved and loaded like the legend label). New checkbox `facet_by_group`
+  (off; the Legacy look and the journal preset both set it off): with at least two distinct
+  non-empty groups the main figure becomes `facet_wrap(~ group, scales = "fixed")`, the
+  strip text is the group name at the axis-title size without a strip background, samples
+  with an empty group go to a panel called "Other", and the legend stays outside. With the
+  fixed panel size, `fixed_panel_grob()` already divided the panel area among the panel
+  rows and columns of a facet figure, so the panel area you set is shared by the facets
+  (unchanged). The composer has a new panel **Lysis curve, one panel per group**
+  (`main_by_group`): one single-group main figure per group, titled with the group name, in
+  group order with "Other" last and tagged a, b, c in that order; it is left out (and
+  listed) when no sample has a group.
+- **Metric explorer** (analysis figure `metric_explorer`): `explorer_x` and `explorer_y`
+  choose any two metrics (defaults lysis onset and OD drop), `explorer_level` ("Per
+  replicate" / "Per sample mean ± error") whether the replicate values are drawn as open
+  circles, `explorer_labels` adds text labels at the points (`geom_text`, axis-text size),
+  `explorer_logx` / `explorer_logy` log10 axes. One point per sample, the mean with error
+  bars in both directions from the main figure's error measure (`error_half_width()`),
+  sample colours and shapes from the per-sample styling, axis labels from
+  `metric_axis_label()`. It uses the shared journal theme and, in fixed-panel mode, a square
+  panel. Also available in the composer.
+- **Download all figures (.zip)** (Plot Dimensions & Export): `all_figures_<W>x<H>mm.zip` with
+  an SVG and a PNG of the main figure, of every analysis figure that renders for the current
+  data and of the composed figure (the existing sized names), `figure_legend.txt` and
+  `methods.txt`; figures that return the "not available" placeholder are listed with their
+  reason in `SKIPPED.txt`. Same archive code as the figure bundle (`zip::zip`, else
+  `utils::zip`, else a `.tar`).
+- `fixed_panel_grob()` builds its grob on a scratch device when the plain build fails: a
+  figure with a plotmath colour-bar title (the heatmap) used to fail with "failed to find or
+  load PDF CID font" in fixed-panel mode when no graphics device was open.
+- Tests: `tests/test_v218_features.R`; `tests/test_v211_analysis.R` now expects the composer's
+  new `main_by_group` choice.
+
 ## v2.17.0 — 2026-10-19
 
 **Log-axis clipping, QC flags, notebook exports, figure bundle, threshold line, gradient palettes.**

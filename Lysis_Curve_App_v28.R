@@ -1,6 +1,22 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.18.0 -- Per-sample time windows, sample groups and facets, metric explorer, export-all:
+#   TIME WINDOWS    -- Time Point Filtering: a per-sample "from" / "to" table (tw_min_<id>, tw_max_<id>; blank =
+#                      no limit), applied after the global filter in prepare_plot_data() and
+#                      prepare_replicate_data() by apply_time_windows_inputs(); saved with the settings
+#                      and listed in the report provenance.
+#   GROUPS / FACETS -- Variable Styling: a free-text Group per sample (group_<id>). facet_by_group splits the
+#                      main figure into one panel per group (shared axes; strip = group name; empty group =
+#                      "Other"); the composer panel "Lysis curve, one panel per group" (main_by_group) adds one
+#                      single-group main figure per group.
+#   METRIC EXPLORER -- Analysis figure "metric_explorer": any curve metric against any other, one point per
+#                      sample (mean with error bars in both directions), replicate values as open circles,
+#                      optional point labels, optional log axes.
+#   EXPORT ALL      -- "Download all figures (.zip)": SVG + PNG of the main figure, every analysis figure that
+#                      renders for the data, and the composed figure, plus the legend and methods text; figures
+#                      that are not available are listed in SKIPPED.txt.
+#
 # v2.17.0 -- Log-axis clipping, QC flags, notebook exports, figure bundle, threshold line, gradients:
 #   LOG-AXIS CLIPPING -- y_oob: a reading below the log-axis floor is drawn ON the floor (squish, the default
 #                        and the journal preset) instead of being deleted (censor, the Legacy look).
@@ -240,7 +256,7 @@ has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: search
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.17.0"
+APP_VERSION <- "2.18.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1928,7 +1944,8 @@ journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_ran
     panel_size_mode = "fixed", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE,
     axis_subscripts = TRUE,       # v2.16: A550 -> A[550] in axis labels (the Legacy look keeps plain text)
     y_oob = "squish",             # v2.17: a reading below the log-axis floor is drawn on the floor, not deleted
-    enable_threshold = FALSE      # v2.17: no threshold line (the Legacy look and the preset both clear it)
+    enable_threshold = FALSE,     # v2.17: no threshold line (the Legacy look and the preset both clear it)
+    facet_by_group = FALSE        # v2.18: no group facets (the Legacy look and the preset both clear it)
   )
   # v2.12: caps as a fraction of the x range, so the look is the same whether
   # time is in minutes or hours (x_range kept for callers; no longer needed)
@@ -2024,7 +2041,19 @@ figure_size_mm <- function(g) {
 # panel columns / rows of a facet figure), with attr(, "size_mm") = the whole figure's size. Only
 # the panels' null units are replaced; every other null unit is zeroed so the size is absolute.
 fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
-  g   <- ggplot2::ggplotGrob(p)
+  g   <- tryCatch(ggplot2::ggplotGrob(p), error = function(e) {
+    # v2.18: a figure with a plotmath colour-bar title (the heatmap) measures text while the grob is built; with no
+    # device open that goes to R's default pdf() device, which cannot load Arial ("failed to find or load PDF CID
+    # font"). Build it on a scratch svglite / ragg device instead.
+    f <- tempfile(fileext = ".svg"); fp <- tempfile(fileext = ".png"); on.exit(unlink(c(f, fp)), add = TRUE)
+    old <- grDevices::dev.cur()
+    opened <- if (requireNamespace("svglite", quietly = TRUE)) tryCatch({ svglite::svglite(f, width = 4, height = 4); TRUE }, error = function(e2) FALSE)
+              else if (requireNamespace("ragg", quietly = TRUE)) tryCatch({ ragg::agg_png(fp, width = 400, height = 400, res = 72); TRUE }, error = function(e2) FALSE)
+              else FALSE
+    if (!opened) stop(e)
+    on.exit({ grDevices::dev.off(); if (old > 1) tryCatch(grDevices::dev.set(old), error = function(e3) NULL) }, add = TRUE)
+    ggplot2::ggplotGrob(p)
+  })
   lay <- g$layout[grepl("^panel", g$layout$name), , drop = FALSE]
   cols <- sort(unique(unlist(Map(seq, lay$l, lay$r))))
   rows <- sort(unique(unlist(Map(seq, lay$t, lay$b))))
@@ -2109,8 +2138,11 @@ ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "me
                              "Replicate overlay"                         = "replicate_overlay",
                              "Curve landmarks (metrics drawn on the curves)" = "landmarks",
                              "MOI dose-response"                         = "dose_response",
-                             "OD heatmap (samples \u00d7 time)"           = "heatmap")
-COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main", ANALYSIS_FIGURE_CHOICES)
+                             "OD heatmap (samples \u00d7 time)"           = "heatmap",
+                             "Metric explorer (one metric against another)" = "metric_explorer")   # v2.18
+COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main",
+                           "Lysis curve, one panel per group" = "main_by_group",   # v2.18
+                           ANALYSIS_FIGURE_CHOICES)
 metric_label <- function(m) { l <- unname(ANALYSIS_METRIC_LABELS[m]); ifelse(is.na(l), m, l) }
 # Axis / facet label with units, from the x-axis time unit and the y-axis label.
 metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
@@ -2403,6 +2435,9 @@ LEGACY_BASE <- list(
   enable_threshold = FALSE, threshold_value = 0.1, threshold_label = "",   # v2.17: horizontal OD threshold line
   threshold_color = "grey40", threshold_linetype = "dashed",
   qc_od_ceiling = 2.5,                # v2.17: QC flag CEILING above this OD
+  facet_by_group = FALSE,             # v2.18: one panel per sample group (journal preset and Legacy look: off)
+  explorer_x = "lysis_time", explorer_y = "od_drop",   # v2.18: metric explorer figure
+  explorer_level = "Per replicate", explorer_labels = FALSE, explorer_logx = FALSE, explorer_logy = FALSE,
   # v2.11 analysis / dashboard inputs
   analysis_type = "metric_summary", analysis_metrics = c("lysis_time", "od_drop"),
   analysis_dose_metric = "lysis_time", analysis_norm_mode = "reference",
@@ -2426,6 +2461,21 @@ LEGACY_BASE <- list(
 # The inputs the journal preset sets, at their legacy values.
 legacy_preset_settings <- function() LEGACY_BASE[names(journal_preset_settings(89, 65))]
 APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65))   # v2.16: no panel letter unless the user sets one
+# ── Sample groups (v2.18) ─────────────────────────────────────────────────────
+# The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
+# NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
+# first-appearance order with "Other" last (the facet / panel order).
+sample_group_map <- function(samples, groups, min_groups = 2L) {
+  if (is.null(groups) || !length(samples)) return(NULL)
+  g <- trimws(as.character(unname(groups[samples]))); g[is.na(g)] <- ""
+  named <- unique(g[nzchar(g)])
+  if (length(named) < min_groups) return(NULL)
+  g[!nzchar(g)] <- "Other"
+  out <- setNames(g, samples)
+  attr(out, "levels") <- unique(c(named, if (any(g == "Other")) "Other"))
+  out
+}
+
 # ── Figure bundle archive (v2.17) ─────────────────────────────────────────────
 # "zip" when the zip package or a zip binary is available, else "tar" (utils::tar, always there).
 bundle_archive_kind <- function()
@@ -2819,7 +2869,13 @@ ui <- fluidPage(
                                         p(style = "font-size:.82em;color:#666;", "Comma-separated values to remove (e.g. 0, 5, 180)."),
                                         textInput("exclude_timepoints", label = NULL, value = "", placeholder = "e.g. 0, 5, 180"),
                                         uiOutput("excluded_timepoints_preview")
-                       )
+                       ),
+                       hr(style = "margin:10px 0;"),
+                       h4("Per-Sample Time Windows", class = "panel-title"),
+                       p(style = "font-size:.82em;color:#666;",
+                         "Keep only the readings of a sample between its \u2018from\u2019 and \u2018to\u2019 times; a blank box is no limit. ",
+                         "Applied after the filter above (and also when it is off), to the figures, statistics and exports; saved with the settings."),
+                       uiOutput("time_windows_ui")
                    )
                  ),
                  
@@ -3061,6 +3117,12 @@ ui <- fluidPage(
                          "Everything a figure submission needs in one file: the figure (SVG + PDF) at the current size, ",
                          "the composed figure (SVG, if two or more panels are selected), settings.json, the tidy source data, ",
                          "summary statistics, curve metrics, the legend text, the methods text and a README."),
+                       br(), br(),
+                       downloadButton("downloadAllFigures", "Download all figures (.zip)", style = "width:100%;"),
+                       p(style = "font-size:.78em;color:#777;margin-top:4px;",
+                         "An SVG and a PNG of the main figure, of every analysis figure that can be drawn for this data and of the ",
+                         "composed figure, each at its current size, plus the legend and methods text. Figures that are not ",
+                         "available are listed in SKIPPED.txt."),
                        hr(),
                        h4("PowerPoint Export", class = "panel-title"),
                        p(style = "font-size:.85em;color:#666;",
@@ -3261,6 +3323,11 @@ ui <- fluidPage(
                        h4("Sample Selection", class = "panel-title"),
                        selectInput("selected_samples", "Select Samples:",
                                    choices = character(0), multiple = TRUE),
+                       checkboxInput("facet_by_group", "One panel per group (main figure)", APP_DEFAULTS$facet_by_group),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Type a Group for each sample below. With two or more different groups the lysis curve is split into ",
+                         "one panel per group (shared axes, the group name above each panel); samples without a group go to ",
+                         "\u2018Other\u2019. The Compose figure tab can also add one separate panel per group."),
                        uiOutput("var_settings")
                    )
                  )
@@ -3321,7 +3388,20 @@ ui <- fluidPage(
                     "the metrics (and the smoothing windows) before you report them.")),
                 conditionalPanel("input.analysis_type == 'heatmap'",
                   p(style = "font-size:.78em;color:#777;",
-                    "Mean OD per sample and time point; for screens with many samples."))
+                    "Mean OD per sample and time point; for screens with many samples.")),
+                conditionalPanel("input.analysis_type == 'metric_explorer'",
+                  selectInput("explorer_x", "X axis:", choices = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
+                              selected = APP_DEFAULTS$explorer_x),
+                  selectInput("explorer_y", "Y axis:", choices = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
+                              selected = APP_DEFAULTS$explorer_y),
+                  radioButtons("explorer_level", "Show:", choices = c("Per replicate", "Per sample mean \u00b1 error"),
+                               selected = APP_DEFAULTS$explorer_level),
+                  checkboxInput("explorer_labels", "Label the points with the sample names", APP_DEFAULTS$explorer_labels),
+                  checkboxInput("explorer_logx", "Log x axis", APP_DEFAULTS$explorer_logx),
+                  checkboxInput("explorer_logy", "Log y axis", APP_DEFAULTS$explorer_logy),
+                  p(style = "font-size:.78em;color:#777;",
+                    "One point per sample: the mean with error bars in both directions (the error measure of the main figure); ",
+                    "open circles are the replicates. Relative metrics need a reference sample (Stats & Reports)."))
               ),
               column(3,
                 selectInput("stats_method", "Statistics:",
@@ -3805,7 +3885,8 @@ server <- function(input, output, session) {
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
                            "use_hex_","hex_color_","legend_label_",
-                           "apply_rgb_","apply_hex_")
+                           "apply_rgb_","apply_hex_",
+                           "tw_min_","tw_max_","group_")   # v2.18: per-sample time window and group
       # v2.8 SETTINGS SAVE FIX: these GLOBAL inputs collide with per-sample
       # prefixes ("shape_", "color_") and were silently dropped from saved files
       global_exceptions <- c("shape_size", "color_palette")
@@ -3833,8 +3914,12 @@ server <- function(input, output, session) {
             shape        = input[[paste0("shape_",        vid)]],
             shape_filled = input[[paste0("shape_filled_", vid)]],
             line_type    = input[[paste0("line_type_",    vid)]],
-            legend_label = if (!is.null(leg) && nchar(leg) > 0) leg else vn
+            legend_label = if (!is.null(leg) && nchar(leg) > 0) leg else vn,
+            group        = trimws(input[[paste0("group_", vid)]] %||% "")      # v2.18; a file with this key also carries the windows
           )
+          tw <- time_window_for(vn)                                             # v2.18: only finite limits are written
+          if (is.finite(tw[1])) sample_aesthetics[[vn]]$tw_min <- unname(tw[1])
+          if (is.finite(tw[2])) sample_aesthetics[[vn]]$tw_max <- unname(tw[2])
         }
       }
       
@@ -3882,7 +3967,8 @@ server <- function(input, output, session) {
                          "main_panel_width")
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
-                         "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_")
+                         "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_",
+                         "tw_min_","tw_max_","group_")
     global_exceptions <- c("shape_size", "color_palette")   # see save handler note
     is_sample_inp <- function(nm) !(nm %in% global_exceptions) &&
       any(vapply(sample_prefixes, startsWith, logical(1), x = nm))
@@ -3911,7 +3997,7 @@ server <- function(input, output, session) {
         } else if (is.character(val) && length(val) == 1) {
           updateSelectInput(session, nm, selected = val)
           updateTextInput(session,   nm, value    = val)
-          if (startsWith(nm, "compose_")) updateRadioButtons(session, nm, selected = val)
+          if (startsWith(nm, "compose_") || identical(nm, "explorer_level")) updateRadioButtons(session, nm, selected = val)
         }
         n_global <- n_global + 1L
       }, error = function(e) invisible(NULL))
@@ -3970,6 +4056,11 @@ server <- function(input, output, session) {
         updateSelectInput(session, paste0("line_type_", vid), selected = aes$line_type)
       if (!is.null(aes$legend_label))
         updateTextInput(session, paste0("legend_label_", vid), value = aes$legend_label)
+      if (!is.null(aes$group)) {     # v2.18: a v2.18 file; a missing window means "no limit", not "leave as is"
+        updateTextInput(session, paste0("group_", vid), value = as.character(aes$group))
+        updateNumericInput(session, paste0("tw_min_", vid), value = if (is.null(aes$tw_min)) NA else aes$tw_min)
+        updateNumericInput(session, paste0("tw_max_", vid), value = if (is.null(aes$tw_max)) NA else aes$tw_max)
+      }
     }
   }
   
@@ -4004,6 +4095,9 @@ server <- function(input, output, session) {
           updateCheckboxInput(session, paste0("shape_filled_",   vid), value    = TRUE)
           updateSelectInput(session,   paste0("line_type_",      vid), selected = "solid")
           updateTextInput(session,     paste0("legend_label_",   vid), value    = vn)
+          updateTextInput(session,     paste0("group_",          vid), value    = "")        # v2.18
+          updateNumericInput(session,  paste0("tw_min_",         vid), value    = NA)
+          updateNumericInput(session,  paste0("tw_max_",         vid), value    = NA)
         }, error = function(e) invisible(NULL))
       }
     }
@@ -4104,6 +4198,7 @@ server <- function(input, output, session) {
       default_lt     <- if (!is.null(imp_aes$line_type))    imp_aes$line_type              else "solid"
       default_filled <- if (!is.null(imp_aes$shape_filled)) imp_aes$shape_filled           else TRUE
       default_leg    <- if (!is.null(imp_aes$legend_label)) imp_aes$legend_label           else vn
+      default_grp    <- if (!is.null(imp_aes$group))        as.character(imp_aes$group)    else ""   # v2.18
       
       div(
         style = "margin-bottom:12px;padding:10px;border:1px solid #ddd;border-radius:6px;background:#fafafa;",
@@ -4158,7 +4253,8 @@ server <- function(input, output, session) {
               )
             )
         ),
-        textInput(paste0("legend_label_", vid), "Legend Label:", value = default_leg)
+        textInput(paste0("legend_label_", vid), "Legend Label:", value = default_leg),
+        textInput(paste0("group_", vid), "Group:", value = default_grp, placeholder = "e.g. Phage A (optional)")   # v2.18
       )
     })
     
@@ -4314,6 +4410,72 @@ server <- function(input, output, session) {
     d
   }
   
+  # ── Per-sample time windows (v2.18) ─────────────────────────────────────────
+  # tw_min_<id> / tw_max_<id> (Time Point Filtering): a sample's rows are kept when from <= time <= to.
+  # A blank box (NA / NULL) is no limit on that side. The windows apply whether or not the global time
+  # filter is on, after it.
+  time_window_for <- function(sample) {
+    vid <- safe_id(sample)
+    num <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1 && is.finite(v)) v else NA_real_ }
+    c(from = num(input[[paste0("tw_min_", vid)]]), to = num(input[[paste0("tw_max_", vid)]]))
+  }
+  # The windows set for `samples` (default: the selected samples) as a data frame (sample, from, to);
+  # zero rows when none is set.
+  time_windows_current <- function(samples = input$selected_samples) {
+    rows <- lapply(samples, function(s) { w <- time_window_for(s)
+      if (all(is.na(w))) NULL else data.frame(sample = s, from = unname(w[1]), to = unname(w[2]), stringsAsFactors = FALSE) })
+    rows <- Filter(Negate(is.null), rows)
+    if (length(rows)) do.call(rbind, rows) else data.frame(sample = character(0), from = numeric(0), to = numeric(0))
+  }
+  # "A 0-120; B from 30" for provenance, the legend and the methods text ("" when no window is set)
+  time_windows_text <- function(samples = input$selected_samples) {
+    tw <- time_windows_current(samples)
+    if (!nrow(tw)) return("")
+    g <- function(x) format(x, trim = TRUE, digits = 10)
+    paste(sprintf("%s %s", tw$sample,
+                  ifelse(is.na(tw$from), paste0("up to ", g(tw$to)),
+                         ifelse(is.na(tw$to), paste0("from ", g(tw$from)), paste0(g(tw$from), "\u2013", g(tw$to))))),
+          collapse = "; ")
+  }
+  # Drops the rows of every sample that lie outside its window. df needs the columns `variable` and
+  # `time` (prepare_plot_data() / prepare_replicate_data() frames); all other columns are kept.
+  apply_time_windows_inputs <- function(df) {
+    if (is.null(df) || nrow(df) == 0 || !all(c("variable", "time") %in% names(df))) return(df)
+    v <- as.character(df$variable); keep <- rep(TRUE, nrow(df))
+    for (s in unique(v)) {
+      w <- time_window_for(s)
+      if (all(is.na(w))) next
+      idx <- v == s
+      if (!is.na(w[1])) keep[idx] <- keep[idx] & df$time >= w[1]
+      if (!is.na(w[2])) keep[idx] <- keep[idx] & df$time <= w[2]
+    }
+    df[keep, , drop = FALSE]
+  }
+  output$time_windows_ui <- renderUI({
+    samps <- input$selected_samples
+    if (is.null(samps) || length(samps) == 0)
+      return(p(style = "color:#999;font-size:.85em;", "Load data and select samples to set per-sample windows."))
+    tp <- rv$all_timepoints
+    rng_txt <- if (!is.null(tp) && length(tp)) paste0("data: ", format(min(tp), digits = 6), "\u2013", format(max(tp), digits = 6)) else NULL
+    cur <- function(id, imp) {   # an imported setting wins (a settings file was just loaded), else keep what is typed
+      v <- if (!is.null(imp)) imp else isolate(input[[id]])
+      v <- suppressWarnings(as.numeric(v)); if (length(v) == 1 && is.finite(v)) v else NA_real_
+    }
+    rows <- lapply(samps, function(vn) {
+      vid <- safe_id(vn); imp <- rv$imported_settings$samples[[vn]]
+      fluidRow(style = "margin-bottom:-8px;",
+        column(4, div(style = "font-size:.82em;padding-top:6px;word-break:break-word;", vn)),
+        column(4, numericInput(paste0("tw_min_", vid), NULL, value = cur(paste0("tw_min_", vid), imp$tw_min), width = "100%")),
+        column(4, numericInput(paste0("tw_max_", vid), NULL, value = cur(paste0("tw_max_", vid), imp$tw_max), width = "100%")))
+    })
+    tagList(
+      fluidRow(column(4, strong("Sample", style = "font-size:.82em;")),
+               column(4, strong("from", style = "font-size:.82em;")),
+               column(4, strong("to", style = "font-size:.82em;"))),
+      do.call(tagList, rows),
+      if (!is.null(rng_txt)) p(style = "font-size:.78em;color:#777;margin-top:6px;", rng_txt))
+  })
+
   # ── Data prep ────────────────────────────────────────────────────────────────
   # Zero-row frames with the usual columns: what prepare_plot_data() / prepare_replicate_data()
   # return when the selected samples match nothing that is loaded (for instance for a moment when a
@@ -4349,6 +4511,7 @@ server <- function(input, output, session) {
                ci95_value = ifelse(n >= 2, qt(0.975, df = pmax(n - 1, 1)) * sem_value, NA_real_))
       names(pd)[names(pd) == rv$group_col] <- "variable"
       names(pd)[names(pd) == rv$time_col]  <- "time"
+      pd <- apply_time_windows_inputs(pd)   # v2.18: per-sample windows, after the global filter
     } else {
       d    <- apply_time_filters(rv$data, rv$time_col)
       meas <- intersect(rv$od_vars_raw, samps)
@@ -4365,7 +4528,7 @@ server <- function(input, output, session) {
         data.frame(time     = rep(t_vec, times = length(idxs)),
                    variable = vn, value = vals, stringsAsFactors = FALSE)
       })
-      pd <- bind_rows(pieces) %>%
+      pd <- apply_time_windows_inputs(bind_rows(pieces)) %>%   # v2.18: per-sample windows, after the global filter
         group_by(time, variable) %>%
         summarise(mean_value = mean(value, na.rm = TRUE),
                   sd_value   = sd(  value, na.rm = TRUE),
@@ -4443,6 +4606,7 @@ server <- function(input, output, session) {
     }
     # KC-7: see prepare_plot_data() above -- same constant blank offset,
     # applied per replicate value here since this frame is un-averaged.
+    out <- apply_time_windows_inputs(out)   # v2.18: per-sample windows, after the global filter
     blank <- input$blank_od %||% 0
     if (is.numeric(blank) && !is.na(blank) && blank != 0) out$value <- out$value - blank
     out %>% filter(is.finite(time) & is.finite(value))
@@ -4456,6 +4620,7 @@ server <- function(input, output, session) {
     line_types <- setNames(character(n), samples)
     leg_labels <- setNames(character(n), samples)
     filled_map <- setNames(logical(n),   samples)
+    groups     <- setNames(character(n), samples)   # v2.18: free-text sample group ("" = none)
     def_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
                     "#984EA3","#FF7F00","#A65628","#F781BF",
                     "#999999","#66C2A5","#FC8D62","#8DA0CB")
@@ -4487,9 +4652,12 @@ server <- function(input, output, session) {
       
       fi <- input[[paste0("shape_filled_", vid)]]
       filled_map[i] <- if (!is.null(fi)) fi else TRUE
+
+      gi <- input[[paste0("group_", vid)]]
+      groups[i] <- if (!is.null(gi) && length(gi) == 1 && !is.na(gi)) trimws(as.character(gi)) else ""
     }
     list(shapes = shapes, colors = colors, line_types = line_types,
-         leg_labels = leg_labels, filled_map = filled_map)
+         leg_labels = leg_labels, filled_map = filled_map, groups = groups)
   }
   
   # ── Shared figure theme (v2.11) ─────────────────────────────────────────────
@@ -4609,6 +4777,12 @@ server <- function(input, output, session) {
     
     if (identical(input$legend_order, "selected"))
       plot_data$variable <- factor(as.character(plot_data$variable), levels = samples)
+    
+    # v2.18: one panel per sample group (facet_by_group, >= 2 distinct non-empty groups). Every layer that
+    # is built from plot_data carries the `group` column; layers without it are drawn in every panel.
+    grp_map <- if (isTRUE(input$facet_by_group)) sample_group_map(samples, aes_vals$groups) else NULL
+    if (!is.null(grp_map))
+      plot_data$group <- factor(unname(grp_map[as.character(plot_data$variable)]), levels = attr(grp_map, "levels"))
     
     # Grey out non-highlighted samples while keeping axis scale stable
     display_colors <- colors
@@ -4750,6 +4924,7 @@ server <- function(input, output, session) {
       rp <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
       if (!is.null(rp) && nrow(rp) > 0) {
         if (input$y_scale_type == "log") rp <- rp[rp$value > 0, , drop = FALSE]
+        if (!is.null(grp_map)) rp$group <- factor(unname(grp_map[as.character(rp$variable)]), levels = attr(grp_map, "levels"))
         jit <- diff(range(plot_data$time, na.rm = TRUE)) * 0.006
         p <- p + geom_point(data = rp, aes(x = time, y = value, color = variable),
                             shape = 1, size = input$shape_size * 0.5, alpha = 0.55,
@@ -4956,6 +5131,14 @@ server <- function(input, output, session) {
                                  n_entries = n_vars, log_y = identical(input$y_scale_type, "log"),
                                  label_chars = max(nchar(unname(leg_labels)), 1))
     
+    if (!is.null(grp_map)) {
+      # v2.18: facet strips read as plain text at the axis-title size, no box; one key for all panels,
+      # outside (an inside key would sit in a corner of the whole panel block, over one facet's curves)
+      p <- p + facet_wrap(~ group, scales = "fixed", labeller = label_wrap_gen(width = 18)) +   # plain-text strips (as the metric summary)
+        theme(strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
+              strip.background = element_blank())
+      if (startsWith(input$legend_position %||% "right", "inside-")) p <- p + theme(legend.position = "right")
+    }
     if (isTRUE(input$custom_aspect_ratio))
       p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
 
@@ -4994,6 +5177,27 @@ server <- function(input, output, session) {
            subtitle = if (nchar(trimws(input$plot_subtitle)) > 0) input$plot_subtitle else NULL,
            caption  = err_caption,
            tag      = if (nzchar(pl_lab)) pl_lab else NULL)
+  }
+  
+  # v2.18: the composer panel "Lysis curve, one panel per group": one single-group main figure per group
+  # (the group's samples only, group name as the title), in group order (first appearance, "Other" last),
+  # named "main_by_group:<group>". An empty list when no sample has a group.
+  main_group_plots <- function() {
+    samps <- input$selected_samples
+    aes_v <- resolve_aesthetics(samps)
+    gm    <- sample_group_map(samps, aes_v$groups, min_groups = 1L)
+    if (is.null(gm)) return(list())
+    pd    <- prepare_plot_data()
+    lv    <- attr(gm, "levels")
+    plots <- lapply(lv, function(g) {
+      gs    <- samps[gm == g]
+      aes_g <- list(shapes = aes_v$shapes[gs], colors = aes_v$colors[gs], line_types = aes_v$line_types[gs],
+                    leg_labels = aes_v$leg_labels[gs], filled_map = aes_v$filled_map[gs])   # no groups: a plain panel
+      tryCatch(build_plot(pd[pd$variable %in% gs, , drop = FALSE], gs, aes_g) + labs(title = g),
+               error = function(e) NULL)
+    })
+    names(plots) <- paste0("main_by_group:", lv)
+    Filter(Negate(is.null), plots)
   }
   
   generate_plot <- function() {
@@ -5056,7 +5260,8 @@ server <- function(input, output, session) {
   }
   # ── Fixed panel size (v2.15) ────────────────────────────────────────────────
   fixed_mode <- function() identical(input$panel_size_mode, "fixed")
-  CURVE_KINDS <- c("main", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response")
+  CURVE_KINDS <- c("main", "main_by_group", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response",
+                   "metric_explorer")
   # Panel (plotting area) size in mm for a figure kind: curve figures are square when
   # panel_square is on; the metric summary and heatmap use width x height as given.
   panel_dims_mm <- function(kind = "main") {
@@ -5255,16 +5460,20 @@ server <- function(input, output, session) {
     if (identical(u, "mm")) sprintf("%dx%dmm", as.integer(round(w)), as.integer(round(h)))
     else sprintf("%.1fx%.1fin", w, h)
   }
-  main_download_name <- function()
-    paste0("lysis_curve_", file_label(input$panel_label, "main"), "_", export_size_tag(), ".", input$export_format %||% "svg")
+  # v2.18: the names without the extension, so the "Download all figures" archive uses the same ones
+  main_file_stem <- function() paste0("lysis_curve_", file_label(input$panel_label, "main"), "_", export_size_tag())
+  analysis_file_stem <- function(ty, sz_in = NULL)
+    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(sz_in))
+  composed_file_stem <- function(sz_mm = NULL)
+    paste0("figure_composed", if (!is.null(sz_mm)) sprintf("_%dx%dmm", as.integer(round(sz_mm[1])), as.integer(round(sz_mm[2]))))
+  main_download_name <- function() paste0(main_file_stem(), ".", input$export_format %||% "svg")
   analysis_download_name <- function() {
     ty <- input$analysis_type %||% "figure"
-    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(if (fixed_mode()) analysis_size_in()), ".", input$export_format %||% "svg")
+    paste0(analysis_file_stem(ty, if (fixed_mode()) analysis_size_in()), ".", input$export_format %||% "svg")
   }
   composed_download_name <- function() {
     sz <- tryCatch({ i <- compose_info(); c(i$width_mm, i$height_mm) }, error = function(e) NULL)
-    paste0("figure_composed", if (!is.null(sz)) sprintf("_%dx%dmm", as.integer(round(sz[1])), as.integer(round(sz[2]))),
-           ".", input$export_format %||% "svg")
+    paste0(composed_file_stem(sz), ".", input$export_format %||% "svg")
   }
 
   # ── Figure size bar (v2.14) ──────────────────────────────────────────────────
@@ -5433,7 +5642,9 @@ server <- function(input, output, session) {
     blank <- input$blank_od %||% 0
     s5 <- if (is.numeric(blank) && is.finite(blank) && blank != 0)
       sprintf("Readings are blank-corrected (−%s).", blank) else NULL
-    s6 <- if (isTRUE(input$enable_time_filter)) "Only the displayed time window was analysed." else NULL
+    tw_txt <- time_windows_text()
+    s6 <- if (isTRUE(input$enable_time_filter) || nzchar(tw_txt)) "Only the displayed time window was analysed." else NULL
+    if (nzchar(tw_txt)) s6 <- paste0(s6, " Per-sample time windows: ", tw_txt, ".")
     paste(c(s1, s2, s3, s4, s5, s6), collapse = " ")
   }
   output$figure_legend_text <- renderText({
@@ -5698,6 +5909,60 @@ server <- function(input, output, session) {
           labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
         if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
+      metric_explorer = {
+        # v2.18: one curve metric against another, a point per sample: the mean of the replicates with error
+        # bars in both directions (the main figure's error measure), and with "Per replicate" the replicate
+        # values as open circles. Samples with no finite value for either metric are left out.
+        rm  <- replicate_metric_rows_current()
+        xm  <- input$explorer_x %||% "lysis_time"; ym <- input$explorer_y %||% "od_drop"
+        if (is.null(rm) || !all(c(xm, ym) %in% names(rm))) stop("Metric not available for these samples.")
+        logx <- isTRUE(input$explorer_logx); logy <- isTRUE(input$explorer_logy)
+        d <- data.frame(sample = rm$sample, replicate = rm$replicate, x = rm[[xm]], y = rm[[ym]], stringsAsFactors = FALSE)
+        d <- d[is.finite(d$x) & is.finite(d$y), , drop = FALSE]
+        if (logx) d <- d[d$x > 0, , drop = FALSE]
+        if (logy) d <- d[d$y > 0, , drop = FALSE]
+        if (nrow(d) == 0) stop(paste0("No sample has a finite value for both ", metric_label(xm), " and ", metric_label(ym),
+          if (logx || logy) " above 0 (log axis)" else "",
+          " (a relative metric needs a reference sample under Stats & Reports)."))
+        d$sample <- factor(d$sample, levels = sample_levels(samps))
+        summ <- d %>% group_by(sample) %>%
+          summarise(mx = mean(x), my = mean(y), ex = ehw(x), ey = ehw(y), .groups = "drop")
+        # on a log axis a whisker cannot reach 0 or below: it stops at half the smallest plotted value
+        lo_floor <- function(v) min(v[v > 0]) / 2
+        fx <- if (logx) lo_floor(c(d$x, summ$mx)) else -Inf
+        fy <- if (logy) lo_floor(c(d$y, summ$my)) else -Inf
+        summ$xlo <- pmax(summ$mx - summ$ex, fx); summ$xhi <- summ$mx + summ$ex
+        summ$ylo <- pmax(summ$my - summ$ey, fy); summ$yhi <- summ$my + summ$ey
+        leg_xy    <- list(x = if (logx) log10(summ$mx) else summ$mx, y = summ$my); leg_log_y <- logy
+        eb_aes_v  <- if (eb_col == "sample") aes(x = mx, ymin = ylo, ymax = yhi, color = sample) else aes(x = mx, ymin = ylo, ymax = yhi)
+        eb_aes_h  <- if (eb_col == "sample") aes(y = my, xmin = xlo, xmax = xhi, color = sample) else aes(y = my, xmin = xlo, xmax = xhi)
+        eb_fixed  <- if (eb_col == "sample") list() else list(color = eb_col)
+        g <- ggplot(summ, aes(x = mx, y = my))
+        if (grepl("^Per replicate", input$explorer_level %||% "Per replicate"))
+          g <- g + geom_point(data = d, aes(x = x, y = y, color = sample), shape = 21, fill = "white",
+                              size = ptsz * 0.6, stroke = pt2lw(0.5), inherit.aes = FALSE, show.legend = FALSE)
+        if (any(is.finite(summ$ey)))
+          g <- g + do.call(geom_linerange, c(list(data = summ, mapping = eb_aes_v, linewidth = pt2lw(0.5),
+                                                  inherit.aes = FALSE, na.rm = TRUE, show.legend = FALSE), eb_fixed))
+        if (any(is.finite(summ$ex)))
+          g <- g + do.call(geom_linerange, c(list(data = summ, mapping = eb_aes_h, orientation = "y", linewidth = pt2lw(0.5),
+                                                  inherit.aes = FALSE, na.rm = TRUE, show.legend = FALSE), eb_fixed))
+        g <- g + geom_point(aes(color = sample, shape = sample), size = ptsz)
+        if (isTRUE(input$explorer_labels))
+          g <- g + geom_text(data = summ, aes(x = mx, y = my, label = unname(labs_v[as.character(sample)]), color = sample),
+                             hjust = 0, vjust = -0.6, show.legend = FALSE, inherit.aes = FALSE,
+                             size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                             family = if (nzchar(input$font_family %||% "")) input$font_family else "")
+        num_lab <- scales::label_number(drop0trailing = TRUE, big.mark = "")
+        g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          (if (logx) scale_x_log10(labels = num_lab, expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))
+           else scale_x_continuous(expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))) +
+          (if (logy) scale_y_log10(labels = num_lab, expand = expansion(mult = 0.08))
+           else scale_y_continuous(expand = expansion(mult = 0.08))) +
+          labs(x = axis_y_label(metric_axis_label(xm, tunit = tunit, ylab = input$y_axis_label %||% "OD")),
+               y = axis_y_label(metric_axis_label(ym, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
+        g
+      },
       heatmap = {
         pd <- prepare_plot_data()
         pd$variable <- factor(pd$variable, levels = rev(sample_levels(samps)), labels = rev(unname(labs_v[sample_levels(samps)])))
@@ -5791,21 +6056,24 @@ server <- function(input, output, session) {
     req(rv$data, input$selected_samples)
     sel   <- input$compose_panels %||% character(0)
     types <- unname(COMPOSE_PANEL_CHOICES[COMPOSE_PANEL_CHOICES %in% sel])   # composed in checkbox order
+    # each requested type gives a named list of plots (one, or one per group for "main_by_group")
     built <- lapply(setNames(types, types), function(ty) {
+      if (identical(ty, "main_by_group")) return(tryCatch(main_group_plots(), error = function(e) list()))
       p <- tryCatch(if (identical(ty, "main")) generate_plot() else generate_analysis_plot(ty),
                     error = function(e) NULL)
-      if (is.null(p) || is_placeholder_plot(p)) NULL else p
+      if (is.null(p) || is_placeholder_plot(p)) list() else setNames(list(p), ty)
     })
-    ok      <- !vapply(built, is.null, logical(1))
+    ok      <- vapply(built, length, integer(1)) > 0
     skipped <- names(COMPOSE_PANEL_CHOICES)[match(types[!ok], COMPOSE_PANEL_CHOICES)]
-    plots   <- built[ok]; n <- length(plots)
+    plots   <- if (any(ok)) do.call(c, unname(built[ok])) else list()
+    n <- length(plots)
     ncol    <- min(as.integer(input$compose_ncol %||% "2"), max(n, 1L))
     rows    <- if (n) ceiling(n / ncol) else 0L
     w_mm    <- compose_width_mm_value()
     h_mm    <- max(rows, 1L) * (input$compose_panel_height_mm %||% 60)
     fig <- if (n >= 1 && fixed_mode()) {
       # v2.15: every panel keeps its fixed panel size; the grid is as wide / tall as its cells need
-      items <- lapply(names(plots), function(ty) fixed_figure(plots[[ty]] + labs(tag = NULL), ty))
+      items <- lapply(names(plots), function(nm) fixed_figure(plots[[nm]] + labs(tag = NULL), sub(":.*$", "", nm)))
       g <- compose_fixed_figure(items, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
                                 font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a",
                                 tags_on = isTRUE(input$compose_tags %||% TRUE))
@@ -5817,7 +6085,7 @@ server <- function(input, output, session) {
                      tags_on = isTRUE(input$compose_tags %||% TRUE))
     else NULL
     list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
-         types = names(plots), width_mm = w_mm, height_mm = h_mm)
+         types = unique(sub(":.*$", "", names(plots))), width_mm = w_mm, height_mm = h_mm)
   })
   compose_size_in <- function() { i <- compose_info(); c(i$width_mm, i$height_mm) / 25.4 }
   compose_plot_current <- function() {
@@ -6183,7 +6451,8 @@ server <- function(input, output, session) {
     blank <- input$blank_od %||% 0
     s2 <- paste0(
       if (is.numeric(blank) && is.finite(blank) && blank != 0) paste0("Readings were blank-corrected by subtracting ", blank, ". ") else "",
-      if (isTRUE(input$enable_time_filter)) "Only the displayed time window was analysed. " else "",
+      if (isTRUE(input$enable_time_filter) || nzchar(time_windows_text())) "Only the displayed time window was analysed. " else "",
+      if (nzchar(time_windows_text())) paste0("Per-sample time windows: ", time_windows_text(), ". ") else "",
       "At each time point the mean of the replicates was plotted. ", err)
     win <- input$metrics_smooth_window %||% 5
     pw  <- input$metrics_peak_smooth_window %||% 1
@@ -6366,6 +6635,69 @@ server <- function(input, output, session) {
     }
   )
 
+  # ── Download all figures (v2.18) ─────────────────────────────────────────────
+  # One SVG and one PNG of the main figure, of every analysis figure that renders for the current data and of
+  # the composed figure, each at the size it has in the app (the same sized file names as the single downloads),
+  # plus figure_legend.txt and methods.txt. A figure that returns the "not available" placeholder (or fails) is
+  # not written; SKIPPED.txt lists it with the reason.
+  all_figures_folder <- function() { mm <- bundle_size_mm(); sprintf("all_figures_%dx%dmm", mm[1], mm[2]) }
+  placeholder_reason <- function(p) {
+    lab <- tryCatch(p$layers[[1]]$aes_params$label, error = function(e) NULL)
+    if (is.character(lab) && length(lab) == 1) gsub("\\s+", " ", sub("^(Plot error|Figure not available): *", "", lab)) else "not available"
+  }
+  output$downloadAllFigures <- downloadHandler(
+    filename = function() paste0(all_figures_folder(), ".", bundle_archive_kind()),
+    content  = function(file) {
+      req(rv$data, input$selected_samples)
+      tmp  <- tempfile("allfig_"); dir.create(tmp)
+      on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+      fold <- all_figures_folder(); dir <- file.path(tmp, fold); dir.create(dir)
+      skipped <- character(0)
+      # an SVG and a PNG of one figure: obj (ggplot or fixed-panel gtable), size in inches
+      write_pair <- function(obj, stem, w_in, h_in) {
+        for (fmt in c("svg", "png")) {
+          args <- list(filename = file.path(dir, paste0(stem, ".", fmt)), plot = obj, device = export_device(fmt),
+                       width = w_in, height = h_in, units = "in", bg = "white", limitsize = FALSE)
+          if (identical(fmt, "png")) args$dpi <- export_dpi_for("png", w_in, h_in)
+          do.call(ggsave, args)
+        }
+      }
+      attempt <- function(label, expr) tryCatch(expr, error = function(e)
+        skipped <<- c(skipped, paste0(label, ": ", friendly_error_message(e))))
+      attempt("Lysis curve (main)", { sz <- export_size_in(); write_pair(main_plot_obj(), main_file_stem(), sz[1], sz[2]) })
+      for (ty in unname(ANALYSIS_FIGURE_CHOICES)) {
+        lab <- names(ANALYSIS_FIGURE_CHOICES)[match(ty, ANALYSIS_FIGURE_CHOICES)]
+        attempt(lab, {
+          p <- generate_analysis_plot(ty)
+          if (is_placeholder_plot(p)) {
+            skipped <- c(skipped, paste0(lab, " [", ty, "]: ", placeholder_reason(p)))
+          } else {
+            if (fixed_mode()) { g <- fixed_figure(p, ty); sz <- size_from_grob(g, ty); obj <- g }
+            else { sz <- export_size_in(); obj <- p }
+            write_pair(obj, analysis_file_stem(ty, if (fixed_mode()) sz), sz[1], sz[2])
+          }
+        })
+      }
+      if (has_patchwork) attempt("Composed figure", {
+        comp <- compose_info()
+        if (is.null(comp$plot)) skipped <- c(skipped, "Composed figure: no panel is available for this selection.")
+        else {
+          write_pair(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+          if (length(comp$skipped))
+            skipped <- c(skipped, paste0("Composed figure, panel left out: ", comp$skipped))
+        }
+      }) else skipped <- c(skipped, "Composed figure: the 'patchwork' package is not installed.")
+      writeLines(enc2utf8(trimws(figure_legend_string())), file.path(dir, "figure_legend.txt"), useBytes = TRUE)
+      mth <- trimws(input$methods_text %||% "")
+      if (!nzchar(mth)) mth <- trimws(tryCatch(draft_methods_text(), error = function(e) ""))   # the drafted paragraph when the box is empty
+      writeLines(enc2utf8(mth), file.path(dir, "methods.txt"), useBytes = TRUE)
+      if (length(skipped))
+        writeLines(enc2utf8(c("Figures that were not written (not available for the current data and settings):", "", skipped)),
+                   file.path(dir, "SKIPPED.txt"), useBytes = TRUE)
+      write_bundle_archive(file, tmp, fold)
+    }
+  )
+
   # Shared metadata for both report formats
   report_meta <- function() {
     samps <- input$selected_samples
@@ -6376,6 +6708,10 @@ server <- function(input, output, session) {
              if (length(excl)) paste0("; excluded points: ", paste(sort(excl), collapse = ", "))
              else "")
     } else "none (all time points shown)"
+    tw_txt <- time_windows_text(samps)   # v2.18: per-sample windows, listed after the global filter
+    if (nzchar(tw_txt))
+      filter_txt <- if (isTRUE(input$enable_time_filter)) paste0(filter_txt, "; per-sample windows: ", tw_txt)
+                    else paste0("no global filter; per-sample windows: ", tw_txt)
     error_txt <- if (input$error_type == "none") "none" else
       paste0(switch(input$error_type, sd = "SD", sem = "SEM", ci95 = "95% CI"),
              if (!is.null(input$error_multiplier) && input$error_multiplier != 1)
