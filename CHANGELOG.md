@@ -1,5 +1,64 @@
 # Changelog
 
+## v2.19.0 — 2026-10-20
+
+**Curve fitting tab, phenotype heatmap, extraction tables and the all-metrics comparison.**
+The v2.18 engine functions (`fit_growth_models`, `phenotype_matrix`, `compare_all_metrics`,
+`od_at_times`, `time_to_od`, ...) now have a user interface. Nothing changes the default
+main figure (the v2.9 byte-identical check is unchanged); every new input has an
+`APP_DEFAULTS` entry and is saved with the settings.
+
+- **Curve fitting tab** (new, after Statistics). Inputs: `fit_models` (Logistic / Gompertz /
+  Baranyi, all by default), `fit_until` ("Up to the peak" or "Whole curve"), `fit_log` (fit
+  ln(OD/OD0)), `fit_level` ("Mean curve" or "Each replicate"), `fit_show` ("Best model by
+  AIC" or "All converged models"). One reactive, `fit_results()`, holds the fit table, so the
+  figure, the tables, the reports, the bundle and the methods sentence share one computation,
+  made only when the fit inputs or the data change.
+  - **Figure** (analysis type `fit_overlay`; also in the Analysis figures select, the composer
+    and Download all figures): the mean curve as points with the main figure's error measure
+    as whiskers, the fitted curve of each sample on a 200-point time grid from
+    `predict_growth_model()` (solid = best model by AIC; with "All converged models" the others
+    are thin and dashed; at replicate level one thin curve per replicate), the sample colours
+    and shapes of the main figure, `y_scale_type` for the y axis, points after the peak in grey
+    when the fit stops there. Same theme, fixed square panel and export as every analysis
+    figure; its own preview and download on the tab.
+  - **Parameter table**: sample, (replicate), model, best (a tick), converged, points, A, mu_max,
+    "Lag (time units)" = the fit's start time + its `lag` (the fit lag is relative to the first
+    fitted point), doubling time = ln 2 / mu_max (none when the fit is not on the ln scale), R²,
+    AIC, the three standard errors and the engine's `message`, at 3 significant digits, with
+    the poorly determined fits highlighted. CSV button (all rows, unformatted). At replicate
+    level a second table gives mean ± SD of A, mu_max and the absolute lag per sample and model
+    over the converged replicates, with its own CSV.
+  - **Notes** under the controls: the fit range, the ln-scale meaning of mu_max, the lag
+    convention, how to read AIC on short curves, and every row that carries a `message`
+    ("only 5 points: parameters are poorly determined" in bold).
+- **Phenotype heatmap** (analysis type `phenotype_heatmap`): `phenotype_matrix()` on the curve
+  metrics, samples (rows, sample order) by metrics (columns). `pheno_metrics` (multi-select over
+  every metric label plus the other numeric columns of the metrics table; default lysis onset,
+  OD drop, lysis efficiency, μmax, AUC, infection strength, extinction time, time of first
+  peak), `pheno_scale` (z-score / 0-1 range / raw), `pheno_values` (print the raw value in
+  each cell, axis-text size). z-scores use a blue-white-red scale centred at 0, the other
+  scales viridis; the legend title is "z-score", "scaled" or the unit. The panel is not forced
+  square (a non-curve kind, like the OD heatmap). Metrics that are undefined or constant across
+  the samples are left out and listed in a note.
+- **Extraction** (Statistics tab, before Methods text). **OD at chosen times**: `extract_times`
+  ("30, 60, 120"), `extract_method` (interpolate / nearest), a table of time, sample, mean, SD, n,
+  SEM and CI95, and per-replicate and summary downloads. **Time to threshold**:
+  `extract_threshold` (0.5), `extract_direction` (up / down), `extract_after` (start / peak),
+  the per-sample summary and the per-replicate crossings. Both use `prepare_replicate_data()`,
+  so they follow the filters, per-sample windows and blank. **All-metrics comparison**:
+  `compare_all_metrics()` over every metric with finite replicate values, with the current
+  statistics method and reference, its warnings, a CSV, and the note that `p_adj_bh_across` is
+  exploratory.
+- **Reports and bundle**: with "Include analysis figures and statistics" on, the HTML and PDF
+  reports gain a **Curve fits** section (the fit figure at export size, the parameter table,
+  the notes and warnings), the **Phenotype heatmap** figure, and **Extracted values** (the OD-at-times
+  table when times are typed, the time-to-threshold table while the threshold box is not empty).
+  The figure bundle adds `fits.csv` and the configured extraction CSVs. The drafted methods text
+  gains a sentence on the fitted models and range once the Curve fitting tab has been used.
+- Tests: `tests/test_v219_integration.R`; the report image counts in `tests/test_v211_analysis.R`
+  rose by two (the heatmap and the fit figure).
+
 ## v2.18.0 — 2026-10-20
 
 **Per-sample time windows, sample groups and facets, metric explorer, download all figures.**

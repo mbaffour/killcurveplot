@@ -377,6 +377,17 @@ without rescaling. Pick a figure, set its panel label (empty by default; the fil
   replicate* the replicate values as open circles. Optional sample-name labels
   at the points and a log x and / or y axis. Samples with no value for one of
   the metrics (a relative metric needs a reference sample) are left out.
+- **Fitted growth curves** (v2.19) — the mean curve with the logistic, Gompertz
+  and / or Baranyi fit drawn over it; the models, range and level are set on the
+  **Curve fitting** tab (see [Curve fitting](#curve-fitting)).
+- **Phenotype heatmap** (v2.19) — samples (rows) by curve metrics (columns),
+  filled with each metric's z-score across the samples (or its 0-1 range, or the
+  raw value) with the raw value printed in each cell. Choose the metrics and the
+  scale in the controls; the default set is lysis onset, OD drop, lysis
+  efficiency, μmax, AUC, infection strength, extinction time and time of first
+  peak. A metric that is undefined or the same in every sample is left out (and
+  named in a note), and the z-score is across the samples shown, so adding or
+  removing a sample changes every cell of a column.
 
 All of these show the **same error measure as the main figure** (SD, SEM or
 95% CI from the Error Bars panel) and the same sample order. A rendered set of
@@ -401,6 +412,34 @@ lysis curve, growth rate, normalized OD (or replicate overlay) and metric
 summary as small multiples; the statistics; and the Experiment Notebook
 fields you have filled in.
 
+### Curve fitting
+
+The **Curve fitting** tab (after Statistics) fits the logistic and Gompertz models
+(Zwietering et al. 1990) and the Baranyi-Roberts model (1994) to the growth phase of each
+curve, by non-linear least squares on ln(OD/OD0) (details and formulas in
+[docs/FITS_AND_EXTRACTION.md](docs/FITS_AND_EXTRACTION.md)). Controls: **Models**,
+**Fit** (*Up to the peak*, the growth before lysis, or *Whole curve*), **Fit ln(OD/OD0)**,
+**Fit to** (*Mean curve* or *Each replicate*) and **Draw** (*Best model by AIC*, or *All
+converged models*).
+
+- The **figure** shows the mean curve (points, whiskers = the main figure's error measure) with
+  the fitted curve of each sample on a fine time grid: solid for the best model by AIC, thin and
+  dashed for the others. Points after the peak are drawn in grey: they are not part of the fit.
+  It follows the figure theme, the fixed square panel and the export settings, and is also
+  available in Analysis figures, the composer and Download all figures.
+- The **parameter table** lists sample, (replicate), model, best (✓), converged, A, mu_max,
+  **Lag (time units)**, doubling time (ln 2 / mu_max), R², AIC, the standard errors and the
+  engine's message, with 3 significant digits; **Parameters (CSV)** has every row. With *Each
+  replicate*, a second table gives mean ± SD of A, mu_max and the lag per sample and model.
+- **Lag convention**: the fit's lag is measured from the first fitted point, so the table's lag is
+  the start time of the fit plus the fitted lag, an absolute time on the figure's axis.
+- **Read the fit, not only the AIC.** AIC can prefer a poorly determined Baranyi fit on a short
+  curve, and a lysis curve that peaks early leaves few points. Rows whose message says
+  "poorly determined" are highlighted; judge every fit against the curve drawn over the data.
+- The Methods draft (Statistics tab) names the fitted models and range once this tab has been
+  used, and the HTML and PDF reports get a **Curve fits** section (figure and table) when
+  *Include analysis figures and statistics* is on. The figure bundle adds `fits.csv`.
+
 ### Statistics tab
 
 The **Statistics** tab (after Dashboard) puts the descriptive statistics where you
@@ -411,7 +450,19 @@ the `DT` package installed the table is searchable and paged at 25 rows, and
 the definition of every metric below it, **Per-replicate metrics (mean ± SD)**, and
 **Replicate comparison** (the same pairwise, omnibus and post-hoc tables as the
 Analysis figures tab; method, reference and metric are set there). Every section
-has its own CSV button. **Methods text (editable)** starts empty: **Draft from
+has its own CSV button. Three sections extract values (v2.19), all following the time filters, the
+per-sample windows and the blank: **OD at chosen times** (type times such as `30, 60, 120`, choose
+linear interpolation or the nearest reading; a table of mean, SD, n, SEM and CI95 per time and sample,
+plus a per-replicate CSV; a time outside a curve's range is NA, never extrapolated), **Time to
+threshold** (the first time each replicate crosses an OD going up or down, searching from the start
+or from the peak, interpolated between readings; a per-sample summary and the per-replicate
+crossings; clear the threshold box to leave it out of the reports) and **All-metrics comparison**
+(every metric with finite replicate values compared with the reference sample by the current
+statistics method, with its warnings and a CSV; `p_adj_bh_across` is a Benjamini-Hochberg
+adjustment over the whole table and is exploratory: the metrics are correlated and three replicates
+give little power, so use it to rank metrics for follow-up, not as a confirmatory result). Typed
+times and a threshold also add the tables to the HTML / PDF reports and the figure bundle.
+**Methods text (editable)** starts empty: **Draft from
 current settings** writes a methods paragraph (measurement, replicates and n,
 how the mean and error statistic were computed, the μmax window, peak mode,
 lysis threshold and smoothing, and the statistical tests) that you then edit

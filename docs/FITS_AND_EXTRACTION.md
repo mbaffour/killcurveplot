@@ -143,6 +143,31 @@ are ignored.
   the replicate frame (columns `variable` and `time`), so a trimmed curve can feed the fits and
   the metrics.
 
+## In the app (v2.19)
+
+The functions above are used by three places in the app; none of them changes the main figure.
+
+* **Curve fitting tab** (after Statistics): inputs `fit_models` (logistic / gompertz / baranyi),
+  `fit_until` (`peak` / `all`), `fit_log` (fit `ln(od / od0)`), `fit_level` (`mean`: one fit per sample
+  from the mean curve with `fit_growth_models_by_sample`; `replicate`: one per replicate with
+  `fit_growth_models_by_replicate`) and `fit_show` (`best` / `all`). The fit table is one reactive,
+  shared by the figure, the tables, the reports, the bundle and the methods sentence. The table adds
+  `best` (the `best_model()` row of each sample / replicate), `lag_abs = t0 + lag` (shown as "Lag (time
+  units)") and `doubling_time = ln 2 / mu_max` (only for a ln-scale fit, where `mu_max` is a specific
+  rate). The figure (analysis type `fit_overlay`) draws the mean curve and `predict_growth_model()` on a
+  200-point grid over each fitted range; points after the peak are grey. Rows with a `message`
+  ("poorly determined") are highlighted: AIC can prefer such a fit, so judge it against the drawn curve.
+* **Phenotype heatmap** (analysis type `phenotype_heatmap`): inputs `pheno_metrics`, `pheno_scale`
+  (`z` / `range` / `none`), `pheno_values`; `phenotype_matrix()` on the current curve metrics, with the
+  `dropped` metrics listed in a note.
+* **Statistics tab**, three sections: **OD at chosen times** (`extract_times`, `extract_method`;
+  `od_at_times()` and `summarise_od_at_times()`), **Time to threshold** (`extract_threshold`,
+  `extract_direction`, `extract_after`; `time_to_od()` with `after = "peak"` or from the start, and
+  `summarise_time_to_od()`) and **All-metrics comparison** (`compare_all_metrics()` with the
+  current statistics method and reference; `p_adj_bh_across` is exploratory). They use the app's
+  replicate frame, so the time filters, per-sample windows (`apply_sample_time_windows` is the
+  engine form of the same trimming) and the blank apply.
+
 ## References
 
 * Zwietering MH, Jongenburger I, Rombouts FM, van 't Riet K (1990) Modeling of the bacterial
