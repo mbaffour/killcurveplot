@@ -3138,6 +3138,77 @@ bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.
   res$n_boot_ok <- as.integer(res$n_boot_ok); res$n_replicates <- as.integer(res$n_replicates)
   res[, cols, drop = FALSE]
 }
+
+# Curve difference versus a reference sample, per time point.
+# pd: time, variable, mean_value (mean curves). mode "difference": diff = mean - reference mean;
+# "log2_ratio": diff = log2(mean / reference mean), NA where either mean is <= 0. With rep_pd
+# (time, variable, replicate, value) every time point also gets a Welch two-sample t-test of the
+# sample's replicates against the reference's (on the raw readings; on log2 readings for
+# "log2_ratio", positive readings only), Holm-adjusted across the sample's time points. The
+# reference's own rows have diff 0 and NA p. Exploratory: n is small and the tests are per time
+# point. Returns sample, time, mean_value, ref_mean, diff[, n, n_ref, p, p_adj_holm, stars].
+curve_difference <- function(pd, ref_sample, rep_pd = NULL, mode = c("difference", "log2_ratio")) {
+  mode <- match.arg(mode)
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  pd <- pd[is.finite(pd$time), , drop = FALSE]
+  if (is.null(ref_sample) || !nzchar(ref_sample) || !ref_sample %in% as.character(pd$variable))
+    stop("reference sample '", ref_sample, "' is not in the data")
+  rg <- pd[as.character(pd$variable) == ref_sample & is.finite(pd$mean_value), , drop = FALSE]
+  ref_mean <- tapply(rg$mean_value, rg$time, mean)
+  dfn <- function(x, r) {
+    if (mode == "difference") x - r
+    else ifelse(is.finite(x) & is.finite(r) & x > 0 & r > 0, log2(x / r), NA_real_)
+  }
+  out <- do.call(rbind, lapply(unique(as.character(pd$variable)), function(v) {
+    g <- pd[as.character(pd$variable) == v, , drop = FALSE]
+    g <- g[order(g$time), , drop = FALSE]
+    r <- unname(ref_mean[match(as.character(g$time), names(ref_mean))])
+    d <- if (v == ref_sample) ifelse(is.finite(g$mean_value) & is.finite(r), 0, NA_real_) else dfn(g$mean_value, r)
+    data.frame(sample = v, time = g$time, mean_value = g$mean_value, ref_mean = r, diff = d,
+               stringsAsFactors = FALSE)
+  }))
+  rownames(out) <- NULL
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(out)
+
+  rep_pd <- rep_pd[is.finite(rep_pd$time) & is.finite(rep_pd$value), , drop = FALSE]
+  vals <- function(v, tm) {
+    x <- rep_pd$value[as.character(rep_pd$variable) == v & rep_pd$time == tm]
+    if (mode == "log2_ratio") log2(x[x > 0]) else x
+  }
+  n_s <- n_r <- p <- rep(NA_real_, nrow(out))
+  for (i in seq_len(nrow(out))) {
+    x <- vals(out$sample[i], out$time[i])
+    y <- vals(ref_sample, out$time[i])
+    n_s[i] <- length(x); n_r[i] <- length(y)
+    if (out$sample[i] == ref_sample || length(x) < 2 || length(y) < 2) next
+    p[i] <- tryCatch(stats::t.test(x, y, var.equal = FALSE)$p.value, error = function(e) NA_real_)
+  }
+  out$n <- as.integer(n_s); out$n_ref <- as.integer(n_r)
+  out$p <- p
+  out$p_adj_holm <- NA_real_
+  for (v in unique(out$sample)) {
+    ix <- which(out$sample == v)
+    out$p_adj_holm[ix] <- stats::p.adjust(out$p[ix], method = "holm")
+  }
+  out$stars <- sig_stars(out$p_adj_holm)
+  out$stars[is.na(out$p_adj_holm)] <- NA_character_
+  out
+}
+
+# First time at which each sample separates from the reference: the earliest time with
+# p_adj_holm < alpha in a curve_difference() table that carries p-values. NA if none (and for
+# the reference itself). Returns sample, first_separation_time, one row per sample.
+first_separation_time <- function(x, alpha = 0.05) {
+  if (is.null(x) || nrow(x) == 0) return(data.frame(sample = character(0), first_separation_time = numeric(0)))
+  if (!"p_adj_holm" %in% names(x)) stop("x needs p-values: call curve_difference() with rep_pd")
+  smp <- unique(as.character(x$sample))
+  data.frame(sample = smp,
+             first_separation_time = vapply(smp, function(v) {
+               s <- x$sample == v & is.finite(x$p_adj_holm) & x$p_adj_holm < alpha
+               if (any(s)) min(x$time[s]) else NA_real_
+             }, numeric(1), USE.NAMES = FALSE),
+             stringsAsFactors = FALSE)
+}
 # ── end v2.20 engine ──
 
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────

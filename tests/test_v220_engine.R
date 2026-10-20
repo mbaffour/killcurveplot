@@ -236,6 +236,75 @@ w12 <- env$bootstrap_metrics(mk_rep(12), "max_od", n_boot = 500); w12 <- w12$ci_
 check(sprintf("a larger replicate count gives a narrower interval (width %.3f at n = 3 vs %.3f at n = 12)", w3, w12),
       is.finite(w3) && is.finite(w12) && w12 < w3)
 
+# ── 3. Curve differences versus the reference ─────────────────────────────────
+cat("\n--- curve_difference / first_separation_time: demo ---\n")
+cd0 <- env$curve_difference(dm$pd, "Uninfected")
+check("without rep_pd: sample, time, mean_value, ref_mean, diff only; one row per sample x time",
+      identical(names(cd0), c("sample", "time", "mean_value", "ref_mean", "diff")) && nrow(cd0) == nrow(dm$pd))
+cd <- env$curve_difference(dm$pd, "Uninfected", dm$rep_pd)
+check("with rep_pd: adds n, n_ref, p, p_adj_holm and stars",
+      identical(names(cd), c("sample", "time", "mean_value", "ref_mean", "diff", "n", "n_ref", "p", "p_adj_holm", "stars")) &&
+      all(cd$n == 3L) && all(cd$n_ref == 3L))
+ru <- cd[cd$sample == "Uninfected", ]
+check("the reference's own diff is 0 and p / p_adj_holm / stars are NA", all(ru$diff == 0) && all(is.na(ru$p)) &&
+      all(is.na(ru$p_adj_holm)) && all(is.na(ru$stars)))
+p10 <- cd[cd$sample == "Phage MOI 10", ]
+check("diff = mean - reference mean", all(abs(p10$diff - (p10$mean_value - ru$mean_value)) < 1e-12))
+check("p is the Welch t-test of the replicates at that time (t = 75)", {
+  x <- dm$rep_pd$value[dm$rep_pd$variable == "Phage MOI 10" & dm$rep_pd$time == 75]
+  y <- dm$rep_pd$value[dm$rep_pd$variable == "Uninfected" & dm$rep_pd$time == 75]
+  near(p10$p[p10$time == 75], t.test(x, y, var.equal = FALSE)$p.value) })
+check("p_adj_holm = Holm over the sample's time points, never below the raw p",
+      near(max(abs(p10$p_adj_holm - p.adjust(p10$p, "holm")), na.rm = TRUE), 0) &&
+      all(p10$p_adj_holm >= p10$p - 1e-12, na.rm = TRUE) && all(p10$p_adj_holm <= 1, na.rm = TRUE))
+check("stars follow the app's convention (sig_stars of p_adj_holm)",
+      identical(p10$stars, ifelse(is.na(p10$p_adj_holm), NA_character_, env$sig_stars(p10$p_adj_holm))))
+check("a phage curve is not separated from the reference before the first sampled decline (t = 0 is NS)",
+      !(p10$p_adj_holm[p10$time == 0] < 0.05))
+
+fs <- env$first_separation_time(cd)
+check("first_separation_time: one row per sample (reference included, NA)",
+      identical(names(fs), c("sample", "first_separation_time")) && nrow(fs) == 3 &&
+      is.na(fs$first_separation_time[fs$sample == "Uninfected"]))
+for (s in c("Phage MOI 10", "Phage MOI 0.1")) {
+  f <- fs$first_separation_time[fs$sample == s]
+  check(sprintf("%s separates from Uninfected after its lysis onset (first separation t = %s > 45)", s, f),
+        is.finite(f) && f > 45)
+}
+check("first separation is not before the lysis onset of the sample",
+      all(vapply(c("Phage MOI 10", "Phage MOI 0.1"), function(s) {
+        g <- cv(dm$pd, s); lt <- env$compute_one_curve_metrics(g$t, g$od, s)$lysis_time
+        fs$first_separation_time[fs$sample == s] >= lt - 15 }, logical(1))))
+check("alpha is honoured: alpha = 1e-12 leaves nothing, alpha = 1 gives the first testable time",
+      all(is.na(env$first_separation_time(cd, 1e-12)$first_separation_time)) &&
+      env$first_separation_time(cd, 1.01)$first_separation_time[2] == min(p10$time[is.finite(p10$p_adj_holm)]))
+
+cat("\n--- curve_difference: log2 ratio, edge cases ---\n")
+cl <- env$curve_difference(dm$pd, "Uninfected", dm$rep_pd, mode = "log2_ratio")
+p10l <- cl[cl$sample == "Phage MOI 10", ]
+check("log2_ratio: diff = log2(mean / reference mean); the reference is 0",
+      all(abs(p10l$diff - log2(p10l$mean_value / p10l$ref_mean)) < 1e-12) && all(cl$diff[cl$sample == "Uninfected"] == 0))
+check("log2_ratio: the Welch test is on log2 readings", {
+  x <- log2(dm$rep_pd$value[dm$rep_pd$variable == "Phage MOI 10" & dm$rep_pd$time == 90])
+  y <- log2(dm$rep_pd$value[dm$rep_pd$variable == "Uninfected" & dm$rep_pd$time == 90])
+  near(p10l$p[p10l$time == 90], t.test(x, y)$p.value) })
+nz <- dm$pd; nz$mean_value[nz$variable == "Phage MOI 10" & nz$time == 90] <- 0
+check("log2_ratio: a non-positive mean gives NA, not -Inf",
+      is.na(env$curve_difference(nz, "Uninfected", mode = "log2_ratio")$diff[
+        nz$variable == "Phage MOI 10" & nz$time == 90]))
+check("unknown reference is an error; NULL / empty pd gives NULL",
+      inherits(try(env$curve_difference(dm$pd, "nope"), silent = TRUE), "try-error") &&
+      is.null(env$curve_difference(NULL, "Uninfected")) && is.null(env$curve_difference(dm$pd[0, ], "Uninfected")))
+one <- dm$rep_pd[dm$rep_pd$replicate == 1, ]
+c1 <- env$curve_difference(dm$pd, "Uninfected", one)
+check("a single replicate per group gives NA p (cannot test) but a diff",
+      all(is.na(c1$p)) && all(is.finite(c1$diff)) && all(is.na(c1$stars)))
+check("essentially constant readings in both groups give NA p, not an error",
+      { k <- dm$rep_pd; k$value <- 0.5; z <- env$curve_difference(dm$pd, "Uninfected", k); all(is.na(z$p)) })
+check("first_separation_time needs p-values and handles empty input",
+      inherits(try(env$first_separation_time(cd0), silent = TRUE), "try-error") &&
+      nrow(env$first_separation_time(cd[0, ])) == 0)
+
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed ============\n", pass, fail))
 if (fail > 0) quit(status = 1)
