@@ -158,6 +158,84 @@ check("curve_phases_by_sample forwards options and handles NULL / empty",
       { b <- env$curve_phases_by_sample(dm$pd, lysis_threshold = 0.30)
         b$t_start[b$sample == "Phage MOI 10" & b$phase == "lysis"] > ph10$t_start[ph10$phase == "lysis"] })
 
+# ── 2. Bootstrap confidence intervals ─────────────────────────────────────────
+cat("\n--- bootstrap_metrics: demo replicates ---\n")
+mets <- c("lysis_time", "max_od", "mu_max")
+tm <- system.time(bt <- env$bootstrap_metrics(dm$rep_pd, mets, n_boot = 500, seed = 1))
+check(sprintf("500 draws x 3 samples x 13 points run in < 5 s (took %.2f s)", tm[["elapsed"]]), tm[["elapsed"]] < 5)
+check("result: one row per sample x metric with the documented columns",
+      identical(names(bt), c("sample", "metric", "estimate", "boot_mean", "ci_low", "ci_high",
+                             "n_replicates", "n_boot_ok", "method")) &&
+      nrow(bt) == 9 && all(bt$method == "percentile") && all(bt$n_replicates == 3L))
+bl <- function(s, m) bt[bt$sample == s & bt$metric == m, ]
+for (s in c("Phage MOI 10", "Phage MOI 0.1")) {
+  r <- bl(s, "lysis_time")
+  check(sprintf("%s: lysis_time CI is finite and contains the estimate (%.1f in [%.1f, %.1f])",
+                s, r$estimate, r$ci_low, r$ci_high),
+        is.finite(r$ci_low) && is.finite(r$ci_high) && r$ci_low <= r$estimate && r$estimate <= r$ci_high)
+  check(sprintf("%s: every draw lysed (n_boot_ok = 500)", s), r$n_boot_ok == 500L)
+}
+ru <- bl("Uninfected", "lysis_time")
+check("Uninfected: lysis_time is NA with no successful draws",
+      is.na(ru$estimate) && is.na(ru$ci_low) && is.na(ru$ci_high) && is.na(ru$boot_mean) && ru$n_boot_ok == 0L)
+check("estimate = the metric of the observed mean curve (same as the Curve Metrics table)",
+      { cm <- env$compute_curve_metrics(dm$pd)
+        all(vapply(seq_len(nrow(bt)), function(i) {
+          e <- cm[[bt$metric[i]]][cm$sample == bt$sample[i]]
+          (is.na(e) && is.na(bt$estimate[i])) || isTRUE(all.equal(e, bt$estimate[i])) }, logical(1))) })
+check("ci_low <= ci_high wherever defined; boot_mean and the interval are NA together",
+      all(bt$ci_low <= bt$ci_high, na.rm = TRUE) && all(!is.na(bt$ci_low) == !is.na(bt$boot_mean)))
+
+cat("\n--- bootstrap_metrics: reproducibility, options and edge cases ---\n")
+bt2 <- env$bootstrap_metrics(dm$rep_pd, mets, n_boot = 500, seed = 1)
+check("same seed -> identical result", identical(bt, bt2))
+bt3 <- env$bootstrap_metrics(dm$rep_pd, mets, n_boot = 500, seed = 2)
+check("a different seed changes the draws (boot_mean of max_od differs)",
+      !isTRUE(all.equal(bt$boot_mean[bt$metric == "max_od"], bt3$boot_mean[bt3$metric == "max_od"])))
+only10 <- env$bootstrap_metrics(dm$rep_pd[dm$rep_pd$variable == "Phage MOI 10", ], "lysis_time", n_boot = 500, seed = 1)
+check("a sample's draws do not depend on which other samples are loaded",
+      isTRUE(all.equal(only10[, setdiff(names(only10), "sample")],
+                       bl("Phage MOI 10", "lysis_time")[, setdiff(names(only10), "sample")], check.attributes = FALSE)))
+set.seed(123); a1 <- runif(3)
+set.seed(123); invisible(env$bootstrap_metrics(dm$rep_pd, "max_od", n_boot = 50, seed = 9)); a2 <- runif(3)
+check("the caller's RNG stream is left untouched", identical(a1, a2))
+b50 <- env$bootstrap_metrics(dm$rep_pd, mets, n_boot = 50, seed = 1)
+check("n_boot = 50 runs; the successful-draw count is at most 50",
+      nrow(b50) == 9 && all(b50$n_boot_ok <= 50L) && b50$n_boot_ok[b50$sample == "Phage MOI 10" & b50$metric == "lysis_time"] == 50L)
+b10 <- env$bootstrap_metrics(dm$rep_pd, "lysis_time", n_boot = 10, seed = 1)
+check("fewer than 20 successful draws -> NA interval, but the estimate and draw count are still reported",
+      all(is.na(b10$ci_low)) && all(is.na(b10$boot_mean)) && any(is.finite(b10$estimate)) && max(b10$n_boot_ok) == 10L)
+one <- dm$rep_pd[dm$rep_pd$replicate == 1, ]
+b1 <- env$bootstrap_metrics(one, c("max_od", "lysis_time"), n_boot = 200)
+check("a single replicate gives NA intervals (estimate kept, n_replicates = 1)",
+      all(b1$n_replicates == 1L) && all(is.na(b1$ci_low)) && all(b1$n_boot_ok == 0L) && is.finite(b1$estimate[b1$metric == "max_od"][1]))
+check("unknown metric names are an error; empty input and no metrics give a zero-row frame",
+      inherits(try(env$bootstrap_metrics(dm$rep_pd, "no_such_metric"), silent = TRUE), "try-error") &&
+      nrow(env$bootstrap_metrics(NULL, "max_od")) == 0 && nrow(env$bootstrap_metrics(dm$rep_pd, character(0))) == 0)
+gap <- dm$rep_pd; gap$value[gap$variable == "Uninfected" & gap$replicate == 2 & gap$time == 75] <- NA
+bg <- env$bootstrap_metrics(gap, "max_od", n_boot = 100)
+check("a missing reading in one replicate is averaged over the replicates that have it (no error)",
+      nrow(bg) == 3 && all(is.finite(bg$estimate)) && all(is.finite(bg$ci_low)))
+bc <- env$bootstrap_metrics(dm$rep_pd, "max_od", n_boot = 500, conf = 0.5)
+bw <- bt[bt$metric == "max_od", ]
+check("conf = 0.5 gives a narrower interval than conf = 0.95",
+      all((bc$ci_high - bc$ci_low) <= (bw$ci_high - bw$ci_low) + 1e-12) && any((bc$ci_high - bc$ci_low) < (bw$ci_high - bw$ci_low)))
+allm <- setdiff(names(env$compute_one_curve_metrics(1:6, c(1, 2, 3, 4, 5, 6), "p")), c("sample", "steepest_decline_interval"))
+tm2 <- system.time(ba <- env$bootstrap_metrics(dm$rep_pd, allm, n_boot = 500))
+check(sprintf("every numeric metric at once (%d) also runs in < 5 s (%.2f s)", length(allm), tm2[["elapsed"]]),
+      nrow(ba) == 3 * length(allm) && tm2[["elapsed"]] < 5)
+
+# n = 3 intervals are wide and coarse: the width shrinks with more replicates from the same process
+set.seed(7)
+tt2 <- seq(0, 180, by = 15)
+mk_rep <- function(R) do.call(rbind, lapply(seq_len(R), function(r)
+  data.frame(time = tt2, variable = "S", replicate = r,
+             value = 1.4 / (1 + (1.4 / 0.05 - 1) * exp(-0.028 * tt2)) * (1 + rnorm(length(tt2), 0, 0.12)))))
+w3  <- env$bootstrap_metrics(mk_rep(3),  "max_od", n_boot = 500); w3  <- w3$ci_high - w3$ci_low
+w12 <- env$bootstrap_metrics(mk_rep(12), "max_od", n_boot = 500); w12 <- w12$ci_high - w12$ci_low
+check(sprintf("a larger replicate count gives a narrower interval (width %.3f at n = 3 vs %.3f at n = 12)", w3, w12),
+      is.finite(w3) && is.finite(w12) && w12 < w3)
+
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed ============\n", pass, fail))
 if (fail > 0) quit(status = 1)

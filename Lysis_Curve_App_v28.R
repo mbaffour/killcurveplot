@@ -3043,6 +3043,101 @@ curve_phases_by_sample <- function(pd, ...) {
   if (!length(out)) return(NULL)
   do.call(rbind, c(out, list(make.row.names = FALSE)))
 }
+
+# Percentile-bootstrap confidence intervals for mean-curve metrics, resampling REPLICATES.
+# rep_pd: long un-averaged data (time, variable, replicate, value). For each sample the replicate
+# curves are drawn with replacement (n_replicates draws), averaged at every time point, and the
+# metrics engine is run on that resampled mean curve; the interval is the percentile interval of
+# the finite draws. `estimate` is the metric of the observed mean curve (what the Curve Metrics
+# table reports). NA interval when the sample has < 2 replicates or < 20 finite draws.
+# The draws for one sample depend only on `seed` and the sample's replicate count, so they do
+# not change when other samples are loaded. The caller's RNG state is left untouched.
+bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.95,
+                              smooth_window = 5, peak_smooth_window = 1,
+                              peak_mode = "global", lysis_threshold = 0.05) {
+  cols <- c("sample", "metric", "estimate", "boot_mean", "ci_low", "ci_high",
+            "n_replicates", "n_boot_ok", "method")
+  empty <- data.frame(sample = character(0), metric = character(0), estimate = numeric(0),
+                      boot_mean = numeric(0), ci_low = numeric(0), ci_high = numeric(0),
+                      n_replicates = integer(0), n_boot_ok = integer(0), method = character(0),
+                      stringsAsFactors = FALSE)
+  if (is.null(rep_pd) || nrow(rep_pd) == 0 || !length(metrics)) return(empty)
+  n_boot <- as.integer(n_boot)
+  if (!is.finite(n_boot) || n_boot < 1) stop("n_boot must be a positive integer")
+  if (!is.finite(conf) || conf <= 0 || conf >= 1) stop("conf must be between 0 and 1")
+  metrics <- unique(as.character(metrics))
+  probe <- compute_one_curve_metrics(c(0, 1, 2, 3, 4, 5), c(1, 2, 3, 4, 5, 6), "probe")
+  bad <- setdiff(metrics, names(probe))
+  if (length(bad)) stop("unknown metric(s): ", paste(bad, collapse = ", "))
+  alpha <- (1 - conf) / 2
+
+  # keep the caller's RNG stream intact
+  had_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = globalenv(), inherits = FALSE) else NULL
+  on.exit({
+    if (had_seed) assign(".Random.seed", old_seed, envir = globalenv())
+    else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
+  }, add = TRUE)
+
+  metric_vec <- function(tv, ov, nm) {
+    ok <- is.finite(tv) & is.finite(ov)
+    r <- tryCatch(compute_one_curve_metrics(tv[ok], ov[ok], nm, smooth_window, peak_smooth_window,
+                                            peak_mode, lysis_threshold),
+                  error = function(e) NULL)
+    if (is.null(r)) return(rep(NA_real_, length(metrics)))
+    vapply(metrics, function(k) suppressWarnings(as.numeric(r[[k]][1])), numeric(1))
+  }
+
+  rep_pd <- rep_pd[is.finite(rep_pd$time), , drop = FALSE]
+  out <- lapply(unique(as.character(rep_pd$variable)), function(v) {
+    g     <- rep_pd[as.character(rep_pd$variable) == v, , drop = FALSE]
+    times <- sort(unique(g$time))
+    reps  <- unique(g$replicate[is.finite(g$value)])
+    R     <- length(reps)
+    na_row <- function(est) data.frame(sample = v, metric = metrics, estimate = est,
+                                       boot_mean = NA_real_, ci_low = NA_real_, ci_high = NA_real_,
+                                       n_replicates = R, n_boot_ok = 0L, method = "percentile",
+                                       stringsAsFactors = FALSE)
+    if (R == 0) return(na_row(rep(NA_real_, length(metrics))))
+    # time x replicate matrix, and its 0/1 "observed" companion
+    M <- matrix(NA_real_, length(times), R)
+    gi <- is.finite(g$value)
+    M[cbind(match(g$time[gi], times), match(g$replicate[gi], reps))] <- g$value[gi]
+    obs <- !is.na(M); M0 <- M; M0[!obs] <- 0
+    storage.mode(obs) <- "numeric"
+    est_curve <- rowSums(M0) / rowSums(obs)
+    estimate  <- metric_vec(times, est_curve, v)
+    if (R < 2) return(na_row(estimate))
+
+    set.seed(seed)
+    idx <- matrix(sample.int(R, R * n_boot, replace = TRUE), nrow = R)            # R x n_boot
+    cnt <- vapply(seq_len(n_boot), function(b) tabulate(idx[, b], nbins = R), numeric(R))  # R x n_boot
+    curves <- (M0 %*% cnt) / (obs %*% cnt)                                         # time x n_boot
+    key <- apply(cnt, 2, paste, collapse = ",")
+    # identical resamples (few replicates => few distinct resamples) give identical curves: run
+    # the engine once per distinct resample
+    uk <- unique(key)
+    first <- match(uk, key)
+    res <- vapply(first, function(b) metric_vec(times, curves[, b], v), numeric(length(metrics)))
+    res <- matrix(res, nrow = length(metrics))
+    draws <- res[, match(key, uk), drop = FALSE]                                   # metrics x n_boot
+
+    rows <- lapply(seq_along(metrics), function(i) {
+      x <- draws[i, ]; x <- x[is.finite(x)]
+      okn <- length(x)
+      good <- okn >= 20
+      qs <- if (good) stats::quantile(x, c(alpha, 1 - alpha), names = FALSE, type = 7) else c(NA_real_, NA_real_)
+      data.frame(sample = v, metric = metrics[i], estimate = estimate[i],
+                 boot_mean = if (good) mean(x) else NA_real_,
+                 ci_low = qs[1], ci_high = qs[2], n_replicates = R, n_boot_ok = okn,
+                 method = "percentile", stringsAsFactors = FALSE)
+    })
+    do.call(rbind, rows)
+  })
+  res <- do.call(rbind, c(out, list(make.row.names = FALSE)))
+  res$n_boot_ok <- as.integer(res$n_boot_ok); res$n_replicates <- as.integer(res$n_replicates)
+  res[, cols, drop = FALSE]
+}
 # ── end v2.20 engine ──
 
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
