@@ -2906,6 +2906,145 @@ apply_sample_time_windows <- function(df, windows) {
 
 # ── end v2.18 engine ──
 
+# ── v2.20 engine: curve phases, bootstrap intervals, curve differences ──
+# Pure functions (no Shiny session), tested by tests/test_v220_engine.R, documented in
+# docs/PHASES_AND_BOOTSTRAP.md. They do not change any existing metric: every phase
+# boundary is read back from compute_one_curve_metrics(), so the phases agree with the
+# reported numbers (and with the landmarks figure).
+
+# Centered rolling ln-OD slope, built exactly as compute_one_curve_metrics() builds the one
+# behind mu_max / lag_phase (positive readings only; a window touching a reading <= 0 gets no
+# slope). Returns NULL when the engine would not compute one (fewer than 3 points in the window).
+phase_ln_slopes <- function(t, od, smooth_window = 5) {
+  n   <- length(t)
+  win <- min(smooth_window, n)
+  if (!(n >= win && win >= 3)) return(NULL)
+  pos <- is.finite(od) & od > 0
+  lo  <- rep(NA_real_, n); lo[pos] <- log(od[pos])
+  rs  <- tryCatch(rolling_slope(t, lo, win), error = function(e) rep(NA_real_, n))
+  if (any(is.finite(od) & od <= 0)) {
+    off <- floor((win - 1) / 2)
+    for (s in seq_len(n - win + 1)) {
+      idx <- s:(s + win - 1)
+      if (any(!pos[idx])) rs[s + off] <- NA_real_
+    }
+  }
+  rs
+}
+
+# Growth / lysis phases of ONE curve, reconstructed from compute_one_curve_metrics().
+#   lag           t[1] -> lag_phase
+#   exponential   lag_phase -> first time after the fastest-growth window at which the rolling
+#                 ln-slope falls below 50 % of mu_max (the peak if that is earlier / never)
+#   deceleration  that time -> start of the stationary run, else -> lysis onset, else -> t[n]
+#   stationary    the longest contiguous run of points >= 95 % of the peak (the run behind
+#                 stat_phase_dur), clipped to start no earlier than the exponential end; it runs to
+#                 lysis onset, or to t[n] when no lysis is detected; omitted when the run does not
+#                 exist or lysis starts at/inside it
+#   lysis         lysis_time -> trough (the post-peak minimum behind residual_od)
+#   recovery      trough -> t[n] when recovery_slope is finite
+#   post-lysis    trough -> t[n] otherwise
+# Phases that do not apply, or have zero length, are omitted; the rest are contiguous and
+# cover t[1]..t[n]. A curve with no measurable growth (mu_max NA) is one "lag" phase.
+curve_phases <- function(t, od, smooth_window = 5, peak_mode = "global", lysis_threshold = 0.05) {
+  empty <- data.frame(phase = character(0), t_start = numeric(0), t_end = numeric(0),
+                      od_start = numeric(0), od_end = numeric(0), duration = numeric(0),
+                      stringsAsFactors = FALSE)
+  ok <- is.finite(t) & is.finite(od)
+  t <- t[ok]; od <- od[ok]
+  o <- order(t); t <- t[o]; od <- od[o]
+  n <- length(t)
+  if (n < 2 || t[n] <= t[1]) return(empty)
+
+  m <- compute_one_curve_metrics(t, od, "x", smooth_window = smooth_window, peak_mode = peak_mode,
+                                 lysis_threshold = lysis_threshold)
+  t1 <- t[1]; tn <- t[n]
+  emit <- function(ph, b) {
+    keep <- b[-1] > b[-length(b)]
+    ph <- ph[keep]; s <- b[-length(b)][keep]; e <- b[-1][keep]
+    if (!length(ph)) return(empty)
+    data.frame(phase = ph, t_start = s, t_end = e,
+               od_start = stats::approx(t, od, xout = s, ties = mean, rule = 2)$y,
+               od_end   = stats::approx(t, od, xout = e, ties = mean, rule = 2)$y,
+               duration = e - s, stringsAsFactors = FALSE)
+  }
+  lag_only <- function() emit("lag", c(t1, tn))
+  if (!is.finite(m$mu_max)) return(lag_only())
+
+  # peak and trough indices, recovered the way the engine anchors them
+  pk_idx <- which(t == m$time_max_od)[1]
+  if (is.na(pk_idx)) return(lag_only())
+  t_pk <- t[pk_idx]
+
+  # lag -> exponential
+  t_lag <- min(max(m$lag_phase, t1), t_pk)
+  if (!is.finite(t_lag)) t_lag <- t1
+
+  # exponential end: first rolling slope < 50 % of mu_max after the fastest-growth window
+  t_exp <- t_pk
+  rs <- phase_ln_slopes(t, od, smooth_window)
+  if (!is.null(rs)) {
+    valid <- which(is.finite(rs) & rs > 1e-10)
+    if (length(valid) && isTRUE(all.equal(max(rs[valid]), m$mu_max))) {
+      mu_idx <- valid[which.max(rs[valid])]
+      after  <- which(seq_len(n) > mu_idx & is.finite(rs) & rs < 0.5 * m$mu_max)
+      if (length(after)) t_exp <- min(t[after[1]], t_pk)
+    }
+  }
+  t_exp <- max(t_exp, t_lag)
+
+  lys <- m$lysis_time
+  has_lysis <- is.finite(lys)
+
+  # trough (post-peak minimum), as for residual_od / lysis_rate
+  t_tr <- NA_real_
+  if (has_lysis && pk_idx < n) {
+    post <- (pk_idx + 1):n
+    t_tr <- t[pk_idx + which.min(od[post])]
+  }
+
+  # stationary: the longest >= 95 %-of-peak run (the one behind stat_phase_dur)
+  s0 <- NA_real_
+  run <- if (pk_idx > 1) longest_true_run(od >= 0.95 * m$max_od) else NULL
+  if (!is.null(run) && run[["end"]] > run[["start"]]) {
+    r0 <- t[run[["start"]]]; r1 <- t[run[["end"]]]
+    s0 <- max(r0, t_exp)
+    end_ref <- if (has_lysis) lys else tn
+    if (!(r1 > t_exp && s0 < end_ref && (!has_lysis || r1 <= lys + 1e-9))) s0 <- NA_real_
+  }
+  has_stat <- is.finite(s0)
+
+  if (has_lysis) {
+    t_tr <- max(t_tr, lys)
+    x    <- if (has_stat) s0 else lys
+    b <- c(t1, t_lag, t_exp, x, lys, t_tr, tn)
+    nm <- c("lag", "exponential", "deceleration", "stationary", "lysis",
+            if (is.finite(m$recovery_slope)) "recovery" else "post-lysis")
+  } else {
+    x <- if (has_stat) s0 else tn
+    b <- c(t1, t_lag, t_exp, x, tn)
+    nm <- c("lag", "exponential", "deceleration", "stationary")
+  }
+  b <- cummax(pmin(pmax(b, t1), tn))
+  emit(nm, b)
+}
+
+# curve_phases() for every sample of a mean-curve frame (time, variable, mean_value);
+# returns the stacked rows with a leading `sample` column. `...` goes to curve_phases().
+curve_phases_by_sample <- function(pd, ...) {
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  out <- lapply(unique(as.character(pd$variable)), function(v) {
+    g <- pd[as.character(pd$variable) == v, , drop = FALSE]
+    ph <- curve_phases(g$time, g$mean_value, ...)
+    if (nrow(ph) == 0) return(NULL)
+    cbind(sample = v, ph, stringsAsFactors = FALSE)
+  })
+  out <- out[!vapply(out, is.null, logical(1))]
+  if (!length(out)) return(NULL)
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+# ── end v2.20 engine ──
+
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
