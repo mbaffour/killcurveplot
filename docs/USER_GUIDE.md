@@ -43,6 +43,8 @@ The layout is detected automatically. Check the data summary box after every loa
 
 **File names** carry no timestamp. They use the export size and label, for example `lysis_curve_a_89x65mm.svg`, or `lysis_curve_main_89x65mm.svg` with no label.
 
+**Editing on the figure.** Click a legend entry in the preview to rename it, recolour it or hide it, and click an axis title, the title or the subtitle to edit its text; press Apply (or Enter) to keep the change, Esc to drop it. Everything else (sizes, fonts, legend position, axis limits) still lives in the Quick edit strip and the sidebar. Untick **Edit labels on the figure** in the strip to get the plain image preview back; the exported file is the same either way.
+
 **Finishing in Inkscape**
 
 1. Apply the preset, check the size bar and preview, then download the figure as SVG.

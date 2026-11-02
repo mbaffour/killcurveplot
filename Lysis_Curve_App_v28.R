@@ -1,6 +1,11 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.22.0 -- Click-to-edit labels on the figure:
+#   CANVAS EDIT     -- the true-size preview of the main figure is the export SVG inline (svg_inline_for_preview);
+#                      legend entries, axis titles, title/subtitle are clickable (the popover writes to the
+#                      quick-edit / sidebar inputs). canvas_edit off = PNG preview as before.
+#
 # v2.21.0 -- Sticky figure, accordion sidebar with a jump menu, quick-edit strip, rename samples everywhere:
 #   STICKY FIGURE   -- the figure column (size bar, tabs, figure) is position:sticky inside a flex layout, so it
 #                      stays in view while the sidebar scrolls (checkbox sticky_figure; stacked and not pinned on a
@@ -298,7 +303,7 @@ has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: search
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.21.0"
+APP_VERSION <- "2.22.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -2083,6 +2088,31 @@ quartz_pdf_device <- function(filename, width, height, bg = "white", pointsize =
 svglite_inkscape_device <- function(filename, width, height, bg = "white", ...) {
   svglite::svglite(filename, width = width, height = height, bg = bg, fix_text_size = FALSE)
 }
+# v2.22: the SVG svglite wrote, ready to be inlined in the page as the true-size preview. Strips the <?xml?> prolog,
+# sets the root <svg>'s width / height to the preview size in px (svglite writes pt; the viewBox stays, so the drawing
+# scales) and adds the kc-canvas-svg class next to svglite's own. NULL when the file is missing or over max_bytes.
+svg_inline_for_preview <- function(path, width_px, height_px, max_bytes = 6e6) {
+  if (!is.character(path) || length(path) != 1L || is.na(path) || !file.exists(path)) return(NULL)
+  sz <- file.size(path)
+  if (is.na(sz) || sz > max_bytes) return(NULL)
+  x <- paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+  x <- sub("^\\s*(<\\?xml[^>]*\\?>)?\\s*", "", x, perl = TRUE)
+  m <- regexpr("<svg\\b[^>]*>", x, perl = TRUE)
+  if (m[1] != 1L) return(NULL)
+  root <- regmatches(x, m)
+  rest <- substring(x, attr(m, "match.length") + 1L)
+  set_attr <- function(tag, name, value)
+    sub(sprintf("(\\s%s\\s*=\\s*)(['\"])[^'\"]*\\2", name), sprintf("\\1'%s'", value), tag, perl = TRUE)
+  root <- set_attr(root, "width",  paste0(width_px,  "px"))
+  root <- set_attr(root, "height", paste0(height_px, "px"))
+  if (grepl("\\sclass\\s*=\\s*(['\"])", root, perl = TRUE)) {
+    root <- sub("(\\sclass\\s*=\\s*)(['\"])([^'\"]*)\\2", "\\1'\\3 kc-canvas-svg'", root, perl = TRUE)
+    if (!grepl("\\bsvglite\\b", root, perl = TRUE)) root <- sub("class='", "class='svglite ", root, fixed = TRUE)
+  } else {
+    root <- sub("<svg", "<svg class='svglite kc-canvas-svg'", root, fixed = TRUE)
+  }
+  paste0(root, rest)
+}
 export_device <- function(format) {
   switch(format,
          pdf  = if (isTRUE(capabilities("aqua"))) quartz_pdf_device
@@ -2527,6 +2557,7 @@ LEGACY_BASE <- list(
   y_expand_top          = 0.05,       x_axis_label           = "Time (minutes)",
   demo_scenario         = "lysis",
   sticky_figure = TRUE, quick_edit_open = TRUE,   # v2.21: figure stays in view while the sidebar scrolls; quick-edit strip shown
+  canvas_edit = TRUE,                             # v2.22: click a legend entry / axis title / title on the figure to edit it
   y_axis_label          = "A550",     plot_title             = "",
   plot_subtitle         = "",         show_major_gridlines   = FALSE,
   show_minor_gridlines  = FALSE,      font_family            = "sans",
@@ -3921,6 +3952,8 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
   div(class = "kc-qe-head",
       span(class = "kc-qe-title", "Quick edit"),
       tags$button(type = "button", class = "btn btn-link btn-xs kc-qe-toggle", id = "kc_qe_toggle", "Hide quick edit")),
+  div(class = "kc-qe-canvas",
+      checkboxInput("canvas_edit", "Edit labels on the figure (click a legend entry, axis title or title)", APP_DEFAULTS$canvas_edit)),
   div(style = "display:none;", checkboxInput("quick_edit_open", "Show the quick-edit strip", APP_DEFAULTS$quick_edit_open)),
   conditionalPanel("input.quick_edit_open == true",
     uiOutput("quick_edit_rows"),
@@ -4028,6 +4061,127 @@ ui <- fluidPage(
          }
          if (window.Shiny && Shiny.addCustomMessageHandler) Shiny.addCustomMessageHandler('kcSwatches', swatches);
          else if (window.jQuery) jQuery(document).on('shiny:connected', function() { Shiny.addCustomMessageHandler('kcSwatches', swatches); });
+         // v2.22: click-to-edit labels on the figure (the inline SVG of output od_plot_svg). mark() tags the legend
+         // entries, axis titles and title / subtitle; a click opens one popover whose Apply writes into the existing
+         // quick-edit / sidebar inputs, so the v2.21 pipeline does the rest. Event-delegated; nothing is kept
+         // across re-renders except the popover itself.
+         var kcCur = null, kcPop = null;
+         function kcVal(id) { var e = document.getElementById(id); return e ? e.value : ''; }
+         function kcSamples() {
+           var out = [];
+           document.querySelectorAll('.kc-qe-row').forEach(function(row) {
+             var inp = row.querySelector('input[id^=qe_name_]'); if (!inp) return;
+             out.push({name: (inp.value || inp.placeholder || '').trim(), id: inp.id.replace('qe_name_', ''), sample: row.getAttribute('data-sample')});
+           });
+           return out;
+         }
+         function kcMark() {
+           var host = document.getElementById('od_plot_svg'); if (!host) return;
+           var ss = kcSamples(), g = {x_axis_label: kcVal('x_axis_label').trim(), plot_title: kcVal('plot_title').trim(),
+                                      plot_subtitle: kcVal('plot_subtitle').trim()};
+           host.querySelectorAll('svg text').forEach(function(t) {
+             var s = (t.textContent || '').trim(), kind = null, id = null, i;
+             if (/rotate\\(-90/.test(t.getAttribute('transform') || '')) kind = 'y_axis_label';
+             else if (s) {
+               for (i = 0; i < ss.length; i++) if (ss[i].name === s) { kind = 'sample'; id = ss[i].id; break; }
+               if (!kind) for (var k in g) if (g[k] && g[k] === s) { kind = k; break; }
+             }
+             if (!kind) return;
+             t.setAttribute('data-kc', kind);
+             if (id) t.setAttribute('data-kc-id', id);
+             t.classList.add('kc-ed');
+             t.setAttribute('aria-label', 'Click to edit ' + (kind === 'sample' ? s : kind.replace(/_/g, ' ')));
+           });
+         }
+         function kcSetText(id, v) {
+           var e = document.getElementById(id); if (!e) return;
+           if (window.jQuery) jQuery(e).val(v).trigger('input');
+           else { e.value = v; e.dispatchEvent(new Event('input', {bubbles: true})); }
+         }
+         function kcClose() { if (kcPop) kcPop.style.display = 'none'; kcCur = null; }
+         function kcPlace(t) {
+           var op = kcPop.offsetParent || document.body, or = op.getBoundingClientRect(), r = t.getBoundingClientRect();
+           var left = r.left - or.left + (op.scrollLeft || 0), top = r.bottom - or.top + (op.scrollTop || 0) + 4;
+           var maxL = Math.max(0, op.clientWidth - kcPop.offsetWidth - 4);
+           if (top + kcPop.offsetHeight > (op.scrollHeight || 1e9) && r.top - or.top - kcPop.offsetHeight - 4 >= 0)
+             top = r.top - or.top + (op.scrollTop || 0) - kcPop.offsetHeight - 4;
+           kcPop.style.left = Math.max(0, Math.min(left, maxL)) + 'px';
+           kcPop.style.top = Math.max(0, top) + 'px';
+         }
+         function kcApply() {
+           if (!kcCur || !kcPop) return;
+           var txt = kcPop.querySelector('input[type=text]'), v = txt ? txt.value : '';
+           if (kcCur.kind === 'sample') {
+             kcSetText('qe_name_' + kcCur.id, v);
+             var shw = kcPop.querySelector('input[type=checkbox]');
+             if (shw && !shw.checked) {
+               var cb = document.getElementById('qe_show_' + kcCur.id); if (cb) cb.checked = false;
+               if (window.Shiny && Shiny.setInputValue) Shiny.setInputValue('qe_show_event', {sample: kcCur.sample, show: false}, {priority: 'event'});
+             }
+           } else kcSetText(kcCur.kind, v);
+           kcClose();
+         }
+         function kcMk(tag, props) { var e = document.createElement(tag); for (var k in props) e[k] = props[k]; return e; }
+         function kcOpen(t) {
+           var kind = t.getAttribute('data-kc'), id = t.getAttribute('data-kc-id'), host = document.getElementById('main_panel');
+           if (!host) return;
+           if (!kcPop) {
+             kcPop = kcMk('div', {id: 'kc_canvas_pop'}); kcPop.setAttribute('role', 'dialog'); host.appendChild(kcPop);
+           } else if (kcPop.parentNode !== host) host.appendChild(kcPop);
+           kcCur = {kind: kind, id: id, sample: null};
+           while (kcPop.firstChild) kcPop.removeChild(kcPop.firstChild);
+           var txt = kcMk('input', {type: 'text', className: 'kc-pop-text'}), cur = '';
+           if (kind === 'sample') {
+             var ni = document.getElementById('qe_name_' + id); if (!ni) return;
+             var row = ni.closest('.kc-qe-row'); kcCur.sample = row ? row.getAttribute('data-sample') : null;
+             cur = ni.value || ni.placeholder || '';
+           } else cur = kcVal(kind);
+           txt.value = cur; txt.setAttribute('aria-label', 'New text');
+           txt.addEventListener('keydown', function(ev) { if (ev.key === 'Enter') { kcApply(); } });
+           kcPop.appendChild(txt);
+           if (kind === 'sample') {
+             var ci = document.getElementById('qe_color_' + id);
+             var col = kcMk('input', {type: 'color', value: ci ? ci.value : '#000000'});
+             col.setAttribute('aria-label', 'Colour');
+             col.addEventListener('input', function() {   // applied at once, through the strip's own picker
+               var c = document.getElementById('qe_color_' + id);
+               if (c) { c.value = col.value; c.dispatchEvent(new Event('input', {bubbles: true})); }
+             });
+             var lab = kcMk('label', {}), shw = kcMk('input', {type: 'checkbox', checked: true});
+             lab.appendChild(shw); lab.appendChild(document.createTextNode(' show'));
+             kcPop.appendChild(col); kcPop.appendChild(lab);
+           }
+           var btns = kcMk('div', {className: 'kc-pop-btns'});
+           var ap = kcMk('button', {type: 'button', className: 'btn btn-primary btn-xs', textContent: 'Apply'});
+           var cl = kcMk('button', {type: 'button', className: 'btn btn-default btn-xs', textContent: 'Close'});
+           ap.addEventListener('click', kcApply); cl.addEventListener('click', kcClose);
+           btns.appendChild(ap); btns.appendChild(cl); kcPop.appendChild(btns);
+           kcPop.style.display = 'block'; kcPlace(t);
+           txt.focus(); txt.select();
+         }
+         document.addEventListener('click', function(ev) {
+           var t = ev.target && ev.target.closest ? ev.target.closest('#od_plot_svg text.kc-ed') : null;
+           if (t) { kcOpen(t); return; }
+           if (kcPop && kcPop.style.display !== 'none' && !kcPop.contains(ev.target)) kcClose();
+         });
+         document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape' && kcCur) kcClose(); });
+         // after the SVG is replaced: tag its labels again; the popover stays only while its label still exists
+         function kcAfterRender() {
+           kcMark();
+           if (!kcCur || !kcPop) return;
+           var hit = null;
+           document.querySelectorAll('#od_plot_svg text.kc-ed').forEach(function(t) {
+             if (!hit && t.getAttribute('data-kc') === kcCur.kind && (kcCur.kind !== 'sample' || t.getAttribute('data-kc-id') === kcCur.id)) hit = t;
+           });
+           if (hit) kcPlace(hit); else kcClose();
+         }
+         if (window.jQuery) {
+           jQuery(document).on('shiny:value', function(ev) {
+             if (ev.name === 'od_plot_svg' || ev.name === 'quick_edit_rows') window.requestAnimationFrame(kcAfterRender);
+           });
+           jQuery(document).on('shiny:idle', kcMark);
+           jQuery(document).on('shiny:inputchanged', function(ev) { if (ev.name === 'canvas_edit' && !ev.value) kcClose(); });
+         }
        })();"
     )),
     # v2.14: the main panel's pixel width, so true-size previews can pick the zoom that fits it
@@ -4102,6 +4256,19 @@ ui <- fluidPage(
       .kc-qe-field label { font-size:.9em; margin-bottom:1px; }
       .kc-qe-field .form-control { height:26px; padding:2px 6px; font-size:1em; }
       .kc-qe-note { font-size:.78em; color:#777; margin:0 0 4px; }
+      .kc-qe-canvas .checkbox { margin:2px 0; font-weight:normal; }
+      .kc-canvas { position:relative; }
+      .kc-canvas-svg text.kc-ed { cursor:pointer; }
+      .kc-canvas-svg text.kc-ed:hover { fill:#0069d9; text-decoration:underline; }
+      #kc_canvas_pop { position:absolute; z-index:50; display:none; min-width:220px; background:#fff; border:1px solid #ccc;
+                       border-radius:4px; padding:8px; box-shadow:0 2px 8px rgba(0,0,0,.25); font-size:.85em; }
+      #kc_canvas_pop > * { display:block; margin-bottom:6px; }
+      #kc_canvas_pop > *:last-child { margin-bottom:0; }
+      #kc_canvas_pop input[type=text] { width:100%; padding:2px 6px; height:26px; border:1px solid #ccc; border-radius:3px; }
+      #kc_canvas_pop input[type=color] { width:40px; height:24px; padding:0; border:1px solid #ccc; background:none; cursor:pointer; }
+      #kc_canvas_pop label { font-weight:normal; margin:0; }
+      #kc_canvas_pop .kc-pop-btns { display:flex; gap:6px; }
+      #kc_canvas_pop .kc-pop-btns button { padding:1px 10px; font-size:.95em; }
       .color-preview {
         display:inline-block; width:28px; height:28px;
         border:1px solid #ccc; border-radius:4px; flex-shrink:0;
@@ -7226,6 +7393,10 @@ server <- function(input, output, session) {
     sz <- size_fun()
     if (identical(input$preview_mode, "wysiwyg")) {
       z <- preview_zoom_value(sz[1], if (identical(img_id, "od_plot_img")) sz[2])
+      # v2.22: the main figure as the inline export SVG, so its labels can be clicked (checkbox canvas_edit)
+      if (isTRUE(input$canvas_edit %||% TRUE) && identical(img_id, "od_plot_img"))
+        return(uiOutput("od_plot_svg", class = "kc-canvas",
+                        style = paste0("width:", round(sz[1] * 96 * z), "px;height:", round(sz[2] * 96 * z), "px;")))
       imageOutput(img_id,
                   width  = paste0(round(sz[1] * 96 * z), "px"),
                   height = paste0(round(sz[2] * 96 * z), "px"))
@@ -7372,6 +7543,28 @@ server <- function(input, output, session) {
 
   output$plot_container <- renderUI(preview_container("od_plot", "od_plot_img"))
   register_preview("od_plot", "od_plot_img", main_plot_obj)
+  # v2.22: the same figure as the export SVG, inline (svg_inline_for_preview); the page script makes the legend
+  # entries, axis titles and title clickable. Too big an SVG (many points) shows a note instead.
+  output$od_plot_svg <- renderUI({
+    plot_inputs_debounced()
+    sz <- export_size_in(); z <- preview_zoom_value(sz[1], sz[2])
+    W  <- round(sz[1] * 96 * z); H <- round(sz[2] * 96 * z)
+    f  <- tempfile(fileext = ".svg"); on.exit(unlink(f), add = TRUE)
+    tryCatch(
+      ggsave(f, plot = main_plot_obj(), device = export_device("svg"),
+             width = sz[1], height = sz[2], units = "in", bg = "white", limitsize = FALSE),
+      error = function(e) {
+        if (inherits(e, "shiny.silent.error")) stop(e)
+        msg <- friendly_error_message(e)
+        guard_notify("render_error", paste("Preview failed:", msg), "error")
+        ggsave(f, plot = plot_error_figure(msg), device = export_device("svg"),
+               width = min(sz[1], 6), height = min(sz[2], 4), units = "in", bg = "white")
+      })
+    sv <- svg_inline_for_preview(f, W, H)
+    if (is.null(sv))
+      p(class = "kc-qe-note", "Figure too large for on-canvas editing; untick 'Edit labels on the figure' to see the preview.")
+    else HTML(sv)
+  })
   
   output$downloadPlot <- downloadHandler(
     filename = function() main_download_name(),

@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.22.0 — 2026-11-02
+
+**Click-to-edit labels on the figure.** Renaming a legend entry or an axis title meant finding the box in the
+quick-edit strip or the sidebar. The true-size preview of the main figure now is the export SVG, inline, and its
+labels are clickable. The exported files are byte-for-byte unchanged (the export path is untouched).
+
+- **Inline SVG preview.** With *Edit labels on the figure* ticked (`canvas_edit`, default on, saved with the
+  settings, in the quick-edit strip's header) the Lysis curve preview is `output$od_plot_svg`: the file svglite
+  writes for the export, with the `<?xml?>` prolog removed and the root width / height set to the preview size
+  (`svg_inline_for_preview()`; the viewBox stays). It is literally the file Inkscape opens. Unticked, or in the
+  pixel-canvas mode, the preview is the PNG as before; the Analysis, Compose and Curve fitting previews are
+  unchanged. An SVG over 6 MB shows a note instead of the figure.
+- **Click a label.** A legend entry opens a small popover with the name, a colour picker and a *show* box; the
+  x-axis title, y-axis title, title and subtitle open a text box. Apply (or Enter) writes into the existing
+  quick-edit / sidebar inputs (`qe_name_<id>`, `qe_color_<id>`, `x_axis_label`, ...), so renaming, recolouring
+  and hiding behave exactly as in v2.21. Esc, a click outside or Close leaves everything as it was.
+- **Limits.** Only the samples in the quick-edit strip (the first 96) are clickable; a hidden sample is
+  re-shown from its *show* box in the strip. Tick labels, facet strips and the legend title are not editable on
+  the figure. A label is matched by its text, so two samples with the same display name share the first match.
+
 ## v2.21.0 — 2026-11-01
 
 **Sticky figure, accordion sidebar with a jump menu, quick-edit strip, rename samples everywhere.**
