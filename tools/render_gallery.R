@@ -39,7 +39,8 @@ for (sc in strsplit(Sys.getenv("KC_SCENARIOS", "lysis,moi_series,resistance,hour
     if (sc == "resistance") session$setInputs(metrics_peak_mode = "first_local", metrics_peak_smooth_window = 3)
     session$setInputs(x_axis_label = if (sc == "hours") "Time (hours)" else "Time (minutes)")
     session$setInputs(analysis_metrics = c("lysis_time", "od_drop", "mu_max", "infection_strength"),
-                      analysis_dose_metric = "lysis_time")   # MOI parses from the sample names; no override box
+                      analysis_dose_metric = "lysis_time",   # MOI parses from the sample names; no override box
+                      pheno_values = FALSE)                  # v2.21: the composite's heatmap cells are too narrow for the raw values
     sz <- export_size_in()
     # v2.20: the lysis-scenario ordering; a panel that is not available for a scenario (e.g. a dose-response
     # with one MOI) appears as the app's own "Figure not available" placeholder
@@ -47,7 +48,9 @@ for (sc in strsplit(Sys.getenv("KC_SCENARIOS", "lysis,moi_series,resistance,hour
               phases = "Curve phases", replicate_overlay = "Replicate overlay",
               growth_rate = "Specific growth rate", normalized = "Normalized OD",
               difference = "Separation from the reference", metric_summary = "Metric summary + stats",
-              dose_response = "MOI dose-response", fit_overlay = "Fitted growth curves",
+              dose_response = "MOI dose-response",
+              lysed_fraction = "Fraction of replicates lysed", od_at_times = "OD at chosen times",   # v2.21
+              fit_overlay = "Fitted growth curves",
               phenotype_heatmap = "Phenotype heatmap", heatmap = "OD heatmap")
     plots <- list()
     for (nm in names(figs)) {
