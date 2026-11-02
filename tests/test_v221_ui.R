@@ -53,11 +53,11 @@ check("the toggle is client-side: the page script flips kc-sticky on shiny:input
 secs <- regmatches(ui_html, gregexpr('<details class="kc-section" id="sec_[a-z_]+"><summary>[^<]*</summary>', ui_html))[[1]]
 sec_titles <- sub('.*<summary>(.*)</summary>', "\\1", secs)
 sec_ids    <- sub('.*id="sec_([a-z_]+)".*', "\\1", secs)
-check("13 sidebar sections are accordion sections, one per SIDEBAR_SECTIONS entry, in order",
-      length(secs) == 13 && identical(sec_ids, unname(env$SIDEBAR_SECTIONS)) &&
+check("every sidebar section (13 + the v2.22 Panels section) is an accordion section, one per SIDEBAR_SECTIONS entry, in order",
+      length(secs) == length(env$SIDEBAR_SECTIONS) && length(secs) == 14 && identical(sec_ids, unname(env$SIDEBAR_SECTIONS)) &&
       identical(sec_titles, htmltools::htmlEscape(names(env$SIDEBAR_SECTIONS))))
 check("every sidebar <summary> is an accordion section (none left behind as a plain <details>)",
-      length(gregexpr("<summary>", sub('(?s)<div id="main_panel".*', "", ui_html, perl = TRUE), fixed = TRUE)[[1]]) == 13)
+      length(gregexpr("<summary>", sub('(?s)<div id="main_panel".*', "", ui_html, perl = TRUE), fixed = TRUE)[[1]]) == 14)
 check("the Statistics tab's sections stay independent (no kc-section class)",
       grepl('<details class="stats-section">', ui_html, fixed = TRUE) && !grepl('class="stats-section kc-section"', ui_html, fixed = TRUE))
 blk  <- regmatches(ui_html, regexpr('<select[^>]*id="sidebar_jump".*?</select>', ui_html))
@@ -69,7 +69,8 @@ check("the jump menu is a native select (keyboard friendly) with a Collapse all 
       !grepl("selectized", blk, fixed = TRUE) && grepl('class="btn btn-link btn-xs kc-collapse-all"', ui_html, fixed = TRUE))
 check("accordion script: closes the other sections when one opens (toggle event, native keyboard behaviour kept)",
       grepl("addEventListener('toggle'", ui_html, fixed = TRUE) && grepl("closeOthers(d)", ui_html, fixed = TRUE) &&
-      grepl("scrollIntoView({block: 'start'})", ui_html, fixed = TRUE) && !grepl("preventDefault", ui_html, fixed = TRUE))
+      grepl("scrollIntoView({block: 'start'})", ui_html, fixed = TRUE) &&
+      !grepl("preventDefault", sub("(?s).*?(function sections\\(\\).*?closeOthers\\(d\\).*?\\}\\)\\(\\);).*", "\\1", ui_html, perl = TRUE), fixed = TRUE))   # v2.22: the markup buttons' script (a separate block) uses preventDefault on purpose
 check("no section is open at the start", !grepl("<details class=\"kc-section\"[^>]* open", ui_html))
 check("the three moved widgets are static inputs in the Lysis curve tab, after the figure",
       all(vapply(c("x_axis_label", "y_axis_label", "legend_position", "quick_edit_open", "quick_edit_rows"),

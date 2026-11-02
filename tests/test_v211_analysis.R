@@ -317,9 +317,9 @@ testServer(app, {
     # lysis demo (MOI 10 and 0.1 = two distinct positive levels, reference set): main figure + metric summary +
     # growth rate + normalized + landmarks (v2.12.4, always) + dose-response = 6 images, plus the composed figure
     # (v2.13.0: the default compose_panels selection has four panels) = 7; v2.19 adds the phenotype heatmap and the
-    # Curve fits figure = 9; v2.20 adds the phases and the separation figure (a reference is set) = 11.
-    check("HTML report (on): exactly 11 <img> (main, metric summary, growth rate, normalized, landmarks, phases, separation, dose-response, phenotype heatmap, composed, fit figure)",
-          n_img(html_on) == 11 && grepl("<h3>Curve landmarks</h3>", html_on, fixed = TRUE) &&
+    # Curve fits figure = 9; v2.20 adds the phases and the separation figure (a reference is set) = 11; v2.22 adds the dOD/dt figure = 12.
+    check("HTML report (on): exactly 12 <img> (main, metric summary, growth rate, dOD/dt, normalized, landmarks, phases, separation, dose-response, phenotype heatmap, composed, fit figure)",
+          n_img(html_on) == 12 && grepl("<h3>Curve landmarks</h3>", html_on, fixed = TRUE) &&
           grepl("<h3>Composed figure</h3>", html_on, fixed = TRUE))
     check("HTML report (on): every analysis figure rendered (no 'Figure not available')",
           !grepl("Figure not available", html_on, fixed = TRUE))
@@ -395,9 +395,9 @@ testServer(app, {
     n_img <- function(h) lengths(regmatches(h, gregexpr("<img ", h, fixed = TRUE)))
     # resistance: both infected samples are MOI 1 = ONE positive level, so no dose-response; images =
     # main + metric summary + growth rate + normalized + landmarks = 5, plus the composed figure (v2.13.0) = 6;
-    # v2.19 adds the phenotype heatmap and the Curve fits figure = 8; v2.20 adds phases and separation = 10
-    check("resistance report: exactly 10 <img> (landmarks, phases, separation, heatmap, fit figure and the composed figure; dose-response skipped for one MOI level)",
-          n_img(h_r) == 10 && grepl("<h3>Curve landmarks</h3>", h_r, fixed = TRUE))
+    # v2.19 adds the phenotype heatmap and the Curve fits figure = 8; v2.20 adds phases and separation = 10; v2.22 adds dOD/dt = 11
+    check("resistance report: exactly 11 <img> (dOD/dt, landmarks, phases, separation, heatmap, fit figure and the composed figure; dose-response skipped for one MOI level)",
+          n_img(h_r) == 11 && grepl("<h3>Curve landmarks</h3>", h_r, fixed = TRUE))
     check("resistance report: no 'MOI dose-response' heading and no 'Figure not available' placeholder",
           !grepl("MOI dose-response", h_r, fixed = TRUE) && !grepl("Figure not available", h_r, fixed = TRUE))
   }
