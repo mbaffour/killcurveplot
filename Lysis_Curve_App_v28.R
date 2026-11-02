@@ -3061,6 +3061,911 @@ apply_sample_time_windows <- function(df, windows) {
 
 # ── end v2.18 engine ──
 
+# ── v2.22 fits engine ──
+# Prism-grade nonlinear regression for growth, lysis and dose-response curves. Pure functions (no Shiny
+# state), all base R (stats::nls, SSasymp, SSfpl, confint, vcov); tested by tests/test_v222_fits.R and
+# documented in docs/FITS_V222.md. Conventions follow the v2.18 engine: time `t`, optical density `od`;
+# a failed fit never raises an error but returns a row of NA values with the reason in `note`.
+# Every `nls` call is wrapped in tryCatch. Parameter confidence intervals are profile-likelihood
+# (`confint`) with a Wald fallback (est +/- qt(1 - (1 - level) / 2, df) * se).
+
+# Human labels for the models and analyses added in v2.22 (the growth models are repeated for the UI).
+FIT_MODEL_LABELS_V222 <- c(
+  one_phase_decay   = "One-phase decay to a plateau (lysis, post-peak)",
+  fpl_decay         = "Four-parameter logistic decay (lysis, post-peak)",
+  exp_window        = "Exponential phase (log-linear regression on a window)",
+  dose_response_4pl = "Four-parameter logistic dose-response (log10 MOI)",
+  logistic          = "Modified logistic (Zwietering 1990)",
+  gompertz          = "Modified Gompertz (Zwietering 1990)",
+  baranyi           = "Baranyi-Roberts (1994)")
+
+# ── small internal helpers (names start with .f22_) ───────────────────────────
+.f22_tq <- function(level, df)                      # two-sided t quantile, NA when df is not positive
+  if (is.finite(df) && df > 0 && is.finite(level) && level > 0 && level < 1) stats::qt(1 - (1 - level) / 2, df) else NA_real_
+
+.f22_num <- function(x) suppressWarnings(as.numeric(x))
+
+# Numeric literal for a formula string (negative numbers parenthesised).
+.f22_lit <- function(x) paste0("(", formatC(x, digits = 17, format = "g"), ")")
+
+# Delta-method value and standard error of a scalar function f(named parameter vector) given the
+# parameter covariance matrix V (central finite differences; NA when V is not finite).
+.f22_delta <- function(f, est, V) {
+  val <- tryCatch(as.numeric(f(est)), error = function(e) NA_real_)
+  if (length(val) != 1 || !is.finite(val) || is.null(V) || !all(is.finite(V)) || any(dim(V) != length(est)))
+    return(list(value = if (length(val) == 1) val else NA_real_, se = NA_real_))
+  g <- vapply(seq_along(est), function(j) {
+    h <- 1e-6 * max(abs(est[[j]]), 1e-3); up <- lo <- est; up[[j]] <- up[[j]] + h; lo[[j]] <- lo[[j]] - h
+    (f(up) - f(lo)) / (2 * h)
+  }, numeric(1))
+  v <- tryCatch(as.numeric(t(g) %*% V %*% g), error = function(e) NA_real_)
+  list(value = val, se = if (is.finite(v) && v >= 0) sqrt(v) else NA_real_)
+}
+
+# Response, fitted values, weights and (unweighted) residuals of a fitted model. nls objects: the
+# response is `m$lhs()` (resid() of an nls fit is multiplied by sqrt(weights), so it is not used here);
+# other models (lm): fitted + residuals.
+.f22_resp <- function(fit) {
+  tryCatch({
+    if (is.null(fit)) return(NULL)
+    w <- tryCatch(stats::weights(fit), error = function(e) NULL)
+    if (inherits(fit, "nls")) { y <- as.numeric(fit$m$lhs()); f <- as.numeric(fit$m$fitted()) }
+    else { f <- as.numeric(stats::fitted(fit)); y <- f + as.numeric(stats::residuals(fit)) }
+    if (is.null(w) || length(w) != length(y)) w <- rep(1, length(y))
+    if (!length(y)) return(NULL)
+    list(y = y, f = f, w = as.numeric(w), r = y - f)
+  }, error = function(e) NULL)
+}
+
+# Attach the bookkeeping fit_bands() needs: name of the time variable in the model formula, the offset
+# subtracted from absolute time, whether the fit is on the ln(OD / OD0) scale, and the baseline OD0.
+.f22_set_meta <- function(fit, tvar, offset = 0, log_transform = FALSE, y0 = NA_real_) {
+  if (!is.null(fit)) attr(fit, "lc_meta") <- list(tvar = tvar, offset = offset, log_transform = log_transform, y0 = y0)
+  fit
+}
+
+# nls wrapper: NULL on any failure. `weighted`: the data frame has a column `w` used as weights.
+.f22_nls <- function(form, dat, start, algorithm = "default", lower = NULL, upper = NULL, ctl = NULL, weighted = FALSE) {
+  if (is.null(ctl)) ctl <- stats::nls.control(maxiter = 500, warnOnly = FALSE)
+  tryCatch(suppressWarnings({
+    if (algorithm == "port") {
+      if (weighted) stats::nls(form, data = dat, start = start, algorithm = "port", lower = lower, upper = upper, control = ctl, weights = w)
+      else          stats::nls(form, data = dat, start = start, algorithm = "port", lower = lower, upper = upper, control = ctl)
+    } else {
+      if (weighted) stats::nls(form, data = dat, start = start, control = ctl, weights = w)
+      else          stats::nls(form, data = dat, start = start, control = ctl)
+    }
+  }), error = function(e) NULL)
+}
+
+# Weighted residual sum of squares of an nls fit (what nls minimises); Inf for NULL.
+.f22_rss <- function(fit) if (is.null(fit)) Inf else tryCatch(as.numeric(fit$m$deviance()), error = function(e) Inf)
+
+# ── fit_weights ───────────────────────────────────────────────────────────────
+#' Weights for nls(weights = ).
+#' @param od numeric response values (OD readings).
+#' @param scheme "none" (all 1), "1/y" (1 / od), "1/y2" (1 / od^2, relative weighting, Prism's
+#'   "weight by 1/Y^2") or "1/sd2" (1 / sd^2, inverse variance; `sd` = standard deviation of each point,
+#'   e.g. across replicates).
+#' @param sd numeric, same length as `od` (recycled), only used for "1/sd2".
+#' @return numeric vector the length of `od`. A weight that is undefined (od <= 0, sd <= 0 or NA, or
+#'   scheme "1/sd2" without `sd`) is NA; the fitting functions drop such points (and say so in `note`).
+fit_weights <- function(od, scheme = c("none", "1/y", "1/y2", "1/sd2"), sd = NULL) {
+  scheme <- match.arg(scheme)
+  od <- .f22_num(od); n <- length(od)
+  if (scheme == "none") return(rep(1, n))
+  w <- switch(scheme,
+              "1/y"   = 1 / od,
+              "1/y2"  = 1 / od^2,
+              "1/sd2" = if (is.null(sd) || !length(sd)) rep(NA_real_, n) else 1 / rep_len(.f22_num(sd), n)^2)
+  w[!is.finite(w) | w <= 0] <- NA_real_
+  w
+}
+
+# ── akaike_weights ────────────────────────────────────────────────────────────
+#' Akaike weights from a vector of AICc (or AIC) values: w_i = exp(-delta_i / 2) / sum_j exp(-delta_j / 2),
+#' delta_i = AICc_i - min(AICc). NA-safe: an NA (or non-finite) entry gets weight NA and is left out of the
+#' sum; all NA gives all NA. Weights of the non-NA entries sum to 1.
+akaike_weights <- function(aicc) {
+  a <- .f22_num(aicc); out <- rep(NA_real_, length(a))
+  ok <- is.finite(a)
+  if (!any(ok)) return(out)
+  d <- a[ok] - min(a[ok]); e <- exp(-d / 2)
+  out[ok] <- e / sum(e)
+  out
+}
+
+# ── fit_ci ────────────────────────────────────────────────────────────────────
+#' Parameter confidence intervals of a fitted nls model.
+#' @param fit an nls object (lm objects work with method "wald").
+#' @param level confidence level (default 0.95).
+#' @param method "profile": stats::confint(fit) (profile likelihood), falling back per term to the Wald
+#'   interval when the profile fails or is not finite; "wald": est +/- qt(1 - (1 - level) / 2, df) * se.
+#' @return data.frame(term, estimate, se, lo, hi, method), one row per coefficient; method says what was
+#'   actually used for that row ("profile" or "wald"). A single NA row when `fit` is NULL or has no
+#'   coefficients. se / Wald limits are NA when the covariance matrix is not available (df = 0 or singular).
+fit_ci <- function(fit, level = 0.95, method = c("profile", "wald")) {
+  method <- match.arg(method)
+  empty <- data.frame(term = NA_character_, estimate = NA_real_, se = NA_real_, lo = NA_real_, hi = NA_real_,
+                      method = NA_character_, stringsAsFactors = FALSE)
+  if (is.null(fit)) return(empty)
+  cf <- tryCatch(stats::coef(fit), error = function(e) NULL)
+  if (is.null(cf) || !length(cf)) return(empty)
+  cf <- cf[!is.na(cf)]
+  if (!length(cf)) return(empty)
+  V  <- tryCatch(stats::vcov(fit), error = function(e) NULL)
+  se <- if (!is.null(V) && all(dim(V) == length(cf))) suppressWarnings(sqrt(diag(V))) else rep(NA_real_, length(cf))
+  se[!is.finite(se)] <- NA_real_
+  df <- tryCatch(as.numeric(stats::df.residual(fit)), error = function(e) NA_real_)
+  q  <- .f22_tq(level, df)
+  lo <- unname(cf) - q * se; hi <- unname(cf) + q * se
+  how <- ifelse(is.finite(lo) & is.finite(hi), "wald", NA_character_)
+  if (method == "profile" && inherits(fit, "nls")) {
+    pr <- tryCatch(suppressMessages(suppressWarnings(stats::confint(fit, level = level))), error = function(e) NULL)
+    if (is.matrix(pr) && nrow(pr) == length(cf) && ncol(pr) >= 2) {
+      ok <- is.finite(pr[, 1]) & is.finite(pr[, 2])
+      lo[ok] <- pr[ok, 1]; hi[ok] <- pr[ok, 2]; how[ok] <- "profile"
+    }
+  }
+  data.frame(term = names(cf), estimate = unname(cf), se = unname(se), lo = lo, hi = hi, method = how,
+             stringsAsFactors = FALSE, row.names = NULL)
+}
+
+# ── fit_quality ───────────────────────────────────────────────────────────────
+# Wald-Wolfowitz runs test on the signs of the residuals (in data order), normal approximation:
+# mu = 2 n+ n- / n + 1, var = (mu - 1)(mu - 2) / (n - 1), z = (R - mu) / sqrt(var), two-sided p.
+# Exact zeros are dropped. NA when either sign is missing or the variance is zero.
+.f22_runs_p <- function(r) {
+  r <- r[is.finite(r) & r != 0]
+  n <- length(r); if (n < 3) return(NA_real_)
+  s <- r > 0; np <- sum(s); nn <- n - np
+  if (np == 0 || nn == 0) return(NA_real_)
+  runs <- 1 + sum(s[-1] != s[-n])
+  mu <- 2 * np * nn / n + 1
+  v  <- (mu - 1) * (mu - 2) / (n - 1)
+  if (!is.finite(v) || v <= 0) return(NA_real_)
+  2 * stats::pnorm(-abs((runs - mu) / sqrt(v)))
+}
+
+#' Goodness-of-fit table of a fitted model.
+#' @param fit nls (or lm) object. @param n number of observations used for AICc (default: the residual count).
+#' @return one-row data.frame: n, k (= parameters + 1 for the residual variance, the k of AIC), r2
+#'   (1 - RSS / SST, weighted when the fit has weights), adj_r2 (1 - (1 - r2)(n - 1) / (n - p), p =
+#'   parameters), rmse (sqrt(RSS / n)), sigma (Sy.x = sqrt(RSS / df)), aic, aicc (= AIC + 2k(k + 1) / (n - k - 1);
+#'   NA when n - k - 1 <= 0), bic, df_resid, runs_test_p (Wald-Wolfowitz runs test of residual signs,
+#'   normal approximation; a small p means the curve is systematically off the data), shapiro_p
+#'   (Shapiro-Wilk test of the residuals; NA for n < 3 or n > 5000). All NA for a NULL / failed fit.
+fit_quality <- function(fit, n = NULL) {
+  na <- data.frame(n = NA_integer_, k = NA_integer_, r2 = NA_real_, adj_r2 = NA_real_, rmse = NA_real_,
+                   sigma = NA_real_, aic = NA_real_, aicc = NA_real_, bic = NA_real_, df_resid = NA_real_,
+                   runs_test_p = NA_real_, shapiro_p = NA_real_)
+  rs <- .f22_resp(fit)
+  if (is.null(rs)) return(na)
+  keep <- is.finite(rs$r) & is.finite(rs$w) & rs$w > 0
+  if (!any(keep)) return(na)
+  y <- rs$y[keep]; r <- rs$r[keep]; w <- rs$w[keep]
+  nobs <- length(y)
+  p <- tryCatch(length(stats::coef(fit)), error = function(e) NA_integer_)
+  rss  <- sum(w * r^2)
+  sst  <- sum(w * (y - sum(w * y) / sum(w))^2)
+  r2   <- if (is.finite(sst) && sst > 0) 1 - rss / sst else NA_real_
+  adj  <- if (is.finite(r2) && is.finite(p) && nobs - p > 0) 1 - (1 - r2) * (nobs - 1) / (nobs - p) else NA_real_
+  dfr  <- tryCatch(as.numeric(stats::df.residual(fit)), error = function(e) NA_real_)
+  if (!is.finite(dfr)) dfr <- nobs - p
+  ll   <- tryCatch(stats::logLik(fit), error = function(e) NULL)
+  k    <- if (!is.null(ll)) as.numeric(attr(ll, "df")) else NA_real_
+  aic  <- tryCatch(as.numeric(stats::AIC(fit)), error = function(e) NA_real_)
+  bic  <- tryCatch(as.numeric(stats::BIC(fit)), error = function(e) NA_real_)
+  if (!is.finite(aic)) aic <- NA_real_
+  if (!is.finite(bic)) bic <- NA_real_
+  nu   <- if (!is.null(n) && length(n) == 1 && is.finite(n)) as.numeric(n) else nobs
+  aicc <- if (is.finite(aic) && is.finite(k) && nu - k - 1 > 0) aic + 2 * k * (k + 1) / (nu - k - 1) else NA_real_
+  shp  <- if (nobs >= 3 && nobs <= 5000) tryCatch(stats::shapiro.test(r)$p.value, error = function(e) NA_real_) else NA_real_
+  data.frame(n = as.integer(nu), k = as.integer(k), r2 = r2, adj_r2 = adj, rmse = sqrt(rss / nobs),
+             sigma = if (is.finite(dfr) && dfr > 0) sqrt(rss / dfr) else NA_real_, aic = aic, aicc = aicc, bic = bic,
+             df_resid = dfr, runs_test_p = .f22_runs_p(rs$r[keep]), shapiro_p = as.numeric(shp))
+}
+
+# ── fit_residual_frame ────────────────────────────────────────────────────────
+#' Residuals of a fitted model for a residual plot.
+#' @param fit nls (or lm) object. @param t the x values (times) of the observations, in the order of the
+#'   data the fit was made on (default 1..n).
+#' @return data.frame(t, fitted, residual, std_residual). residual = response - fitted (original units);
+#'   std_residual = sqrt(weight) * residual / sigma with sigma = sqrt(RSS / df) (NA when df = 0), so about
+#'   95 % of the points lie within +/- 2. One NA row when the fit is NULL.
+fit_residual_frame <- function(fit, t = NULL) {
+  rs <- .f22_resp(fit)
+  if (is.null(rs)) return(data.frame(t = NA_real_, fitted = NA_real_, residual = NA_real_, std_residual = NA_real_))
+  n <- length(rs$y)
+  tt <- if (is.null(t)) seq_len(n) else if (length(t) == n) .f22_num(t) else rep(NA_real_, n)
+  dfr <- tryCatch(as.numeric(stats::df.residual(fit)), error = function(e) NA_real_)
+  sg  <- if (is.finite(dfr) && dfr > 0) sqrt(sum(rs$w * rs$r^2, na.rm = TRUE) / dfr) else NA_real_
+  data.frame(t = tt, fitted = rs$f, residual = rs$r, std_residual = sqrt(rs$w) * rs$r / sg)
+}
+
+# ── fit_bands ─────────────────────────────────────────────────────────────────
+# Evaluate the model formula's right-hand side at parameter vector `cf` and `newdata` (named list).
+.f22_eval <- function(fit, cf, newdata) {
+  fo  <- stats::formula(fit)
+  env <- list2env(c(as.list(cf), newdata), parent = if (is.null(environment(fo))) globalenv() else environment(fo))
+  as.numeric(eval(fo[[length(fo)]], env))
+}
+.f22_timevar <- function(fit) {
+  fo <- stats::formula(fit)
+  v  <- setdiff(all.vars(fo[[length(fo)]]), names(stats::coef(fit)))
+  if (length(v)) v[1] else NA_character_
+}
+
+#' Delta-method confidence or prediction band of a fitted nls curve.
+#' @param fit nls object. Models made by fit_lysis_models(), fit_dose_response() and fit_growth_object()
+#'   carry their time offset and scale; any other nls fit is evaluated at `newdata_t` as given (its single
+#'   non-parameter variable is taken as the time variable).
+#' @param newdata_t times (x values; absolute, i.e. the same axis as the data) at which to evaluate.
+#' @param level confidence level (default 0.95).
+#' @param type "confidence": band for the mean curve, se^2 = g' V g; "prediction": band for a new
+#'   observation, se^2 = g' V g + sigma^2 (sigma^2 = RSS / df; for a weighted fit the new point is taken
+#'   at weight 1). g is the numeric gradient of the curve with respect to the parameters (central finite
+#'   differences), V = vcov(fit), critical value qt(1 - (1 - level) / 2, df.residual).
+#' @param backtransform NULL (default): the band is on the scale the model was fitted on. For a growth fit
+#'   from fit_growth_object() that scale is ln(OD / OD0) (y = ln(od / od0), time tt = t - t0): the fitted
+#'   curve and its limits are then ln-ratios. Pass `exp` (or TRUE) to return OD units: OD0 * exp(.) for a
+#'   ln fit, OD0 + . for a fit on OD - OD0. Ignored for fits without a baseline (lysis, dose-response),
+#'   which are already on the OD / response scale.
+#' @return data.frame(t, fit, lo, hi); lo / hi are NA when the covariance matrix is not available
+#'   (zero residual df, singular fit); all NA (one row per t) for a NULL / non-nls fit.
+fit_bands <- function(fit, newdata_t, level = 0.95, type = c("confidence", "prediction"), backtransform = NULL) {
+  type <- match.arg(type)
+  tn <- .f22_num(newdata_t)
+  na <- data.frame(t = tn, fit = rep(NA_real_, length(tn)), lo = NA_real_, hi = NA_real_)
+  if (is.null(fit) || !inherits(fit, "nls") || !length(tn)) return(na)
+  tryCatch({
+    meta <- attr(fit, "lc_meta")
+    tvar <- if (!is.null(meta$tvar)) meta$tvar else .f22_timevar(fit)
+    off  <- if (!is.null(meta$offset) && is.finite(meta$offset)) meta$offset else 0
+    if (is.na(tvar)) return(na)
+    nd <- stats::setNames(list(tn - off), tvar)
+    cf <- stats::coef(fit); p <- length(cf)
+    f0 <- .f22_eval(fit, cf, nd)
+    out <- data.frame(t = tn, fit = f0, lo = NA_real_, hi = NA_real_)
+    V  <- tryCatch(stats::vcov(fit), error = function(e) NULL)
+    dfr <- as.numeric(stats::df.residual(fit))
+    q  <- .f22_tq(level, dfr)
+    if (!is.null(V) && all(dim(V) == p) && all(is.finite(V)) && is.finite(q)) {
+      J <- vapply(seq_len(p), function(j) {
+        h <- 1e-6 * max(abs(cf[[j]]), 1e-3); up <- lo <- cf; up[[j]] <- up[[j]] + h; lo[[j]] <- lo[[j]] - h
+        (.f22_eval(fit, up, nd) - .f22_eval(fit, lo, nd)) / (2 * h)
+      }, numeric(length(f0)))
+      J <- matrix(J, nrow = length(f0), ncol = p)
+      v <- rowSums((J %*% V) * J)
+      if (type == "prediction") {
+        rs <- .f22_resp(fit)
+        s2 <- if (is.null(rs)) NA_real_ else sum(rs$w * rs$r^2) / dfr
+        v  <- v + s2
+      }
+      se <- suppressWarnings(sqrt(v))
+      out$lo <- f0 - q * se; out$hi <- f0 + q * se
+    }
+    if (!is.null(backtransform) && !isFALSE(backtransform) && !is.null(meta) && is.finite(meta$y0)) {
+      bt <- if (is.function(backtransform)) backtransform else exp
+      cv <- if (isTRUE(meta$log_transform)) function(v) meta$y0 * bt(v) else function(v) meta$y0 + v
+      out$fit <- cv(out$fit); out$lo <- cv(out$lo); out$hi <- cv(out$hi)
+    }
+    out
+  }, error = function(e) na)
+}
+
+# ── fit_lysis_models: post-peak decay fits ────────────────────────────────────
+.f22_lysis_params <- c("k", "half_life", "t50_lysis", "plateau", "od0", "top", "bottom", "xmid", "scal")
+
+# One output row of fit_lysis_models (all parameters NA unless filled by the caller).
+.f22_lysis_row <- function(model, n = NA_integer_, t_ref = NA_real_, note = NA_character_, converged = FALSE) {
+  r <- data.frame(model = model, converged = converged, n = as.integer(n), t_ref = t_ref, stringsAsFactors = FALSE)
+  for (p in .f22_lysis_params) { r[[p]] <- NA_real_; r[[paste0(p, "_se")]] <- NA_real_
+                                r[[paste0(p, "_lo")]] <- NA_real_; r[[paste0(p, "_hi")]] <- NA_real_ }
+  for (cc in c("r2", "adj_r2", "rmse", "sigma", "aic", "aicc", "bic", "df_resid")) r[[cc]] <- NA_real_
+  r$ci_method <- NA_character_; r$note <- as.character(note)
+  r
+}
+.f22_set_par <- function(r, name, est, se = NA_real_, lo = NA_real_, hi = NA_real_) {
+  r[[name]] <- est; r[[paste0(name, "_se")]] <- se; r[[paste0(name, "_lo")]] <- lo; r[[paste0(name, "_hi")]] <- hi
+  r
+}
+.f22_join_note <- function(...) {
+  x <- c(...); x <- x[!is.na(x) & nzchar(x)]
+  if (length(x)) paste(x, collapse = "; ") else NA_character_
+}
+
+# Clean (t, od, weights) -> sorted finite points. Returns list(t, y, w, note).
+.f22_clean_xy <- function(x, y, weights = NULL, positive_x = FALSE) {
+  x <- .f22_num(x); y <- .f22_num(y); note <- NA_character_
+  if (length(x) != length(y)) return(list(x = numeric(0), y = numeric(0), w = NULL, note = "x and y differ in length"))
+  w <- if (is.null(weights)) NULL else .f22_num(weights)
+  if (!is.null(w) && length(w) != length(x)) return(list(x = numeric(0), y = numeric(0), w = NULL, note = "weights differ in length from the data"))
+  ok <- is.finite(x) & is.finite(y)
+  if (!is.null(w)) {
+    bad <- ok & !(is.finite(w) & w > 0)
+    if (any(bad)) note <- sprintf("%d point(s) with an undefined weight dropped", sum(bad))
+    ok <- ok & !bad
+  }
+  o <- order(x[ok])
+  list(x = x[ok][o], y = y[ok][o], w = if (is.null(w)) NULL else w[ok][o], note = note)
+}
+
+# One-phase decay: od = plateau + (od0 - plateau) * exp(-k * tp), tp = t - t_ref. Starting values from
+# SSasymp (od = Asym + (R0 - Asym) * exp(-exp(lrc) * tp)) plus a small grid of manual starts; the lowest
+# weighted RSS among the solutions with k > 0 wins. Returns the nls object or NULL.
+.f22_fit_opd <- function(dat, weighted) {
+  y <- dat$y; tp <- dat$tp; rng <- diff(range(y)); span <- max(tp)
+  form <- y ~ plateau + (od0 - plateau) * exp(-k * tp)
+  starts <- list()
+  ss <- tryCatch(suppressWarnings(stats::nls(y ~ stats::SSasymp(tp, Asym, R0, lrc), data = dat)), error = function(e) NULL)
+  if (!is.null(ss)) { cf <- stats::coef(ss); starts[[1]] <- list(plateau = cf[["Asym"]], od0 = cf[["R0"]], k = exp(cf[["lrc"]])) }
+  mid <- (y[1] + min(y)) / 2; i <- which(y <= mid)[1]
+  k0 <- log(2) / (if (is.na(i)) span / 2 else max(tp[i], span / 50))
+  for (pl in c(min(y), min(y) - 0.1 * rng, min(y) - 0.5 * rng)) for (kf in c(0.5, 1, 2))
+    starts[[length(starts) + 1]] <- list(plateau = pl, od0 = y[1], k = k0 * kf)
+  ctl <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(y^2), 1e-12), warnOnly = FALSE)
+  best <- NULL; brss <- Inf
+  good <- function(f) !is.null(f) && all(is.finite(stats::coef(f))) && stats::coef(f)[["k"]] > 0
+  for (alg in c("default", "port")) {
+    for (st in starts) {
+      st <- lapply(st, function(v) unname(v))
+      f <- if (alg == "default") .f22_nls(form, dat, st, ctl = ctl, weighted = weighted)
+           else .f22_nls(form, dat, st, "port", lower = c(plateau = -Inf, od0 = -Inf, k = 1e-8), upper = c(plateau = Inf, od0 = Inf, k = 1e3 / max(span, 1e-12)),
+                         ctl = ctl, weighted = weighted)
+      if (good(f) && .f22_rss(f) < brss) { best <- f; brss <- .f22_rss(f) }
+    }
+    if (!is.null(best)) break
+  }
+  best
+}
+
+# Decreasing four-parameter logistic in time: od = top + (bottom - top) / (1 + exp((xmid - tp) / scal)),
+# scal > 0, top > bottom (SSfpl with A = top, B = bottom).
+.f22_fit_fpl_decay <- function(dat, weighted) {
+  y <- dat$y; tp <- dat$tp; rng <- diff(range(y)); span <- max(tp)
+  form <- y ~ top + (bottom - top) / (1 + exp((xmid - tp) / scal))
+  starts <- list()
+  ss <- tryCatch(suppressWarnings(stats::nls(y ~ stats::SSfpl(tp, A, B, xmid, scal), data = dat)), error = function(e) NULL)
+  if (!is.null(ss)) { cf <- stats::coef(ss); starts[[1]] <- list(top = cf[["A"]], bottom = cf[["B"]], xmid = cf[["xmid"]], scal = cf[["scal"]]) }
+  mid <- (max(y) + min(y)) / 2; i <- which(y <= mid)[1]
+  x0 <- if (is.na(i)) span / 2 else tp[i]
+  for (xf in c(1, 0.5, 1.5)) for (sf in c(0.5, 1, 2))
+    starts[[length(starts) + 1]] <- list(top = max(y) + 0.05 * rng, bottom = min(y) - 0.05 * rng,
+                                         xmid = max(x0 * xf, span / 100), scal = span / 8 * sf)
+  ctl <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(y^2), 1e-12), warnOnly = FALSE)
+  lower <- c(top = -Inf, bottom = -Inf, xmid = -span, scal = 1e-6 * max(span, 1e-12))
+  upper <- c(top = Inf, bottom = Inf, xmid = 3 * span, scal = 10 * max(span, 1e-12))
+  best <- NULL; brss <- Inf
+  good <- function(f) { if (is.null(f)) return(FALSE); cf <- stats::coef(f); all(is.finite(cf)) && cf[["scal"]] > 0 && cf[["top"]] > cf[["bottom"]] }
+  for (alg in c("default", "port")) {
+    for (st in starts) {
+      st <- lapply(st, function(v) unname(v))
+      f <- if (alg == "default") .f22_nls(form, dat, st, ctl = ctl, weighted = weighted)
+           else .f22_nls(form, dat, st, "port", lower = lower, upper = upper, ctl = ctl, weighted = weighted)
+      if (good(f) && .f22_rss(f) < brss) { best <- f; brss <- .f22_rss(f) }
+    }
+    if (!is.null(best)) break
+  }
+  best
+}
+
+#' Post-peak (lysis) decay fits.
+#' @param t,od numeric time and optical density of one curve (non-finite points are dropped; data are sorted by t).
+#' @param models any of "one_phase_decay" (od = plateau + (od0 - plateau) * exp(-k * tp), fitted from
+#'   SSasymp starts) and "fpl_decay" (od = top + (bottom - top) / (1 + exp((xmid - tp) / scal)), a
+#'   decreasing four-parameter logistic in time, SSfpl starts); tp = t - t_ref.
+#' @param from "peak": fit the points from the maximum of `od` to the end of the curve (t_ref = time of
+#'   the maximum, tp = 0 there); "start": fit the whole curve (t_ref = first time).
+#' @param weights optional positive weights, one per input point (see fit_weights()); points with an
+#'   undefined weight are dropped. @param level confidence level (default 0.95).
+#' @return data.frame, one row per model, columns: model, converged, n (points fitted), t_ref, then for each of
+#'   k, half_life, t50_lysis, plateau, od0, top, bottom, xmid, scal the estimate and `_se`, `_lo`, `_hi` (95 %
+#'   interval; profile where possible, Wald otherwise, delta method for derived quantities), then r2,
+#'   adj_r2, rmse, sigma, aic, aicc, bic, df_resid, ci_method and note.
+#'   k (per time unit) and half_life = ln 2 / k exist for the one-phase model only; od0 is the fitted OD at
+#'   tp = 0 (the "peak" of the fitted curve), plateau the asymptote (= bottom for the logistic);
+#'   t50_lysis is the ABSOLUTE time at which the fitted OD is halfway between od0 and the plateau
+#'   (t_ref + half_life for the one-phase model). A model that cannot be fitted (too few points: fewer than
+#'   4 for one-phase decay, 5 for the logistic; flat data; no convergence) returns converged = FALSE, NA
+#'   estimates and the reason in `note`. The nls objects are in attr(result, "fits"), a named list
+#'   (model -> list(fit, t_ref, data)); fit_bands() and fit_residual_frame() accept them, and
+#'   predict_lysis_fit() evaluates them.
+fit_lysis_models <- function(t, od, models = c("one_phase_decay", "fpl_decay"), from = c("peak", "start"),
+                             weights = NULL, level = 0.95) {
+  from   <- match.arg(from)
+  models <- match.arg(models, c("one_phase_decay", "fpl_decay"), several.ok = TRUE)
+  cl   <- .f22_clean_xy(t, od, weights)
+  note0 <- cl$note
+  seg  <- NULL; tref <- NA_real_
+  if (length(cl$x) > 0) {
+    i0  <- if (from == "peak") which.max(cl$y) else 1L
+    seg <- i0:length(cl$x); tref <- cl$x[i0]
+  }
+  n <- length(seg)
+  fits <- list()
+  rows <- lapply(models, function(m) {
+    nmin <- if (m == "one_phase_decay") 4L else 5L
+    na <- function(msg) .f22_lysis_row(m, n, tref, .f22_join_note(note0, msg))
+    if (n == 0) return(na("no finite data"))
+    y <- cl$y[seg]; x <- cl$x[seg] - tref
+    if (n < nmin) return(na(sprintf("too few points (%d; %s needs at least %d%s)", n, m, nmin,
+                                    if (from == "peak") " from the peak onwards" else "")))
+    if (diff(range(y)) == 0) return(na("flat curve: nothing to fit"))
+    if (length(unique(x)) < n) return(na("repeated time values"))
+    weighted <- !is.null(cl$w)
+    dat <- data.frame(tp = x, y = y); if (weighted) dat$w <- cl$w[seg]
+    fit <- tryCatch(if (m == "one_phase_decay") .f22_fit_opd(dat, weighted) else .f22_fit_fpl_decay(dat, weighted),
+                    error = function(e) NULL)
+    if (is.null(fit)) return(na(if (m == "fpl_decay") "did not converge (the logistic needs a sigmoidal drop; an exponential-like decay is fitted by one_phase_decay)" else "did not converge"))
+    fit <- .f22_set_meta(fit, "tp", offset = tref)
+    r   <- .f22_lysis_row(m, n, tref, note0, converged = TRUE)
+    cf  <- stats::coef(fit); V <- tryCatch(stats::vcov(fit), error = function(e) NULL)
+    dfr <- as.numeric(stats::df.residual(fit)); q <- .f22_tq(level, dfr)
+    ci  <- fit_ci(fit, level = level, method = "profile")
+    cir <- function(term) ci[match(term, ci$term), , drop = FALSE]
+    for (term in names(cf)) { z <- cir(term); r <- .f22_set_par(r, term, z$estimate, z$se, z$lo, z$hi) }
+    wald <- function(f) {                 # delta-method value, se and Wald interval of a derived quantity
+      d <- .f22_delta(f, cf, V)
+      c(d$value, d$se, d$value - q * d$se, d$value + q * d$se)
+    }
+    msg <- NULL
+    if (m == "one_phase_decay") {
+      kk <- cir("k")
+      hl <- ifelse(kk$estimate > 0, log(2) / kk$estimate, NA_real_)
+      hl_se <- if (is.finite(kk$se)) log(2) / kk$estimate^2 * kk$se else NA_real_
+      hl_lo <- if (is.finite(kk$hi) && kk$hi > 0) log(2) / kk$hi else NA_real_
+      hl_hi <- if (is.finite(kk$lo) && kk$lo > 0) log(2) / kk$lo else NA_real_
+      r <- .f22_set_par(r, "half_life", hl, hl_se, hl_lo, hl_hi)
+      r <- .f22_set_par(r, "t50_lysis", tref + hl, hl_se, tref + hl_lo, tref + hl_hi)
+      if (cf[["plateau"]] < 0) msg <- "fitted plateau is below 0: the decay has not levelled off in the data"
+    } else {
+      f0 <- function(p) p[["top"]] + (p[["bottom"]] - p[["top"]]) / (1 + exp(p[["xmid"]] / p[["scal"]]))
+      w0 <- wald(f0); r <- .f22_set_par(r, "od0", w0[1], w0[2], w0[3], w0[4])
+      r <- .f22_set_par(r, "plateau", cf[["bottom"]], r$bottom_se, r$bottom_lo, r$bottom_hi)
+      f50 <- function(p) { h <- (f0(p) + p[["bottom"]]) / 2
+                           p[["xmid"]] - p[["scal"]] * log((p[["bottom"]] - h) / (h - p[["top"]])) }
+      w5 <- wald(f50); r <- .f22_set_par(r, "t50_lysis", tref + w5[1], w5[2], tref + w5[3], tref + w5[4])
+      if (cf[["xmid"]] <= 0 || cf[["xmid"]] >= max(x)) msg <- "inflection time outside the fitted range: curve poorly determined"
+    }
+    qa <- fit_quality(fit)
+    for (cc in c("r2", "adj_r2", "rmse", "sigma", "aic", "aicc", "bic", "df_resid")) r[[cc]] <- qa[[cc]]
+    if (!is.finite(dfr) || dfr <= 0) msg <- c(msg, "no residual degrees of freedom: intervals unavailable")
+    else if (dfr < 3) msg <- c(msg, sprintf("only %d residual degree(s) of freedom: intervals are very wide", as.integer(dfr)))
+    r$ci_method <- paste(unique(stats::na.omit(ci$method)), collapse = "+"); if (!nzchar(r$ci_method)) r$ci_method <- NA_character_
+    r$note <- do.call(.f22_join_note, as.list(c(note0, msg)))
+    fits[[m]] <<- list(fit = fit, t_ref = tref, data = dat)
+    r
+  })
+  out <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  attr(out, "fits") <- fits
+  out
+}
+
+#' Fitted OD of a fit_lysis_models() result at absolute times `t` (NA when that model did not converge).
+predict_lysis_fit <- function(res, model, t) {
+  f <- attr(res, "fits")[[model]]
+  t <- .f22_num(t)
+  if (is.null(f)) return(rep(NA_real_, length(t)))
+  fit_bands(f$fit, t)$fit
+}
+
+# ── fit_exponential_window ────────────────────────────────────────────────────
+#' Log-linear regression of the exponential phase: lm(log(od) ~ t) on a time window.
+#' @param t,od numeric time and OD of one curve (non-positive OD is dropped).
+#' @param window NULL, or c(t_from, t_to) (NA = open end): fit exactly that window (>= 3 points needed).
+#' @param min_points smallest number of consecutive points a window may have (default 4).
+#' @param auto with window = NULL: TRUE searches every contiguous window of at least `min_points` points
+#'   and takes the one with the highest R2 among those with a positive slope (ties within 1e-10: the longer
+#'   window, then the earlier one); FALSE uses all points.
+#' @param level confidence level of the slope interval (default 0.95; t distribution, n - 2 df).
+#' @return one-row data.frame: t_start, t_end, n, mu (slope of ln od, per time unit), mu_se, mu_lo, mu_hi,
+#'   doubling_time = ln 2 / mu, doubling_time_lo = ln 2 / mu_hi, doubling_time_hi = ln 2 / mu_lo (NA when
+#'   mu_lo <= 0), r2, intercept (of ln od at t = 0), note. NA row (with a note) when no window qualifies.
+fit_exponential_window <- function(t, od, window = NULL, min_points = 4, auto = TRUE, level = 0.95) {
+  nar <- function(msg, n = NA_integer_) data.frame(t_start = NA_real_, t_end = NA_real_, n = as.integer(n), mu = NA_real_,
+         mu_se = NA_real_, mu_lo = NA_real_, mu_hi = NA_real_, doubling_time = NA_real_, doubling_time_lo = NA_real_,
+         doubling_time_hi = NA_real_, r2 = NA_real_, intercept = NA_real_, note = msg, stringsAsFactors = FALSE)
+  tryCatch({
+    cl <- .f22_clean_xy(t, od)
+    pos <- cl$y > 0
+    x <- cl$x[pos]; y <- log(cl$y[pos]); n <- length(x)
+    min_points <- max(3L, as.integer(min_points))
+    if (n < 3) return(nar(sprintf("too few positive points (%d)", n), n))
+    sel <- NULL; note <- NA_character_
+    if (!is.null(window)) {
+      lo <- if (length(window) >= 1 && is.finite(window[1])) window[1] else -Inf
+      hi <- if (length(window) >= 2 && is.finite(window[2])) window[2] else Inf
+      sel <- which(x >= lo & x <= hi)
+      if (length(sel) < 3) return(nar(sprintf("window holds %d point(s); at least 3 are needed", length(sel)), length(sel)))
+      if (length(sel) < min_points) note <- sprintf("window holds only %d points (min_points = %d)", length(sel), min_points)
+      if (length(unique(x[sel])) < 2) return(nar("window has a single time value", length(sel)))
+    } else if (isTRUE(auto)) {
+      if (n < min_points) return(nar(sprintf("too few points (%d) for a window of %d", n, min_points), n))
+      xc <- x - mean(x); yc <- y - mean(y)                      # centred, prefix sums
+      cs <- function(v) c(0, cumsum(v))
+      Sx <- cs(xc); Sy <- cs(yc); Sxx <- cs(xc^2); Sxy <- cs(xc * yc); Syy <- cs(yc^2)
+      best <- NULL
+      for (i in 1:(n - min_points + 1)) for (j in (i + min_points - 1):n) {
+        m <- j - i + 1
+        sx <- Sx[j + 1] - Sx[i]; sy <- Sy[j + 1] - Sy[i]
+        sxx <- Sxx[j + 1] - Sxx[i] - sx^2 / m; sxy <- Sxy[j + 1] - Sxy[i] - sx * sy / m; syy <- Syy[j + 1] - Syy[i] - sy^2 / m
+        if (!(sxx > 1e-12 * max(1, abs(Sxx[n + 1])) && syy > 1e-14 && sxy > 0)) next     # need spread and a positive slope
+        r2 <- sxy^2 / (sxx * syy)
+        better <- is.null(best) || r2 > best$r2 + 1e-10 || (abs(r2 - best$r2) <= 1e-10 && m > best$m)
+        if (better) best <- list(r2 = r2, i = i, j = j, m = m)
+      }
+      if (is.null(best)) return(nar("no window with a positive slope and variation in ln od"))
+      sel <- best$i:best$j
+    } else sel <- seq_len(n)
+    xs <- x[sel]; ys <- y[sel]; m <- length(sel)
+    if (diff(range(ys)) == 0) return(nar("flat curve: no growth in the window", m))
+    fit <- stats::lm(ys ~ xs)
+    smr <- suppressWarnings(summary(fit)); sm <- smr$coefficients
+    mu  <- unname(stats::coef(fit)[2]); se <- sm[2, 2]
+    q   <- .f22_tq(level, m - 2)
+    mlo <- mu - q * se; mhi <- mu + q * se
+    dt  <- if (mu > 0) log(2) / mu else NA_real_
+    data.frame(t_start = min(xs), t_end = max(xs), n = as.integer(m), mu = mu, mu_se = se, mu_lo = mlo, mu_hi = mhi,
+               doubling_time = dt,
+               doubling_time_lo = if (is.finite(mhi) && mhi > 0) log(2) / mhi else NA_real_,
+               doubling_time_hi = if (is.finite(mlo) && mlo > 0) log(2) / mlo else NA_real_,
+               r2 = smr$r.squared, intercept = unname(stats::coef(fit)[1]),
+               note = .f22_join_note(note, if (mu <= 0) "slope is not positive: not an exponential growth window"), stringsAsFactors = FALSE)
+  }, error = function(e) nar(paste("error:", conditionMessage(e))))
+}
+
+# ── growth fits as nls objects (for bands, residuals, CIs) ────────────────────
+#' Rebuild the nls object behind a row of fit_growth_models() so that fit_bands(), fit_ci(),
+#' fit_quality() and fit_residual_frame() can be used on it. The data are prepared exactly as
+#' fit_growth_models() prepared them (finite points, non-positive OD dropped for the ln scale, sorted,
+#' cut at the peak when `until = "peak"`), the response is y = ln(od / od[1]) (or od - od[1] without the log),
+#' the time is tt = t - t[1], and the model is y ~ gm_<model>(tt, A, mu, lag) started at the row's
+#' estimates. Bands from fit_bands() are therefore on the ln(OD / OD0) scale unless `backtransform = exp`
+#' is passed (then OD0 * exp(.)). NULL when the row did not converge or the refit fails.
+#' @param fit_row one row of fit_growth_models(); @param t,od the curve it was fitted to.
+fit_growth_object <- function(fit_row, t, od) {
+  tryCatch({
+    fit_row <- fit_row[1, , drop = FALSE]
+    if (!isTRUE(fit_row$converged)) return(NULL)
+    lg <- if ("log_transform" %in% names(fit_row)) isTRUE(fit_row$log_transform) else TRUE
+    until <- if ("until" %in% names(fit_row)) as.character(fit_row$until) else "peak"
+    cl <- .f22_clean_xy(t, od)
+    x <- cl$x; y0v <- cl$y
+    if (lg) { keep <- y0v > 0; x <- x[keep]; y0v <- y0v[keep] }
+    if (!length(x)) return(NULL)
+    if (until == "peak") { k <- which.max(y0v); x <- x[seq_len(k)]; y0v <- y0v[seq_len(k)] }
+    t0 <- x[1]; od0 <- y0v[1]
+    y <- if (lg) log(y0v / od0) else y0v - od0
+    dat <- data.frame(tt = x - t0, y = y)
+    model <- as.character(fit_row$model)
+    if (!model %in% names(GROWTH_MODEL_FUNS)) return(NULL)
+    form <- stats::as.formula(paste0("y ~ gm_", model, "(tt, A, mu, lag)"))
+    st <- list(A = fit_row$A, mu = fit_row$mu_max, lag = fit_row$lag)
+    ctl <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(y^2), 1e-12), warnOnly = FALSE)
+    fit <- .f22_nls(form, dat, st, ctl = ctl)
+    if (is.null(fit)) fit <- .f22_nls(form, dat, st, "port", lower = c(A = 1e-8, mu = 1e-8, lag = 0), upper = c(A = Inf, mu = Inf, lag = max(dat$tt)), ctl = ctl)
+    .f22_set_meta(fit, "tt", offset = t0, log_transform = lg, y0 = od0)
+  }, error = function(e) NULL)
+}
+
+# ── compare_fits: extra-sum-of-squares F test (Prism "Compare") ───────────────
+# Null: one set of parameters for every sample; alternative: every parameter sample-specific, or only `param`
+# sample-specific with the others shared. Both are single nls fits to the stacked data, so replicates
+# enter as separate points. Models are the v2.18 growth models, y = y0_s + f(tt) - f(0), fitted to y = ln(od)
+# (log_transform) against tt = t - t0_sample, where f is the model curve and y0_s = ln(OD0_s) is a baseline
+# that is FITTED separately for every sample in both the null and the alternative model (a nuisance
+# parameter: the first reading is noisy, and treating it as exact would make the F test reject on baseline
+# noise alone). The points up to the peak of the mean curve are used when until = "peak".
+.f22_cmp_na <- function(model, param, note, n = NA_integer_, ng = NA_integer_) {
+  list(test = data.frame(model = model, param = param, n = as.integer(n), n_groups = as.integer(ng), null_ss = NA_real_,
+                         alt_ss = NA_real_, df_null = NA_real_, df_alt = NA_real_, F = NA_real_, p = NA_real_,
+                         delta_aicc = NA_real_, preferred = NA_character_, preferred_aicc = NA_character_,
+                         note = note, stringsAsFactors = FALSE),
+       params = data.frame(sample = NA_character_, od0 = NA_real_, A = NA_real_, A_se = NA_real_, mu = NA_real_, mu_se = NA_real_,
+                           lag = NA_real_, lag_se = NA_real_, n_points = NA_integer_, shared = NA_character_, stringsAsFactors = FALSE),
+       converged = list(null = FALSE, alt = FALSE, per_sample = logical(0)))
+}
+
+#' Do the best-fit growth parameters differ between samples? (extra-sum-of-squares F test)
+#' @param df data.frame with columns t (time), od, and a grouping column (default "sample"); replicate points
+#'   are stacked (an optional `replicate` column is not needed).
+#' @param model "logistic", "gompertz" or "baranyi" (the v2.18 / Zwietering forms, parameters A, mu, lag).
+#' @param param "all": every parameter sample-specific in the alternative; "mu", "lag" or "A": only that
+#'   parameter sample-specific, the other two shared.
+#' @param by name of the grouping column. @param until "peak" (default; points up to the maximum of each
+#'   sample's mean curve) or "all". @param log_transform fit ln(od) (default; A in ln units, mu a specific growth rate) or od.
+#' @param alpha significance level that decides `preferred`.
+#' @return list(test, params, converged, ...). `test` is a one-row data.frame: model, param, n (stacked points),
+#'   n_groups, null_ss, alt_ss (residual sums of squares), df_null, df_alt (residual df), F =
+#'   ((SS_null - SS_alt) / (df_null - df_alt)) / (SS_alt / df_alt), p (upper tail of F(df_null - df_alt, df_alt)),
+#'   delta_aicc = AICc(alternative) - AICc(null) (negative favours separate curves), preferred ("alternative"
+#'   if p < alpha, else "null": the simpler model unless the data demand more), preferred_aicc (lowest AICc),
+#'   note. `params`: the alternative fit, one row per sample with od0 (fitted baseline OD), A, mu, lag (and
+#'   `_se`; a shared parameter has the same value in every row), n_points and `shared`. `converged`: list(null, alt, per_sample). Also
+#'   `null_params` (the shared fit) and `fits` (list(null, alt) nls objects). Any failure (fewer than two
+#'   samples, fewer than 4 points per sample, no convergence, no residual df) returns NA values and a `note`.
+compare_fits <- function(df, model = c("logistic", "gompertz", "baranyi"), param = c("all", "mu", "lag", "A"),
+                         by = "sample", until = c("peak", "all"), log_transform = TRUE, alpha = 0.05) {
+  model <- match.arg(model); param <- match.arg(param); until <- match.arg(until)
+  fail <- function(msg, n = NA, ng = NA) .f22_cmp_na(model, param, msg, n, ng)
+  tryCatch({
+    if (!is.data.frame(df) || !all(c("t", "od", by) %in% names(df))) return(fail(sprintf("df needs columns t, od and %s", by)))
+    x  <- .f22_num(df$t); y <- .f22_num(df$od); g <- as.character(df[[by]])
+    ok <- is.finite(x) & is.finite(y) & !is.na(g)
+    if (log_transform) ok <- ok & y > 0
+    x <- x[ok]; y <- y[ok]; g <- g[ok]
+    groups <- unique(g); ng <- length(groups)
+    if (ng < 2) return(fail("need at least two samples to compare", length(x), ng))
+    parts <- vector("list", ng); y0s <- numeric(ng); starts <- vector("list", ng); per_ok <- stats::setNames(rep(FALSE, ng), groups)
+    for (i in seq_len(ng)) {
+      sel <- g == groups[i]
+      xm  <- tapply(y[sel], x[sel], mean); tm <- as.numeric(names(xm)); xm <- as.numeric(xm)
+      o   <- order(tm); tm <- tm[o]; xm <- xm[o]
+      kpk <- if (until == "peak") which.max(xm) else length(xm)
+      tcut <- tm[kpk]
+      keep <- sel & x <= tcut
+      tm <- tm[seq_len(kpk)]; xm <- xm[seq_len(kpk)]
+      if (length(tm) < 4) return(fail(sprintf("sample '%s' has fewer than 4 time points%s", groups[i],
+                                              if (until == "peak") " up to its peak" else ""), length(x), ng))
+      t0 <- tm[1]; od0 <- xm[1]
+      yy <- if (log_transform) log(y[keep]) else y[keep]
+      y0s[i] <- if (log_transform) log(od0) else od0
+      parts[[i]] <- data.frame(tt = x[keep] - t0, y = yy, g = i, stringsAsFactors = FALSE)
+      fr <- fit_growth_models(tm, xm, models = model, until = "all", log_transform = log_transform)
+      if (!isTRUE(fr$converged[1])) return(fail(sprintf("per-sample %s fit of '%s' did not converge (%s)", model, groups[i],
+                                                         fr$message[1]), length(x), ng))
+      per_ok[i] <- TRUE
+      starts[[i]] <- c(A = fr$A[1], mu = fr$mu_max[1], lag = fr$lag[1])
+    }
+    dat <- do.call(rbind, parts); N <- nrow(dat)
+    S <- do.call(rbind, starts)                                   # ng x 3 starting values
+    free <- if (param == "all") c("A", "mu", "lag") else param
+    pn   <- c("A", "mu", "lag")
+    mkform <- function(fr) stats::as.formula(sprintf("y ~ y0[g] + gm_%s(tt, %s)", model,
+                          paste(vapply(pn, function(p) if (p %in% fr) paste0(p, "[g]") else p, ""), collapse = ", ")))
+    bounds <- list(A = c(1e-3 * min(S[, "A"]), 5 * max(S[, "A"])), mu = c(1e-3 * min(S[, "mu"]), 20 * max(S[, "mu"])),
+                   lag = c(0, max(dat$tt)))
+    ctl <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(dat$y^2), 1e-12), warnOnly = FALSE)
+    fit_set <- function(fr, start_list) {         # fr = parameters that vary by sample; start_list = list of start lists
+      form <- mkform(fr)
+      lo <- c(rep(-Inf, ng), unlist(lapply(pn, function(p) rep(bounds[[p]][1], if (p %in% fr) ng else 1))))
+      hi <- c(rep(Inf, ng),  unlist(lapply(pn, function(p) rep(bounds[[p]][2], if (p %in% fr) ng else 1))))
+      best <- NULL; brss <- Inf
+      for (st in start_list) {
+        for (alg in c("port", "default")) {
+          f <- if (alg == "port") .f22_nls(form, dat, lapply(st, unname), "port", lower = lo, upper = hi, ctl = ctl)
+               else .f22_nls(form, dat, lapply(st, unname), ctl = ctl)
+          if (is.null(f)) next
+          cf <- stats::coef(f)
+          if (!all(is.finite(cf)) || any(cf[grepl("^A", names(cf))] <= 0) || any(cf[grepl("^mu", names(cf))] <= 0)) next
+          if (.f22_rss(f) < brss) { best <- f; brss <- .f22_rss(f) }
+          break
+        }
+      }
+      best
+    }
+    mk_start <- function(fr, rowv) {              # rowv: function(p) -> start value(s) of parameter p
+      c(list(y0 = y0s), stats::setNames(lapply(pn, function(p) if (p %in% fr) rowv(p, TRUE) else rowv(p, FALSE)), pn))
+    }
+    mean_par <- colMeans(S)
+    null_starts <- c(list(c(list(y0 = y0s), as.list(mean_par))), lapply(seq_len(ng), function(i) c(list(y0 = y0s), as.list(S[i, ]))))
+    null_fit <- fit_set(character(0), null_starts)
+    if (is.null(null_fit)) return(fail("the shared (null) model did not converge", N, ng))
+    ncf <- stats::coef(null_fit)[c("A", "mu", "lag")]
+    alt_starts <- list(
+      mk_start(free, function(p, vary) if (vary) S[, p] else mean_par[[p]]),                   # per-sample estimates
+      mk_start(free, function(p, vary) if (vary) rep(ncf[[p]], ng) else ncf[[p]]))             # null solution expanded
+    alt_fit <- fit_set(free, alt_starts)
+    if (is.null(alt_fit)) return(fail("the sample-specific (alternative) model did not converge", N, ng))
+    ss0 <- .f22_rss(null_fit); ss1 <- .f22_rss(alt_fit)
+    p0 <- length(stats::coef(null_fit)); p1 <- length(stats::coef(alt_fit))
+    df0 <- N - p0; df1 <- N - p1
+    note <- NA_character_
+    if (ss1 > ss0 * (1 + 1e-6)) note <- "alternative fit has a larger SS than the null fit (local optimum): F is not reliable"
+    Fv <- pv <- NA_real_
+    if (df1 > 0 && df0 > df1) {
+      Fv <- ((ss0 - ss1) / (df0 - df1)) / (max(ss1, 1e-300) / df1)
+      pv <- stats::pf(max(Fv, 0), df0 - df1, df1, lower.tail = FALSE)
+    } else note <- .f22_join_note(note, "no residual degrees of freedom in the alternative model: F test not defined")
+    aicc <- function(f) { aic <- stats::AIC(f); kk <- p_k(f); if (N - kk - 1 > 0) aic + 2 * kk * (kk + 1) / (N - kk - 1) else NA_real_ }
+    p_k <- function(f) as.numeric(attr(stats::logLik(f), "df"))
+    a0 <- aicc(null_fit); a1 <- aicc(alt_fit)
+    test <- data.frame(model = model, param = param, n = as.integer(N), n_groups = as.integer(ng), null_ss = ss0, alt_ss = ss1,
+                       df_null = df0, df_alt = df1, F = Fv, p = pv, delta_aicc = a1 - a0,
+                       preferred = if (is.finite(pv)) (if (pv < alpha) "alternative" else "null") else NA_character_,
+                       preferred_aicc = if (is.finite(a1 - a0)) (if (a1 < a0) "alternative" else "null") else NA_character_,
+                       note = note, stringsAsFactors = FALSE)
+    cfa <- summary(alt_fit)$coefficients
+    get <- function(p, i) { nm <- if (p %in% free) paste0(p, i) else p
+                            c(cfa[nm, "Estimate"], cfa[nm, "Std. Error"]) }
+    params <- do.call(rbind, lapply(seq_len(ng), function(i) {
+      a <- get("A", i); m <- get("mu", i); l <- get("lag", i)
+      y0v <- cfa[paste0("y0", i), "Estimate"]
+      data.frame(sample = groups[i], od0 = if (log_transform) exp(y0v) else y0v, A = a[1], A_se = a[2], mu = m[1], mu_se = m[2], lag = l[1], lag_se = l[2],
+                 n_points = sum(dat$g == i), shared = paste(setdiff(pn, free), collapse = ","), stringsAsFactors = FALSE)
+    }))
+    cfn <- summary(null_fit)$coefficients
+    list(test = test, params = params, converged = list(null = TRUE, alt = TRUE, per_sample = per_ok),
+         null_params = data.frame(A = cfn["A", 1], A_se = cfn["A", 2], mu = cfn["mu", 1], mu_se = cfn["mu", 2],
+                                  lag = cfn["lag", 1], lag_se = cfn["lag", 2]),
+         fits = list(null = null_fit, alt = alt_fit))
+  }, error = function(e) fail(paste("error:", conditionMessage(e))))
+}
+
+# ── fit_dose_response: four-parameter logistic on log10(MOI) ──────────────────
+.f22_dr_na <- function(note, n = NA_integer_) {
+  r <- data.frame(ec50 = NA_real_, ec50_lo = NA_real_, ec50_hi = NA_real_, hill = NA_real_, hill_lo = NA_real_, hill_hi = NA_real_,
+                  top = NA_real_, top_se = NA_real_, top_lo = NA_real_, top_hi = NA_real_,
+                  bottom = NA_real_, bottom_se = NA_real_, bottom_lo = NA_real_, bottom_hi = NA_real_,
+                  xmid = NA_real_, xmid_se = NA_real_, xmid_lo = NA_real_, xmid_hi = NA_real_, scal = NA_real_, scal_se = NA_real_,
+                  r2 = NA_real_, adj_r2 = NA_real_, aicc = NA_real_, df_resid = NA_real_, n = as.integer(n), converged = FALSE,
+                  ci_method = NA_character_, note = note, stringsAsFactors = FALSE)
+  attr(r, "curve") <- data.frame(moi = numeric(0), fit = numeric(0), lo = numeric(0), hi = numeric(0))
+  attr(r, "nls") <- NULL
+  r
+}
+
+#' Four-parameter logistic dose-response (value against MOI).
+#' @param moi multiplicity of infection (> 0 when log_x = TRUE; rows with moi <= 0 are dropped, with a note).
+#' @param value response (OD, lysis time, % killing, ...). Replicates: repeat the moi.
+#' @param log_x TRUE (default): x = log10(moi). FALSE: x = moi (EC50 = xmid in moi units; hill is then
+#'   1 / scal).
+#' @param fix_bottom,fix_top NULL (fitted) or a number: the lower / upper plateau held fixed (e.g. 0 and 100 for
+#'   % response). "bottom" is the lower asymptote and "top" the upper one regardless of whether the curve rises
+#'   or falls with MOI (the direction is taken from the data).
+#' @param weights optional positive weights (see fit_weights()). @param level confidence level (0.95).
+#' @param n_curve number of points of the overlay curve.
+#' @details Model: y = A + (B - A) / (1 + exp((xmid - x) / scal)) with scal > 0 (A: asymptote at low x, B: at
+#'   high x; SSfpl starting values with a manual-start fallback; the logistic is fitted by nls, port algorithm
+#'   as a fallback). EC50 = 10^xmid (the MOI half-way between the plateaus; its interval is 10^ the xmid
+#'   interval). Hill slope (Prism's HillSlope on log10 x) = sign(B - A) / (scal * ln 10): negative for a response
+#'   that falls with MOI.
+#' @return one-row data.frame: ec50, ec50_lo, ec50_hi, hill, hill_lo, hill_hi, top, bottom (each with _se, _lo, _hi;
+#'   NA for a fixed plateau), xmid (log10 scale), xmid_se/_lo/_hi, scal, scal_se, r2, adj_r2, aicc, df_resid, n,
+#'   converged, ci_method, note. `attr(result, "curve")`: data.frame(moi, fit, lo, hi) over the MOI range
+#'   (log-spaced when log_x), with the delta-method confidence band; `attr(result, "nls")`: the nls object.
+#'   Fewer points than free parameters (4, or fewer with fixed plateaus), flat data or no convergence give
+#'   converged = FALSE, NA estimates and a note.
+fit_dose_response <- function(moi, value, log_x = TRUE, fix_bottom = NULL, fix_top = NULL, weights = NULL,
+                              level = 0.95, n_curve = 100L) {
+  tryCatch({
+    cl0 <- .f22_clean_xy(moi, value, weights)
+    x0 <- cl0$x; y <- cl0$y; w <- cl0$w; note <- cl0$note
+    if (length(x0) == 0) return(.f22_dr_na(.f22_join_note(note, "no finite data"), 0))
+    if (isTRUE(log_x)) {
+      pos <- x0 > 0
+      if (any(!pos)) note <- .f22_join_note(note, sprintf("%d point(s) with moi <= 0 dropped (log scale)", sum(!pos)))
+      x0 <- x0[pos]; y <- y[pos]; if (!is.null(w)) w <- w[pos]
+    }
+    n <- length(x0)
+    fb <- if (!is.null(fix_bottom) && length(fix_bottom) == 1 && is.finite(fix_bottom)) as.numeric(fix_bottom) else NULL
+    ft <- if (!is.null(fix_top) && length(fix_top) == 1 && is.finite(fix_top)) as.numeric(fix_top) else NULL
+    nfree <- 2L + is.null(fb) + is.null(ft)
+    x <- if (isTRUE(log_x)) log10(x0) else x0
+    if (n < nfree) return(.f22_dr_na(.f22_join_note(note, sprintf("too few points (%d; %d parameters are fitted)", n, nfree)), n))
+    if (diff(range(y)) == 0) return(.f22_dr_na(.f22_join_note(note, "flat response: nothing to fit"), n))
+    if (diff(range(x)) == 0) return(.f22_dr_na(.f22_join_note(note, "a single MOI value"), n))
+    weighted <- !is.null(w)
+    dat <- data.frame(x = x, y = y); if (weighted) dat$w <- w
+    rng <- diff(range(y)); span <- diff(range(x))
+    up  <- unname(stats::coef(stats::lm(y ~ x))[2]) > 0                  # response rises with x
+    # A = asymptote at low x, B = at high x
+    Aconst <- if (up) fb else ft; Bconst <- if (up) ft else fb
+    tok <- function(nm, const) if (is.null(const)) nm else .f22_lit(const)
+    form <- stats::as.formula(sprintf("y ~ %1$s + (%2$s - %1$s) / (1 + exp((xmid - x) / scal))", tok("A", Aconst), tok("B", Bconst)))
+    lo_y <- min(y) - 0.05 * rng; hi_y <- max(y) + 0.05 * rng
+    A0 <- if (!is.null(Aconst)) Aconst else if (up) lo_y else hi_y
+    B0 <- if (!is.null(Bconst)) Bconst else if (up) hi_y else lo_y
+    xm_c <- unique(c(x[which.min(abs(y - (A0 + B0) / 2))], stats::median(x), mean(range(x))))
+    starts <- list()
+    if (is.null(fb) && is.null(ft)) {
+      ss <- tryCatch(suppressWarnings(stats::nls(y ~ stats::SSfpl(x, A, B, xmid, scal), data = dat)), error = function(e) NULL)
+      if (!is.null(ss)) { cf <- stats::coef(ss)
+        if (cf[["scal"]] > 0) starts[[1]] <- list(A = cf[["A"]], B = cf[["B"]], xmid = cf[["xmid"]], scal = cf[["scal"]])
+        else if (cf[["scal"]] < 0) starts[[1]] <- list(A = cf[["B"]], B = cf[["A"]], xmid = cf[["xmid"]], scal = -cf[["scal"]]) }
+    }
+    for (xm in xm_c) for (sf in c(1 / 3, 1 / 6, 1 / 12))
+      starts[[length(starts) + 1]] <- list(A = A0, B = B0, xmid = xm, scal = span * sf)
+    starts <- lapply(starts, function(s) s[intersect(names(s), c(if (is.null(Aconst)) "A", if (is.null(Bconst)) "B", "xmid", "scal"))])
+    pn <- c(if (is.null(Aconst)) "A", if (is.null(Bconst)) "B", "xmid", "scal")
+    lower <- c(A = min(y) - 2 * rng, B = min(y) - 2 * rng, xmid = min(x) - span, scal = 1e-3 * span)[pn]
+    upper <- c(A = max(y) + 2 * rng, B = max(y) + 2 * rng, xmid = max(x) + span, scal = 10 * span)[pn]
+    ctl <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(y^2), 1e-12), warnOnly = FALSE)
+    good <- function(f) { if (is.null(f)) return(FALSE); cf <- stats::coef(f)
+      all(is.finite(cf)) && cf[["scal"]] > 0 && cf[["xmid"]] > min(x) - 3 * span && cf[["xmid"]] < max(x) + 3 * span }
+    best <- NULL; brss <- Inf
+    for (st in starts) {
+      st <- lapply(st, unname)
+      f <- .f22_nls(form, dat, st, ctl = ctl, weighted = weighted)
+      if (!good(f)) f <- .f22_nls(form, dat, st, "port", lower = lower, upper = upper, ctl = ctl, weighted = weighted)
+      if (good(f) && .f22_rss(f) < brss) { best <- f; brss <- .f22_rss(f) }
+    }
+    if (is.null(best)) return(.f22_dr_na(.f22_join_note(note, "did not converge"), n))
+    fit <- .f22_set_meta(best, "x")
+    cf <- stats::coef(fit)
+    ci <- fit_ci(fit, level = level)
+    gt <- function(term) { z <- ci[match(term, ci$term), , drop = FALSE]; if (nrow(z) && !is.na(z$term)) z else
+      data.frame(term = term, estimate = NA_real_, se = NA_real_, lo = NA_real_, hi = NA_real_, method = NA_character_) }
+    Aval <- if (is.null(Aconst)) cf[["A"]] else Aconst; Bval <- if (is.null(Bconst)) cf[["B"]] else Bconst
+    zA <- if (is.null(Aconst)) gt("A") else data.frame(estimate = Aconst, se = NA_real_, lo = NA_real_, hi = NA_real_)
+    zB <- if (is.null(Bconst)) gt("B") else data.frame(estimate = Bconst, se = NA_real_, lo = NA_real_, hi = NA_real_)
+    zx <- gt("xmid"); zs <- gt("scal")
+    sgn <- if (Bval >= Aval) 1 else -1
+    hf  <- function(s) if (isTRUE(log_x)) sgn / (s * log(10)) else sgn / s
+    hl  <- c(if (is.finite(zs$hi) && zs$hi > 0) hf(zs$hi) else NA_real_, if (is.finite(zs$lo) && zs$lo > 0) hf(zs$lo) else NA_real_)
+    hl  <- if (any(is.na(hl))) c(NA_real_, NA_real_) else sort(hl)
+    low_is_A <- Aval < Bval
+    zbot <- if (low_is_A) zA else zB; ztop <- if (low_is_A) zB else zA
+    ec <- function(v) if (isTRUE(log_x)) 10^v else v
+    nm <- function(z, col) { v <- z[[col]]; if (length(v)) v else NA_real_ }
+    qa <- fit_quality(fit)
+    msg <- note
+    dfr <- as.numeric(stats::df.residual(fit))
+    if (!is.finite(dfr) || dfr <= 0) msg <- .f22_join_note(msg, "no residual degrees of freedom: intervals unavailable")
+    else if (dfr < 3) msg <- .f22_join_note(msg, sprintf("only %d residual degree(s) of freedom: intervals are very wide", as.integer(dfr)))
+    if (cf[["xmid"]] < min(x) || cf[["xmid"]] > max(x)) msg <- .f22_join_note(msg, "EC50 lies outside the tested MOI range: extrapolated")
+    if (is.null(Aconst) && is.null(Bconst) && abs(Bval - Aval) < 0.1 * rng) msg <- .f22_join_note(msg, "plateaus are close together: curve poorly determined")
+    out <- .f22_dr_na(msg, n)
+    out$ec50 <- ec(cf[["xmid"]]); out$ec50_lo <- ec(zx$lo); out$ec50_hi <- ec(zx$hi)
+    out$hill <- hf(cf[["scal"]]); out$hill_lo <- hl[1]; out$hill_hi <- hl[2]
+    out$top <- max(Aval, Bval); out$top_se <- nm(ztop, "se"); out$top_lo <- nm(ztop, "lo"); out$top_hi <- nm(ztop, "hi")
+    out$bottom <- min(Aval, Bval); out$bottom_se <- nm(zbot, "se"); out$bottom_lo <- nm(zbot, "lo"); out$bottom_hi <- nm(zbot, "hi")
+    out$xmid <- cf[["xmid"]]; out$xmid_se <- zx$se; out$xmid_lo <- zx$lo; out$xmid_hi <- zx$hi
+    out$scal <- cf[["scal"]]; out$scal_se <- zs$se
+    out$r2 <- qa$r2; out$adj_r2 <- qa$adj_r2; out$aicc <- qa$aicc; out$df_resid <- dfr
+    out$converged <- TRUE
+    out$ci_method <- { mm <- unique(stats::na.omit(ci$method)); if (length(mm)) paste(mm, collapse = "+") else NA_character_ }
+    gx <- if (isTRUE(log_x)) seq(min(x), max(x), length.out = n_curve) else seq(min(x), max(x), length.out = n_curve)
+    bd <- fit_bands(fit, gx, level = level, type = "confidence")
+    attr(out, "curve") <- data.frame(moi = if (isTRUE(log_x)) 10^gx else gx, fit = bd$fit, lo = bd$lo, hi = bd$hi)
+    attr(out, "nls") <- fit
+    out
+  }, error = function(e) .f22_dr_na(paste("error:", conditionMessage(e))))
+}
+
+# ── parameter definitions (for the docs and the table footnotes) ──────────────
+#' data.frame(parameter, definition, unit) for every parameter the v2.22 fits report.
+fit_parameter_definitions <- function() {
+  d <- function(parameter, definition, unit) data.frame(parameter = parameter, definition = definition, unit = unit, stringsAsFactors = FALSE)
+  rbind(
+    d("k", "One-phase decay rate constant: od = plateau + (od0 - plateau) exp(-k tp), tp = t - t_ref", "1 / time"),
+    d("half_life", "ln 2 / k: time for the fitted OD to fall half-way from od0 to the plateau (one-phase decay)", "time"),
+    d("t50_lysis", "Absolute time at which the fitted OD is half-way between od0 (the peak) and the plateau; t_ref + half_life for one-phase decay", "time"),
+    d("t_ref", "Time of the maximum OD (from = \"peak\") or of the first point (from = \"start\"); tp = t - t_ref", "time"),
+    d("plateau", "Asymptotic OD the curve decays to (the lower asymptote, `bottom`, of the logistic)", "OD"),
+    d("od0", "Fitted OD at tp = 0 (the peak of the fitted curve)", "OD"),
+    d("top", "Upper asymptote of the logistic (OD as tp -> -infinity; may lie above the observed peak) or of the dose-response curve", "OD / response"),
+    d("bottom", "Lower asymptote of the logistic or dose-response curve", "OD / response"),
+    d("xmid", "Inflection point of the logistic: time (lysis) or log10 MOI (dose-response) at which the curve is half-way between its asymptotes", "time or log10 MOI"),
+    d("scal", "Logistic scale parameter: the curve changes from 27 % to 73 % of its range over 2 scal", "time or log10 MOI"),
+    d("ec50", "MOI giving the half-maximal response, 10^xmid", "MOI"),
+    d("hill", "Hill slope on log10 MOI: sign(B - A) / (scal ln 10); negative for a response that falls with MOI", "1 / log10 MOI"),
+    d("A", "Growth-model asymptote: total log-increase ln(OD_max / OD0) (or OD increase without the log)", "ln OD (or OD)"),
+    d("mu", "Maximum specific growth rate (growth models) or the slope of ln OD against t (exponential window)", "1 / time"),
+    d("lag", "Lag duration (lambda), measured from the first fitted point", "time"),
+    d("doubling_time", "ln 2 / mu", "time"),
+    d("n", "Number of points fitted", "count"),
+    d("r2", "1 - RSS / SST (weighted when the fit is weighted)", "-"),
+    d("adj_r2", "1 - (1 - r2)(n - 1) / (n - p), p = number of fitted parameters", "-"),
+    d("rmse", "sqrt(RSS / n)", "OD"),
+    d("sigma", "Sy.x = sqrt(RSS / df): residual standard deviation", "OD"),
+    d("aic", "Akaike information criterion, n ln(RSS / n) + 2k + const with k = parameters + 1", "-"),
+    d("aicc", "AIC + 2k(k + 1) / (n - k - 1); NA when n - k - 1 <= 0", "-"),
+    d("bic", "Bayesian information criterion", "-"),
+    d("df_resid", "Residual degrees of freedom, n - p", "count"),
+    d("runs_test_p", "Wald-Wolfowitz runs test of the signs of the residuals (normal approximation); small = systematic deviation", "-"),
+    d("shapiro_p", "Shapiro-Wilk test of normality of the residuals (NA for n < 3)", "-"),
+    d("akaike_weight", "exp(-delta AICc / 2) / sum over the models compared", "-"),
+    d("F", "Extra-sum-of-squares F: ((SS_null - SS_alt) / (df_null - df_alt)) / (SS_alt / df_alt)", "-"),
+    d("p", "Upper-tail probability of F with (df_null - df_alt, df_alt) degrees of freedom", "-"),
+    d("delta_aicc", "AICc(alternative) - AICc(null); negative favours separate curves", "-"),
+    d("t_start", "First time of the exponential window", "time"),
+    d("t_end", "Last time of the exponential window", "time"),
+    d("intercept", "Intercept of ln OD at t = 0 in the exponential window regression", "ln OD"))
+}
+# ── end v2.22 fits engine ──
+
 # ── v2.20 engine: curve phases, bootstrap intervals, curve differences ──
 # Pure functions (no Shiny session), tested by tests/test_v220_engine.R, documented in
 # docs/PHASES_AND_BOOTSTRAP.md. They do not change any existing metric: every phase
