@@ -6041,9 +6041,7 @@ OLD_IGNORED_REASONS <- c(
   x_minor_step = "no separate x minor interval (minor ticks are half the major interval)",
   y_major_step = "linear / sqrt y tick intervals are not available", y_minor_step = "linear / sqrt y tick intervals are not available",
   plot_height = "the canvas height follows the export size", line_type = "the global line type is not used (set it per sample)",
-  time_col_choice = "no time-column override in this version", error_cap_type = "inert in the old app",
-  use_od_filter = "OD-range exclusion is not available", od_min = "OD-range exclusion is not available",
-  od_max = "OD-range exclusion is not available",
+  time_col_choice = "the time column belongs to the loaded file: choose it under the file picker", error_cap_type = "inert in the old app",
   exclude_times = "time-point exclusions belong to the data: set them under Time Point Filtering",
   floating_labels = "floating legend labels are not available")
 OLD_SAMPLE_KEY_RE <- "^(color_selector|color|shape|shape_filled|line_type|legend_label|exclude_var|use_rgb|red|green|blue|alpha|use_hex|hex_color|apply_rgb|apply_hex)_([0-9]+)$"
@@ -6076,7 +6074,9 @@ legacy_settings_kind <- function(s) {
     return("current")
   }
   gs <- names(s[["global_settings"]] %||% list())
-  if (!is.null(s[["experiment_notes"]]) || !is.null(s[["floating_labels"]]) || any(grepl("^notes_", gs)) ||
+  # this app's own notes-caption inputs also start with "notes_": only the OLD app's notes keys mark an old file
+  gs_old_notes <- setdiff(gs[grepl("^notes_", gs)], c("notes_show_caption", "notes_caption_fields", "notes_caption_size", "notes_pptx_slide"))
+  if (!is.null(s[["experiment_notes"]]) || !is.null(s[["floating_labels"]]) || length(gs_old_notes) ||
       any(vapply(s[["sample_aesthetics"]] %||% list(), function(a) any(c("panel", "leg_row", "leg_col") %in% names(a)), logical(1))))
     return("lca")
   "current"

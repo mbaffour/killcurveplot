@@ -34,8 +34,8 @@ nm <- names(env$LEGACY_BASE)
 new_keys <- c("compare_label_a", "compare_label_b", "compare_mode", "compare_overlay_style", "compare_alpha_b", "compare_common_only",
               "theme_autoapply", "notes_show_caption", "notes_caption_fields", "notes_caption_size", "notes_pptx_slide",
               "batch_outputs", "batch_format", "batch_dpi", "batch_size_mode", "batch_width_mm", "batch_height_mm", "night_mode")
-check("the v2.22 defaults are the LAST entries of the default list (after lysed_threshold), in order",
-      identical(tail(nm, length(new_keys) + 2)[1:2], c("lysed_mode", "lysed_threshold")) && identical(tail(nm, length(new_keys)), new_keys))
+check("the v2.22 compare defaults sit together, in order, in the default list (later versions append after them)",
+      identical(nm[match(new_keys[1], nm) + seq_along(new_keys) - 1], new_keys))
 check("journal startup defaults are unchanged (89 x 65 mm, SVG, Arial 6-8 pt, inside-auto legend, Okabe-Ito)",
       d$export_units == "mm" && d$export_width == 89 && d$export_height == 65 && d$export_format == "svg" && d$font_family == "Arial" &&
       d$axis_text_font_size == 6 && d$axis_label_font_size == 7 && d$legend_position == "inside-auto" && d$color_palette == "colorblind" &&
@@ -119,9 +119,11 @@ check("N4: x_major_step -> x_tick_interval", g$x_tick_interval == 60 && is.null(
 check("N4: font 'helvetica' -> Helvetica", identical(g$font_family, "Helvetica"))
 check("N4: inch sizes stay inches and the units are switched to inches (10 x 8 in stays 7 x 5 in)",
       identical(g$export_units, "in") && g$export_width == 7 && g$export_height == 5 && g$export_dpi == 600)
-check("N4: controls without a counterpart are reported as ignored with a reason (minor interval, y ticks, line_type, OD filter ...)",
-      all(c("x_minor_step", "y_major_step", "y_minor_step", "line_type", "error_cap_type", "use_od_filter", "od_min", "od_max",
+check("N4: controls without a counterpart are reported as ignored with a reason (minor interval, y ticks, line_type ...)",
+      all(c("x_minor_step", "y_major_step", "y_minor_step", "line_type", "error_cap_type",
             "plot_height", "exclude_times", "time_col_choice") %in% names(tr$ignored)) && all(nzchar(tr$ignored)))
+check("N4: the OD-range filter keys are real controls here (v2.22 Data tab), so they are applied, not ignored",
+      !any(c("use_od_filter", "od_min", "od_max") %in% names(tr$ignored)) && !is.null(g$use_od_filter))
 check("N4: nothing leaks the positional widgets or the file input into the globals",
       !any(grepl("^(color_selector|shape|line_type|legend_label|exclude_var|use_rgb|hex_color)_[0-9]+$", names(g))) && is.null(g$file))
 sa <- tr$s$sample_aesthetics
@@ -184,7 +186,7 @@ testServer(app, {
   check("loader: the N4 file is recognised and the status says 'N global, M sample settings applied, K ignored'",
         identical(li$kind, "n4") && grepl("^N4 app settings imported: [0-9]+ global, 14 sample settings applied, [0-9]+ ignored\\.$", rv$settings_status$msg) &&
         identical(rv$settings_status$msg, li$message) && identical(rv$settings_status$type, "ok"))
-  check("loader: the counts in the record add up (global applied > 30, ignored >= the 11 known)", li$n_global > 30 && li$n_ignored >= 11)
+  check("loader: the counts in the record add up (global applied > 30, ignored >= the 8 known)", li$n_global > 30 && li$n_ignored >= 8)
   check("loader: positional legend labels become display names of the first three samples in order",
         identical(unname(rv$display_names[smp]), c("N4 wild type", "Uninfected", "Phage MOI 0.1")))
   check("loader: styles are kept for the samples (colour of sample 3 is the custom hex)",
