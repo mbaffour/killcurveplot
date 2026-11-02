@@ -68,9 +68,9 @@ Panels render at native size, so text stays at 6 to 8 pt. Apply the journal pres
 
 ## 5. Analysis figures and what each shows
 
-Open the **Analysis figures** tab, choose a **Figure:**, set its **Panel label:** if needed, and click **Download figure**. Every analysis figure uses the same error measure (SD, SEM or 95 % CI) and sample order as the main figure.
+Open the **Analysis figures** tab, choose a **Figure:**, set its **Panel label:** if needed, and click **Download figure**. Analysis figures follow the sample order and colours of the main figure, and their error bars use the measure (SD, SEM or 95 % CI) chosen under **Error Bars / Shadow**. They are also composer panels and **Download all figures (.zip)** files.
 
-- **Metric summary:** one facet per metric (**Metrics (one facet each):**). Open circles are replicates, the bar is the mean and whiskers are ± SD. With a reference set and **Mark significance vs reference on the metric summary** ticked, Holm-adjusted stars appear.
+- **Metric summary:** one facet per metric (**Metrics (one facet each):**). Open circles are replicates, the bar is the mean and whiskers are ± SD. **Whiskers:** can instead show the bootstrap 95 % interval of the mean-curve estimate, once the bootstrap has been run (metrics it lacks keep ± SD, with a notice). With a reference set and **Mark significance vs reference on the metric summary** ticked, Holm-adjusted stars appear.
 - **Specific growth rate vs time:** μ(t) = d ln(OD)/dt per replicate, as a mean ± SD band. Lysis shows as a negative rate.
 - **Normalized OD vs time:** each mean curve divided by the reference at every time point, or by its own t = 0 value (**Relative to:**).
 - **Replicate overlay:** each replicate as a thin line with the mean in bold, showing the variance the error bars summarise.
@@ -78,6 +78,10 @@ Open the **Analysis figures** tab, choose a **Figure:**, set its **Panel label:*
 - **MOI dose-response:** a metric against log10 MOI. MOI is read from names such as `Phage MOI 10`, or entered as `sample = MOI` lines in the MOI box. It needs at least two levels.
 - **OD heatmap:** samples by time, for screens with many samples.
 - **Metric explorer:** one metric against another, one point per sample (defaults: lysis onset and OD drop). Replicate values, labels and log axes are optional. Samples missing either metric are left out.
+- **Curve phases:** the mean curves with each sample's phases shaded: lag, exponential, deceleration, stationary, lysis, recovery and post-lysis. With one sample the shading runs behind the curve. With several, each sample gets a thin strip at the top so the bands do not overlap. The phase key sits outside the panel, and the phase table is in section 6.
+- **Separation from the reference:** each non-reference sample's curve minus the reference over time, shown as **Show:** Difference (OD) or log2 ratio, with a dashed zero line. An asterisk marks times where the Holm-adjusted p is below 0.05; untick **Mark times with p (Holm) < 0.05 with \*** to hide them. It needs a reference; first separation times are listed under the figure.
+- **Phenotype heatmap:** samples (rows) by curve metrics (columns), chosen under **Metrics (columns):**. **Colour scale:** z-score (blue-white-red centred on zero), 0 to 1 range or raw values. Each cell can print its raw value. Undefined or constant metrics are left out and noted.
+- **Fitted growth curves:** the mean curve with the models from the **Curve fitting** tab (section 6). The best model by AIC is solid; with **Draw:** All converged models, the others are thin and dashed.
 
 **Groups and facets.** In **Variable Styling**, give each sample a **Group** (for example the phage or medium). With two or more groups, tick **One panel per group (main figure)**. Samples without a group go to "Other".
 
@@ -85,7 +89,7 @@ Open the **Analysis figures** tab, choose a **Figure:**, set its **Panel label:*
 
 ## 6. Statistics and numbers for the text
 
-**Where.** The **Statistics** tab has four collapsible sections: **Summary statistics** (mean, SD, n, SEM and 95 % CI half-width), **Curve metrics (mean curve)** with the definition of each metric, **Per-replicate metrics (mean ± SD)** and **Replicate comparison**. Each has its own CSV download.
+**Where.** The **Statistics** tab has collapsible sections, each with its own CSV download: **Summary statistics** (mean, SD, n, SEM and 95 % CI half-width), **Curve metrics (mean curve)** with the definition of each metric, **Per-replicate metrics (mean ± SD)**, **Curve phases**, **Replicate comparison**, **OD at chosen times**, **Time to threshold**, **All-metrics comparison** and **Bootstrap intervals**. The methods text box comes last. The **Curve fitting** tab is separate, after Statistics.
 
 **Curve metrics** are computed on the mean curve, giving one number per sample with no replicate uncertainty. The main definitions:
 
@@ -102,22 +106,32 @@ Metrics that do not apply are reported as NA, never as an invented value.
 
 **Peak-detection smoothing window** (off by default) locates the peak on a smoothed curve, which steadies the peak-anchored metrics against replicate noise.
 
-**Replicate comparison.** Set **Statistics:** in the Analysis figures tab to Welch t / ANOVA + Tukey or Mann-Whitney / Kruskal-Wallis. Each sample is compared with the reference (all pairs if none is set), with Holm-adjusted p, Hedges' g and the 95 % CI of the difference. Groups with fewer than two values are excluded, and n < 3 is flagged. Three replicates give little power, so a non-significant result is not evidence of no difference.
+**Replicate comparison.** Set **Statistics:** in the Analysis figures tab to Welch t / ANOVA + Tukey or Mann-Whitney / Kruskal-Wallis. Each sample is compared with the reference (all pairs if none is set), with Holm-adjusted p, Hedges' g and the 95 % CI of the difference. Groups with fewer than two values are excluded, and n < 3 is flagged. Three replicates give little power, so a non-significant result is not evidence of no difference. The **First separation from reference** table gives each sample's first time its replicates differ from the reference at Holm-adjusted p below 0.05, or "none".
 
-**Methods text.** In the Statistics tab, **Draft from current settings** writes a methods paragraph. It fills only an empty box unless **replace existing text** is ticked. Edit it, then **Download methods (.txt)**.
+**Curve phases.** The phases table gives each sample's phases with start, end, duration and the OD at both edges, to three significant digits. Its CSV is unformatted. The phases follow the metrics smoothing window, peak mode and lysis threshold.
+
+**OD at chosen times and time to threshold.** **Times (comma separated):** (for example 30, 60, 120) gives each sample's OD at those times, interpolated or taken from the nearest reading (**Between readings:**). **Threshold (OD):** (0.5 by default) gives the first time the curve crosses it, upward or downward (**Crossing:**), searched from the start or from the peak (**Search from:**). Both give mean, SD, n, SEM and 95 % CI per sample, and follow the time filters, windows and blank.
+
+**All-metrics comparison** runs the replicate comparison on every metric, with the current statistics method and reference. The across-test Benjamini-Hochberg column (`p_adj_bh_across`) is exploratory: use it to screen metrics, and report the per-metric Holm-adjusted values.
+
+**Bootstrap intervals.** Choose the **Metrics:**, **Draws:** (200 to 5000, default 1000) and **Seed:**, then press **Run bootstrap**; nothing runs before that. Replicates are resampled and each mean-curve metric is recomputed per draw, giving a 95 % percentile interval. Changing the data, filters, windows, blank, samples or metric settings marks the result **out of date**, and the reports, bundle and metric summary ignore it until you run it again. At n = 3 the intervals are wide, coarse and can collapse to a point. Infection strength and other reference-relative metrics are not bootstrapped; the run says so.
+
+**Curve fitting.** The **Curve fitting** tab fits the logistic, Gompertz and Baranyi models on ln(OD/OD0), per sample from the mean curve or per replicate (**Fit to:**). By default each fit runs from the first reading to the peak (**Fit:**; **Whole curve** fits every point). The table gives a tick on the best model by AIC, the parameters A and μmax, lag, doubling time, R², AIC and standard errors. **Lag (time units)** is measured from the first fitted point, not from time zero. Short curves give fits flagged **poorly determined** in bold; judge those against the drawn curve, because AIC can still prefer them. Compare models by AIC, not by μmax.
+
+**Methods text.** In the Statistics tab, **Draft from current settings** writes a methods paragraph. It fills only an empty box unless **replace existing text** is ticked. Edit it, then **Download methods (.txt)**. Once the Curve fitting tab or a bootstrap has been used, the draft also gains a sentence on the fitted models or the intervals.
 
 **Limitations, stated plainly**
 
 - **Lysis onset rule.** A single point 5 % below the peak is not lysis. Lysis is detected only when the decline exceeds both the threshold and three times the curve's noise, sustained over two consecutive points, so a noisy uninfected control reports NA. A curve that falls by more than half its peak is reported even with fewer than two points after the peak.
 - **First-peak mode.** **Peak used for lysis metrics:** set to **First peak before a > 10 % decline** anchors the lysis metrics on the first peak, for regrowth and resistance curves. The 10 % threshold is deliberate, because plateau noise of about 4 % can look like a decline. Use a 3-point smoothing window with it. The `first_peak_od` metric uses a 5 %-of-range floor with no noise term, so a small early bump can qualify on noisy data.
-- **Growth-model fits.** The logistic, Gompertz and Baranyi fits are engine functions in v2.18 and are not drawn or exported by the app. Lag is measured from the first fitted point (t0), not from time zero, so it shifts if the first reading is after time zero. Compare models by AIC, not by μmax.
+- **Growth-model fits.** A fit is descriptive. Check it against the drawn curve before quoting its parameters, and remember that lag is measured from the first fitted point (t0), not from time zero.
 
 ## 7. Reports, notebook and bundles
 
-- **HTML Report** is one self-contained file that opens in any browser. It holds the figure at export settings, the Experiment Notebook record, the summary and curve-metric tables with definitions, data provenance (file, format, time column, filters, error settings, blank value, per-sample windows), QC flags, key settings, and R and package versions. With **Include analysis figures and statistics** ticked, it adds the analysis figures and replicate-statistics tables.
+- **HTML Report** is one self-contained file that opens in any browser. It holds the figure at export settings, the Experiment Notebook record, the summary and curve-metric tables with definitions, data provenance (file, format, time column, filters, error settings, blank value, per-sample windows), QC flags, key settings, and R and package versions. With **Include analysis figures and statistics** ticked, it adds the analysis figures, the replicate-statistics tables, and the curve fits, phases, separation (with a reference set), extracted values and current bootstrap intervals.
 - **PDF Report** has the same content as a multi-page PDF, with no LaTeX or pandoc needed.
 - **Experiment Notebook** fields cover experiment, host, phage, MOI, medium, temperature, passage, inducer and custom keys. **Download notebook (.txt)** writes the filled fields, the Figure Legend Text and the methods text. **Download notebook row (.csv)** writes one row for a master spreadsheet.
-- **Download figure bundle (.zip)** packs the main figure as SVG and PDF, the composed figure, `settings.json`, `source_data_tidy.csv`, `summary_statistics.csv`, `curve_metrics.csv`, `figure_legend.txt`, `methods.txt` and `README.txt`. The README records the app version, date, data source, figure size and fonts.
+- **Download figure bundle (.zip)** packs the main figure as SVG and PDF, the composed figure, `settings.json`, `source_data_tidy.csv`, `summary_statistics.csv`, `curve_metrics.csv`, `figure_legend.txt`, `methods.txt`, `phases.csv`, `fits.csv`, `bootstrap.csv` (current results only), the extraction CSVs when they are set, and `README.txt`. The README records the app version, date, data source, figure size and fonts.
 - **Download all figures (.zip)** writes an SVG and a PNG of every figure that can be drawn for the current data, plus the composed figure, legend and methods. Figures that cannot be drawn are listed with reasons in `SKIPPED.txt`.
 
 ## 8. Reproducibility checklist
@@ -137,6 +151,7 @@ Metrics that do not apply are reported as NA, never as an invented value.
 - [Figure standards](FIGURE_STANDARDS.md): journal widths, sources and the Inkscape loop.
 - [Metrics reference](METRICS_REFERENCE.md): formulas and detection rules for each curve metric.
 - [Fits and extraction](FITS_AND_EXTRACTION.md): growth-model fits, time-to-OD and all-metrics statistics.
+- [Phases and bootstrap](PHASES_AND_BOOTSTRAP.md): curve phases, bootstrap intervals and separation from the reference.
 - [Ported from the Lysis Curve App](PORTED_FROM_LYSIS_CURVE_APP.md): engine and CSV-reader changes.
-- [Changelog](../CHANGELOG.md): v2.10.0 to v2.18.0.
+- [Changelog](../CHANGELOG.md): v2.10.0 to v2.20.0.
 - [Gallery](gallery/gallery.png): every figure from the demo data.
