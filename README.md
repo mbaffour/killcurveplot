@@ -155,19 +155,25 @@ picker — Auto-detect (the default, sniffed from the header line), US/UK, or Eu
 
 ## Using the App
 
+### Navigating the app (new in v2.21)
+
+The **figure stays in view** while you scroll the settings: the figure column (size bar, tabs and the figure) is pinned to the top of the window, so you change a setting and see the effect without scrolling back up (untick **Keep the figure in view while I scroll the settings** at the top of the sidebar to get the old, scrolling layout; on a narrow window the columns stack and nothing is pinned). While the column is pinned the auto-fit preview also fits the window height, so the figure and the strip below it are in view together. The sidebar is an **accordion**: opening a section closes the other one, so only one is ever open; the **Jump to a section...** menu above them opens any section and scrolls it to the top (it takes keyboard focus too), and **Collapse all** closes them. Under the figure, the **Quick edit** strip has one row per loaded sample: a colour swatch and picker, the **name** shown in figures and tables, and a **show** box that adds or removes the sample from the figure; below the rows are the **X-axis label**, **Y-axis label** and **Legend position** (moved here from the sidebar, same settings). *Hide quick edit* collapses the strip.
+
+**Renaming a sample** (the name box in the strip) changes the name everywhere the sample is shown: the legends and labels of every figure, the tables of the Statistics tab and the Dashboard, the curve-metrics, per-replicate-metrics, statistics, extraction, phases, bootstrap and fit tables and their CSV downloads, the reports, the Figure Legend Text and the drafted methods text. The CSV files keep the file's own column name in a `sample_raw` column next to the display `sample` column (and `versus_raw` where a table has a `versus` column), the reports list the mapping "raw column name → display name" in the data provenance, and Save Settings stores the name per sample (the existing `legend_label` entry). The column name stays the key: Select Samples, the reference sample and the MOI override box use it (a sample whose column name carries no MOI but whose display name does, for example "Phage MOI 10", counts as that MOI). The raw source-data CSV in the figure bundle keeps the file's own names. A colour picked in the strip is the sample's colour; picking another colour for that sample in Variable Styling replaces it, and the strip's swatch follows the sidebar.
+
 ### Loading Data
 
 Click **"Browse..."** next to "Choose CSV File" and select your file. The plot will appear automatically on the right side.
 
 ### Selecting Samples
 
-Under **Variable Styling → Sample Selection**, use the dropdown to check or uncheck which samples appear on the plot.
+Under **Variable Styling → Sample Selection**, use the dropdown to check or uncheck which samples appear on the plot, or untick **show** in the Quick edit strip under the figure.
 
 ### Adjusting the Plot
 
 All settings are in the left sidebar, organized into collapsible sections. Click on any section header to expand it.
 
-**Axis Settings** — Change between linear, logarithmic, square root, or reverse axis scales. Customize tick marks, axis labels, fonts, and gridlines. The default Y-axis is logarithmic (common for OD data). *Readings below the axis floor* (new in v2.17) decides what happens to a post-lysis reading that falls below the log-axis minimum: **Clip to the floor** (the default) draws it on the floor so the curve and its points stay visible, **Drop (legacy)** deletes it as earlier versions did (the Legacy look keeps this).
+**Axis Settings** — Change between linear, logarithmic, square root, or reverse axis scales. Customize tick marks, fonts, and gridlines (the axis labels and the legend position are in the Quick edit strip under the figure). The default Y-axis is logarithmic (common for OD data). *Readings below the axis floor* (new in v2.17) decides what happens to a post-lysis reading that falls below the log-axis minimum: **Clip to the floor** (the default) draws it on the floor so the curve and its points stay visible, **Drop (legacy)** deletes it as earlier versions did (the Legacy look keeps this).
 
 **Time Point Filtering** — Restrict the displayed time range or exclude specific time points (e.g., removing an outlier at time 0). New in v2.18: under the global filter, a **per-sample time window** table gives every selected sample its own *from* and *to* time (blank = no limit), for example to cut a sample at the point where it crashes or to drop a late contaminated reading of one well type. The windows are applied after the global filter (and also when it is off) to the figures, statistics, metrics and exports; they are saved with the settings and listed in the report provenance, the figure legend text and the methods text.
 
@@ -183,7 +189,7 @@ All settings are in the left sidebar, organized into collapsible sections. Click
 
 **Error Bars / Shadow** — Display variability as error bars (T-shaped or lines) or as a shaded ribbon around each line. Choose between SD, SEM, or 95% CI. If you only have one replicate per sample per time point, error bars will simply not appear (there's no variability to show).
 
-**Variable Styling** — Fine-tune each sample individually: set its color (from presets, HEX code, or RGB sliders), point shape (circle, square, triangle, etc.), line type (solid, dashed, dotted, etc.), and legend label. New in v2.18: a free-text **Group** per sample (for example the phage, host or medium). Tick **One panel per group (main figure)** and the lysis curve is split into one panel per group with shared axes and the group name above each panel (needs two or more different groups; samples without a group go to "Other"); with *fixed panel size* the panel area you set is divided among the panels. In **Compose figure**, the panel **Lysis curve, one panel per group** adds one separate single-group figure per group, lettered a, b, c in group order. Groups are saved with the settings.
+**Variable Styling** — Fine-tune each sample individually: set its color (from presets, HEX code, or RGB sliders), point shape (circle, square, triangle, etc.), line type (solid, dashed, dotted, etc.); the sample's name is edited in the Quick edit strip under the figure. New in v2.18: a free-text **Group** per sample (for example the phage, host or medium). Tick **One panel per group (main figure)** and the lysis curve is split into one panel per group with shared axes and the group name above each panel (needs two or more different groups; samples without a group go to "Other"); with *fixed panel size* the panel area you set is divided among the panels. In **Compose figure**, the panel **Lysis curve, one panel per group** adds one separate single-group figure per group, lettered a, b, c in group order. Groups are saved with the settings.
 
 ### Saving and Loading Settings
 
@@ -537,7 +543,7 @@ legend text states the measure and n.
 
 ### Everything stays editable
 
-All of this is live: change the Y-axis label (Axis Settings → Labels & Formatting), rename any legend entry (Variable Styling → Legend Label), switch fonts and sizes (title, axis labels, axis text, and legend each have their own size control), recolor any sample, then re-download the figure or regenerate the report — the outputs always reflect the current state of the plot.
+All of this is live: change the Y-axis label (Quick edit strip under the figure), rename any legend entry (the name box in the Quick edit strip under the figure, which renames the sample in the tables and reports too), switch fonts and sizes (title, axis labels, axis text, and legend each have their own size control), recolor any sample, then re-download the figure or regenerate the report — the outputs always reflect the current state of the plot.
 
 ---
 

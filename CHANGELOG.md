@@ -1,5 +1,46 @@
 # Changelog
 
+## v2.21.0 — 2026-11-01
+
+**Sticky figure, accordion sidebar with a jump menu, quick-edit strip, rename samples everywhere.**
+Three usability complaints: the figure scrolled out of view while a long sidebar was edited, renaming a sample
+was buried in Variable Styling and only changed the legend, and finding a section in a sidebar of thirteen was
+slow. The default main figure is unchanged (the v2.9 byte-identical check is unchanged); the two new inputs
+have `APP_DEFAULTS` entries (placed right after `demo_scenario`).
+
+- **Sticky figure.** The layout is now a flex row (`#kc_layout`, sidebar 25 %); the figure column
+  (`#main_panel`: size bar, tabs, figure) is `position: sticky; top: 0; max-height: 100vh` with its own
+  scrolling, so it stays in view while the sidebar scrolls. `sticky_figure` (checkbox at the top of the
+  sidebar, default on, saved with the settings) removes the `kc-sticky` class in the browser; on a window
+  narrower than 768 px the columns stack and nothing is pinned. While the column is pinned the auto-fit
+  preview zoom also fits the window height (`sticky_viewport_height`, reported by the page; the main figure
+  only; the quick-edit strip is reserved for while it is open), so the figure and the strip are in view
+  together. Every existing input and output id is unchanged.
+- **Accordion sidebar.** The thirteen sidebar sections are `kc_section()` details elements that close each
+  other (one open at a time; native `<details>`, so Enter / Space on a summary still work). **Jump to a
+  section...** (`sidebar_jump`, UI only, not saved) opens a section, scrolls it to the top of the window and
+  focuses its summary; **Collapse all** closes them. The Statistics tab's sections stay independent.
+- **Quick-edit strip** under the figure (Lysis curve tab; `quick_edit_open`, default on, *Hide quick edit*
+  link). One row per loaded sample: a 12 px swatch, the name (`qe_name_<id>`), a colour picker
+  (`qe_color_<id>`) and a **show** box (`qe_show_<id>`: a click removes / adds the sample in Select Samples,
+  in plot order). The X- and Y-axis labels and the legend position were **moved** here from the sidebar
+  (same input ids; a one-line note remains in Axis Settings and Figure Layout). A colour picked in the strip
+  is the sample's colour (`rv$qe_colors`, read first by `resolve_aesthetics()`); the sidebar colour widgets
+  follow it, a different colour chosen in the sidebar replaces it, and the swatches follow the sidebar.
+- **Rename samples everywhere.** `rv$display_names` (raw column name -> display name) is fed by the name
+  boxes. The legend labels read it (the Variable Styling "Legend Label" box is gone: one source of truth),
+  and so do the tables of the Statistics tab and the Dashboard, the curve-metrics, per-replicate-metrics,
+  statistics (`sample`, `versus`, Tukey `comparison`, warnings and notes), extraction, phases, bootstrap and
+  fit tables, the all-metrics comparison, the QC flags, the reports (the data provenance lists
+  "raw column name → display name"), the Figure Legend Text, the methods text and the PowerPoint slide titles.
+  The CSV downloads and the bundle's tables carry `sample` (display) with `sample_raw` right after it (and
+  `versus_raw`, `comparison_raw`). The raw column name stays the key in `rv$col_map`, `selected_samples`, the
+  reference sample and the settings file (`sample_aesthetics` still keys by raw name; its `legend_label` is
+  the display name, so older files load). MOI is read from the raw name; a display name fills in a sample
+  whose raw name has no MOI. `curve_metrics_current()` gains a `sample_display` column while any sample is
+  renamed. The bundle's `source_data_tidy.csv` keeps the file's own names.
+- Tests: `tests/test_v221_ui.R`.
+
 ## v2.20.0 — 2026-10-20
 
 **Curve phases figure, bootstrap intervals, separation from the reference, gallery update.**

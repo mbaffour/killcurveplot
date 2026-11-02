@@ -8,7 +8,7 @@ This guide is for finishing phage lysis-curve figures and their statistics for a
 2. **Load data.** Click **Browse...** next to **Choose CSV File**, or pick a scenario beside **Load Demo Data** (for example Lysis curve (3 samples) or MOI series (dose-response)). A scenario also sets the x-axis label and the reference sample.
 3. **Check the data.** The green data summary box under the file picker states how many replicate columns were found for each sample. Below it, the QC flag list shows any of CEILING, NEGATIVE, GAP or FLAT_REFERENCE. Clean data shows nothing.
 4. **Check the figure.** The app starts in the journal standard: a fixed 65 x 65 mm square panel, Arial with 7 pt axis titles and 6 pt tick and legend text, 0.75 pt data lines, Okabe-Ito colours, no panel letter and SVG export.
-5. **Adjust.** Set **Legend Position:** in **Axis Settings**, colours in **Color Palettes** or per sample in **Variable Styling**, and error display in **Error Bars / Shadow**.
+5. **Adjust.** The **Quick edit** strip under the figure holds a name, a colour and a **show** box for each sample (the name you type there is used in the legend, every table, the CSV files and the reports; the CSV files keep the file's own column name in `sample_raw`), plus **X-axis label**, **Y-axis label** and **Legend position**. The figure stays pinned to the top of the window while you scroll the sidebar, the sections open one at a time, and the **Jump to a section...** menu above them goes straight to one. Set colours for a whole palette in **Color Palettes** or per sample in **Variable Styling**, and error display in **Error Bars / Shadow**.
 6. **Download.** In **Plot Dimensions & Export**, keep **Format:** as SVG and click **Download Image**.
 
 ## 2. Data formats the app reads
@@ -33,7 +33,7 @@ The layout is detected automatically. Check the data summary box after every loa
 
 **Fits indicator.** The size bar gives the panel and figure size and says whether the figure fits a single column, two across a double column, or three across. With the legend inside, a 65 mm panel gives a figure of about 75 mm, which fits a single column, and two such figures fit across a 183 mm double column.
 
-**Legend inside or outside.** The preset selects **Inside: emptiest corner (auto)**, which places the key in the corner with the fewest plotted points. It moves to the right, outside the panel, when there are more than four entries or the corner still overlaps data. Other positions are under **Legend Position:**.
+**Legend inside or outside.** The preset selects **Inside: emptiest corner (auto)**, which places the key in the corner with the fewest plotted points. It moves to the right, outside the panel, when there are more than four entries or the corner still overlaps data. Other positions are under **Legend position:** in the Quick edit strip under the figure.
 
 **Subscripts.** With **Typeset wavelength as subscript** ticked (the default), `A550` and `OD600` in the y label are drawn as A₅₅₀ and OD₆₀₀. Untick it for plain text.
 
