@@ -285,7 +285,7 @@ has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: search
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.20.0"
+APP_VERSION <- "2.20.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3567,7 +3567,7 @@ pheno_heatmap_frame <- function(pm, scale = "z", sample_order = NULL, sample_lab
   d$dark <- if (identical(scale, "z")) abs(d$value) > 0.6 * max(abs(rng), 1e-9)
             else (d$value - rng[1]) / max(diff(rng), 1e-9) < 0.5       # viridis: low = dark
   d$dark[is.na(d$dark)] <- FALSE
-  d$label <- ifelse(is.finite(d$raw), formatC(signif(d$raw, 3), format = "g"), "NA")
+  d$label <- ifelse(is.finite(d$raw), formatC(signif(d$raw, 2), format = "g"), NA_character_)   # v2.20.1: two significant digits, no text for an undefined cell
   mlab <- if (is.null(metric_labels)) pheno_metric_label(pm$metrics) else metric_labels
   d$metric_key <- d$metric
   d$metric <- factor(mlab[match(d$metric, pm$metrics)], levels = unique(mlab))
@@ -6485,6 +6485,11 @@ server <- function(input, output, session) {
     w  <- cl(input$panel_width_mm, 65)
     h  <- cl(input$panel_height_mm, w)
     if (kind %in% CURVE_KINDS && isTRUE(input$panel_square %||% TRUE)) h <- w
+    if (identical(kind, "phenotype_heatmap")) {   # v2.20.1: the height follows the rows so the tiles stay square-ish
+      n <- tryCatch(nrow(pheno_current()$matrix), error = function(e) NA_integer_)
+      if (!is.finite(n) || n < 1) n <- length(input$selected_samples)
+      h <- min(max(25, 10 * max(n, 1)), 400)
+    }
     c(w, h)
   }
   fixed_figure <- function(p, kind = "main") {
@@ -7159,7 +7164,7 @@ server <- function(input, output, session) {
         # v2.20: the mean curves with each sample's phases (curve_phases_by_sample(): lag, exponential, deceleration,
         # stationary, lysis, recovery / post-lysis, every boundary read back from the curve metrics) as translucent
         # shaded bands behind the curve. With several samples full-height bands would overlap, so each sample gets a
-        # thin strip at the top of the panel (one row per sample, labelled on the left) and the curves sit below.
+        # thin strip at the top of the panel (one row per sample, marked by a small square in the sample's colour at its left end) and the curves sit below.
         pd <- prepare_plot_data(); ph <- phases_current()
         if (is.null(ph) || nrow(ph) == 0) stop("No phases could be computed: a curve needs at least two readings.")
         logy <- identical(input$y_scale_type, "log")
@@ -7193,13 +7198,13 @@ server <- function(input, output, session) {
                     colour = if (strips) "white" else NA, linewidth = if (strips) pt2lw(0.25) else 0,
                     inherit.aes = FALSE)
         if (strips) {
-          lab <- data.frame(variable = factor(smp, levels = sample_levels(samps)), label = unname(labs_v[smp]),
-                            x = t_rng[1] + 0.012 * (t_rng[2] - t_rng[1]),
-                            y = inv((lay$strips$ymin + lay$strips$ymax) / 2), stringsAsFactors = FALSE)
-          g <- g + geom_text(data = lab, aes(x = x, y = y, label = label, colour = variable), hjust = 0, vjust = 0.5,
-                             size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
-                             family = if (nzchar(input$font_family %||% "")) input$font_family else "",
-                             show.legend = FALSE, inherit.aes = FALSE)
+          # v2.20.1: no text over the strips; a 1.5 mm square in the sample's colour at the left end of its strip
+          # (pch 15 is 0.75 x the point size on a side: size 2 mm -> 1.5 mm; stroke 0 so no border is added)
+          sq <- data.frame(variable = factor(smp, levels = sample_levels(samps)),
+                           x = t_rng[1] + 0.02 * (t_rng[2] - t_rng[1]),
+                           y = inv((lay$strips$ymin + lay$strips$ymax) / 2), stringsAsFactors = FALSE)
+          g <- g + geom_point(data = sq, aes(x = x, y = y, colour = variable), shape = 15, size = 2, stroke = 0,
+                              show.legend = FALSE, inherit.aes = FALSE)
         }
         g <- g +
           geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable, group = variable),
@@ -7207,7 +7212,7 @@ server <- function(input, output, session) {
           scale_color_manual(   values = cols, labels = labs_v, name = NULL) +
           scale_linetype_manual(values = lts,  labels = labs_v, name = NULL) +
           scale_fill_manual(values = PHASE_COLORS, breaks = intersect(PHASE_LEVELS, as.character(ph$phase)),
-                            drop = TRUE, name = "Phase") +
+                            drop = TRUE, name = if (strips) "Phase (strips top\u2192bottom\nin legend order)" else "Phase") +
           guides(color = guide_legend(order = 1), linetype = guide_legend(order = 1),
                  fill = guide_legend(order = 2, override.aes = list(alpha = 0.6, colour = NA))) +
           scale_x_continuous(expand = c(0, 0)) +
@@ -7375,7 +7380,7 @@ server <- function(input, output, session) {
         if (length(pm$metrics) == 0) stop(pheno_empty_reason(pm))
         scl <- input$pheno_scale %||% "z"
         d   <- pheno_heatmap_frame(pm, scl, sample_order = sample_levels(samps), sample_labels = labs_v,
-                                   metric_labels = pheno_metric_label(pm$metrics))
+                                   metric_labels = sub("\\s*\\(.*\\)$", "", pheno_metric_label(pm$metrics)))
         n_met <- length(pm$metrics)
         fill_name <- switch(scl, z = "z-score", range = "scaled",
                             if (n_met == 1 && grepl("\\(.*\\)$", metric_axis_label(pm$metrics, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
@@ -7388,13 +7393,17 @@ server <- function(input, output, session) {
           scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0,
                                limits = c(-lim, lim), na.value = "grey90", name = fill_name)
         } else scale_fill_viridis_c(name = fill_name, na.value = "grey90")
-        if (isTRUE(input$pheno_values %||% TRUE))
-          g <- g + geom_text(aes(label = label, color = dark), size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+        # v2.20.1: values at 0.8 x the axis-text size, left out beyond 8 metric columns (they would overlap);
+        # undefined cells carry no text; the columns use the short metric names (no units), wrapped at 12 characters,
+        # horizontal for up to 4 columns, otherwise at 45 degrees
+        if (isTRUE(input$pheno_values %||% TRUE) && n_met <= 8)
+          g <- g + geom_text(aes(label = label, color = dark), size = 0.8 * (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                             na.rm = TRUE,
                              family = if (nzchar(input$font_family %||% "")) input$font_family else "") +
             scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "black"), guide = "none")
         g + scale_x_discrete(labels = scales::label_wrap(12), expand = c(0, 0),
                              guide = if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
-                                     else if (n_met >= 5) guide_axis(angle = 45) else waiver()) +
+                                     else if (n_met > 4) guide_axis(angle = 45) else waiver()) +
           scale_y_discrete(expand = c(0, 0)) + labs(x = NULL, y = NULL)
       },
       heatmap = {

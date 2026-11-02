@@ -95,8 +95,12 @@ testServer(app, {
   fills <- unique(rect_d$fill)
   check("the fill follows the fixed phase palette",
         all(substr(fills, 1, 7) %in% toupper(substr(unname(env$PHASE_COLORS), 1, 7)) | substr(fills, 1, 7) %in% unname(env$PHASE_COLORS)))
-  check("one text label per sample (the legend label) and the curves are drawn",
-        sum(lay == "GeomText") == 1 && nrow(b$data[[which(lay == "GeomText")]]) == 3 && sum(lay == "GeomLine") == 1)
+  check("no text over the strips: one 1.5 mm square (shape 15, size 2, stroke 0) per sample in its colour, and the curves are drawn",
+        !"GeomText" %in% lay && sum(lay == "GeomPoint") == 1 && nrow(b$data[[which(lay == "GeomPoint")]]) == 3 &&
+        all(b$data[[which(lay == "GeomPoint")]]$shape == 15) && all(b$data[[which(lay == "GeomPoint")]]$size == 2) &&
+        sum(lay == "GeomLine") == 1)
+  check("the phase legend title explains the strip order, over two lines",
+        identical(p$scales$get_scales("fill")$name, "Phase (strips top\u2192bottom\nin legend order)"))
   check("the phase key sits outside right", identical(p$theme$legend.position, "right"))
   check("the curves lie below the strips (the highest mean value is under the lowest strip edge)",
         max(b$data[[which(lay == "GeomLine")]]$y) < min(rect_d$ymin))
@@ -104,9 +108,9 @@ testServer(app, {
   session$setInputs(selected_samples = smp[3])
   p1 <- generate_analysis_plot("phases"); lay1 <- vapply(p1$layers, function(l) class(l$geom)[1], ""); b1 <- ggplot_build(p1)
   r1 <- b1$data[[which(lay1 == "GeomRect")]]
-  check("one sample: full-height bands (every rectangle spans the whole panel), alpha 0.12, no strip label",
+  check("one sample: full-height bands (every rectangle spans the whole panel), alpha 0.12, no strip marks, plain legend title",
         !is_placeholder_plot(p1) && length(unique(r1$ymin)) == 1 && length(unique(r1$ymax)) == 1 && all(abs(r1$alpha - 0.12) < 1e-9) &&
-        !"GeomText" %in% lay1)
+        !"GeomText" %in% lay1 && !"GeomPoint" %in% lay1 && identical(p1$scales$get_scales("fill")$name, "Phase"))
   session$setInputs(selected_samples = smp)
   # log axis
   session$setInputs(y_scale_type = "log")

@@ -266,14 +266,23 @@ testServer(app, {
         inherits(p$scales$get_scales("fill"), "ScaleContinuous") &&
         identical(toupper(p$scales$get_scales("fill")$palette(0.5)), "#FFFFFF"))
   lbl <- p$layers[[2]]
-  check("cell text: the raw value in the axis-text size", inherits(lbl$geom, "GeomText") &&
-        abs(lbl$aes_params$size - input$axis_text_font_size / ggplot2::.pt) < 1e-9 && nrow(p$data) == nrow(tiles))
+  check("cell text: the raw value (2 significant digits, no text for NA) at 0.8 x the axis-text size", inherits(lbl$geom, "GeomText") &&
+        abs(lbl$aes_params$size - 0.8 * input$axis_text_font_size / ggplot2::.pt) < 1e-9 && nrow(p$data) == nrow(tiles) &&
+        !any(p$data$label %in% "NA") && all(is.na(p$data$label) == !is.finite(p$data$raw)) &&
+        all(p$data$label[is.finite(p$data$raw)] == formatC(signif(p$data$raw[is.finite(p$data$raw)], 2), format = "g")))
   check("rows follow the sample order (first sample on top); columns are the wrapped metric labels",
         identical(levels(p$data$sample), rev(sample_levels(smp))) &&
-        all(levels(p$data$metric) %in% env$pheno_metric_label(pm$metrics)))
+        all(levels(p$data$metric) %in% sub("\\s*\\(.*\\)$", "", env$pheno_metric_label(pm$metrics))))
   check("legend sits at the right (a tile figure)", identical(p$theme$legend.position, "right"))
   session$setInputs(pheno_values = FALSE)
   check("pheno_values off: no text layer", !any(vapply(generate_analysis_plot("phenotype_heatmap")$layers, function(l) inherits(l$geom, "GeomText"), logical(1))))
+  session$setInputs(pheno_values = TRUE)
+  session$setInputs(pheno_metrics = c("lysis_time", "od_drop", "lysis_efficiency", "mu_max", "auc", "max_od", "final_od", "t_first_peak", "doubling_time"))
+  p9 <- generate_analysis_plot("phenotype_heatmap")
+  check("more than 8 metric columns: no cell values (they would overlap)",
+        !is_placeholder_plot(p9) && length(levels(p9$data$metric)) > 8 &&
+        !any(vapply(p9$layers, function(l) inherits(l$geom, "GeomText"), logical(1))))
+  session$setInputs(pheno_metrics = env$APP_DEFAULTS$pheno_metrics)
   session$setInputs(pheno_values = TRUE, pheno_scale = "range")
   pr <- generate_analysis_plot("phenotype_heatmap")
   check("range scale: viridis, legend title 'scaled', fill in 0..1",
@@ -304,13 +313,13 @@ testServer(app, {
   # not forced square: the panel is width x height as given
   session$setInputs(panel_size_mode = "fixed", panel_width_mm = 65, panel_height_mm = 40, panel_square = TRUE)
   dims <- panel_dims_mm("phenotype_heatmap")
-  check("phenotype_heatmap is a non-curve kind: panel 65 x 40 mm even with 'square panel' on; fit_overlay stays square",
-        identical(dims, c(65, 40)) && identical(panel_dims_mm("fit_overlay"), c(65, 65)))
+  check("phenotype_heatmap is a non-curve kind: panel 65 x max(25, 10 x samples) = 65 x 30 mm (3 samples) even with 'square panel' on; fit_overlay stays square",
+        identical(dims, c(65, 30)) && identical(panel_dims_mm("fit_overlay"), c(65, 65)))
   fgp <- fixed_figure(generate_analysis_plot("phenotype_heatmap"), "phenotype_heatmap")
   pcp <- fgp$layout[grepl("^panel", fgp$layout$name), ]
-  check("fixed panel: the heatmap panel is 65 x 40 mm",
+  check("fixed panel: the heatmap panel is 65 x 30 mm",
         abs(grid::convertWidth(fgp$widths[pcp$l[1]], "mm", valueOnly = TRUE) - 65) < 1e-6 &&
-        abs(grid::convertHeight(fgp$heights[pcp$t[1]], "mm", valueOnly = TRUE) - 40) < 1e-6)
+        abs(grid::convertHeight(fgp$heights[pcp$t[1]], "mm", valueOnly = TRUE) - 30) < 1e-6)
   session$setInputs(panel_size_mode = "fit")
 })
 
