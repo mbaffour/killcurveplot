@@ -1800,13 +1800,29 @@ report_analysis_html <- function(analysis) {
     tbl(st$posthoc,  "Post-hoc comparisons (Tukey HSD)"),
     "<h3>Definitions</h3>\n<p style='font-size:0.9em;'>", html_escape(STATS_DEFINITIONS), "</p>\n",
     report_extraction_html(analysis$extraction),
-    report_bootstrap_html(analysis$bootstrap))
+    report_bootstrap_html(analysis$bootstrap),
+    report_stats22_html(analysis$stats22, cap_style))
 }
 
 # v2.20: the "Bootstrap intervals" section of the HTML report; "" when no current bootstrap is cached.
 report_bootstrap_html <- function(b) {
   if (is.null(b)) return("")
   paste0("\n<h2>", html_escape(b$title), "</h2>\n<p style='font-size:0.9em;'>", html_escape(b$desc), "</p>", html_table(b$table))
+}
+
+# v2.22: the "Statistics (v2.22)" section of the HTML report: methods sentences, figures, tables with rows; "" when there is none.
+report_stats22_html <- function(x, cap_style = "font-size:0.9em;color:#495057;margin-top:6px;") {
+  if (is.null(x)) return("")
+  figs <- paste0(vapply(x$figures %||% list(), function(f) {
+    body <- if (!is.null(f$b64)) paste0("<img class='figure' src='data:image/png;base64,", f$b64, "' alt='", html_escape(f$title), "'/>")
+            else paste0("<p><em>Figure not available: ", html_escape(f$error %||% "unknown reason"), "</em></p>")
+    paste0("<h3>", html_escape(f$title), "</h3>", body, if (nzchar(f$caption %||% "")) paste0("<p style='", cap_style, "'>", html_escape(f$caption), "</p>") else "")
+  }, character(1)), collapse = "\n")
+  tbls <- paste0(vapply(x$tables %||% list(), function(t)
+    paste0("<h3>", html_escape(t$title), "</h3>", if (nzchar(t$desc %||% "")) paste0("<p style='font-size:0.9em;'>", html_escape(t$desc), "</p>") else "", html_table(t$table, class = "wrap")),
+    character(1)), collapse = "\n")
+  meth <- if (length(x$methods)) paste0("<h3>Methods sentences</h3><p class='methods'>", html_escape(paste(x$methods, collapse = " ")), "</p>") else ""
+  paste0("\n<h2>", html_escape(x$title), "</h2>\n<p style='font-size:0.9em;'>", html_escape(x$intro %||% ""), "</p>\n", figs, tbls, meth)
 }
 
 # v2.19: the "Curve fits" section of the HTML report (figure, parameter table, notes); "" without fits.
@@ -2070,6 +2086,10 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
     kc  <- which(vapply(figs_pdf, function(f) identical(f$type, "composed"), logical(1)))
     figs_pdf <- append(figs_pdf, list(analysis$fits$figure), after = if (length(kc)) kc[1] - 1L else length(figs_pdf))
   }
+  if (length(analysis$stats22$figures)) {          # v2.22: the per-time and AUC figures, before the composed figure
+    kc  <- which(vapply(figs_pdf, function(f) identical(f$type, "composed"), logical(1)))
+    figs_pdf <- append(figs_pdf, analysis$stats22$figures, after = if (length(kc)) kc[1] - 1L else length(figs_pdf))
+  }
   # ── Stats table pages (chunked) ──
   fmt_df <- function(df) {
     df2 <- df
@@ -2144,6 +2164,14 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
   if (!is.null(analysis$bootstrap)) {          # v2.20
     text_page(analysis$bootstrap$title, analysis$bootstrap$desc)
     page_table(analysis$bootstrap$table, analysis$bootstrap$title)
+  }
+  if (!is.null(analysis$stats22)) {            # v2.22: the Statistics section (tables with rows; the figures are above)
+    s22 <- analysis$stats22
+    text_page(s22$title, c(s22$intro, if (length(s22$methods)) paste0("Methods sentences. ", paste(s22$methods, collapse = " "))))
+    for (tb in s22$tables) {
+      tab <- tb$table; for (j in seq_along(tab)) if (is.character(tab[[j]])) tab[[j]] <- vapply(tab[[j]], function(m) paste(strwrap(m, 40), collapse = "\n"), character(1))
+      page_table(tab, tb$title, rows_per_page = if (ncol(tab) > 10) 18 else 28)
+    }
   }
   if (!is.null(analysis)) {
     st <- analysis$stats
@@ -2618,7 +2646,9 @@ ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "me
                              "OD at chosen times (grouped bars or dots)" = "od_at_times",          # v2.21
                              "Time to an OD threshold (per sample)"      = "time_to_threshold",    # v2.21
                              "Replicate small multiples (one panel per sample)" = "replicate_facets",   # v2.21
-                             "Fraction of replicates lysed vs time"      = "lysed_fraction")       # v2.21
+                             "Fraction of replicates lysed vs time"      = "lysed_fraction",       # v2.21
+                             "Per-time comparisons vs reference (stars)" = "per_time",             # v2.22
+                             "AUC per sample"                            = "auc")                  # v2.22
 COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main",
                            "Lysis curve, one panel per group" = "main_by_group",   # v2.18
                            ANALYSIS_FIGURE_CHOICES,
@@ -2986,7 +3016,20 @@ LEGACY_BASE <- list(
   notes_show_caption = FALSE, notes_caption_fields = c("exp_id", "host_strain", "phage_plasmid", "moi"), notes_caption_size = 6,
   notes_pptx_slide = FALSE,
   batch_outputs = "main", batch_format = "svg", batch_dpi = 300, batch_size_mode = "current", batch_width_mm = 89, batch_height_mm = 65,
-  night_mode = FALSE
+  night_mode = FALSE,
+  # v2.22 statistics and fitting UI (Statistics tab sections, Curve fitting tab blocks, the AUC / per-time / 4PL figures).
+  # Every one is off or a neutral choice: a session that does not touch them is exactly what it was.
+  s22_metrics = c("lysis_time", "od_drop", "mu_max", "auc"), s22_qq_metric = "lysis_time",
+  posthoc_method = "holm_welch",
+  tc_adjust = "sidak", tc_repeated = TRUE,
+  auc_baseline = "none", auc_baseline_value = 0, auc_from = "", auc_to = "", auc_relative = TRUE, auc_style = "dot",
+  outlier_method = "grubbs", onesample_text = "",
+  explorer_stats = "none", explorer_line = FALSE, explorer_band = "confidence",
+  fit_ci_method = "profile", fit_weights_scheme = "none", fit_bands_on = FALSE, fit_bands_type = "confidence",
+  lysis_models = c("one_phase_decay", "fpl_decay"), lysis_from = "peak", lysis_level = "mean", lysis_show = FALSE,
+  expwin_level = "mean", expwin_mode = "auto", expwin_from = "", expwin_to = "", expwin_min_points = 4, expwin_show = FALSE,
+  cmp_model = "logistic", cmp_param = "mu",
+  dr_fit = FALSE, dr_fix_bottom = "", dr_fix_top = "", dr_band = TRUE, dr_ec50 = TRUE
 )
 
 # The inputs the journal preset sets, at their legacy values.
@@ -5499,6 +5542,491 @@ STATS_V222_DEFINITIONS <- data.frame(
   stringsAsFactors = FALSE)
 # ── end v2.22 stats engine ──
 
+# ── v2.22 statistics and fitting UI helpers ──
+# Pure functions (no Shiny state) behind the v2.22 Statistics-tab sections, the Curve fitting blocks and the AUC /
+# per-time / 4PL figures. They only compose the two v2.22 engines above (fits and stats); tested by
+# tests/test_v222_integration.R and described in docs/STATISTICS_AND_FITTING_UI.md. A calculation that cannot be done
+# returns an NA row / NULL with the reason, never an error (the UI shows the reason).
+
+S22_POSTHOC_CHOICES <- c("Holm-adjusted Welch t (default)" = "holm_welch", "Tukey HSD" = "tukey", "Games-Howell" = "games_howell",
+                         "Dunn (rank-based, after Kruskal-Wallis)" = "dunn", "Dunnett (each sample vs the reference)" = "dunnett",
+                         "Bonferroni (Welch t)" = "bonferroni", "Sidak (Welch t)" = "sidak")
+S22_ADJUST_CHOICES  <- c("Sidak" = "sidak", "Holm" = "holm", "Bonferroni" = "bonferroni")
+S22_WEIGHT_CHOICES  <- c("None (equal weights)" = "none", "1/Y (relative)" = "1/y", "1/Y² (relative, Prism default)" = "1/y2",
+                         "1/SD² (replicate SD; mean-curve and dose-response fits)" = "1/sd2")
+S22_OUTLIER_CHOICES <- c("Grubbs (two-sided, assumes normality)" = "grubbs", "MAD (robust z > 3)" = "mad", "IQR fences (1.5 x IQR)" = "iqr")
+S22_NOTE_N3 <- paste0("With n = 3 replicates the power is low: a non-significant result is not evidence of no difference, ",
+                      "the normality and variance tests cannot reject anything meaningful, and a rank test cannot reach p < 0.05 ",
+                      "for 3 values per group (Wilcoxon signed-rank cannot go below 0.25).")
+
+# a value of a select / radio input restricted to the allowed ones
+s22_choice <- function(x, valid, default) {
+  x <- as.character(x %||% "")
+  if (length(x) == 1 && x %in% valid) x else default
+}
+# a typed number ("" / junk -> NA)
+s22_num <- function(x) { v <- suppressWarnings(as.numeric(gsub(",", ".", trimws(as.character(x %||% "")), fixed = TRUE))); if (length(v) == 1 && is.finite(v)) v else NA_real_ }
+
+# "doubling_time = 20; lysis_time: 90" -> c(doubling_time = 20, lysis_time = 90); keys may be metric names or labels
+s22_parse_assignments <- function(txt) {
+  parts <- trimws(unlist(strsplit(as.character(txt %||% ""), "[;\n,]+")))
+  parts <- parts[nzchar(parts)]
+  out <- numeric(0); bad <- character(0)
+  keys <- names(ANALYSIS_METRIC_LABELS)
+  labs <- tolower(unname(ANALYSIS_METRIC_LABELS))
+  for (p in parts) {
+    kv <- trimws(strsplit(p, "[=:]")[[1]])
+    if (length(kv) != 2 || !nzchar(kv[1])) { bad <- c(bad, p); next }
+    v <- s22_num(kv[2])
+    k <- if (kv[1] %in% keys) kv[1] else keys[match(tolower(kv[1]), labs)]
+    if (is.na(k) || !is.finite(v)) { bad <- c(bad, p); next }
+    out[k] <- v
+  }
+  list(values = out, invalid = bad)
+}
+
+# Format helpers --------------------------------------------------------------------------------------------------------
+s22_sig <- function(df, sig = 4) {   # 4 significant digits as text, "NA" for missing; integers stay whole
+  if (is.null(df) || !is.data.frame(df)) return(df)
+  for (cc in names(df)) if (is.numeric(df[[cc]]))
+    df[[cc]] <- vapply(df[[cc]], function(v) if (is.finite(v)) format(signif(v, sig), trim = TRUE, scientific = FALSE) else "NA", "")
+  df
+}
+s22_ci_text <- function(est, lo, hi, sig = 3) {
+  f <- function(v) ifelse(is.finite(v), formatC(signif(v, sig), format = "g"), "—")
+  ifelse(is.finite(lo) & is.finite(hi), paste0(f(lo), " to ", f(hi)), "—")
+}
+
+# Map the sample-name columns `cols` of a table to display names: the display name in place, the raw name in a
+# `<col>_raw` column right after it (the CSV form); `keep_raw = FALSE` drops them (screen and reports).
+s22_display <- function(df, map, cols = "sample", keep_raw = TRUE) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0) return(df)
+  for (col in intersect(cols, names(df))) {
+    raw <- as.character(df[[col]]); dsp <- display_name_of(raw, map)
+    if (!keep_raw) { df[[col]] <- dsp; next }
+    pos <- match(col, names(df)); df[[col]] <- dsp
+    nms <- names(df); df[[paste0(col, "_raw")]] <- raw
+    df <- df[c(nms[seq_len(pos)], paste0(col, "_raw"), setdiff(nms[-seq_len(pos)], paste0(col, "_raw")))]
+  }
+  df
+}
+
+# ── post-hoc comparison of one metric (Statistics tab: "Post-hoc method") ──────────────────────────────────────────────
+# The per-replicate metric of `rm` (compute_replicate_metric_rows) compared with posthoc_table() by `method`. The family is
+# "each sample vs the reference" when the reference has usable values (as compare_replicate_metric), else all pairs.
+# Returns list(omnibus, posthoc, notes, n, reference, metric). A method that needs a reference (Dunnett) without one
+# compares all pairs through the engine's fallback and says so.
+s22_posthoc_for_metric <- function(rm, metric, method = "holm_welch", reference = NULL) {
+  out <- list(omnibus = NULL, posthoc = NULL, notes = character(0), n = NULL, reference = "", metric = metric, method = method)
+  if (is.null(rm) || !is.data.frame(rm) || !metric %in% names(rm) || !"sample" %in% names(rm)) {
+    out$notes <- "No per-replicate metric for the selected samples."; return(out)
+  }
+  v <- suppressWarnings(as.numeric(rm[[metric]])); g <- as.character(rm$sample)
+  ok <- is.finite(v)
+  ns <- table(g[ok]); keep <- names(ns)[ns >= 2]
+  if (length(keep) < 2) {
+    out$notes <- "Need at least two samples with 2+ replicate values for this metric."; return(out)
+  }
+  sel <- ok & g %in% keep
+  ref <- if (!is.null(reference) && length(reference) == 1 && !is.na(reference) && nzchar(reference) && reference %in% keep) reference else NULL
+  if (!is.null(reference) && length(reference) == 1 && !is.na(reference) && nzchar(reference) && is.null(ref))
+    out$notes <- c(out$notes, paste0("The reference '", reference, "' has no usable values for this metric, so all pairs are compared."))
+  if (identical(method, "dunnett") && is.null(ref))
+    out$notes <- c(out$notes, "Dunnett's test compares each sample with one reference: set the reference sample under Stats & Reports; all pairs are compared meanwhile.")
+  out$reference <- ref %||% ""
+  out$omnibus <- omnibus_table(v[sel], g[sel])
+  out$posthoc <- posthoc_table(v[sel], g[sel], method = method, reference = ref)
+  out$n <- attr(out$posthoc, "n")
+  if (any(ns[keep] < 3)) out$notes <- c(out$notes, "Some groups have n < 3.")
+  out
+}
+
+# ── growth fits: confidence intervals, quality, residuals, bands ───────────────────────────────────────────────────────
+# fit_growth_object() refits a v2.18 row by an unbounded nls from the row's estimates; when the engine's fit sat on its
+# bound (lag = 0, the usual case for a curve without a lag) that refit can run to a different solution. This wrapper
+# accepts the refit only when A, mu and lag agree with the row (tolerance `tol`), else tries a bounded (lag >= 0, port)
+# refit, else returns NULL with the reason: the intervals and bands then fall back to the row's own standard errors.
+growth_object_port <- function(fit_row, t, od) {
+  tryCatch({
+    row <- fit_row[1, , drop = FALSE]
+    lg <- if ("log_transform" %in% names(row)) isTRUE(row$log_transform) else TRUE
+    until <- if ("until" %in% names(row)) as.character(row$until) else "peak"
+    cl <- .f22_clean_xy(t, od); x <- cl$x; y0v <- cl$y
+    if (lg) { keep <- y0v > 0; x <- x[keep]; y0v <- y0v[keep] }
+    if (!length(x)) return(NULL)
+    if (until == "peak") { k <- which.max(y0v); x <- x[seq_len(k)]; y0v <- y0v[seq_len(k)] }
+    t0 <- x[1]; od0 <- y0v[1]
+    y <- if (lg) log(y0v / od0) else y0v - od0
+    dat <- data.frame(tt = x - t0, y = y)
+    model <- as.character(row$model)
+    if (!model %in% names(GROWTH_MODEL_FUNS)) return(NULL)
+    form <- stats::as.formula(paste0("y ~ gm_", model, "(tt, A, mu, lag)"))
+    ctl <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(y^2), 1e-12), warnOnly = FALSE)
+    fit <- .f22_nls(form, dat, list(A = row$A, mu = row$mu_max, lag = row$lag), "port",
+                    lower = c(A = 1e-8, mu = 1e-8, lag = 0), upper = c(A = Inf, mu = Inf, lag = max(dat$tt)), ctl = ctl)
+    .f22_set_meta(fit, "tt", offset = t0, log_transform = lg, y0 = od0)
+  }, error = function(e) NULL)
+}
+growth_object_checked <- function(fit_row, t, od, tol = 0.02) {
+  row <- fit_row[1, , drop = FALSE]
+  if (!isTRUE(row$converged)) return(list(fit = NULL, note = "the growth fit did not converge"))
+  span <- suppressWarnings(diff(range(.f22_num(t)[is.finite(.f22_num(t))])))
+  if (!is.finite(span) || span <= 0) span <- 1
+  agree <- function(o) {
+    if (is.null(o)) return(FALSE)
+    cf <- tryCatch(stats::coef(o), error = function(e) NULL)
+    if (is.null(cf) || !all(c("A", "mu", "lag") %in% names(cf)) || !all(is.finite(cf))) return(FALSE)
+    abs(cf[["A"]] - row$A) <= tol * max(abs(row$A), 1e-12) && abs(cf[["mu"]] - row$mu_max) <= tol * max(abs(row$mu_max), 1e-12) &&
+      abs(cf[["lag"]] - row$lag) <= tol * span
+  }
+  o <- fit_growth_object(row, t, od)
+  if (agree(o)) return(list(fit = o, note = NA_character_))
+  o2 <- growth_object_port(row, t, od)
+  if (agree(o2)) return(list(fit = o2, note = NA_character_))
+  list(fit = NULL, note = "the refit did not reproduce the fitted parameters")
+}
+
+# One checked nls object per row of a fit table (fit_table_prepare()). `curve_of(row)` returns list(t, od) of the curve the
+# row was fitted to. A list aligned with the rows: each element list(fit, note).
+growth_objects <- function(tab, curve_of) {
+  if (is.null(tab) || nrow(tab) == 0) return(list())
+  lapply(seq_len(nrow(tab)), function(i) {
+    r <- tab[i, , drop = FALSE]
+    cv <- tryCatch(curve_of(r), error = function(e) NULL)
+    if (is.null(cv) || !length(cv$t)) return(list(fit = NULL, note = "curve not available"))
+    tryCatch(growth_object_checked(r, cv$t, cv$od), error = function(e) list(fit = NULL, note = "refit failed"))
+  })
+}
+
+# The fit table with 95 % intervals (profile or Wald), adjusted R2, RMSE, AICc, Akaike weights (over the converged models of
+# the same curve) and the runs / Shapiro tests of the residuals. When the refit is not available the intervals are Wald from the
+# row's standard errors and the residual tests are NA (said in `ci_note`). One row per row of `tab`.
+fit_extended_table <- function(tab, objects, method = "profile", level = 0.95) {
+  if (is.null(tab) || nrow(tab) == 0) return(NULL)
+  method <- s22_choice(method, c("profile", "wald"), "profile")
+  rows <- lapply(seq_len(nrow(tab)), function(i) {
+    r <- tab[i, , drop = FALSE]; ob <- if (i <= length(objects)) objects[[i]] else list(fit = NULL, note = "no refit")
+    conv <- isTRUE(r$converged)
+    na <- list(A_lo = NA_real_, A_hi = NA_real_, mu_max_lo = NA_real_, mu_max_hi = NA_real_, lag_abs_lo = NA_real_, lag_abs_hi = NA_real_,
+               doubling_time_lo = NA_real_, doubling_time_hi = NA_real_, adj_r2 = NA_real_, rmse = NA_real_, aicc = NA_real_,
+               df_resid = NA_real_, runs_test_p = NA_real_, shapiro_p = NA_real_, ci_method = NA_character_, ci_note = NA_character_)
+    if (!conv) { na$ci_note <- "not converged"; return(na) }
+    n <- as.numeric(r$n_points); t0 <- if (is.finite(r$t0)) r$t0 else 0
+    out <- na; notes <- character(0)
+    if (!is.null(ob$fit)) {
+      ci <- fit_ci(ob$fit, level = level, method = method)
+      g <- function(term, col) { z <- ci[match(term, ci$term), col]; if (length(z)) z else NA_real_ }
+      out$A_lo <- g("A", "lo"); out$A_hi <- g("A", "hi"); out$mu_max_lo <- g("mu", "lo"); out$mu_max_hi <- g("mu", "hi")
+      out$lag_abs_lo <- t0 + g("lag", "lo"); out$lag_abs_hi <- t0 + g("lag", "hi")
+      out$ci_method <- paste(unique(stats::na.omit(ci$method)), collapse = "+"); if (!nzchar(out$ci_method)) out$ci_method <- NA_character_
+      q <- fit_quality(ob$fit)
+      for (cc in c("adj_r2", "rmse", "aicc", "df_resid", "runs_test_p", "shapiro_p")) out[[cc]] <- q[[cc]]
+      if (!is.na(ob$note)) notes <- c(notes, ob$note)
+    } else {
+      dfr <- n - 3; tq <- .f22_tq(level, dfr)
+      w <- function(est, se) if (is.finite(tq) && is.finite(est) && is.finite(se)) est + c(-1, 1) * tq * se else c(NA_real_, NA_real_)
+      a <- w(r$A, r$se_A); m <- w(r$mu_max, r$se_mu_max); l <- w(r$lag, r$se_lag)
+      out$A_lo <- a[1]; out$A_hi <- a[2]; out$mu_max_lo <- m[1]; out$mu_max_hi <- m[2]; out$lag_abs_lo <- t0 + l[1]; out$lag_abs_hi <- t0 + l[2]
+      out$ci_method <- "wald (row standard errors)"
+      k <- 4; out$df_resid <- dfr
+      out$rmse <- if (is.finite(r$rss) && n > 0) sqrt(r$rss / n) else NA_real_
+      out$adj_r2 <- if (is.finite(r$r2) && dfr > 0) 1 - (1 - r$r2) * (n - 1) / dfr else NA_real_
+      out$aicc <- if (is.finite(r$aic) && n - k - 1 > 0) r$aic + 2 * k * (k + 1) / (n - k - 1) else NA_real_
+      notes <- c(notes, paste0("profile interval and residual tests unavailable: ", ob$note %||% "refit failed"))
+    }
+    if (is.finite(r$lag) && r$lag <= 1e-8) {      # on its bound the lag has no two-sided interval: left blank, said in the note
+      out$lag_abs_lo <- NA_real_; out$lag_abs_hi <- NA_real_
+      notes <- c(notes, "lag at its lower bound (0): no meaningful interval")
+    }
+    if (is.finite(out$df_resid) && out$df_resid <= 0) notes <- c(notes, "no residual degrees of freedom: intervals unavailable")
+    if (isTRUE(r$log_transform) && is.finite(out$mu_max_lo) && out$mu_max_lo > 0 && is.finite(out$mu_max_hi)) {
+      out$doubling_time_lo <- log(2) / out$mu_max_hi; out$doubling_time_hi <- log(2) / out$mu_max_lo
+    }
+    out$ci_note <- if (length(notes)) paste(unique(notes), collapse = "; ") else NA_character_
+    out
+  })
+  ex <- do.call(rbind, lapply(rows, function(z) as.data.frame(z, stringsAsFactors = FALSE)))
+  keys <- intersect(c("sample", "replicate"), names(tab))
+  kk <- do.call(paste, c(lapply(tab[keys], as.character), sep = "\r"))
+  ex$akaike_weight <- NA_real_
+  for (k in unique(kk)) { ix <- which(kk == k & tab$converged %in% TRUE); if (length(ix)) ex$akaike_weight[ix] <- akaike_weights(ex$aicc[ix]) }
+  first <- intersect(c("sample", "replicate", "model", "best", "converged", "n_points", "A", "mu_max", "lag_abs", "doubling_time", "r2"), names(tab))
+  base <- tab[first]
+  out <- cbind(base, ex[c("A_lo", "A_hi")], stringsAsFactors = FALSE)
+  out$mu_max_lo <- ex$mu_max_lo; out$mu_max_hi <- ex$mu_max_hi; out$lag_abs_lo <- ex$lag_abs_lo; out$lag_abs_hi <- ex$lag_abs_hi
+  out$doubling_time_lo <- ex$doubling_time_lo; out$doubling_time_hi <- ex$doubling_time_hi
+  for (cc in c("adj_r2", "rmse", "aicc", "akaike_weight", "df_resid", "runs_test_p", "shapiro_p", "ci_method", "ci_note")) out[[cc]] <- ex[[cc]]
+  out <- out[c(intersect(c("sample", "replicate", "model", "best", "converged", "n_points", "A", "A_lo", "A_hi", "mu_max", "mu_max_lo", "mu_max_hi",
+                           "lag_abs", "lag_abs_lo", "lag_abs_hi", "doubling_time", "doubling_time_lo", "doubling_time_hi", "r2"), names(out)),
+               c("adj_r2", "rmse", "aicc", "akaike_weight", "df_resid", "runs_test_p", "shapiro_p", "ci_method", "ci_note"))]
+  rownames(out) <- NULL
+  out
+}
+
+# The extended table as shown on screen: "estimate" and "lo to hi" pairs, 3 significant digits.
+fit_extended_display <- function(ext) {
+  if (is.null(ext) || nrow(ext) == 0) return(NULL)
+  f3 <- function(x) ifelse(is.finite(x), formatC(signif(x, 3), format = "g"), "—")
+  d <- data.frame(Sample = as.character(ext$sample), stringsAsFactors = FALSE)
+  if ("replicate" %in% names(ext)) d$Replicate <- as.character(ext$replicate)
+  d$Model <- ifelse(is.na(ext$model), "—", as.character(ext$model))
+  d$Best <- ifelse(ext$best %in% TRUE, "✓", "")
+  d$A <- f3(ext$A); d[["A 95% CI"]] <- s22_ci_text(ext$A, ext$A_lo, ext$A_hi)
+  d$mu_max <- f3(ext$mu_max); d[["mu_max 95% CI"]] <- s22_ci_text(ext$mu_max, ext$mu_max_lo, ext$mu_max_hi)
+  d[["Lag"]] <- f3(ext$lag_abs); d[["Lag 95% CI"]] <- s22_ci_text(ext$lag_abs, ext$lag_abs_lo, ext$lag_abs_hi)
+  d[["Doubling time"]] <- f3(ext$doubling_time); d[["Doubling 95% CI"]] <- s22_ci_text(ext$doubling_time, ext$doubling_time_lo, ext$doubling_time_hi)
+  d[["R²"]] <- f3(ext$r2); d[["Adj. R²"]] <- f3(ext$adj_r2); d$RMSE <- f3(ext$rmse)
+  d$AICc <- f3(ext$aicc); d[["Akaike weight"]] <- f3(ext$akaike_weight)
+  d[["Runs test p"]] <- f3(ext$runs_test_p); d[["Shapiro p (resid.)"]] <- f3(ext$shapiro_p)
+  d[["CI method"]] <- ifelse(is.na(ext$ci_method), "", as.character(ext$ci_method))
+  d$Note <- ifelse(is.na(ext$ci_note), "", as.character(ext$ci_note))
+  d
+}
+
+# Residuals of the rows to show (the best model of each curve), for the residual plot: sample, replicate, model, t, fitted, residual,
+# std_residual. `curve_of(row)` as in growth_objects(). The times are the fitted window of the curve (the points the model was fitted to).
+fit_residual_frames <- function(tab, objects, curve_of, rows = NULL) {
+  if (is.null(tab) || nrow(tab) == 0 || !length(objects)) return(NULL)
+  if (is.null(rows)) rows <- which(tab$best %in% TRUE)
+  out <- lapply(rows, function(i) {
+    ob <- objects[[i]]; if (is.null(ob) || is.null(ob$fit)) return(NULL)
+    r <- tab[i, , drop = FALSE]; cv <- tryCatch(curve_of(r), error = function(e) NULL); if (is.null(cv)) return(NULL)
+    w <- fit_window_points(cv$t, cv$od, as.character(r$until), isTRUE(r$log_transform))
+    rf <- fit_residual_frame(ob$fit, w$t)
+    rf <- rf[is.finite(rf$residual), , drop = FALSE]
+    if (nrow(rf) > 1) rf <- rf[-1, , drop = FALSE]   # the model is anchored on the first reading (y = ln(OD/OD0) starts at 0): its residual is 0 by construction
+    if (!nrow(rf)) return(NULL)
+    data.frame(sample = as.character(r$sample), replicate = if ("replicate" %in% names(r)) r$replicate else NA_real_,
+               model = as.character(r$model), t = rf$t, fitted = rf$fitted, residual = rf$residual, std_residual = rf$std_residual,
+               stringsAsFactors = FALSE)
+  })
+  out <- Filter(Negate(is.null), out)
+  if (!length(out)) return(NULL)
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# Delta-method bands (back-transformed to OD) of the rows to draw, on a fine grid over each fitted range:
+# sample, replicate, model, best, time, od, lo, hi. `type`: "confidence" or "prediction".
+growth_band_frames <- function(tab, objects, windows, rows, type = "confidence", level = 0.95, n_grid = 120L) {
+  if (is.null(tab) || nrow(tab) == 0 || !length(objects) || !length(rows)) return(NULL)
+  type <- s22_choice(type, c("confidence", "prediction"), "confidence")
+  has_rep <- "replicate" %in% names(tab)
+  out <- lapply(rows, function(i) {
+    ob <- objects[[i]]; if (is.null(ob) || is.null(ob$fit)) return(NULL)
+    r <- tab[i, , drop = FALSE]
+    w <- windows[[if (has_rep) paste(r$sample, r$replicate, sep = "\r") else as.character(r$sample)]]
+    if (is.null(w) || !length(w$t) || !is.finite(r$t0)) return(NULL)
+    tg <- seq(r$t0, max(w$t), length.out = n_grid)
+    b <- fit_bands(ob$fit, tg, level = level, type = type, backtransform = exp)
+    if (!any(is.finite(b$lo))) return(NULL)
+    data.frame(sample = as.character(r$sample), replicate = if (has_rep) r$replicate else NA_real_, model = as.character(r$model),
+               best = r$best %in% TRUE, time = b$t, od = b$fit, lo = b$lo, hi = b$hi, stringsAsFactors = FALSE)
+  })
+  out <- Filter(Negate(is.null), out)
+  if (!length(out)) return(NULL)
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# ── lysis-phase models per curve ───────────────────────────────────────────────────────────────────────────────────────
+# fit_lysis_models() on the mean curve of every sample (pd: time, variable, mean_value, sd_value) or on every replicate curve
+# (rp: time, variable, replicate, value). `scheme` weights the points (fit_weights(); "1/sd2" needs the SD of the mean curve,
+# so replicate fits fall back to equal weights and say so). Returns list(table, curves, note): table = one row per curve and model
+# (sample, replicate = NA at the mean level, the engine's columns, akaike_weight); curves = the fitted decay on a fine grid.
+lysis_fits_by_group <- function(pd = NULL, rp = NULL, level = c("mean", "replicate"), models = c("one_phase_decay", "fpl_decay"),
+                                from = "peak", scheme = "none", ci_level = 0.95, n_grid = 100L) {
+  level <- match.arg(level); models <- intersect(models, c("one_phase_decay", "fpl_decay")); from <- s22_choice(from, c("peak", "start"), "peak")
+  scheme <- s22_choice(scheme, c("none", "1/y", "1/y2", "1/sd2"), "none")
+  empty <- list(table = NULL, curves = NULL, note = character(0))
+  if (!length(models)) return(modifyList(empty, list(note = "Select at least one lysis model.")))
+  note <- character(0)
+  groups <- list()
+  if (level == "mean") {
+    if (is.null(pd) || nrow(pd) == 0) return(empty)
+    for (s in unique(as.character(pd$variable))) {
+      g <- pd[as.character(pd$variable) == s, , drop = FALSE]; g <- g[order(g$time), , drop = FALSE]
+      groups[[length(groups) + 1L]] <- list(sample = s, replicate = NA_real_, t = g$time, od = g$mean_value, sd = g$sd_value)
+    }
+  } else {
+    if (is.null(rp) || nrow(rp) == 0) return(empty)
+    key <- unique(data.frame(s = as.character(rp$variable), r = rp$replicate, stringsAsFactors = FALSE))
+    for (i in seq_len(nrow(key))) {
+      g <- rp[as.character(rp$variable) == key$s[i] & rp$replicate == key$r[i], , drop = FALSE]; g <- g[order(g$time), , drop = FALSE]
+      groups[[length(groups) + 1L]] <- list(sample = key$s[i], replicate = key$r[i], t = g$time, od = g$value, sd = NULL)
+    }
+  }
+  sch <- scheme
+  if (scheme == "1/sd2" && level == "replicate") { sch <- "none"; note <- c(note, "1/SD² weights need the replicate SD, so the replicate-level lysis fits use equal weights.") }
+  rows <- list(); curves <- list()
+  for (gr in groups) {
+    w <- if (sch == "none") NULL else fit_weights(gr$od, sch, gr$sd)
+    res <- tryCatch(fit_lysis_models(gr$t, gr$od, models = models, from = from, weights = w, level = ci_level), error = function(e) NULL)
+    if (is.null(res)) next
+    res$akaike_weight <- NA_real_
+    okm <- which(res$converged %in% TRUE)
+    if (length(okm)) res$akaike_weight[okm] <- akaike_weights(res$aicc[okm])
+    rows[[length(rows) + 1L]] <- cbind(data.frame(sample = gr$sample, replicate = gr$replicate, stringsAsFactors = FALSE), res)
+    tmax <- suppressWarnings(max(gr$t[is.finite(gr$t)]))
+    for (m in res$model[okm]) {
+      tref <- res$t_ref[res$model == m]
+      if (!is.finite(tref) || !is.finite(tmax) || tmax <= tref) next
+      tg <- seq(tref, tmax, length.out = n_grid)
+      curves[[length(curves) + 1L]] <- data.frame(sample = gr$sample, replicate = gr$replicate, model = m, time = tg,
+                                                  od = predict_lysis_fit(res, m, tg), stringsAsFactors = FALSE)
+    }
+  }
+  if (!length(rows)) return(modifyList(empty, list(note = note)))
+  tab <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  list(table = tab, curves = if (length(curves)) do.call(rbind, c(curves, list(make.row.names = FALSE))) else NULL,
+       note = note, scheme = sch)
+}
+
+# The lysis table as shown on screen (k, half-life, t50, plateau with their 95 % intervals, r2, AICc, weight, note).
+lysis_display_table <- function(tab) {
+  if (is.null(tab) || nrow(tab) == 0) return(NULL)
+  f3 <- function(x) ifelse(is.finite(x), formatC(signif(x, 3), format = "g"), "—")
+  d <- data.frame(Sample = as.character(tab$sample), stringsAsFactors = FALSE)
+  if (any(is.finite(tab$replicate))) d$Replicate <- ifelse(is.finite(tab$replicate), as.character(tab$replicate), "mean")
+  d$Model <- as.character(tab$model); d$Converged <- ifelse(tab$converged %in% TRUE, "yes", "no"); d$Points <- as.character(tab$n)
+  d$k <- f3(tab$k); d[["k 95% CI"]] <- s22_ci_text(tab$k, tab$k_lo, tab$k_hi)
+  d[["Half-life"]] <- f3(tab$half_life); d[["Half-life 95% CI"]] <- s22_ci_text(tab$half_life, tab$half_life_lo, tab$half_life_hi)
+  d[["t50 lysis"]] <- f3(tab$t50_lysis); d[["t50 95% CI"]] <- s22_ci_text(tab$t50_lysis, tab$t50_lysis_lo, tab$t50_lysis_hi)
+  d$Plateau <- f3(tab$plateau); d[["Plateau 95% CI"]] <- s22_ci_text(tab$plateau, tab$plateau_lo, tab$plateau_hi)
+  d[["R²"]] <- f3(tab$r2); d$AICc <- f3(tab$aicc); d[["Akaike weight"]] <- f3(tab$akaike_weight)
+  d$Note <- ifelse(is.na(tab$note), "", as.character(tab$note))
+  d
+}
+
+# ── exponential-growth window per curve ────────────────────────────────────────────────────────────────────────────────
+# fit_exponential_window() on the mean curve of every sample or on every replicate. mode "auto" (best-R2 window of at least
+# `min_points`), "manual" (from / to typed, text, "" = open end) or "all" (every point).
+exp_window_by_group <- function(pd = NULL, rp = NULL, level = c("mean", "replicate"), mode = "auto", from = "", to = "", min_points = 4) {
+  level <- match.arg(level); mode <- s22_choice(mode, c("auto", "manual", "all"), "auto")
+  mp <- suppressWarnings(as.integer(round(as.numeric(min_points)))); if (length(mp) != 1 || !is.finite(mp) || mp < 3) mp <- 4L
+  win <- if (mode == "manual") c(s22_num(from), s22_num(to)) else NULL
+  one <- function(s, r, t, od) {
+    ord <- order(t); t <- t[ord]; od <- od[ord]
+    z <- fit_exponential_window(t, od, window = win, min_points = mp, auto = identical(mode, "auto"))
+    cbind(data.frame(sample = s, replicate = r, stringsAsFactors = FALSE), z)
+  }
+  rows <- list()
+  if (level == "mean") {
+    if (is.null(pd) || nrow(pd) == 0) return(NULL)
+    for (s in unique(as.character(pd$variable))) { g <- pd[as.character(pd$variable) == s, , drop = FALSE]; rows[[length(rows) + 1L]] <- one(s, NA_real_, g$time, g$mean_value) }
+  } else {
+    if (is.null(rp) || nrow(rp) == 0) return(NULL)
+    key <- unique(data.frame(s = as.character(rp$variable), r = rp$replicate, stringsAsFactors = FALSE))
+    for (i in seq_len(nrow(key))) { g <- rp[as.character(rp$variable) == key$s[i] & rp$replicate == key$r[i], , drop = FALSE]; rows[[length(rows) + 1L]] <- one(key$s[i], key$r[i], g$time, g$value) }
+  }
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+exp_window_display <- function(tab, rolling_mu = NULL) {
+  if (is.null(tab) || nrow(tab) == 0) return(NULL)
+  f3 <- function(x) ifelse(is.finite(x), formatC(signif(x, 3), format = "g"), "—")
+  d <- data.frame(Sample = as.character(tab$sample), stringsAsFactors = FALSE)
+  if (any(is.finite(tab$replicate))) d$Replicate <- ifelse(is.finite(tab$replicate), as.character(tab$replicate), "mean")
+  d$Window <- ifelse(is.finite(tab$t_start), paste0(formatC(signif(tab$t_start, 4), format = "g"), " to ", formatC(signif(tab$t_end, 4), format = "g")), "—")
+  d$Points <- as.character(tab$n)
+  d[["mu (exp. window)"]] <- f3(tab$mu); d[["mu 95% CI"]] <- s22_ci_text(tab$mu, tab$mu_lo, tab$mu_hi)
+  d[["Doubling time"]] <- f3(tab$doubling_time); d[["Doubling 95% CI"]] <- s22_ci_text(tab$doubling_time, tab$doubling_time_lo, tab$doubling_time_hi)
+  d[["R²"]] <- f3(tab$r2)
+  if (!is.null(rolling_mu)) d[["mu_max (rolling)"]] <- f3(unname(rolling_mu[as.character(tab$sample)]))
+  d$Note <- ifelse(is.na(tab$note), "", as.character(tab$note))
+  d
+}
+
+# ── Compare fits (extra-sum-of-squares F test) ─────────────────────────────────────────────────────────────────────────
+# compare_fits() on the stacked replicate points of the chosen samples. Returns list(res, test, params, warnings).
+compare_fits_for_samples <- function(rp, samples, model = "logistic", param = "mu", until = "peak", log_transform = TRUE) {
+  model <- s22_choice(model, c("logistic", "gompertz", "baranyi"), "logistic"); param <- s22_choice(param, c("all", "mu", "lag", "A"), "mu")
+  until <- s22_choice(until, c("peak", "all"), "peak")
+  out <- list(res = NULL, test = NULL, params = NULL, warnings = character(0))
+  if (is.null(rp) || nrow(rp) == 0 || length(samples) < 2) { out$warnings <- "Select at least two samples to compare."; return(out) }
+  d <- rp[as.character(rp$variable) %in% samples, , drop = FALSE]
+  df <- data.frame(t = d$time, od = d$value, sample = as.character(d$variable), stringsAsFactors = FALSE)
+  res <- tryCatch(compare_fits(df, model = model, param = param, until = until, log_transform = log_transform), error = function(e) NULL)
+  if (is.null(res)) { out$warnings <- "The comparison could not be computed."; return(out) }
+  out$res <- res; out$test <- res$test; out$params <- res$params
+  nrep <- tapply(d$replicate, as.character(d$variable), function(z) length(unique(z)))
+  if (any(nrep < 3)) out$warnings <- c(out$warnings, sprintf("Low n: %s have fewer than 3 replicate curves; the F test then rests on the scatter of very few curves.",
+                                                         paste(names(nrep)[nrep < 3], collapse = ", ")))
+  dfa <- res$test$df_alt
+  if (is.finite(dfa) && dfa < 10) out$warnings <- c(out$warnings, sprintf("Only %d residual degrees of freedom in the separate-curves model: the test has little power; report df and treat p near 0.05 with caution.", as.integer(dfa)))
+  if (is.finite(res$test$p) && identical(param, "all") && length(samples) > 2) out$warnings <- c(out$warnings, "Comparing all parameters at once is a single test; comparing mu, lag and A separately is three tests (correct for them).")
+  if (!is.na(res$test$note) && nzchar(res$test$note)) out$warnings <- c(out$warnings, res$test$note)
+  out
+}
+compare_fits_test_display <- function(test) {
+  if (is.null(test) || nrow(test) == 0) return(NULL)
+  f3 <- function(x) ifelse(is.finite(x), formatC(signif(x, 3), format = "g"), "—")
+  data.frame(Model = test$model, Compared = test$param, Points = as.character(test$n), Samples = as.character(test$n_groups),
+             F = f3(test$F), `df (null, alt)` = paste0(ifelse(is.finite(test$df_null), test$df_null, "—"), ", ", ifelse(is.finite(test$df_alt), test$df_alt, "—")),
+             p = f3(test$p), `Delta AICc` = f3(test$delta_aicc), `Preferred (F test)` = ifelse(is.na(test$preferred), "—", test$preferred),
+             `Preferred (AICc)` = ifelse(is.na(test$preferred_aicc), "—", test$preferred_aicc), check.names = FALSE, stringsAsFactors = FALSE)
+}
+
+# ── dose-response: 4PL per phage series ─────────────────────────────────────────────────────────────────────────────────
+# The series of a sample label: the label with its MOI token removed ("Phage A MOI 10" -> "Phage A"), "Phage" when nothing is left
+# (the same rule as the dose-response figure's connecting lines).
+dose_series_name <- function(label) {
+  s <- trimws(gsub("(?i)\\s*MOI[[:space:]_:=]*[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?", "", label, perl = TRUE))
+  s[!nzchar(s)] <- "Phage"
+  s
+}
+# d: one row per replicate value with series, moi, value. Returns list(table, curves): one row per series (fit_dose_response()
+# columns, n_moi = distinct MOI levels), curves = data.frame(series, moi, fit, lo, hi).
+dose_response_series_fits <- function(d, fix_bottom = NA_real_, fix_top = NA_real_, scheme = "none", level = 0.95) {
+  if (is.null(d) || nrow(d) == 0) return(list(table = NULL, curves = NULL))
+  scheme <- s22_choice(scheme, c("none", "1/y", "1/y2", "1/sd2"), "none")
+  fb <- if (is.finite(fix_bottom)) fix_bottom else NULL; ft <- if (is.finite(fix_top)) fix_top else NULL
+  rows <- list(); curves <- list()
+  for (sr in unique(as.character(d$series))) {
+    g <- d[as.character(d$series) == sr & is.finite(d$moi) & d$moi > 0 & is.finite(d$value), , drop = FALSE]
+    w <- NULL
+    if (scheme != "none") {
+      sdm <- ave(g$value, g$moi, FUN = function(z) if (length(z) >= 2) stats::sd(z) else NA_real_)
+      w <- fit_weights(g$value, scheme, sdm)
+    }
+    fit <- tryCatch(fit_dose_response(g$moi, g$value, log_x = TRUE, fix_bottom = fb, fix_top = ft, weights = w, level = level), error = function(e) NULL)
+    if (is.null(fit)) next
+    fit$n_moi <- length(unique(g$moi)); fit$series <- sr
+    cv <- attr(fit, "curve")
+    if (isTRUE(fit$converged) && !is.null(cv)) curves[[length(curves) + 1L]] <- cbind(data.frame(series = sr, stringsAsFactors = FALSE), cv)
+    attr(fit, "curve") <- NULL; attr(fit, "nls") <- NULL
+    rows[[length(rows) + 1L]] <- fit
+  }
+  if (!length(rows)) return(list(table = NULL, curves = NULL))
+  tab <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  tab <- tab[c("series", setdiff(names(tab), "series"))]
+  list(table = tab, curves = if (length(curves)) do.call(rbind, c(curves, list(make.row.names = FALSE))) else NULL)
+}
+dose_response_display <- function(tab) {
+  if (is.null(tab) || nrow(tab) == 0) return(NULL)
+  f3 <- function(x) ifelse(is.finite(x), formatC(signif(x, 3), format = "g"), "—")
+  data.frame(Series = tab$series, `MOI levels` = as.character(tab$n_moi), Points = as.character(tab$n), `EC50 (MOI)` = f3(tab$ec50),
+             `EC50 95% CI` = s22_ci_text(tab$ec50, tab$ec50_lo, tab$ec50_hi), `Hill slope` = f3(tab$hill), Top = f3(tab$top), Bottom = f3(tab$bottom),
+             `R²` = f3(tab$r2), AICc = f3(tab$aicc), Note = ifelse(is.na(tab$note), "", as.character(tab$note)), check.names = FALSE, stringsAsFactors = FALSE)
+}
+
+# ── Time-course: significance stars per time point ─────────────────────────────────────────────────────────────────────
+# Rows of per_time_comparisons() with p_adj < alpha, as the stars to draw: sample, time, stars.
+per_time_star_rows <- function(pt, alpha = 0.05) {
+  if (is.null(pt) || !is.data.frame(pt) || nrow(pt) == 0 || !all(c("time", "sample", "p_adj") %in% names(pt))) return(NULL)
+  k <- is.finite(pt$p_adj) & pt$p_adj < alpha
+  if (!any(k)) return(NULL)
+  data.frame(sample = as.character(pt$sample[k]), time = pt$time[k], p_adj = pt$p_adj[k], stars = sig_stars(pt$p_adj[k]), stringsAsFactors = FALSE)
+}
+
+# ── AUC rows for the figure ─────────────────────────────────────────────────────────────────────────────────────────────
+# The settings of the AUC section as the arguments of auc_table(): baseline mode, fixed value, window.
+auc_settings_from_inputs <- function(baseline = "none", baseline_value = 0, from = "", to = "") {
+  bl <- s22_choice(baseline, c("none", "first", "value", "min"), "none")
+  bv <- s22_num(baseline_value); if (!is.finite(bv)) bv <- 0
+  f <- s22_num(from); t <- s22_num(to)
+  list(baseline = bl, baseline_value = bv, t_from = if (is.finite(f)) f else NULL, t_to = if (is.finite(t)) t else NULL)
+}
+# ── end v2.22 statistics and fitting UI helpers ──
+
 # ── v2.21 figure helpers ──
 # Pure functions (no Shiny state) behind the v2.21 analysis figures: the metric summary's styles and significance
 # brackets, the replicate small multiples and the fraction-lysed curves. Tested by tests/test_v221_figures.R.
@@ -7832,7 +8360,28 @@ ui <- fluidPage(
                                 rows = 2, placeholder = "Phage A = 10; Phage B = 0.1"),
                   p(style = "font-size:.78em;color:#777;margin-top:-6px;",
                     "MOI is read from names like 'Phage MOI 10'. Samples without a positive MOI ",
-                    "(e.g. the uninfected control) are left out; the x axis is log10.")),
+                    "(e.g. the uninfected control) are left out; the x axis is log10."),
+                  checkboxInput("dr_fit", "Fit a four-parameter logistic (4PL) and mark the EC50", APP_DEFAULTS$dr_fit),
+                  fluidRow(
+                    column(6, textInput("dr_fix_bottom", "Fix bottom at:", APP_DEFAULTS$dr_fix_bottom, placeholder = "fitted")),
+                    column(6, textInput("dr_fix_top", "Fix top at:", APP_DEFAULTS$dr_fix_top, placeholder = "fitted"))),
+                  checkboxInput("dr_band", "Show the 95 % confidence band of the fit", APP_DEFAULTS$dr_band),
+                  checkboxInput("dr_ec50", "Mark the EC50 (dashed line) and its 95 % interval", APP_DEFAULTS$dr_ec50),
+                  p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                    "The 4PL is fitted to the replicate values against log10 MOI, one curve per phage series. Fixing a plateau (for example bottom at 0) ",
+                    "determines the EC50 much better from a few MOIs. The weighting is set on the Curve fitting tab. The EC50 table is under the figure.")),
+                conditionalPanel("input.analysis_type == 'per_time'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "The mean curve of each sample with a star above every time point at which it differs from the reference (Welch t, p adjusted across the ",
+                    "sample's time points, p < 0.05: * < 0.05, ** < 0.01, *** < 0.001), in the sample's colour. The adjustment and the repeated-measures ",
+                    "ANOVA are under Statistics > Time-course ANOVA; the reference is set under Stats & Reports. Samples are labelled at the end of their ",
+                    "curves (no legend). Exploratory with n = 3.")),
+                conditionalPanel("input.analysis_type == 'auc'",
+                  selectInput("auc_style", "Style:", choices = c("Dot plot (replicates, mean bar)" = "dot", "Bar (mean \u00b1 error, replicates as points)" = "bar"),
+                              selected = APP_DEFAULTS$auc_style),
+                  p(style = "font-size:.78em;color:#777;",
+                    "The area under each replicate curve (baseline and window as set under Statistics > Area under the curve), the mean and the main ",
+                    "figure's error measure. The table with the relative AUC and the comparisons is on the Statistics tab.")),
                 conditionalPanel("input.analysis_type == 'normalized'",
                   radioButtons("analysis_norm_mode", "Relative to:",
                                c("Reference sample" = "reference", "Own t = 0 value" = "t0"),
@@ -7881,6 +8430,11 @@ ui <- fluidPage(
                   checkboxInput("explorer_labels", "Label the points with the sample names", APP_DEFAULTS$explorer_labels),
                   checkboxInput("explorer_logx", "Log x axis", APP_DEFAULTS$explorer_logx),
                   checkboxInput("explorer_logy", "Log y axis", APP_DEFAULTS$explorer_logy),
+                  selectInput("explorer_stats", "Correlation (table under the figure):",
+                              choices = c("None" = "none", "Pearson r" = "pearson", "Spearman rho" = "spearman"), selected = APP_DEFAULTS$explorer_stats),
+                  checkboxInput("explorer_line", "Straight-line fit with a confidence band", APP_DEFAULTS$explorer_line),
+                  selectInput("explorer_band", "Band:", choices = c("95 % confidence band of the line" = "confidence", "95 % prediction band" = "prediction"),
+                              selected = APP_DEFAULTS$explorer_band),
                   p(style = "font-size:.78em;color:#777;",
                     "One point per sample: the mean with error bars in both directions (the error measure of the main figure); ",
                     "open circles are the replicates. Relative metrics need a reference sample (Stats & Reports).")),
@@ -7931,7 +8485,7 @@ ui <- fluidPage(
                   p(style = "font-size:.78em;color:#777;",
                     "A replicate counts as lysed after its sample's peak once its OD is below the threshold (0.5 = half of the ",
                     "peak). The step curve is the fraction of replicates lysed at each time; the point marks when half are.")),
-                conditionalPanel("['metric_summary', 'od_at_times', 'time_to_threshold', 'replicate_facets', 'lysed_fraction'].indexOf(input.analysis_type) >= 0",
+                conditionalPanel("['metric_summary', 'od_at_times', 'time_to_threshold', 'replicate_facets', 'lysed_fraction', 'per_time', 'auc', 'dose_response', 'metric_explorer'].indexOf(input.analysis_type) >= 0",
                   uiOutput("analysis_figure_note"))
               ),
               column(3,
@@ -7956,6 +8510,16 @@ ui <- fluidPage(
             )
           ),
           uiOutput("analysis_container"),
+          conditionalPanel("input.analysis_type == 'metric_explorer'",
+            h5("Correlation and straight-line fit", style = "margin-top:10px;"),
+            uiOutput("explorer_stats_note"),
+            div(style = "overflow-x:auto;", tableOutput("explorer_stats_table")),
+            downloadButton("downloadExplorerStatsCSV", "Correlation and fit (CSV)")),
+          conditionalPanel("input.analysis_type == 'dose_response'",
+            h5("4PL fit: EC50 per series", style = "margin-top:10px;"),
+            uiOutput("dr_note"),
+            div(style = "overflow-x:auto;", tableOutput("dr_table")),
+            downloadButton("downloadDoseResponseCSV", "EC50 table (CSV)")),
           conditionalPanel("input.analysis_type == 'difference'",
             h5("First separation from the reference", style = "margin-top:10px;"),
             uiOutput("analysis_separation_note"),
@@ -8188,6 +8752,128 @@ ui <- fluidPage(
               div(style = "overflow-x:auto;", tableOutput("rep_qc_replicates")),
               downloadButton("downloadRepQCCSV", "Per-replicate QC (CSV)"),
               downloadButton("downloadRepQCSamplesCSV", "Per-sample CV (CSV)"))),
+          # ── v2.22: Prism-style statistics sections ──
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Column statistics")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Descriptive statistics of the per-replicate metrics, one row per sample and metric (Prism: Column statistics): n, mean, SD, ",
+                "SEM, CV %, the 95 % t-based confidence interval of the mean, median, IQR, range, skewness, kurtosis and geometric mean. ",
+                "The metrics chosen here are shared by the assumption checks, the outliers and the one-sample tests below."),
+              selectInput("s22_metrics", "Metrics:", choices = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
+                          selected = APP_DEFAULTS$s22_metrics, multiple = TRUE, width = "100%"),
+              uiOutput("s22_describe_note"),
+              div(style = "overflow-x:auto;", tableOutput("s22_describe_table")),
+              downloadButton("downloadDescribeCSV", "Column statistics (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Assumption checks")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Shapiro-Wilk normality test per sample and on the pooled residuals (values minus their sample mean), and the Brown-Forsythe ",
+                "(median-centred Levene) and Bartlett tests for equal variances, for the metrics chosen under Column statistics. The Q-Q ",
+                "figure shows the pooled residuals of one metric against normal quantiles."),
+              p(class = "stats-note", S22_NOTE_N3, " Read these as warnings, not as proof of normality: with three replicates per sample ",
+                "the Welch / Games-Howell family (no equal-variance assumption) is the safe default."),
+              h5("Normality (Shapiro-Wilk)"),
+              div(style = "overflow-x:auto;", tableOutput("s22_normality_table")),
+              h5("Equal variances"),
+              div(style = "overflow-x:auto;", tableOutput("s22_variance_table")),
+              fluidRow(
+                column(4, selectInput("s22_qq_metric", "Q-Q plot of:", choices = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
+                                      selected = APP_DEFAULTS$s22_qq_metric)),
+                column(8, br(), downloadButton("downloadQQFigure", "Q-Q figure"),
+                       downloadButton("downloadNormalityCSV", "Normality (CSV)"), downloadButton("downloadVarianceCSV", "Variance tests (CSV)"))),
+              uiOutput("s22_qq_container"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Post-hoc comparison (method)")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "The metric and the reference sample are those of the Replicate comparison above (first metric of the Analysis figures; the reference ",
+                "under Stats & Reports). The omnibus tests (one-way ANOVA, Welch ANOVA, Kruskal-Wallis, with eta² / epsilon²) come first, then the ",
+                "pairwise table of the chosen method. Holm-adjusted Welch t is the default and reproduces the p_adj_holm column above."),
+              selectInput("posthoc_method", "Post-hoc method:", choices = S22_POSTHOC_CHOICES, selected = APP_DEFAULTS$posthoc_method, width = "100%"),
+              uiOutput("s22_posthoc_note"),
+              h5("Omnibus tests"),
+              div(style = "overflow-x:auto;", tableOutput("s22_omnibus_table")),
+              h5("Pairwise comparisons"),
+              div(style = "overflow-x:auto;", tableOutput("s22_posthoc_table")),
+              downloadButton("downloadPosthocCSV", "Omnibus and post-hoc (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Time-course ANOVA")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Two-way ANOVA of log(OD): sample x time, with the well as the repeated-measures subject (a mixed model with AR(1) errors when the ",
+                "nlme package is installed, else an Error(well) ANOVA; the method and why are shown). Below, each sample is compared with the ",
+                "reference at every time point by Welch t, p-values adjusted across the time points of that sample (Prism: multiple comparisons at ",
+                "each time). The figure is 'Per-time comparisons vs reference' under Analysis figures and the composer."),
+              fluidRow(
+                column(4, checkboxInput("tc_repeated", "Repeated measures by well", APP_DEFAULTS$tc_repeated)),
+                column(4, selectInput("tc_adjust", "Adjustment across time points:", choices = S22_ADJUST_CHOICES, selected = APP_DEFAULTS$tc_adjust))),
+              uiOutput("s22_tc_note"),
+              h5("Two-way ANOVA"),
+              div(style = "overflow-x:auto;", tableOutput("s22_tc_anova_table")),
+              h5("Each sample vs the reference, per time point"),
+              div(style = "overflow-x:auto;", tableOutput("s22_pertime_table")),
+              downloadButton("downloadTCAnovaCSV", "Two-way ANOVA (CSV)"),
+              downloadButton("downloadPerTimeCSV", "Per-time comparisons (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Area under the curve")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Trapezoid area under each replicate curve above a baseline, over a time window (Prism: Area under curve): the mean, SD, SEM and ",
+                "95 % CI per sample, optionally relative to the reference sample (ratio with a log-delta confidence interval), then the pairwise ",
+                "comparison of the per-replicate AUCs by the post-hoc method chosen above. The figure is 'AUC per sample' under Analysis figures."),
+              fluidRow(
+                column(3, selectInput("auc_baseline", "Baseline:", choices = c("None (0)" = "none", "First reading of each curve" = "first",
+                                                                              "Fixed value" = "value", "Minimum of each curve" = "min"),
+                                      selected = APP_DEFAULTS$auc_baseline)),
+                column(3, numericInput("auc_baseline_value", "Fixed baseline:", APP_DEFAULTS$auc_baseline_value, step = 0.01)),
+                column(2, textInput("auc_from", "From time:", APP_DEFAULTS$auc_from, placeholder = "start")),
+                column(2, textInput("auc_to", "To time:", APP_DEFAULTS$auc_to, placeholder = "end")),
+                column(2, checkboxInput("auc_relative", "Relative to the reference", APP_DEFAULTS$auc_relative))),
+              uiOutput("s22_auc_note"),
+              h5("AUC per sample"),
+              div(style = "overflow-x:auto;", tableOutput("s22_auc_table")),
+              h5("Pairwise comparison of the AUCs"),
+              div(style = "overflow-x:auto;", tableOutput("s22_auc_compare_table")),
+              downloadButton("downloadAUCCSV", "AUC per sample (CSV)"),
+              downloadButton("downloadAUCRepCSV", "AUC per replicate (CSV)"),
+              downloadButton("downloadAUCCompareCSV", "AUC comparison (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Outliers")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Grubbs, MAD or IQR screening of the replicate values of each metric within each sample, and a screen of whole replicate curves ",
+                "(distance from the sample's median curve). The tables flag; nothing is removed."),
+              p(class = "stats-note", "To exclude a replicate, use the Data tab (replicate exclusions): there is no automatic exclusion. With n = 3 ",
+                "Grubbs can only flag a value when G exceeds 1.154 and the MAD / IQR rules are unreliable below about 6 values; a flag is a prompt ",
+                "to look at the well, not a reason to delete it."),
+              fluidRow(column(5, selectInput("outlier_method", "Metric outlier rule:", choices = S22_OUTLIER_CHOICES, selected = APP_DEFAULTS$outlier_method))),
+              h5("Metric values"),
+              div(style = "overflow-x:auto;", tableOutput("s22_outlier_table")),
+              h5("Replicate curves"),
+              div(style = "overflow-x:auto;", tableOutput("s22_curve_outlier_table")),
+              downloadButton("downloadOutliersCSV", "Metric outliers (CSV)"),
+              downloadButton("downloadCurveOutliersCSV", "Replicate-curve outliers (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("One-sample tests")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Does a sample's metric differ from a hypothetical value? One-sample t test (with the CI of the mean) and the Wilcoxon signed-rank test ",
+                "(Prism: One sample t test and Wilcoxon test) for each sample. Type one value per metric as 'metric = value', separated by ; or new ",
+                "lines. Metrics: ", paste(names(ANALYSIS_METRIC_LABELS), collapse = ", "), "."),
+              textAreaInput("onesample_text", "Hypothetical values:", APP_DEFAULTS$onesample_text, rows = 2, width = "100%",
+                            placeholder = "doubling_time = 20; lysis_time = 90"),
+              uiOutput("s22_onesample_note"),
+              div(style = "overflow-x:auto;", tableOutput("s22_onesample_table")),
+              downloadButton("downloadOneSampleCSV", "One-sample tests (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("All v2.22 tables (archive)")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Every table of the sections above and of the Curve fitting tab (fit statistics, lysis models, exponential window, compare fits, 4PL EC50 when ",
+                "ticked) as CSV files in one archive, with the methods sentences. The same tables are in the figure bundle and the reports once the tabs have been used."),
+              downloadButton("downloadStats22All", "All tables (archive)"))),
           tags$details(class = "stats-section",
             tags$summary(tags$b("Methods text (editable)")),
             div(class = "panel-section",
@@ -8228,11 +8914,81 @@ ui <- fluidPage(
                 downloadButton("downloadFitFigure", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadFitsCSV", "Parameters (CSV)", style = "width:100%;")))),
+          # v2.22: what is drawn over the fitted figure, and how the fits are weighted / their intervals computed
+          div(class = "analysis-controls",
+            fluidRow(
+              column(3,
+                checkboxInput("fit_bands_on", "Confidence / prediction band on the growth fits", APP_DEFAULTS$fit_bands_on),
+                selectInput("fit_bands_type", "Band:", choices = c("95 % confidence band of the curve" = "confidence", "95 % prediction band (new observation)" = "prediction"),
+                            selected = APP_DEFAULTS$fit_bands_type)),
+              column(3,
+                checkboxInput("lysis_show", "Draw the fitted lysis decay (Lysis models below)", APP_DEFAULTS$lysis_show),
+                checkboxInput("expwin_show", "Shade the exponential-growth window (below)", APP_DEFAULTS$expwin_show)),
+              column(3,
+                selectInput("fit_ci_method", "Parameter intervals:", choices = c("Profile likelihood (asymmetric)" = "profile", "Wald (estimate ± t SE)" = "wald"),
+                            selected = APP_DEFAULTS$fit_ci_method)),
+              column(3,
+                selectInput("fit_weights_scheme", "Weighting (lysis and dose-response fits):", choices = S22_WEIGHT_CHOICES, selected = APP_DEFAULTS$fit_weights_scheme),
+                p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                  "The growth-model fitter has no weights: the growth fits above stay unweighted. Weighted AICc values are comparable only between fits with the same weights.")))),
           uiOutput("fit_note"),
+          uiOutput("fit_overlay_note"),
           uiOutput("fit_container"),
           h4("Fitted parameters", style = "margin-top:18px;"),
           uiOutput("fit_table_ui"),
-          uiOutput("fit_summary_block"))
+          uiOutput("fit_summary_block"),
+          # ── v2.22: intervals, AICc and residuals of the growth fits; lysis models; exponential window; compare fits ──
+          h4("Fit statistics: intervals, AICc and residual checks", style = "margin-top:22px;"),
+          p(class = "stats-note",
+            "The growth fits above, refitted as nls objects so that every parameter gets a 95 % interval (profile likelihood, or Wald as chosen), ",
+            "with adjusted R², RMSE, AICc, the Akaike weight of each model among the converged models of the same curve (a difference of ",
+            "about 2 AICc units or less is a tie), the runs test (are the points systematically on one side of the curve?) and the Shapiro-Wilk ",
+            "test of the residuals. A lag on its lower bound (0) has no meaningful interval. With 6-12 points per curve all of these are rough."),
+          uiOutput("fit_ext_note"),
+          div(style = "overflow-x:auto;", tableOutput("fit_ext_table")),
+          downloadButton("downloadFitExtCSV", "Fit statistics (CSV)"),
+          h5("Residuals of the best model", style = "margin-top:14px;"),
+          uiOutput("fit_resid_container"),
+          downloadButton("downloadFitResidFigure", "Residual figure"),
+          h4("Lysis models (decay after the peak)", style = "margin-top:22px;"),
+          div(class = "analysis-controls",
+            fluidRow(
+              column(4, checkboxGroupInput("lysis_models", "Models:",
+                                           choices = c("One-phase decay to a plateau" = "one_phase_decay", "Four-parameter logistic decay" = "fpl_decay"),
+                                           selected = APP_DEFAULTS$lysis_models)),
+              column(4, selectInput("lysis_from", "Fit from:", choices = c("The peak of each curve" = "peak", "The first reading" = "start"), selected = APP_DEFAULTS$lysis_from),
+                        selectInput("lysis_level", "Fit to:", choices = c("Mean curve of each sample" = "mean", "Each replicate" = "replicate"), selected = APP_DEFAULTS$lysis_level)),
+              column(4, p(style = "font-size:.82em;color:#555;",
+                          "k is the decay rate constant (per time unit), the half-life ln 2 / k, t50 the absolute time at which the fitted OD is half-way ",
+                          "between the fitted peak and the plateau. The weights are set above. Tick 'Draw the fitted lysis decay' to see them on the figure.")))),
+          uiOutput("lysis_note"),
+          div(style = "overflow-x:auto;", tableOutput("lysis_table")),
+          downloadButton("downloadLysisFitsCSV", "Lysis models (CSV)"),
+          h4("Exponential-growth window", style = "margin-top:22px;"),
+          div(class = "analysis-controls",
+            fluidRow(
+              column(3, selectInput("expwin_mode", "Window:", choices = c("Automatic (best R²)" = "auto", "Typed" = "manual", "All points" = "all"), selected = APP_DEFAULTS$expwin_mode)),
+              column(2, textInput("expwin_from", "From time:", APP_DEFAULTS$expwin_from, placeholder = "start")),
+              column(2, textInput("expwin_to", "To time:", APP_DEFAULTS$expwin_to, placeholder = "end")),
+              column(2, numericInput("expwin_min_points", "Min. points:", APP_DEFAULTS$expwin_min_points, min = 3, step = 1)),
+              column(3, selectInput("expwin_level", "Fit to:", choices = c("Mean curve" = "mean", "Each replicate" = "replicate"), selected = APP_DEFAULTS$expwin_level)))),
+          uiOutput("expwin_note"),
+          div(style = "overflow-x:auto;", tableOutput("expwin_table")),
+          downloadButton("downloadExpWindowCSV", "Exponential window (CSV)"),
+          h4("Compare fits (do the best-fit values differ between samples?)", style = "margin-top:22px;"),
+          div(class = "analysis-controls",
+            fluidRow(
+              column(4, uiOutput("cmp_samples_ui")),
+              column(3, selectInput("cmp_model", "Model:", choices = c("Logistic" = "logistic", "Gompertz" = "gompertz", "Baranyi" = "baranyi"), selected = APP_DEFAULTS$cmp_model)),
+              column(3, selectInput("cmp_param", "Compare:", choices = c("Growth rate mu only" = "mu", "Lag only" = "lag", "Asymptote A only" = "A", "All parameters" = "all"),
+                                    selected = APP_DEFAULTS$cmp_param)),
+              column(2, p(style = "font-size:.78em;color:#777;",
+                          "Extra-sum-of-squares F test (Prism: Compare). The range ('Fit' above) and the ln scale are those of the growth fits.")))),
+          uiOutput("cmp_note"),
+          div(style = "overflow-x:auto;", tableOutput("cmp_test_table")),
+          h5("Parameters of the separate-curves model"),
+          div(style = "overflow-x:auto;", tableOutput("cmp_params_table")),
+          downloadButton("downloadCompareFitsCSV", "Compare fits (CSV)"))
       )
     )
   )
@@ -8873,7 +9629,8 @@ server <- function(input, output, session) {
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                            "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
-                           "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none")   # v2.22
+                           "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",   # v2.22
+                           "cmp_samples")   # v2.22: the samples of the Compare fits block belong to the file
       # Per-sample dynamic input prefixes — handled separately below
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
@@ -8974,7 +9731,8 @@ server <- function(input, output, session) {
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                          "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
-                         "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none")   # v2.22
+                         "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",   # v2.22
+                           "cmp_samples")   # v2.22: the samples of the Compare fits block belong to the file
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
                          "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_",
@@ -8999,11 +9757,11 @@ server <- function(input, output, session) {
       if (!(nm %in% names(input)))                  { ignored_unknown <- c(ignored_unknown, nm); next }
       tryCatch({
         val <- global[[nm]]
-        if (nm %in% c("pheno_metrics", "boot_metrics")) {
+        if (nm %in% c("pheno_metrics", "boot_metrics", "s22_metrics")) {
           updateSelectInput(session, nm, selected = val)            # v2.19: a multi-select, not a checkbox group
         } else if (identical(nm, "nb_date") && is.character(val) && length(val) == 1) {
           updateDateInput(session, nm, value = tryCatch(as.Date(val), error = function(e) NULL))   # v2.22: notes_date of an old file
-        } else if (is.character(val) && (length(val) > 1 || nm %in% c("compose_panels", "fit_models", "batch_outputs", "notes_caption_fields"))) {
+        } else if (is.character(val) && (length(val) > 1 || nm %in% c("compose_panels", "fit_models", "batch_outputs", "notes_caption_fields", "lysis_models"))) {
           updateCheckboxGroupInput(session, nm, selected = val)     # v2.13: checkbox groups
         } else if (is.logical(val) && length(val) == 1) {
           updateCheckboxInput(session, nm, value = val)
@@ -10523,7 +11281,8 @@ server <- function(input, output, session) {
   # ── Fixed panel size (v2.15) ────────────────────────────────────────────────
   fixed_mode <- function() identical(input$panel_size_mode, "fixed")
   CURVE_KINDS <- c("main", "main_by_group", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response",
-                   "metric_explorer", "fit_overlay", "phases", "difference", "compare")   # v2.19: the fit figure is square, v2.20: so are the phases and separation figures; the phenotype heatmap (like the OD heatmap) is not
+                   "metric_explorer", "fit_overlay", "phases", "difference", "compare",
+                   "per_time", "qq", "fit_residuals")   # v2.19: the fit figure is square, v2.20: so are the phases and separation figures; the phenotype heatmap (like the OD heatmap) is not
   # Panel (plotting area) size in mm for a figure kind: curve figures are square when
   # panel_square is on; the metric summary and heatmap use width x height as given.
   panel_dims_mm <- function(kind = "main") {
@@ -10600,7 +11359,7 @@ server <- function(input, output, session) {
       tryCatch({
         if (is.logical(val))      updateCheckboxInput(session, nm, value = val)
         else if (is.numeric(val)) updateNumericInput( session, nm, value = val)
-        else if (nm %in% c("pheno_metrics", "boot_metrics")) updateSelectInput(session, nm, selected = val)   # v2.19 / v2.20: multi-selects
+        else if (nm %in% c("pheno_metrics", "boot_metrics", "s22_metrics")) updateSelectInput(session, nm, selected = val)   # v2.19 / v2.20 / v2.22: multi-selects
         else if (is.character(val) && (length(val) > 1 || nm %in% c("batch_outputs"))) updateCheckboxGroupInput(session, nm, selected = val)
         else { updateSelectInput(session,   nm, selected = val)
                updateRadioButtons(session, nm, selected = val)
@@ -11274,6 +12033,34 @@ server <- function(input, output, session) {
           scale_x_log10(labels = scales::label_number(drop0trailing = TRUE, big.mark = ""),
                         expand = if (length(series_levels) > 1) expansion(mult = c(0.05, 0.35)) else waiver()) +
           labs(x = "MOI", y = axis_y_label(metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
+        # v2.22: optional four-parameter logistic per phage series, its confidence band and the EC50 with its interval (Curve fitting tab weights)
+        if (isTRUE(input$dr_fit)) {
+          dd <- d; dd$series <- dose_series_name(unname(labs_v[as.character(dd$sample)]))
+          fx <- dose_response_series_fits(dd, s22_num(input$dr_fix_bottom), s22_num(input$dr_fix_top), input$fit_weights_scheme %||% "none", 0.95)
+          if (is.null(fx$table)) fig_notes <- c(fig_notes, "The 4PL could not be fitted.")
+          else {
+            under <- list(); over <- list(); ecl <- character(0)
+            f3 <- function(v) formatC(signif(v, 3), format = "g")
+            for (i in seq_len(nrow(fx$table))) {
+              sr <- fx$table$series[i]; col_sr <- unname(series_col[[sr]]); cv <- fx$curves[fx$curves$series == sr, , drop = FALSE]
+              if (isTRUE(fx$table$converged[i]) && nrow(cv)) {
+                if (isTRUE(input$dr_band %||% TRUE) && any(is.finite(cv$lo)))
+                  under <- c(under, list(geom_ribbon(data = cv, aes(x = moi, ymin = lo, ymax = hi), fill = col_sr, alpha = 0.15, inherit.aes = FALSE, na.rm = TRUE)))
+                over <- c(over, list(geom_line(data = cv, aes(x = moi, y = fit), colour = col_sr, linewidth = lw, inherit.aes = FALSE)))
+                if (isTRUE(input$dr_ec50 %||% TRUE) && is.finite(fx$table$ec50[i])) {
+                  ymid <- (fx$table$top[i] + fx$table$bottom[i]) / 2
+                  over <- c(over, list(geom_vline(xintercept = fx$table$ec50[i], linetype = "dashed", colour = col_sr, linewidth = pt2lw(0.5))))
+                  if (all(is.finite(c(fx$table$ec50_lo[i], fx$table$ec50_hi[i]))))
+                    over <- c(over, list(geom_segment(data = data.frame(x = fx$table$ec50_lo[i], xend = fx$table$ec50_hi[i], y = ymid), aes(x = x, xend = xend, y = y, yend = y),
+                                                      colour = col_sr, linewidth = pt2lw(1), inherit.aes = FALSE)))
+                }
+                ecl <- c(ecl, paste0(sr, ": ", f3(fx$table$ec50[i]), if (is.finite(fx$table$ec50_lo[i]) && is.finite(fx$table$ec50_hi[i])) paste0(" (", f3(fx$table$ec50_lo[i]), "–", f3(fx$table$ec50_hi[i]), ")") else " (no interval)"))
+              } else ecl <- c(ecl, paste0(sr, ": not fitted (", fx$table$note[i], ")"))
+            }
+            g <- s22_prepend_layers(g, under) + over
+            fig_notes <- c(fig_notes, paste0("4PL fit per series (curve; band: 95 % confidence; dashed line and bar: EC50 and its 95 % interval, MOI): ", paste(ecl, collapse = "; "), "."))
+          }
+        }
         g
       },
       landmarks = {
@@ -11467,6 +12254,16 @@ server <- function(input, output, session) {
            else scale_y_continuous(expand = expansion(mult = 0.08))) +
           labs(x = axis_y_label(metric_axis_label(xm, tunit = tunit, ylab = input$y_axis_label %||% "OD")),
                y = axis_y_label(metric_axis_label(ym, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
+        # v2.22: optional straight-line fit with its band (the correlation and the fit table are under the figure)
+        if (isTRUE(input$explorer_line)) {
+          ef <- s22_explorer_fit(rm, xm, ym, logx, logy, grepl("^Per replicate", input$explorer_level %||% "Per replicate"), "none", TRUE,
+                                 s22_choice(input$explorer_band, c("confidence", "prediction"), "confidence"))
+          if (!is.null(ef$band)) {
+            g <- s22_prepend_layers(g, list(geom_ribbon(data = ef$band, aes(x = x, ymin = lo, ymax = hi), fill = "grey60", alpha = 0.25, inherit.aes = FALSE, na.rm = TRUE)))
+            g <- g + geom_line(data = ef$band, aes(x = x, y = fit), colour = "grey25", linewidth = pt2lw(0.75), inherit.aes = FALSE)
+            fig_notes <- c(fig_notes, paste0("Line: least-squares fit (", ef$n, " points) with its 95 % ", if (identical(input$explorer_band, "prediction")) "prediction" else "confidence", " band; numbers under the figure."))
+          } else fig_notes <- c(fig_notes, ef$note)
+        }
         g
       },
       fit_overlay = {
@@ -11531,6 +12328,10 @@ server <- function(input, output, session) {
           scale_shape_manual(values = shp,  labels = labs_v, limits = sample_levels(samps), name = NULL) +   # same limits: one merged key
           guides(fill = "none") +
           labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        # v2.22: optional overlays (Curve fitting tab): the growth-fit band, the fitted lysis decay, the exponential window; none by default
+        ov <- s22_fit_overlay(fr, logy, lw, yr = range(c(pd$mean_value, pd$lo, pd$hi)[is.finite(c(pd$mean_value, pd$lo, pd$hi))]))   # the window spans the plotted data (-Inf is not drawn on a log axis)
+        if (length(ov$back)) g <- s22_prepend_layers(g, ov$back)
+        if (length(ov$front)) g <- g + ov$front
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       phenotype_heatmap = {
@@ -11734,6 +12535,78 @@ server <- function(input, output, session) {
           scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = expansion(mult = 0.03)) +
           labs(x = input$x_axis_label, y = "Fraction of replicates lysed")
       },
+      per_time = {
+        # v2.22: the mean curve of each sample with a star above every time point at which it differs from the reference
+        # (per_time_comparisons(): Welch t per time, p adjusted across the sample's time points, p_adj < 0.05). The samples are
+        # labelled at the end of their curves, so the figure has no legend. Exploratory with a few replicates.
+        if (!nzchar(ref) || !ref %in% samps) stop("Pick the uninfected reference sample under Stats & Reports first.")
+        pd <- prepare_plot_data()
+        if (nrow(pd) == 0) stop("No data.")
+        pt <- s22_pertime_current()
+        logy <- identical(input$y_scale_type, "log")
+        if (logy) pd <- pd[pd$mean_value > 0, , drop = FALSE]
+        if (nrow(pd) == 0) stop("No data to draw.")
+        pd$sample <- as.character(pd$variable); pd$variable <- factor(pd$sample, levels = sample_levels(samps))
+        et <- input$error_type %||% "sem"; em <- input$error_multiplier %||% 1
+        ev <- if (et == "none") rep(NA_real_, nrow(pd)) else
+          em * switch(et, sd = pd$sd_value, sem = pd$sem_value, ci95 = pd$ci95_value, pd$sem_value)
+        pd$lo <- pd$mean_value - ev; pd$hi <- pd$mean_value + ev
+        if (logy) pd$lo <- pmax(pd$lo, min(pd$mean_value) / 2)
+        top <- ifelse(is.finite(pd$hi), pd$hi, pd$mean_value)
+        span <- diff(range(c(pd$mean_value, top), na.rm = TRUE)); if (!is.finite(span) || span <= 0) span <- 1
+        st <- per_time_star_rows(pt)
+        if (!is.null(st)) {
+          k <- match(paste(st$sample, st$time), paste(pd$sample, pd$time)); st <- st[!is.na(k), , drop = FALSE]; k <- k[!is.na(k)]
+          st$y <- if (logy) top[k] * 1.12 else top[k] + 0.05 * span
+          st$variable <- factor(st$sample, levels = sample_levels(samps))
+        }
+        n_sig <- if (is.null(st)) 0L else nrow(st)
+        fig_notes <- c(fig_notes, paste0("Stars: p < 0.05 (*), < 0.01 (**), < 0.001 (***) against the reference '", unname(labs_v[ref]), "' (Welch t at that time, p adjusted across the sample's time points by ",
+                                         s22_choice(input$tc_adjust, c("sidak", "holm", "bonferroni"), "sidak"), "). ",
+                                         if (n_sig == 0) "No time point is significant." else paste0(n_sig, " time point(s) marked.")))
+        lab <- do.call(rbind, lapply(split(pd, pd$sample), function(z) z[which.max(z$time), , drop = FALSE]))
+        lab$name <- paste0("  ", unname(labs_v[as.character(lab$sample)]))
+        leg_xy <- list(x = pd$time, y = pd$mean_value, g = pd$variable); leg_log_y <- logy
+        eb_aes   <- if (eb_col == "sample") aes(x = time, ymin = lo, ymax = hi, color = variable) else aes(x = time, ymin = lo, ymax = hi)
+        eb_fixed <- if (eb_col == "sample") list() else list(color = eb_col)
+        pk <- pd[is.finite(pd$lo) & is.finite(pd$hi), , drop = FALSE]
+        g <- ggplot(pd, aes(x = time, y = mean_value, color = variable, linetype = variable, shape = variable, group = variable))
+        if (nrow(pk)) g <- g + do.call(geom_linerange, c(list(data = pk, mapping = eb_aes, linewidth = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE), eb_fixed))
+        g <- g + geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7)
+        if (!is.null(st) && nrow(st))
+          g <- g + geom_text(data = st, aes(x = time, y = y, label = stars, color = variable), vjust = 0.45, size = ptsz * 1.5, fontface = "bold", show.legend = FALSE, inherit.aes = FALSE)
+        g <- g + ggrepel::geom_text_repel(data = lab, aes(x = time, y = mean_value, label = name, color = variable), hjust = 0, direction = "y", min.segment.length = Inf,
+                                          box.padding = 0.25, point.padding = 0, seed = 1, show.legend = FALSE, inherit.aes = FALSE,
+                                          size = (input$legend_font_size %||% 14) / ggplot2::.pt) +
+          base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          scale_x_continuous(expand = expansion(mult = c(0.02, 0.32))) +
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g + scale_y_continuous(expand = expansion(mult = c(0.04, 0.12)))
+      },
+      auc = {
+        # v2.22: the area under each replicate curve per sample (Statistics > Area under the curve: baseline, window), in the dot / bar
+        # look of the metric summary: replicates as open circles, the mean, whiskers = the main figure's error measure.
+        au <- s22_auc_current(); rep_df <- au$replicates
+        if (is.null(rep_df) || nrow(rep_df) == 0 || !any(is.finite(rep_df$auc))) stop("No area under the curve could be computed.")
+        smp  <- sample_levels(samps); smp <- smp[smp %in% unique(rep_df$sample)]
+        long <- data.frame(sample = factor(rep_df$sample, levels = smp, labels = unname(labs_v[smp])), metric = "AUC", value = rep_df$auc, stringsAsFactors = FALSE)
+        long <- long[is.finite(long$value), , drop = FALSE]
+        summ <- do.call(rbind, lapply(levels(long$sample), function(s) {
+          v <- long$value[long$sample == s]
+          data.frame(metric = "AUC", sample = factor(s, levels = levels(long$sample)), mean = if (length(v)) mean(v) else NA_real_,
+                     sd = if (length(v)) ehw(v) else NA_real_, n = length(v), stringsAsFactors = FALSE) }))
+        summ$lo <- summ$mean - summ$sd; summ$hi <- summ$mean + summ$sd
+        x_guide <- if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+          else if (nlevels(long$sample) >= 5 || max(nchar(levels(long$sample))) > 16) guide_axis(angle = 45)
+          else if (max(nchar(levels(long$sample))) > 6) guide_axis(n.dodge = 2)
+          else waiver()
+        ast <- if (identical(input$auc_style, "bar")) "bar" else "dot"
+        fig_notes <- c(fig_notes, paste0("Baseline: ", c(none = "none", first = "the first reading of each curve", value = "a fixed value", min = "the minimum of each curve")[[s22_choice(input$auc_baseline, c("none", "first", "value", "min"), "none")]],
+                                         if (nzchar(trimws(input$auc_from %||% "")) || nzchar(trimws(input$auc_to %||% ""))) "; the window typed under Statistics > Area under the curve" else "; the whole curve", "."))
+        metric_summary_styled(ast, long, summ, setNames(unname(cols[smp]), unname(labs_v[smp])), eb_col = eb_col, ptsz = ptsz, x_guide = x_guide,
+                              y_exp = if (ast == "bar") c(0, 0.18) else c(0.08, 0.18), facet = FALSE, x_drop = FALSE) +
+          labs(x = NULL, y = axis_y_label(paste0("AUC (", input$y_axis_label %||% "OD", " × ", tunit, ")")))
+      },
       heatmap = {
         pd <- prepare_plot_data()
         pd$variable <- factor(pd$variable, levels = rev(sample_levels(samps)), labels = rev(unname(labs_v[sample_levels(samps)])))
@@ -11760,6 +12633,8 @@ server <- function(input, output, session) {
     if (type == "phases")      # v2.20: the phase key sits outside the panel, never over the strips
       p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
     if (type == "time_to_threshold")   # v2.21: the x axis names the samples
+      p <- p + theme(legend.position = "none")
+    if (type %in% c("per_time", "auc"))   # v2.22: the curves are labelled at their ends / the x axis names the samples
       p <- p + theme(legend.position = "none")
     if (type == "replicate_facets")    # v2.21: strips name the samples (like the metric summary's facets)
       p <- p + theme(legend.position = "none",
@@ -11974,7 +12849,7 @@ server <- function(input, output, session) {
     card <- function(title, value, sub = NULL)
       div(class = "dash-card", div(class = "dash-card-title", title),
           div(class = "dash-card-value", value), if (!is.null(sub)) div(class = "dash-card-sub", sub))
-    div(class = "dash-cards",
+    tagAppendChildren(div(class = "dash-cards",
         card("Samples", length(input$selected_samples), rv$data_source %||% ""),
         card("Replicates", if (n_rng[1] == n_rng[2]) n_rng[1] else paste0(n_rng[1], "–", n_rng[2]),
              "per sample and time point"),
@@ -11986,7 +12861,8 @@ server <- function(input, output, session) {
              "for infection metrics and statistics"),
         card("Figure", sprintf("%s × %s mm", round(sz[1] * 25.4), round(sz[2] * 25.4)),
              paste0(input$font_family, " ", input$axis_label_font_size, "/", input$axis_text_font_size,
-                    " pt, ", toupper(input$export_format %||% "pdf"))))
+                    " pt, ", toupper(input$export_format %||% "pdf")))),
+        list = tryCatch(s22_dash_cards(), error = function(e) list()))   # v2.22: + the AUC and the exponential-window doubling time
   })
   
   output$dash_metrics_table <- renderTable({
@@ -12695,6 +13571,788 @@ server <- function(input, output, session) {
            " draws, seed ", b$seed, "), averaging the drawn curves and recomputing each metric on the resampled mean curve.")
   }
 
+  # ── v2.22 statistics and fitting UI ──────────────────────────────────────────────────────────────────────────────────
+  # The Statistics-tab sections (column statistics, assumption checks, post-hoc method, time-course ANOVA, AUC, outliers,
+  # one-sample tests), the Curve fitting blocks (fit statistics, lysis models, exponential window, compare fits), the
+  # per-time / AUC / 4PL / correlation figures and their report, bundle and methods text. Engines: the v2.22 stats and fits
+  # blocks; helpers: "v2.22 statistics and fitting UI helpers". Every table has a CSV; every reactive below is computed only
+  # when an output (or a report) asks for it. See docs/STATISTICS_AND_FITTING_UI.md.
+  s22_stats_seen <- reactiveVal(FALSE)          # the methods draft and the reports describe the Statistics sections once the tab was visited
+  observeEvent(input$main_tabs, { if (identical(input$main_tabs, "Statistics")) s22_stats_seen(TRUE) })
+  s22_curves <- reactive({
+    req(rv$data, input$selected_samples)
+    list(pd = prepare_plot_data(), rp = prepare_replicate_data())
+  })
+  s22_rm <- reactive({ req(rv$data, input$selected_samples); replicate_metric_rows_current() })
+  s22_ref <- function() { r <- input$metrics_ref_sample %||% ""; if (nzchar(r) && r %in% input$selected_samples) r else "" }
+  s22_order <- function(df, col = "sample") {
+    if (is.null(df) || !is.data.frame(df) || !nrow(df) || !col %in% names(df)) return(df)
+    df[order(match(as.character(df[[col]]), sample_levels(input$selected_samples)), seq_len(nrow(df))), , drop = FALSE]
+  }
+  s22_show <- function(df, cols = "sample") s22_sig(s22_display(df, rv$display_names, cols, keep_raw = FALSE))
+  s22_csv_df <- function(df, cols = "sample") s22_display(df, rv$display_names, cols, keep_raw = TRUE)
+  s22_stamp <- function() format(Sys.time(), "%Y%m%d_%H%M%S")
+  s22_dl <- function(id, stem, fun) {            # a CSV download of fun() (NULL: nothing to write)
+    output[[id]] <- downloadHandler(
+      filename = function() paste0(stem, "_", s22_stamp(), ".csv"),
+      content  = function(file) { req(rv$data, input$selected_samples); d <- fun(); req(d); utils::write.csv(d, file, row.names = FALSE) })
+  }
+  s22_metrics_sel <- function(rm) {
+    m <- intersect(as.character(input$s22_metrics %||% character(0)), names(rm))
+    m[vapply(m, function(k) any(is.finite(suppressWarnings(as.numeric(rm[[k]])))), logical(1))]
+  }
+  s22_note <- function(...) { x <- c(...); x <- x[!is.na(x) & nzchar(x)]; if (length(x)) div(lapply(x, function(n) div(class = "stats-note", n))) }
+  s22_posthoc_method <- function() s22_choice(input$posthoc_method, unname(S22_POSTHOC_CHOICES), "holm_welch")
+  # a figure with its own fixed-panel preview, size and download (the same path as the other analysis figures)
+  s22_figure_shell <- function(raw_build, kind, container_id, img_id, plot_id, download_id, stem) {
+    build <- function() {
+      req(rv$data, input$selected_samples)
+      tryCatch(raw_build(), error = function(e) {
+        if (inherits(e, "shiny.silent.error")) stop(e)
+        ggplot() + annotate("text", x = 0.5, y = 0.5, label = paste(strwrap(paste("Figure not available:", conditionMessage(e)), width = 40), collapse = "\n"),
+                            color = "grey30", size = 2.6, hjust = 0.5) + theme_void()
+      })
+    }
+    fixed <- reactive(fixed_figure(build(), kind))
+    obj   <- function() if (fixed_mode()) fixed() else build()
+    size  <- function() {
+      if (!fixed_mode()) return(export_size_in())
+      tryCatch(size_from_grob(fixed(), kind), error = function(e) { if (inherits(e, "shiny.silent.error")) fixed_fallback_in(kind) else stop(e) })
+    }
+    output[[container_id]] <- renderUI(preview_container(plot_id, img_id, size))
+    register_preview(plot_id, img_id, obj, size)
+    output[[download_id]] <- downloadHandler(
+      filename = function() paste0(stem, "_", file_label(input$analysis_panel_label, stem), "_", export_size_tag(if (fixed_mode()) size()), ".", input$export_format %||% "svg"),
+      content  = function(file) {
+        sz <- size(); fmt <- input$export_format
+        args <- list(filename = file, plot = obj(), device = export_device(fmt), width = sz[1], height = sz[2], units = "in",
+                     dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
+        if (identical(fmt, "tiff")) args$compression <- "lzw"
+        do.call(ggsave, args)
+      })
+    list(build = build, obj = obj, size = size)
+  }
+  # the figure's shared closing: journal theme layers, no clipping (as build_analysis_plot)
+  s22_finish_figure <- function(p, xy = NULL, legend = TRUE, log_y = FALSE) {
+    samps <- input$selected_samples; labs_v <- resolve_aesthetics(samps)$leg_labels
+    p <- p + figure_theme_layers(xy = xy, n_entries = length(samps), log_y = log_y, label_chars = max(nchar(unname(labs_v)), 1))
+    if (!legend) p <- p + theme(legend.position = "none")
+    if (isTRUE(input$custom_aspect_ratio)) p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
+    p + coord_cartesian(clip = "off")
+  }
+  s22_prepend_layers <- function(g, layers) {    # layers drawn first (behind what g already holds)
+    if (!length(layers)) return(g)
+    n0 <- length(g$layers); g <- g + layers
+    k <- length(g$layers) - n0
+    g$layers <- c(g$layers[n0 + seq_len(k)], g$layers[seq_len(n0)])
+    g
+  }
+
+  # ── Column statistics ────────────────────────────────────────────────────────────────────────────────────────────────
+  s22_describe_current <- reactive({
+    rm <- s22_rm(); mets <- s22_metrics_sel(rm); req(length(mets) > 0)
+    d <- describe_metrics(rm, mets)
+    if (is.null(d) || !nrow(d)) return(NULL)
+    d <- d[order(match(d$sample, sample_levels(input$selected_samples)), match(d$metric, mets)), , drop = FALSE]
+    pos <- match("metric", names(d)); d$metric_label <- metric_label(d$metric)
+    d[c(names(d)[seq_len(pos)], "metric_label", setdiff(names(d), c(names(d)[seq_len(pos)], "metric_label")))]
+  })
+  output$s22_describe_note <- renderUI({
+    req(rv$data, input$selected_samples); d <- s22_describe_current()
+    s22_note(if (is.null(d)) "Choose at least one metric with finite replicate values." else NA_character_,
+             "SEM = SD / sqrt(n); the CI is mean ± t(n-1) x SEM; skewness needs n >= 3 and kurtosis n >= 4 (NA below). At n = 3 the SD and the CI are themselves very uncertain.")
+  })
+  output$s22_describe_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_describe_current(); req(d)
+    d <- d[c("sample", "metric_label", "n", "mean", "sd", "sem", "cv_pct", "ci_lo", "ci_hi", "median", "iqr", "min", "max", "skewness", "kurtosis", "geo_mean")]
+    d$n <- as.integer(d$n)
+    names(d) <- c("Sample", "Metric", "n", "Mean", "SD", "SEM", "CV %", "CI low", "CI high", "Median", "IQR", "Min", "Max", "Skewness", "Kurtosis", "Geo. mean")
+    s22_sig(s22_display(d, rv$display_names, "Sample", keep_raw = FALSE))
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadDescribeCSV", "column_statistics", function() s22_csv_df(s22_describe_current()))
+
+  # ── Assumption checks ────────────────────────────────────────────────────────────────────────────────────────────────
+  s22_normality_current <- reactive({
+    rm <- s22_rm(); mets <- s22_metrics_sel(rm); req(length(mets) > 0)
+    d <- normality_table(rm, mets); if (is.null(d) || !nrow(d)) return(NULL)
+    d$metric_label <- metric_label(d$metric)
+    d <- d[order(match(d$metric, mets), match(d$sample, c(sample_levels(input$selected_samples), "(pooled residuals)"))), , drop = FALSE]
+    d[c("sample", "metric", "metric_label", "n", "W", "shapiro_p", "note")]
+  })
+  s22_variance_current <- reactive({
+    rm <- s22_rm(); mets <- s22_metrics_sel(rm); req(length(mets) > 0)
+    out <- lapply(mets, function(m) cbind(data.frame(metric = m, metric_label = metric_label(m), stringsAsFactors = FALSE),
+                                          variance_check(rm[[m]], rm$sample)))
+    do.call(rbind, c(out, list(make.row.names = FALSE)))
+  })
+  output$s22_normality_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_normality_current(); req(d)
+    d <- d[c("sample", "metric_label", "n", "W", "shapiro_p", "note")]; d$n <- as.integer(d$n)
+    names(d) <- c("Sample", "Metric", "n", "W", "Shapiro p", "Note")
+    s22_sig(s22_display(d, rv$display_names, "Sample", keep_raw = FALSE))
+  }, striped = TRUE, spacing = "xs")
+  output$s22_variance_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_variance_current(); req(d)
+    d <- d[c("metric_label", "test", "statistic", "df1", "df2", "p", "note")]
+    names(d) <- c("Metric", "Test", "Statistic", "df1", "df2", "p", "Note")
+    s22_sig(d)
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadNormalityCSV", "normality", function() s22_csv_df(s22_normality_current()))
+  s22_dl("downloadVarianceCSV", "variance_tests", function() s22_variance_current())
+  # Q-Q figure of the pooled residuals (value minus its sample mean) of one metric
+  s22_qq_build <- function() {
+    rm <- s22_rm(); m <- s22_choice(input$s22_qq_metric, names(rm), "lysis_time")
+    if (!m %in% names(rm)) stop("Metric not available for these samples.")
+    v <- suppressWarnings(as.numeric(rm[[m]])); g <- as.character(rm$sample); ok <- is.finite(v)
+    cnt <- table(g[ok]); keep <- ok & g %in% names(cnt)[cnt >= 2]
+    if (sum(keep) < 3) stop("Need at least 3 residuals (two samples with 2+ values, or one with 3).")
+    r <- v[keep] - ave(v[keep], g[keep], FUN = mean); s <- g[keep]
+    o <- order(r); d <- data.frame(theoretical = qnorm(ppoints(length(r))), residual = r[o], sample = s[o], stringsAsFactors = FALSE)
+    samps <- input$selected_samples; aes_v <- resolve_aesthetics(samps)
+    cols <- setNames(aes_v$colors, samps); labs_v <- aes_v$leg_labels; shp <- aes_v$shapes
+    d$sample <- factor(d$sample, levels = sample_levels(samps))
+    lim_q <- sample_levels(samps)[sample_levels(samps) %in% as.character(d$sample)]
+    q <- quantile(d$residual, c(0.25, 0.75)); z <- qnorm(c(0.25, 0.75)); sl <- diff(q) / diff(z); ic <- q[1] - sl * z[1]
+    p <- ggplot(d, aes(x = theoretical, y = residual)) +
+      (if (is.finite(sl) && sl > 0) geom_abline(slope = sl, intercept = ic, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed")) +
+      geom_point(aes(color = sample, shape = sample), size = (input$shape_size %||% 3) * 0.8) +
+      scale_color_manual(values = cols, labels = labs_v, limits = lim_q, name = NULL) +
+      scale_shape_manual(values = shp, labels = labs_v, limits = lim_q, name = NULL) +
+      labs(x = "Theoretical normal quantile", y = axis_y_label(paste0("Residual: ", metric_axis_label(m, tunit = time_unit_from_label(input$x_axis_label), ylab = input$y_axis_label %||% "OD"))))
+    s22_finish_figure(p, xy = list(x = d$theoretical, y = d$residual, g = d$sample))
+  }
+  s22_qq_fig <- s22_figure_shell(s22_qq_build, "qq", "s22_qq_container", "s22_qq_img", "s22_qq_plot", "downloadQQFigure", "qq_plot")
+
+  # ── Post-hoc comparison (method) ─────────────────────────────────────────────────────────────────────────────────────
+  s22_posthoc_current <- reactive({
+    rm <- s22_rm(); s22_posthoc_for_metric(rm, analysis_stat_metric(), s22_posthoc_method(), input$metrics_ref_sample)
+  })
+  s22_posthoc_sentence <- function(ph = s22_posthoc_current()) {
+    if (is.null(ph$posthoc) || !nrow(ph$posthoc) || all(is.na(ph$posthoc$p_adj))) return(character(0))
+    stats_method_sentence(ph$posthoc, "posthoc", what = paste0("The ", tolower(metric_label(ph$metric))), n = ph$n)
+  }
+  output$s22_posthoc_note <- renderUI({
+    req(rv$data, input$selected_samples); ph <- s22_posthoc_current()
+    s22_note(paste0("Metric: ", metric_label(ph$metric), ". ",
+                    if (nzchar(ph$reference)) paste0("Each sample vs reference '", dname(ph$reference), "'. ") else "All pairs. ",
+                    "Method: ", names(S22_POSTHOC_CHOICES)[match(s22_posthoc_method(), S22_POSTHOC_CHOICES)], "."),
+             relabel(ph$notes), s22_posthoc_sentence(ph),
+             if (!is.null(ph$posthoc) && nrow(ph$posthoc) && any(ph$posthoc$p_adj < 0.05, na.rm = TRUE) && !is.null(ph$n) && min(ph$n, na.rm = TRUE) < 4)
+               "n = 3 per group: every pairwise p is exploratory; prefer the effect size and its CI to the star." else NA_character_)
+  })
+  s22_posthoc_display <- function(ph = s22_posthoc_current()) {
+    d <- ph$posthoc; if (is.null(d) || !nrow(d)) return(NULL)
+    d <- s22_display(d, rv$display_names, c("group1", "group2"), keep_raw = FALSE)
+    d[c("group1", "group2", "estimate", "ci_lo", "ci_hi", "statistic", "p_raw", "p_adj", "stars", "method", "note")]
+  }
+  output$s22_omnibus_table <- renderTable({ req(rv$data, input$selected_samples); ph <- s22_posthoc_current(); req(ph$omnibus); fmt_stats_table(ph$omnibus) }, striped = TRUE, spacing = "xs")
+  output$s22_posthoc_table <- renderTable({ req(rv$data, input$selected_samples); d <- s22_posthoc_display(); req(d); fmt_stats_table(d) }, striped = TRUE, spacing = "xs")
+  output$downloadPosthocCSV <- downloadHandler(
+    filename = function() paste0("posthoc_", analysis_stat_metric(), "_", s22_posthoc_method(), "_", s22_stamp(), ".csv"),
+    content = function(file) {
+      req(rv$data, input$selected_samples); ph <- s22_posthoc_current()
+      con <- file(file, open = "w", encoding = "UTF-8"); on.exit(close(con))
+      writeLines(paste0("# metric,", ph$metric, " ; method,", ph$method, " ; reference,", dname(ph$reference), " ; reference_raw,", ph$reference), con)
+      for (w in ph$notes) writeLines(paste0("# ", w), con)
+      if (!is.null(ph$omnibus)) { writeLines("# omnibus", con); utils::write.csv(ph$omnibus, con, row.names = FALSE) }
+      if (!is.null(ph$posthoc)) { writeLines("# pairwise", con); utils::write.csv(s22_display(ph$posthoc, rv$display_names, c("group1", "group2"), keep_raw = TRUE), con, row.names = FALSE) }
+    })
+
+  # ── Time-course ANOVA ────────────────────────────────────────────────────────────────────────────────────────────────
+  s22_tc_current <- reactive({ two_way_time_anova(s22_curves()$rp, rm = isTRUE(input$tc_repeated %||% TRUE)) })
+  s22_pertime_current <- reactive({
+    ref <- s22_ref(); if (!nzchar(ref)) return(NULL)
+    per_time_comparisons(s22_curves()$rp, ref, adjust = s22_choice(input$tc_adjust, c("sidak", "holm", "bonferroni"), "sidak"))
+  })
+  output$s22_tc_note <- renderUI({
+    req(rv$data, input$selected_samples); a <- s22_tc_current()
+    s22_note(paste0("Method: ", a$method, "."), a$note,
+             if (!nzchar(s22_ref())) "Pick the reference sample under Stats & Reports to see the per-time comparisons." else NA_character_,
+             "The interaction (Sample x Time) tests whether the curves differ in shape; the Sample main effect has only (wells - samples) degrees of freedom and is the weakest.")
+  })
+  output$s22_tc_anova_table <- renderTable({
+    req(rv$data, input$selected_samples); a <- s22_tc_current(); req(a$anova)
+    d <- a$anova; names(d) <- c("Term", "df (num)", "df (den)", "F", "p"); s22_sig(d)
+  }, striped = TRUE, spacing = "xs")
+  output$s22_pertime_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_pertime_current(); req(d)
+    d <- s22_order(d); d$n <- as.integer(d$n); d$n_ref <- as.integer(d$n_ref)
+    s22_show(d[c("time", "sample", "diff", "ci_lo", "ci_hi", "t", "df", "p_raw", "p_adj", "stars", "n", "n_ref")])
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadTCAnovaCSV", "timecourse_anova", function() {
+    a <- s22_tc_current(); if (is.null(a$anova)) return(NULL)
+    cbind(a$anova, method = a$method, note = paste(a$note, collapse = " "), stringsAsFactors = FALSE) })
+  s22_dl("downloadPerTimeCSV", "per_time_comparisons", function() s22_csv_df(s22_order(s22_pertime_current())))
+
+  # ── Area under the curve ─────────────────────────────────────────────────────────────────────────────────────────────
+  s22_auc_current <- reactive({
+    st  <- auc_settings_from_inputs(input$auc_baseline, input$auc_baseline_value, input$auc_from, input$auc_to)
+    ref <- if (isTRUE(input$auc_relative %||% TRUE)) s22_ref() else ""
+    auc_table(s22_curves()$rp, baseline = st$baseline, baseline_value = st$baseline_value, t_from = st$t_from, t_to = st$t_to,
+              relative_to = if (nzchar(ref)) ref else NULL)
+  })
+  s22_auc_compare_current <- reactive({
+    a <- s22_auc_current(); ref <- s22_ref()
+    if (is.null(a$replicates) || !nrow(a$replicates)) return(NULL)
+    auc_compare(a$replicates, if (nzchar(ref)) ref else NULL, method = s22_posthoc_method())
+  })
+  output$s22_auc_note <- renderUI({
+    req(rv$data, input$selected_samples); a <- s22_auc_current()
+    nts <- unique(unlist(strsplit(paste(a$replicates$note[!is.na(a$replicates$note) & nzchar(a$replicates$note)], collapse = "; "), "; ", fixed = TRUE)))
+    s22_note(paste0("Trapezoid area of max(", input$y_axis_label %||% "OD", " - baseline, 0) over ",
+                    if (nzchar(trimws(input$auc_from %||% "")) || nzchar(trimws(input$auc_to %||% ""))) "the typed window" else "the whole curve",
+                    "; baseline: ", c(none = "none (0)", first = "the first reading of each replicate", value = "the fixed value", min = "the minimum of each replicate")[[s22_choice(input$auc_baseline, c("none", "first", "value", "min"), "none")]], ". ",
+                    "Units: ", input$y_axis_label %||% "OD", " x ", time_unit_from_label(input$x_axis_label), "."),
+             if (isTRUE(input$auc_relative %||% TRUE) && !nzchar(s22_ref())) "Set the reference sample (Stats & Reports) for the relative AUC." else NA_character_,
+             if (length(nts)) paste0("Notes: ", paste(utils::head(nts, 4), collapse = "; "), ".") else NA_character_,
+             "The relative AUC is the ratio of mean AUCs (log-delta CI, approximate at n = 3). The comparison below uses the post-hoc method chosen above.")
+  })
+  s22_auc_display <- function() {
+    a <- s22_auc_current(); d <- a$summary; if (is.null(d) || !nrow(d)) return(NULL)
+    s22_order(d)
+  }
+  output$s22_auc_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_auc_display(); req(d); d$n <- as.integer(d$n); s22_show(d)
+  }, striped = TRUE, spacing = "xs")
+  output$s22_auc_compare_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_auc_compare_current(); req(d)
+    d <- s22_display(d, rv$display_names, c("group1", "group2"), keep_raw = FALSE)
+    fmt_stats_table(d[c("group1", "group2", "estimate", "ci_lo", "ci_hi", "statistic", "p_raw", "p_adj", "stars", "method", "note")])
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadAUCCSV", "auc_per_sample", function() s22_csv_df(s22_auc_display()))
+  s22_dl("downloadAUCRepCSV", "auc_per_replicate", function() s22_csv_df(s22_order(s22_auc_current()$replicates)))
+  s22_dl("downloadAUCCompareCSV", "auc_comparison", function() { d <- s22_auc_compare_current(); if (is.null(d)) NULL else s22_display(d, rv$display_names, c("group1", "group2"), keep_raw = TRUE) })
+
+  # ── Outliers ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  s22_outliers_current <- reactive({
+    rm <- s22_rm(); mets <- s22_metrics_sel(rm); req(length(mets) > 0)
+    meth <- s22_choice(input$outlier_method, c("grubbs", "mad", "iqr"), "grubbs")
+    out <- list()
+    for (m in mets) for (s in unique(as.character(rm$sample))) {
+      ix <- which(as.character(rm$sample) == s & is.finite(suppressWarnings(as.numeric(rm[[m]]))))
+      if (!length(ix)) next
+      o <- outlier_tests(as.numeric(rm[[m]][ix]), method = meth)
+      out[[length(out) + 1L]] <- cbind(data.frame(sample = s, metric = m, metric_label = metric_label(m), replicate = rm$replicate[ix][o$index], stringsAsFactors = FALSE),
+                                       o[c("value", "flagged", "method", "statistic", "p", "note")])
+    }
+    if (!length(out)) return(NULL)
+    d <- do.call(rbind, c(out, list(make.row.names = FALSE)))
+    d[order(match(d$sample, sample_levels(input$selected_samples)), match(d$metric, mets), seq_len(nrow(d))), , drop = FALSE]
+  })
+  s22_curve_outliers_current <- reactive({ d <- replicate_outlier_flags(s22_curves()$rp); if (is.null(d) || !nrow(d)) NULL else s22_order(d) })
+  output$s22_outlier_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_outliers_current(); req(d)
+    d$flagged <- ifelse(d$flagged %in% TRUE, "FLAGGED", "")
+    d <- d[c("sample", "metric_label", "replicate", "value", "flagged", "method", "statistic", "p", "note")]
+    d$replicate <- as.character(d$replicate)
+    s22_show(d)
+  }, striped = TRUE, spacing = "xs")
+  output$s22_curve_outlier_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_curve_outliers_current(); req(d)
+    d$flagged <- ifelse(d$flagged %in% TRUE, "FLAGGED", ""); d$replicate <- as.character(d$replicate)
+    s22_show(d[c("sample", "replicate", "abs_dev", "distance", "flagged", "note")])
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadOutliersCSV", "outliers_metrics", function() s22_csv_df(s22_outliers_current()))
+  s22_dl("downloadCurveOutliersCSV", "outliers_replicate_curves", function() s22_csv_df(s22_curve_outliers_current()))
+
+  # ── One-sample tests ─────────────────────────────────────────────────────────────────────────────────────────────────
+  s22_onesample_spec <- reactive(s22_parse_assignments(input$onesample_text))
+  s22_onesample_current <- reactive({
+    spec <- s22_onesample_spec(); if (!length(spec$values)) return(NULL)
+    rm <- s22_rm(); out <- list()
+    for (m in intersect(names(spec$values), names(rm))) for (s in unique(as.character(rm$sample))) {
+      x <- suppressWarnings(as.numeric(rm[[m]][as.character(rm$sample) == s])); x <- x[is.finite(x)]
+      if (!length(x)) next
+      out[[length(out) + 1L]] <- cbind(data.frame(sample = s, metric = m, metric_label = metric_label(m), stringsAsFactors = FALSE), one_sample_tests(x, spec$values[[m]]))
+    }
+    if (!length(out)) return(NULL)
+    d <- do.call(rbind, c(out, list(make.row.names = FALSE)))
+    d[order(match(d$metric, names(spec$values)), match(d$sample, sample_levels(input$selected_samples)), seq_len(nrow(d))), , drop = FALSE]
+  })
+  output$s22_onesample_note <- renderUI({
+    req(rv$data, input$selected_samples); spec <- s22_onesample_spec(); rm <- s22_rm()
+    miss <- setdiff(names(spec$values), names(rm))
+    s22_note(if (!length(spec$values) && !length(spec$invalid)) "Type a hypothetical value, for example doubling_time = 20." else NA_character_,
+             if (length(spec$invalid)) paste0("Not read as 'metric = value': ", paste(spec$invalid, collapse = "; "), ".") else NA_character_,
+             if (length(miss)) paste0("Not available for these samples: ", paste(metric_label(miss), collapse = ", "), ".") else NA_character_,
+             "At n = 3 the Wilcoxon signed-rank test cannot give p below 0.25: use the t test and the CI of the mean.")
+  })
+  output$s22_onesample_table <- renderTable({
+    req(rv$data, input$selected_samples); d <- s22_onesample_current(); req(d)
+    d$n <- as.integer(d$n); s22_show(d[c("sample", "metric_label", "test", "n", "mu", "estimate", "statistic", "df", "p", "ci_lo", "ci_hi", "note")])
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadOneSampleCSV", "one_sample_tests", function() s22_csv_df(s22_onesample_current()))
+
+  # ── Curve fitting: growth-fit statistics (intervals, AICc, residuals, bands) ───────────────────────────────────────────
+  s22_curve_of <- function(level, cv) function(r) {       # the curve a fit-table row was fitted to
+    if (identical(level, "replicate") && "replicate" %in% names(r)) {
+      g <- cv$rp[as.character(cv$rp$variable) == as.character(r$sample) & cv$rp$replicate == r$replicate, , drop = FALSE]
+      list(t = g$time, od = g$value)
+    } else {
+      g <- cv$pd[as.character(cv$pd$variable) == as.character(r$sample), , drop = FALSE]
+      list(t = g$time, od = g$mean_value)
+    }
+  }
+  fit_objects_cur <- reactive({
+    fr <- fit_results(); if (is.null(fr$table)) return(NULL)
+    growth_objects(fr$table, s22_curve_of(fr$settings$level, s22_curves()))
+  })
+  fit_ext_cur <- reactive({
+    fr <- fit_results(); if (is.null(fr$table)) return(NULL)
+    fit_extended_table(fr$table, fit_objects_cur(), s22_choice(input$fit_ci_method, c("profile", "wald"), "profile"), 0.95)
+  })
+  output$fit_ext_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    ob <- fit_objects_cur(); n_bad <- if (is.null(ob)) 0L else sum(vapply(ob, function(o) is.null(o$fit), logical(1)) & fit_results()$table$converged %in% TRUE)
+    s22_note(paste0("Intervals: ", if (identical(input$fit_ci_method, "wald")) "Wald (estimate ± t x SE)" else "profile likelihood, Wald for a parameter whose profile fails", "; 95 %."),
+             if (n_bad > 0) sprintf("%d fit(s) could not be refitted to the same parameters; their intervals are Wald from the fit's standard errors and the residual tests are blank.", n_bad) else NA_character_,
+             if (identical(fit_results()$settings$level, "replicate")) "Replicate-level fits: one row per replicate and model." else NA_character_,
+             "Residual figure: the observed minus the fitted value on the fit's own scale (ln OD/OD0), for the best model of each curve; the first reading is the baseline of every growth fit (residual 0 by construction) and is not plotted.")
+  })
+  output$fit_ext_table <- renderTable({
+    req(rv$data, input$selected_samples); e <- fit_ext_cur(); req(e)
+    d <- fit_extended_display(s22_display(e, rv$display_names, "sample", keep_raw = FALSE)); req(d); d
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadFitExtCSV", "fit_statistics", function() { e <- fit_ext_cur(); if (is.null(e)) NULL else s22_csv_df(e) })
+  fit_resid_current <- reactive({
+    fr <- fit_results(); if (is.null(fr$table)) return(NULL)
+    fit_residual_frames(fr$table, fit_objects_cur(), s22_curve_of(fr$settings$level, s22_curves()))
+  })
+  fit_resid_build <- function() {
+    rf <- fit_resid_current(); if (is.null(rf) || !nrow(rf)) stop("No residuals: no growth fit could be refitted to the same parameters.")
+    fs <- fit_results()$settings
+    samps <- input$selected_samples; aes_v <- resolve_aesthetics(samps)
+    cols <- setNames(aes_v$colors, samps); labs_v <- aes_v$leg_labels; shp <- aes_v$shapes
+    rf$variable <- factor(rf$sample, levels = sample_levels(samps))
+    p <- ggplot(rf, aes(x = t, y = residual, color = variable, shape = variable)) +
+      geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
+      geom_point(size = (input$shape_size %||% 3) * 0.8, alpha = if (identical(fs$level, "replicate")) 0.7 else 1) +
+      scale_color_manual(values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
+      scale_shape_manual(values = shp, labels = labs_v, limits = sample_levels(samps), name = NULL) +
+      labs(x = input$x_axis_label, y = if (isTRUE(fs$log)) "Residual (ln OD/OD0)" else "Residual (OD change)")
+    s22_finish_figure(p, xy = list(x = rf$t, y = rf$residual, g = rf$variable))
+  }
+  s22_resid_fig <- s22_figure_shell(fit_resid_build, "fit_residuals", "fit_resid_container", "fit_resid_img", "fit_resid_plot", "downloadFitResidFigure", "fit_residuals")
+
+  # ── Lysis models ─────────────────────────────────────────────────────────────────────────────────────────────────────
+  lysis_current <- reactive({
+    cv <- s22_curves()
+    lysis_fits_by_group(cv$pd, cv$rp, s22_choice(input$lysis_level, c("mean", "replicate"), "mean"), as.character(input$lysis_models %||% character(0)),
+                        input$lysis_from %||% "peak", input$fit_weights_scheme %||% "none", 0.95)
+  })
+  output$lysis_note <- renderUI({
+    req(rv$data, input$selected_samples); ly <- lysis_current()
+    s22_note(ly$note, if (!length(input$lysis_models)) "Select at least one lysis model." else NA_character_,
+             if (is.null(ly$table) && length(input$lysis_models)) "No lysis model could be fitted: a curve needs at least 4 points from its peak onwards (5 for the logistic)." else NA_character_,
+             if (!is.null(ly$scheme) && ly$scheme != "none") paste0("Weights: ", names(S22_WEIGHT_CHOICES)[match(ly$scheme, S22_WEIGHT_CHOICES)], "; AICc values compare only fits with the same weights.") else NA_character_,
+             "The fitted peak (od0) is the top of the fitted curve, not the highest reading. A one-phase decay assumes a plateau: a plateau below 0 means the OD is still falling at the end of the data.")
+  })
+  output$lysis_table <- renderTable({
+    req(rv$data, input$selected_samples); ly <- lysis_current(); req(ly$table)
+    d <- lysis_display_table(s22_display(s22_order(ly$table), rv$display_names, "sample", keep_raw = FALSE)); req(d); d
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadLysisFitsCSV", "lysis_models", function() { ly <- lysis_current(); if (is.null(ly$table)) NULL else s22_csv_df(s22_order(ly$table)) })
+
+  # ── Exponential-growth window ────────────────────────────────────────────────────────────────────────────────────────
+  expwin_current <- reactive({
+    cv <- s22_curves()
+    exp_window_by_group(cv$pd, cv$rp, s22_choice(input$expwin_level, c("mean", "replicate"), "mean"), input$expwin_mode %||% "auto",
+                        input$expwin_from, input$expwin_to, input$expwin_min_points %||% 4)
+  })
+  s22_rolling_mu <- function() {
+    m <- tryCatch(curve_metrics_current(), error = function(e) NULL)
+    if (is.null(m) || !"mu_max" %in% names(m)) NULL else setNames(m$mu_max, m$sample)
+  }
+  output$expwin_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    s22_note(paste0("Log-linear regression of ln(OD) on time over ", c(auto = "the window of at least the minimum number of points with the highest R²",
+                                                                 manual = "the window you typed", all = "all points")[[s22_choice(input$expwin_mode, c("auto", "manual", "all"), "auto")]],
+                    ". mu is the slope (per time unit), the doubling time ln 2 / mu, both with 95 % t intervals."),
+             "R² favours short windows (any 4 nearly collinear points have R² close to 1): raise the minimum number of points, or type the window you chose by eye from the log plot. The window is data-driven, so its interval is optimistic. The rolling mu_max is the curve-metrics value (the largest slope in a sliding window).")
+  })
+  s22_dl("downloadExpWindowCSV", "exponential_window", function() { e <- expwin_current(); if (is.null(e)) NULL else {
+    e <- s22_order(e); rmu <- s22_rolling_mu(); if (!is.null(rmu)) e$rolling_mu_max <- unname(rmu[as.character(e$sample)]); s22_csv_df(e) } })
+  output$expwin_table <- renderTable({
+    req(rv$data, input$selected_samples); e <- expwin_current(); req(e); e <- s22_order(e)
+    rmu <- s22_rolling_mu()
+    d <- exp_window_display(e, rmu); req(d); d$Sample <- display_name_of(e$sample, rv$display_names); d
+  }, striped = TRUE, spacing = "xs")
+
+  # ── Compare fits ──────────────────────────────────────────────────────────────────────────────────────────────────────
+  output$cmp_samples_ui <- renderUI({
+    req(rv$data, input$selected_samples)
+    smp <- sample_levels(input$selected_samples)
+    cur <- isolate(input$cmp_samples)
+    selectInput("cmp_samples", "Samples to compare:", choices = setNames(smp, dname(smp)), selected = if (length(cur)) intersect(cur, smp) else smp, multiple = TRUE, width = "100%")
+  })
+  cmp_selected <- function() { s <- as.character(input$cmp_samples %||% character(0)); s <- intersect(s, input$selected_samples); if (length(s)) s else as.character(input$selected_samples) }
+  cmp_current <- reactive({
+    fs <- fit_settings()
+    compare_fits_for_samples(s22_curves()$rp, cmp_selected(), input$cmp_model %||% "logistic", input$cmp_param %||% "mu", fs$until, fs$log)
+  })
+  cmp_sentence <- function(cf = cmp_current()) {
+    tst <- cf$test; if (is.null(tst) || !is.finite(tst$p)) return(character(0))
+    pp <- tst$p; ptxt <- if (pp < 0.001) "p < 0.001" else paste0("p = ", formatC(pp, digits = 2, format = "g"))
+    paste0("Whether the ", c(mu = "maximum specific growth rate", lag = "lag time", A = "asymptote", all = "growth parameters (A, mu and lag)")[[tst$param]],
+           " of the ", tst$model, " model differed between ", paste(dname(cmp_selected()), collapse = ", "),
+           " was tested by an extra-sum-of-squares F test of separate against shared curves (each sample with its own baseline) fitted to all replicate points: F(",
+           tst$df_null - tst$df_alt, ", ", tst$df_alt, ") = ", formatC(tst$F, digits = 3, format = "g"), ", ", ptxt, ".")
+  }
+  output$cmp_note <- renderUI({
+    req(rv$data, input$selected_samples); cf <- cmp_current()
+    s22_note(relabel(cf$warnings), cmp_sentence(cf),
+             "Null model: one curve for all samples; alternative: separate curves (or only the chosen parameter separate). Prefer one parameter (mu) to 'all': it costs one extra parameter per sample, not three.")
+  })
+  output$cmp_test_table <- renderTable({ req(rv$data, input$selected_samples); cf <- cmp_current(); req(cf$test); compare_fits_test_display(cf$test) }, striped = TRUE, spacing = "xs")
+  output$cmp_params_table <- renderTable({
+    req(rv$data, input$selected_samples); cf <- cmp_current(); req(cf$params, nrow(cf$params) > 0, !all(is.na(cf$params$sample)))
+    d <- cf$params; d$sample <- display_name_of(d$sample, rv$display_names)
+    d$n_points <- as.integer(d$n_points)
+    names(d)[names(d) == "sample"] <- "Sample"
+    s22_sig(d)
+  }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadCompareFitsCSV", "compare_fits", function() {
+    cf <- cmp_current(); if (is.null(cf$test)) return(NULL)
+    p <- cf$params; p$sample <- display_name_of(p$sample, rv$display_names)
+    t <- cf$test[rep(1, nrow(p)), , drop = FALSE]
+    cbind(t, p, row.names = NULL) })
+  # a table of the growth fits for the dashboard etc. is fit_results(); nothing else to add here
+
+  # ── Fit figure overlays (Curve fitting tab: bands, lysis decay, exponential window) ─────────────────────────────────────
+  # Returns list(back = layers drawn behind the fit, front = layers on top, notes). Everything is off by default.
+  s22_fit_overlay <- function(fr, logy, lw, yr = c(-Inf, Inf)) {
+    back <- list(); front <- list(); notes <- character(0)
+    fs <- fr$settings; tab <- fr$table; smp <- sample_levels(input$selected_samples)
+    if (isTRUE(input$fit_bands_on)) {
+      if (!identical(fs$level, "mean")) notes <- c(notes, "Bands are drawn for the mean-curve fits: choose 'Mean curve' under Fit to.")
+      else {
+        rows <- which(tab$converged %in% TRUE & (identical(fs$show, "all") | tab$best %in% TRUE))
+        bf <- growth_band_frames(tab, fit_objects_cur(), fr$windows, rows, input$fit_bands_type, 0.95)
+        if (is.null(bf)) notes <- c(notes, "No band could be computed (the fit could not be refitted to the same parameters, or it has no residual degrees of freedom).")
+        else {
+          bf$variable <- factor(bf$sample, levels = smp); bf$grp <- paste(bf$sample, bf$model, sep = "|")
+          if (logy) bf <- bf[is.finite(bf$lo) & bf$lo > 0, , drop = FALSE]
+          if (nrow(bf)) back[[length(back) + 1L]] <- geom_ribbon(data = bf, aes(x = time, ymin = lo, ymax = hi, fill = variable, group = grp), alpha = 0.18,
+                                                                 colour = NA, show.legend = FALSE, inherit.aes = FALSE)
+          notes <- c(notes, paste0("Shaded: ", if (identical(input$fit_bands_type, "prediction")) "95 % prediction band (where a new reading is expected)" else "95 % confidence band of the fitted curve",
+                                   " (delta method on the ln scale, back-transformed)."))
+        }
+      }
+    }
+    if (isTRUE(input$lysis_show)) {
+      ly <- lysis_current(); lc <- ly$curves
+      if (is.null(lc) || !nrow(lc)) notes <- c(notes, "No lysis decay could be fitted (see Lysis models).")
+      else {
+        lc$variable <- factor(lc$sample, levels = smp); lc$grp <- paste(lc$sample, lc$replicate, lc$model, sep = "|")
+        if (logy) lc <- lc[is.finite(lc$od) & lc$od > 0, , drop = FALSE]
+        rep_lvl <- identical(input$lysis_level, "replicate")
+        if (nrow(lc)) front[[length(front) + 1L]] <- geom_line(data = lc, aes(x = time, y = od, color = variable, group = grp), linetype = "longdash",
+                                                               linewidth = lw * (if (rep_lvl) 0.5 else 0.8), alpha = if (rep_lvl) 0.7 else 1, show.legend = FALSE, inherit.aes = FALSE)
+        notes <- c(notes, "Long dashes: the fitted lysis decay after the peak (Lysis models).")
+      }
+    }
+    if (isTRUE(input$expwin_show)) {
+      ew <- expwin_current()
+      if (!is.null(ew)) ew <- ew[is.finite(ew$t_start) & is.finite(ew$t_end), , drop = FALSE]
+      if (is.null(ew) || !nrow(ew)) notes <- c(notes, "No exponential window could be fitted.")
+      else {
+        ew <- do.call(rbind, lapply(split(ew, as.character(ew$sample)), function(z) data.frame(sample = z$sample[1], t_start = min(z$t_start), t_end = max(z$t_end), stringsAsFactors = FALSE)))
+        ew$variable <- factor(ew$sample, levels = smp)
+        back[[length(back) + 1L]] <- geom_rect(data = ew, aes(xmin = t_start, xmax = t_end, ymin = yr[1], ymax = yr[2], fill = variable), alpha = 0.12,
+                                               show.legend = FALSE, inherit.aes = FALSE)
+        notes <- c(notes, "Light bands: the exponential-growth window of each sample (Exponential-growth window).")
+      }
+    }
+    list(back = back, front = front, notes = notes)
+  }
+  # the overlay notes shown on the Curve fitting tab, with the others
+  s22_fit_overlay_notes <- function() {
+    if (!any(isTRUE(input$fit_bands_on), isTRUE(input$lysis_show), isTRUE(input$expwin_show))) return(character(0))
+    fr <- tryCatch(fit_results(), error = function(e) NULL); if (is.null(fr) || is.null(fr$table)) return(character(0))
+    tryCatch(s22_fit_overlay(fr, identical(input$y_scale_type, "log"), input$line_thickness %||% 1)$notes, error = function(e) character(0))
+  }
+  output$fit_overlay_note <- renderUI({ req(rv$data, input$selected_samples); s22_note(s22_fit_overlay_notes()) })
+
+  # ── Dose-response: 4PL per series ────────────────────────────────────────────────────────────────────────────────────
+  s22_dose_data <- function() {
+    rm <- replicate_metric_rows_current(); metric <- input$analysis_dose_metric %||% "lysis_time"
+    if (is.null(rm) || !metric %in% names(rm)) return(NULL)
+    samps <- input$selected_samples; moi <- moi_map(samps, input$moi_override); rm$moi <- unname(moi[rm$sample])
+    d <- rm[is.finite(rm$moi) & rm$moi > 0 & is.finite(rm[[metric]]), c("sample", "replicate", "moi", metric), drop = FALSE]
+    if (!nrow(d)) return(NULL)
+    names(d)[4] <- "value"
+    labs <- resolve_aesthetics(samps)$leg_labels
+    d$series <- dose_series_name(unname(labs[as.character(d$sample)]))
+    d
+  }
+  dr_current <- reactive({
+    d <- s22_dose_data()
+    if (is.null(d)) return(list(table = NULL, curves = NULL, note = "No sample has a positive MOI for this metric."))
+    fx <- dose_response_series_fits(d, s22_num(input$dr_fix_bottom), s22_num(input$dr_fix_top), input$fit_weights_scheme %||% "none", 0.95)
+    fx$note <- character(0)
+    if (is.null(fx$table)) fx$note <- "No series could be fitted."
+    fx
+  })
+  output$dr_note <- renderUI({
+    req(rv$data, input$selected_samples); fx <- dr_current()
+    s22_note(fx$note, if (!isTRUE(input$dr_fit)) "The 4PL is not drawn on the figure: tick 'Fit a four-parameter logistic (4PL)' in the figure's controls (the table below is computed either way)." else NA_character_,
+             "Four-parameter logistic of the metric against log10 MOI, fitted to the replicate values of each phage series (EC50 = the MOI half-way between the plateaus; interval from the profile of the log10 EC50). With 4 free parameters and 5 or fewer MOIs the interval is wide or missing: fix a plateau where the experiment defines it.")
+  })
+  output$dr_table <- renderTable({ req(rv$data, input$selected_samples); fx <- dr_current(); req(fx$table); dose_response_display(fx$table) }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadDoseResponseCSV", "dose_response_ec50", function() { fx <- dr_current(); fx$table })
+
+  # ── Metric explorer: correlation and straight-line fit ───────────────────────────────────────────────────────────────
+  # Points as the figure plots them: per replicate, or the mean of each sample ("Per sample mean"); a log axis is
+  # fitted on log10 of that axis. Returns list(corr, lin, band, note, n).
+  s22_explorer_fit <- function(rm, xm, ym, logx, logy, per_replicate, method, want_line, band_type) {
+    out <- list(corr = NULL, lin = NULL, band = NULL, note = character(0), n = 0L)
+    if (is.null(rm) || !all(c(xm, ym) %in% names(rm))) return(out)
+    d <- data.frame(sample = rm$sample, x = suppressWarnings(as.numeric(rm[[xm]])), y = suppressWarnings(as.numeric(rm[[ym]])), stringsAsFactors = FALSE)
+    d <- d[is.finite(d$x) & is.finite(d$y), , drop = FALSE]
+    if (logx) d <- d[d$x > 0, , drop = FALSE]; if (logy) d <- d[d$y > 0, , drop = FALSE]
+    if (!per_replicate && nrow(d)) d <- data.frame(sample = unique(d$sample), x = as.numeric(tapply(d$x, d$sample, mean)[unique(d$sample)]), y = as.numeric(tapply(d$y, d$sample, mean)[unique(d$sample)]), stringsAsFactors = FALSE)
+    out$n <- nrow(d)
+    if (nrow(d) < 3) { out$note <- "Need at least 3 points for a correlation (samples with a finite value for both metrics)."; return(out) }
+    xt <- if (logx) log10(d$x) else d$x; yt <- if (logy) log10(d$y) else d$y
+    out$note <- c(if (logx || logy) paste0("Fitted on ", paste(c(if (logx) "log10 x", if (logy) "log10 y"), collapse = " and "), " (the log axis)."),
+                  if (per_replicate) "Points: every replicate of every sample (they are not independent of their sample)." else "Points: the mean of each sample.",
+                  if (nrow(d) < 5) "Fewer than 5 points: r is not meaningful." else NULL)
+    if (method %in% c("pearson", "spearman")) out$corr <- correlation_table(xt, yt, method)
+    if (want_line) out$lin <- linear_fit_table(xt, yt)
+    if (want_line) {
+      b <- linear_band(xt, yt, level = 0.95, type = band_type)
+      if (!is.null(b) && nrow(b) && any(is.finite(b$lo))) {
+        out$band <- data.frame(x = if (logx) 10^b$x else b$x, fit = if (logy) 10^b$fit else b$fit, lo = if (logy) 10^b$lo else b$lo, hi = if (logy) 10^b$hi else b$hi)
+      }
+    }
+    out
+  }
+  explorer_fit_current <- function() {
+    s22_explorer_fit(replicate_metric_rows_current(), input$explorer_x %||% "lysis_time", input$explorer_y %||% "od_drop",
+                     isTRUE(input$explorer_logx), isTRUE(input$explorer_logy), grepl("^Per replicate", input$explorer_level %||% "Per replicate"),
+                     s22_choice(input$explorer_stats, c("none", "pearson", "spearman"), "none"), isTRUE(input$explorer_line),
+                     s22_choice(input$explorer_band, c("confidence", "prediction"), "confidence"))
+  }
+  explorer_stats_df <- function() {
+    ef <- explorer_fit_current(); parts <- list()
+    if (!is.null(ef$corr)) parts[[length(parts) + 1L]] <- cbind(data.frame(quantity = "Correlation", stringsAsFactors = FALSE), ef$corr)
+    if (!is.null(ef$lin)) parts[[length(parts) + 1L]] <- cbind(data.frame(quantity = paste0("Linear fit: ", ef$lin$term), stringsAsFactors = FALSE), ef$lin[setdiff(names(ef$lin), "term")])
+    if (!length(parts)) return(NULL)
+    d <- dplyr::bind_rows(parts)
+    d$x_metric <- input$explorer_x %||% "lysis_time"; d$y_metric <- input$explorer_y %||% "od_drop"
+    d
+  }
+  output$explorer_stats_note <- renderUI({
+    req(rv$data, input$selected_samples); ef <- explorer_fit_current()
+    s22_note(if (identical(input$explorer_stats, "none") && !isTRUE(input$explorer_line)) "Choose Pearson or Spearman (and/or the straight-line fit) in the figure's controls." else NA_character_,
+             ef$note, if (!identical(input$explorer_stats, "none") || isTRUE(input$explorer_line)) "A correlation with few points is exploratory: it says how the metrics co-vary, not why.")
+  })
+  output$explorer_stats_table <- renderTable({ req(rv$data, input$selected_samples); d <- explorer_stats_df(); req(d); d$n <- as.integer(d$n); s22_sig(d) }, striped = TRUE, spacing = "xs")
+  s22_dl("downloadExplorerStatsCSV", "metric_explorer_stats", function() explorer_stats_df())
+
+  # ── Dashboard cards (AUC, exponential-window doubling time) ──────────────────────────────────────────────────────────
+  s22_dash_cards <- function() {
+    card <- function(title, value, sub = NULL)
+      div(class = "dash-card", div(class = "dash-card-title", title), div(class = "dash-card-value", value), if (!is.null(sub)) div(class = "dash-card-sub", sub))
+    focus <- { r <- s22_ref(); if (nzchar(r)) r else input$selected_samples[1] }
+    a <- tryCatch(s22_auc_current()$summary, error = function(e) NULL)
+    av <- if (!is.null(a) && focus %in% a$sample && is.finite(a$mean[a$sample == focus])) formatC(signif(a$mean[a$sample == focus], 3), format = "g") else "—"
+    e <- tryCatch(exp_window_by_group(s22_curves()$pd, NULL, "mean", input$expwin_mode %||% "auto", input$expwin_from, input$expwin_to, input$expwin_min_points %||% 4), error = function(e) NULL)
+    ev <- if (!is.null(e) && focus %in% e$sample && is.finite(e$doubling_time[e$sample == focus])) formatC(signif(e$doubling_time[e$sample == focus], 3), format = "g") else "—"
+    unit <- time_unit_from_label(input$x_axis_label)
+    list(card("AUC", av, paste0(dname(focus), ", ", input$y_axis_label %||% "OD", " x ", unit)),
+         card("Doubling time (exp. window)", ev, paste0(dname(focus), ", ", unit)))
+  }
+
+  # ── v2.22 tables for the reports, the figure bundle and the all-tables archive ───────────────────────────────────────────
+  # A list of entries list(file, title, desc, csv, show): `csv` the unformatted table (display name + <col>_raw), `show` the table
+  # as the screen and the reports show it (NULL: CSV only). The Statistics-tab sections appear once that tab was visited, the
+  # Curve fitting ones once the Curve fitting tab was (as the methods sentences do); each is computed only here.
+  stats22_tables_current <- function(force = FALSE) {
+    out <- list()
+    add <- function(file, title, desc, csv, show = csv) {
+      if (is.null(csv) || !is.data.frame(csv) || nrow(csv) == 0) return(invisible(NULL))
+      out[[length(out) + 1L]] <<- list(file = file, title = title, desc = desc, csv = csv, show = show)
+    }
+    tc <- function(expr) tryCatch(expr, error = function(e) NULL)
+    if (isTRUE(s22_stats_seen()) || force) {
+      d <- tc(s22_describe_current())
+      if (!is.null(d)) {
+        sh <- d[c("sample", "metric_label", "n", "mean", "sd", "sem", "cv_pct", "ci_lo", "ci_hi", "median", "iqr", "min", "max", "skewness", "kurtosis", "geo_mean")]
+        names(sh) <- c("Sample", "Metric", "n", "Mean", "SD", "SEM", "CV %", "CI low", "CI high", "Median", "IQR", "Min", "Max", "Skewness", "Kurtosis", "Geo. mean")
+        sh$n <- as.integer(sh$n)
+        add("column_statistics.csv", "Column statistics",
+            "Per-replicate metrics per sample: n, mean, SD, SEM, CV %, 95 % t-based CI of the mean, median, IQR, range, skewness, kurtosis, geometric mean.",
+            s22_csv_df(d), s22_sig(s22_display(sh, rv$display_names, "Sample", keep_raw = FALSE)))
+      }
+      nm <- tc(s22_normality_current())
+      if (!is.null(nm)) add("normality.csv", "Normality (Shapiro-Wilk)", paste0("Per sample and on the pooled residuals. ", S22_NOTE_N3), s22_csv_df(nm),
+                            { z <- nm[c("sample", "metric_label", "n", "W", "shapiro_p", "note")]; z$n <- as.integer(z$n); names(z) <- c("Sample", "Metric", "n", "W", "Shapiro p", "Note"); s22_sig(s22_display(z, rv$display_names, "Sample", keep_raw = FALSE)) })
+      vr <- tc(s22_variance_current())
+      if (!is.null(vr)) add("variance_tests.csv", "Equal-variance tests", "Brown-Forsythe (median-centred Levene) and Bartlett across the samples, per metric.", vr,
+                            { z <- vr[c("metric_label", "test", "statistic", "df1", "df2", "p", "note")]; names(z) <- c("Metric", "Test", "Statistic", "df1", "df2", "p", "Note"); s22_sig(z) })
+      ph <- tc(s22_posthoc_current())
+      if (!is.null(ph) && !is.null(ph$omnibus)) {
+        mname <- names(S22_POSTHOC_CHOICES)[match(s22_posthoc_method(), S22_POSTHOC_CHOICES)]
+        add("posthoc_omnibus.csv", paste0("Omnibus tests: ", metric_label(ph$metric)), "One-way ANOVA, Welch ANOVA and Kruskal-Wallis with eta² / epsilon².", ph$omnibus, fmt_stats_table(ph$omnibus))
+        pd <- tc(s22_posthoc_display(ph))
+        if (!is.null(pd)) add("posthoc_pairwise.csv", paste0("Post-hoc comparisons: ", metric_label(ph$metric), " (", mname, ")"),
+                              paste(c(paste0("Method: ", mname, ". ", if (nzchar(ph$reference)) paste0("Each sample vs reference '", dname(ph$reference), "'.") else "All pairs."), relabel(ph$notes)), collapse = " "),
+                              s22_display(ph$posthoc, rv$display_names, c("group1", "group2"), keep_raw = TRUE), fmt_stats_table(pd))
+      }
+      a <- tc(s22_tc_current())
+      if (!is.null(a) && !is.null(a$anova)) add("timecourse_anova.csv", "Time-course ANOVA (sample x time)", paste0("Method: ", a$method, ". ", paste(a$note, collapse = " ")),
+                                                cbind(a$anova, method = a$method, stringsAsFactors = FALSE), { z <- a$anova; names(z) <- c("Term", "df (num)", "df (den)", "F", "p"); s22_sig(z) })
+      pt <- tc(s22_pertime_current())
+      if (!is.null(pt) && nrow(pt)) add("per_time_comparisons.csv", paste0("Each sample vs '", dname(s22_ref()), "' at each time point"),
+                                       paste0("Welch t per time point; p adjusted across the time points of each sample (", s22_choice(input$tc_adjust, c("sidak", "holm", "bonferroni"), "sidak"), ")."),
+                                       s22_csv_df(s22_order(pt)), { z <- s22_order(pt); z$n <- as.integer(z$n); z$n_ref <- as.integer(z$n_ref); s22_show(z[c("time", "sample", "diff", "ci_lo", "ci_hi", "t", "df", "p_raw", "p_adj", "stars", "n", "n_ref")]) })
+      au <- tc(s22_auc_current())
+      if (!is.null(au)) {
+        sm <- tc(s22_auc_display())
+        if (!is.null(sm)) add("auc_per_sample.csv", "Area under the curve", paste0("Trapezoid area above the baseline (", s22_choice(input$auc_baseline, c("none", "first", "value", "min"), "none"), ") per replicate curve; mean, SD, SEM and 95 % CI per sample",
+                                                                                if (nzchar(s22_ref()) && isTRUE(input$auc_relative %||% TRUE)) paste0("; relative AUC vs '", dname(s22_ref()), "' with a log-delta CI.") else "."),
+                              s22_csv_df(sm), { z <- sm; z$n <- as.integer(z$n); s22_show(z) })
+        add("auc_per_replicate.csv", "AUC per replicate", "", s22_csv_df(s22_order(au$replicates)), NULL)
+        ac <- tc(s22_auc_compare_current())
+        if (!is.null(ac)) add("auc_comparison.csv", "AUC comparison", paste0("Pairwise comparison of the per-replicate AUCs by ", names(S22_POSTHOC_CHOICES)[match(s22_posthoc_method(), S22_POSTHOC_CHOICES)], "."),
+                              s22_display(ac, rv$display_names, c("group1", "group2"), keep_raw = TRUE), fmt_stats_table(s22_display(ac, rv$display_names, c("group1", "group2"), keep_raw = FALSE)[c("group1", "group2", "estimate", "ci_lo", "ci_hi", "statistic", "p_raw", "p_adj", "stars", "method", "note")]))
+      }
+      ot <- tc(s22_outliers_current())
+      if (!is.null(ot)) {
+        fl <- ot[ot$flagged %in% TRUE, , drop = FALSE]
+        add("outliers_metrics.csv", "Outliers: metric values", paste0(if (nrow(fl)) sprintf("%d value(s) flagged (listed). ", nrow(fl)) else "No value flagged. ", "Flags only; nothing is removed (exclude replicates in the Data tab)."),
+            s22_csv_df(ot), if (nrow(fl)) { z <- fl[c("sample", "metric_label", "replicate", "value", "method", "statistic", "p", "note")]; z$replicate <- as.character(z$replicate); s22_show(z) } else NULL)
+      }
+      oc <- tc(s22_curve_outliers_current())
+      if (!is.null(oc)) {
+        fl <- oc[oc$flagged %in% TRUE, , drop = FALSE]
+        add("outliers_replicate_curves.csv", "Outliers: replicate curves", paste0(if (nrow(fl)) sprintf("%d replicate curve(s) flagged (listed).", nrow(fl)) else "No replicate curve flagged."),
+            s22_csv_df(oc), if (nrow(fl)) { z <- fl[c("sample", "replicate", "abs_dev", "distance", "note")]; z$replicate <- as.character(z$replicate); s22_show(z) } else NULL)
+      }
+      os <- tc(s22_onesample_current())
+      if (!is.null(os)) add("one_sample_tests.csv", "One-sample tests", "One-sample t test and Wilcoxon signed-rank test against the typed hypothetical values.", s22_csv_df(os),
+                            { z <- os; z$n <- as.integer(z$n); s22_show(z[c("sample", "metric_label", "test", "n", "mu", "estimate", "statistic", "df", "p", "ci_lo", "ci_hi", "note")]) })
+      if (!identical(input$explorer_stats %||% "none", "none") || isTRUE(input$explorer_line)) {
+        ex <- tc(explorer_stats_df())
+        if (!is.null(ex)) add("metric_explorer_stats.csv", "Metric explorer: correlation and straight-line fit", paste0(paste(tc(explorer_fit_current())$note, collapse = " ")),
+                              ex, { z <- ex; z$n <- as.integer(z$n); s22_sig(z) })
+      }
+    }
+    if (isTRUE(fit_tab_seen()) || force) {
+      e <- tc(fit_ext_cur())
+      if (!is.null(e)) add("fit_statistics.csv", "Growth fits: intervals, AICc and residual checks", "95 % intervals of the growth-model parameters, adjusted R², RMSE, AICc, Akaike weights, runs test and Shapiro-Wilk test of the residuals.",
+                           s22_csv_df(e), tc(fit_extended_display(s22_display(e, rv$display_names, "sample", keep_raw = FALSE))))
+      ly <- tc(lysis_current())
+      if (!is.null(ly$table)) add("lysis_models.csv", "Lysis models", "Decay after the peak: one-phase decay to a plateau and/or four-parameter logistic decay; k, half-life, t50 and plateau with 95 % intervals.",
+                                  s22_csv_df(s22_order(ly$table)), lysis_display_table(s22_display(s22_order(ly$table), rv$display_names, "sample", keep_raw = FALSE)))
+      ew <- tc(expwin_current())
+      if (!is.null(ew) && any(is.finite(ew$mu))) add("exponential_window.csv", "Exponential-growth window", "Log-linear regression of ln OD on time over the exponential window: mu and the doubling time with 95 % CIs.",
+                                                     { z <- s22_order(ew); r <- s22_rolling_mu(); if (!is.null(r)) z$rolling_mu_max <- unname(r[as.character(z$sample)]); s22_csv_df(z) },
+                                                     { z <- s22_order(ew); sh <- exp_window_display(z, s22_rolling_mu()); sh$Sample <- display_name_of(z$sample, rv$display_names); sh })
+      cf <- tc(cmp_current())
+      if (!is.null(cf$test) && is.finite(cf$test$p)) {
+        p <- cf$params; p$sample <- display_name_of(p$sample, rv$display_names)
+        add("compare_fits.csv", "Compare fits", paste(c(cmp_sentence(cf), relabel(cf$warnings)), collapse = " "), cbind(cf$test[rep(1, nrow(p)), , drop = FALSE], p, row.names = NULL),
+            compare_fits_test_display(cf$test))
+      }
+      if (isTRUE(input$dr_fit)) {
+        dr <- tc(dr_current())
+        if (!is.null(dr$table)) add("dose_response_ec50.csv", "Dose-response: 4PL EC50", "Four-parameter logistic against log10 MOI per phage series; EC50 with the 95 % interval.", dr$table, dose_response_display(dr$table))
+      }
+    }
+    out
+  }
+  output$downloadStats22All <- downloadHandler(
+    filename = function() paste0("statistics_v222_", s22_stamp(), ".", bundle_archive_kind()),
+    content = function(file) {
+      req(rv$data, input$selected_samples)
+      tmp <- tempfile("stats22_"); dir.create(tmp); on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+      fold <- "statistics_v222"; dir <- file.path(tmp, fold); dir.create(dir)
+      ents <- stats22_tables_current(force = TRUE)    # the archive is explicit: both tabs' tables, whether or not the tabs were visited
+      for (e in ents) utils::write.csv(e$csv, file.path(dir, e$file), row.names = FALSE)
+      sents <- tryCatch(stats22_methods_sentences(force = TRUE), error = function(e) character(0))
+      writeLines(enc2utf8(c("STATISTICS (v2.22)", paste0("Lysis Curve OD Visualization App v", APP_VERSION), paste0("Created: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+                            paste0("Data source: ", rv$data_source %||% "(unknown)"), "", "Tables:", paste0("  ", vapply(ents, function(e) e$file, "")),
+                            if (length(sents)) c("", "Methods sentences:", sents))), file.path(dir, "README.txt"), useBytes = TRUE)
+      write_bundle_archive(file, tmp, fold)
+    })
+
+  # the sentences the methods draft gains (nothing for an untouched session)
+  stats22_methods_sentences <- function(force = FALSE) {
+    out <- character(0); tc <- function(expr) tryCatch(expr, error = function(e) NULL)
+    if (isTRUE(s22_stats_seen()) || force) {
+      d <- tc(s22_describe_current()); n_rep <- if (!is.null(d)) d$n else NULL
+      if (!is.null(d)) out <- c(out, stats_method_sentence(d, "describe", what = "Each metric", n = n_rep),
+                                stats_method_sentence(tc(s22_normality_current()), "normality", what = "the metrics", n = n_rep),
+                                stats_method_sentence(tc(s22_variance_current()), "variance", n = n_rep))
+      if (!identical(s22_posthoc_method(), "holm_welch")) out <- c(out, tc(s22_posthoc_sentence()))
+      a <- tc(s22_tc_current())
+      if (!is.null(a) && !is.null(a$anova)) out <- c(out, stats_method_sentence(a, "two_way", what = "Optical density"))
+      pt <- tc(s22_pertime_current())
+      if (!is.null(pt) && nrow(pt)) out <- c(out, stats_method_sentence(pt, "per_time", what = "Optical density"))
+      au <- tc(s22_auc_current())
+      if (!is.null(au) && !is.null(au$summary) && nrow(au$summary)) out <- c(out, stats_method_sentence(au$summary, "auc", n = au$summary$n))
+      ot <- tc(s22_outliers_current())
+      if (!is.null(ot)) out <- c(out, stats_method_sentence(ot, "outlier"))
+      os <- tc(s22_onesample_current())
+      if (!is.null(os)) out <- c(out, stats_method_sentence(os, "one_sample", what = "Each metric"))
+      if (!identical(input$explorer_stats %||% "none", "none")) {
+        ef <- tc(explorer_fit_current()); if (!is.null(ef$corr)) out <- c(out, stats_method_sentence(ef$corr, "correlation"))
+      }
+      if (isTRUE(input$explorer_line)) { ef <- tc(explorer_fit_current()); if (!is.null(ef$lin)) out <- c(out, stats_method_sentence(ef$lin, "linear")) }
+    }
+    if (isTRUE(fit_tab_seen()) || force) {
+      e <- tc(fit_ext_cur())
+      if (!is.null(e) && any(e$converged %in% TRUE))
+        out <- c(out, paste0("Parameters of the growth fits are given with 95% ", if (identical(input$fit_ci_method, "wald")) "Wald" else "profile-likelihood",
+                             " confidence intervals; the models were compared by the second-order Akaike information criterion (AICc) and Akaike weights, and the fit was checked by the runs test and the Shapiro-Wilk test of the residuals."))
+      ly <- tc(lysis_current())
+      if (!is.null(ly$table) && any(ly$table$converged %in% TRUE)) {
+        ms <- unique(as.character(ly$table$model[ly$table$converged %in% TRUE]))
+        out <- c(out, paste0("The decline after the peak was described by ", paste(c(one_phase_decay = "a one-phase exponential decay to a plateau", fpl_decay = "a four-parameter logistic decay")[ms], collapse = " and "),
+                             " fitted by non-linear least squares to the ", if (identical(input$lysis_level, "replicate")) "individual replicate curves" else "mean curve",
+                             " of each sample", if (!identical(ly$scheme %||% "none", "none")) paste0(" (weights ", ly$scheme, ")") else "", "; the half-life is ln 2 / k and the lysis time t50 is the time at which the fitted curve is half-way between its peak and the plateau."))
+      }
+      ew <- tc(expwin_current())
+      if (!is.null(ew) && any(is.finite(ew$mu)))
+        out <- c(out, paste0("The specific growth rate in the exponential phase was estimated by linear regression of ln(OD) on time over ",
+                             c(auto = "the window of highest R² (at least the minimum number of points)", manual = "a window chosen from the log plot", all = "all points")[[s22_choice(input$expwin_mode, c("auto", "manual", "all"), "auto")]],
+                             ", with the doubling time ln 2 / mu and 95% confidence intervals."))
+      cf <- tc(cmp_current()); if (!is.null(cf)) out <- c(out, cmp_sentence(cf))
+      if (isTRUE(input$dr_fit)) {
+        dr <- tc(dr_current())
+        if (!is.null(dr$table) && any(dr$table$converged %in% TRUE))
+          out <- c(out, paste0("Dose-response curves were fitted by a four-parameter logistic function of log10 MOI",
+                               if (is.finite(s22_num(input$dr_fix_bottom)) || is.finite(s22_num(input$dr_fix_top)))
+                                 paste0(" with the ", paste(c(if (is.finite(s22_num(input$dr_fix_bottom))) paste0("bottom fixed at ", s22_num(input$dr_fix_bottom)), if (is.finite(s22_num(input$dr_fix_top))) paste0("top fixed at ", s22_num(input$dr_fix_top))), collapse = " and ")) else "",
+                               " for each phage series, and the EC50 is reported with its 95% profile-likelihood confidence interval."))
+      }
+    }
+    out[!is.na(out) & nzchar(out)]
+  }
+
+  # the "Statistics (v2.22)" report section: the tables with rows, two figures, the methods sentences
+  report_stats22_payload <- function(render_png = FALSE) {
+    ents <- tryCatch(stats22_tables_current(), error = function(e) list())
+    tabs <- Filter(Negate(is.null), lapply(ents, function(e) if (is.null(e$show) || !nrow(e$show)) NULL else list(title = e$title, desc = e$desc, table = e$show)))
+    figs <- list()
+    if (isTRUE(s22_stats_seen())) {
+      ref <- s22_ref()
+      if (nzchar(ref))
+        figs[[length(figs) + 1L]] <- report_figure_entry("per_time", "Per-time comparisons vs the reference",
+          paste0("Mean curves; a star above a time point marks p < 0.05 against the reference '", dname(ref), "' (Welch t, p adjusted across the sample's time points by ",
+                 s22_choice(input$tc_adjust, c("sidak", "holm", "bonferroni"), "sidak"), "). Samples are labelled at the end of their curves. Exploratory with n = 3."), render_png)
+      figs[[length(figs) + 1L]] <- report_figure_entry("auc", "AUC per sample",
+        paste0("Area under each replicate curve (open circles), the mean and the main figure's error measure; baseline ", s22_choice(input$auc_baseline, c("none", "first", "value", "min"), "none"), "."), render_png)
+      figs <- Filter(Negate(is.null), figs)
+    }
+    if (!length(tabs) && !length(figs)) return(NULL)
+    list(title = "Statistics (v2.22)", figures = figs, tables = tabs,
+         intro = paste0("Tables of the Statistics and Curve fitting tabs for the current samples and settings. ", S22_NOTE_N3),
+         methods = tryCatch(stats22_methods_sentences(), error = function(e) character(0)))
+  }
+
   # Methods paragraph drafted from the current settings: what was measured, how the mean and the
   # error statistic were computed, how the metrics were defined and which tests were run. Plain text
   # (the y label keeps its "A550"); the user edits it and the reports include what is in the box.
@@ -12772,7 +14430,7 @@ server <- function(input, output, session) {
         else ""))
     s5 <- paste0("Analysis and figures were produced with the Lysis Curve OD Visualization App v", APP_VERSION,
                  " (R ", R.version$major, ".", R.version$minor, ").")
-    paste(c(s1, s2, s3, fit_methods_sentence(), boot_methods_sentence(), s4, s5), collapse = " ")   # v2.19: + the fits, once the tab was used; v2.20: + the bootstrap, once run
+    paste(c(s1, s2, s3, fit_methods_sentence(), boot_methods_sentence(), s4, stats22_methods_sentences(), s5), collapse = " ")   # v2.19: + the fits, once the tab was used; v2.20: + the bootstrap, once run
   }
   observeEvent(input$methods_draft, {
     if (is.null(rv$data) || !length(input$selected_samples)) {
@@ -12916,6 +14574,10 @@ server <- function(input, output, session) {
       }
       for (nm in names(ex_tabs <- tryCatch(extraction_tables_current(), error = function(e) list()))) {
         utils::write.csv(ex_tabs[[nm]], file.path(dir, nm), row.names = FALSE); extra_csv <- c(extra_csv, nm)
+      }
+      # v2.22: the Statistics-tab and Curve-fitting tables the user has used (the "All v2.22 tables" archive has them all)
+      for (e22 in tryCatch(stats22_tables_current(), error = function(e) list())) {
+        utils::write.csv(e22$csv, file.path(dir, e22$file), row.names = FALSE); extra_csv <- c(extra_csv, e22$file)
       }
       leg <- trimws(figure_legend_string())
       writeLines(enc2utf8(leg), file.path(dir, "figure_legend.txt"), useBytes = TRUE)
@@ -13299,7 +14961,8 @@ server <- function(input, output, session) {
     list(figures = figs, stats = st, metric_label = metric_label(st$metric),
          ref_sample = ref_d, method = input$stats_method %||% "welch",
          fits = report_fits_payload(render_png), extraction = report_extraction_payload(),   # v2.19
-         bootstrap = report_bootstrap_payload())   # v2.20: NULL unless a current bootstrap is cached
+         bootstrap = report_bootstrap_payload(),   # v2.20: NULL unless a current bootstrap is cached
+         stats22 = report_stats22_payload(render_png))   # v2.22: NULL until the Statistics / Curve fitting tabs were used
   }
 
   # The report bodies live outside the download handlers so the test suites
