@@ -1,6 +1,64 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.21.0 -- Sticky figure, accordion sidebar with a jump menu, quick-edit strip, rename samples everywhere:
+#   STICKY FIGURE   -- the figure column (size bar, tabs, figure) is position:sticky inside a flex layout, so it
+#                      stays in view while the sidebar scrolls (checkbox sticky_figure; stacked and not pinned on a
+#                      narrow window). While pinned, the auto-fit preview zoom also fits the window height.
+#   ACCORDION       -- the thirteen sidebar sections (kc_section) open one at a time; "Jump to a section..."
+#                      (sidebar_jump, not saved) opens one and scrolls to it; "Collapse all".
+#   QUICK EDIT      -- strip under the figure: per sample a colour swatch + picker, the display name and a "show" box
+#                      (adds / removes it from Select Samples); the X / Y axis labels and the legend position moved
+#                      here from the sidebar (same ids). quick_edit_open collapses it.
+#   DISPLAY NAMES   -- rv$display_names (raw column name -> name shown) feeds the legends and every table, CSV
+#                      download (sample + sample_raw), report (provenance "raw -> display"), the legend and methods
+#                      text. The raw name stays the key (col_map, selected_samples, reference, settings).
+#
+# v2.20.0 -- Curve phases figure, bootstrap intervals, separation from the reference:
+#   CURVE PHASES    -- Analysis type "phases": the mean curves with each sample's phases (lag, exponential,
+#                      deceleration, stationary, lysis, recovery / post-lysis; curve_phases_by_sample()) as shaded
+#                      bands: full-height for one sample, thin labelled strips stacked at the top of the panel for
+#                      several. Statistics tab section "Curve phases" (table + CSV; phases.csv in the figure bundle).
+#   BOOTSTRAP       -- Statistics tab section "Bootstrap intervals": boot_metrics, boot_n, boot_seed and a
+#                      "Run bootstrap" button (percentile intervals from replicate resampling, cached until the data,
+#                      filters or metric settings change). The metric summary gets metric_error_source: replicate
+#                      spread (default) or the bootstrap 95 % CI of the mean-curve metric.
+#   SEPARATION      -- Analysis type "difference": mean curve minus (or log2 ratio to) the reference over time, '*'
+#                      where the Holm-adjusted per-time Welch test is < 0.05 (diff_mode, diff_mark), and the first
+#                      separation time per sample (also in the Statistics tab's Replicate comparison section).
+#   REPORTS         -- Curve phases (figure + table), Separation (figure + table, with a reference) and the cached
+#                      bootstrap table; the gallery gains the four v2.19 / v2.20 figures (3 columns when > 8 panels).
+#
+# v2.19.0 -- Curve fitting tab, phenotype heatmap, extraction tables, all-metrics comparison:
+#   CURVE FITTING   -- New main-panel tab after Statistics: fit_models, fit_until, fit_log, fit_level, fit_show.
+#                      One reactive (fit_results) feeds the figure (analysis type "fit_overlay": mean curve + fitted
+#                      curve(s) on a fine grid, best model by AIC solid), the parameter table (best, A, mu_max,
+#                      absolute lag = t0 + lag, doubling time, R2, AIC, SEs, message; CSV; mean +/- SD per
+#                      sample and model at replicate level), the reports ("Curve fits"), fits.csv in the bundle
+#                      and a sentence in the drafted methods text.
+#   PHENOTYPE HEATMAP -- Analysis type "phenotype_heatmap": samples x metrics from phenotype_matrix() (z / range /
+#                      raw fill, raw value in the cells); also in the composer, the reports and Download all figures.
+#   EXTRACTION      -- Statistics tab: OD at chosen times (extract_times, extract_method), time to threshold
+#                      (extract_threshold, extract_direction, extract_after) and the all-metrics comparison
+#                      (compare_all_metrics; p_adj_bh_across is exploratory), each with CSV downloads; the typed
+#                      times / threshold also go into the reports and the figure bundle.
+#
+# v2.18.0 -- Per-sample time windows, sample groups and facets, metric explorer, export-all:
+#   TIME WINDOWS    -- Time Point Filtering: a per-sample "from" / "to" table (tw_min_<id>, tw_max_<id>; blank =
+#                      no limit), applied after the global filter in prepare_plot_data() and
+#                      prepare_replicate_data() by apply_time_windows_inputs(); saved with the settings
+#                      and listed in the report provenance.
+#   GROUPS / FACETS -- Variable Styling: a free-text Group per sample (group_<id>). facet_by_group splits the
+#                      main figure into one panel per group (shared axes; strip = group name; empty group =
+#                      "Other"); the composer panel "Lysis curve, one panel per group" (main_by_group) adds one
+#                      single-group main figure per group.
+#   METRIC EXPLORER -- Analysis figure "metric_explorer": any curve metric against any other, one point per
+#                      sample (mean with error bars in both directions), replicate values as open circles,
+#                      optional point labels, optional log axes.
+#   EXPORT ALL      -- "Download all figures (.zip)": SVG + PNG of the main figure, every analysis figure that
+#                      renders for the data, and the composed figure, plus the legend and methods text; figures
+#                      that are not available are listed in SKIPPED.txt.
+#
 # v2.17.0 -- Log-axis clipping, QC flags, notebook exports, figure bundle, threshold line, gradients:
 #   LOG-AXIS CLIPPING -- y_oob: a reading below the log-axis floor is drawn ON the floor (squish, the default
 #                        and the journal preset) instead of being deleted (censor, the Legacy look).
@@ -240,7 +298,7 @@ has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: search
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.17.0"
+APP_VERSION <- "2.21.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1384,7 +1442,8 @@ report_analysis_html <- function(analysis) {
              "' alt='", html_escape(f$title), "'/>")
     else paste0("<p><em>Figure not available: ", html_escape(f$error %||% "unknown reason"), "</em></p>")
     paste0("<h3>", html_escape(f$title), "</h3>", body,
-           if (nzchar(f$caption %||% "")) paste0("<p style='", cap_style, "'>", html_escape(f$caption), "</p>") else "")
+           if (nzchar(f$caption %||% "")) paste0("<p style='", cap_style, "'>", html_escape(f$caption), "</p>") else "",
+           if (!is.null(f$table)) paste0("<h4>", html_escape(f$table_title %||% f$title), "</h4>", html_table(f$table)) else "")   # v2.20
   }, character(1))
   st <- analysis$stats
   warn_html <- paste0(vapply(st$warnings %||% character(0), function(w)
@@ -1397,13 +1456,56 @@ report_analysis_html <- function(analysis) {
     "<p>Rendered at the export size with the main figure's theme; each is the figure the ",
     "Analysis figures tab shows for the current samples, filtering and settings.</p>\n",
     paste0(fig_html, collapse = "\n"),
+    report_fits_html(analysis$fits, cap_style),
     "\n<h2>Replicate statistics</h2>\n",
     "<p>", html_escape(stats_lead_text(analysis)), "</p>\n",
     warn_html,
     tbl(st$pairwise, "Pairwise comparisons"),
     tbl(st$omnibus,  "Omnibus test"),
     tbl(st$posthoc,  "Post-hoc comparisons (Tukey HSD)"),
-    "<h3>Definitions</h3>\n<p style='font-size:0.9em;'>", html_escape(STATS_DEFINITIONS), "</p>\n")
+    "<h3>Definitions</h3>\n<p style='font-size:0.9em;'>", html_escape(STATS_DEFINITIONS), "</p>\n",
+    report_extraction_html(analysis$extraction),
+    report_bootstrap_html(analysis$bootstrap))
+}
+
+# v2.20: the "Bootstrap intervals" section of the HTML report; "" when no current bootstrap is cached.
+report_bootstrap_html <- function(b) {
+  if (is.null(b)) return("")
+  paste0("\n<h2>", html_escape(b$title), "</h2>\n<p style='font-size:0.9em;'>", html_escape(b$desc), "</p>", html_table(b$table))
+}
+
+# v2.19: the "Curve fits" section of the HTML report (figure, parameter table, notes); "" without fits.
+report_fits_html <- function(fits, cap_style = "font-size:0.9em;color:#495057;margin-top:6px;") {
+  if (is.null(fits)) return("")
+  f <- fits$figure
+  fig <- if (is.null(f)) "" else {
+    body <- if (!is.null(f$b64)) paste0("<img class='figure' src='data:image/png;base64,", f$b64, "' alt='", html_escape(f$title), "'/>")
+            else paste0("<p><em>Figure not available: ", html_escape(f$error %||% "unknown reason"), "</em></p>")
+    paste0("<h3>", html_escape(f$title), "</h3>", body,
+           if (nzchar(f$caption %||% "")) paste0("<p style='", cap_style, "'>", html_escape(f$caption), "</p>") else "")
+  }
+  msgs <- fits$messages
+  warn <- if (is.null(msgs) || nrow(msgs) == 0) "" else
+    paste0("<p style='background:#fff4e6;border:1px solid #ffd8a8;border-radius:6px;padding:8px 12px;'><b>Fit warnings</b><br/>",
+           paste0(ifelse(msgs$poor, "<b>", ""), html_escape(msgs$who), ": ", html_escape(msgs$message),
+                  ifelse(msgs$poor, "</b>", ""), collapse = "<br/>"), "</p>")
+  paste0("\n<h2>Curve fits</h2>\n",
+         "<p>Growth models fitted to the growth phase (logistic and Gompertz: Zwietering et al. 1990; Baranyi-Roberts 1994), ",
+         "with the settings of the Curve fitting tab.</p>\n",
+         paste0("<p style='font-size:0.9em;'>", html_escape(fits$notes), "</p>", collapse = "\n"),
+         fig,
+         "<h3>Fitted parameters</h3>", html_table(fits$table, class = "wrap"),
+         if ((fits$n_rows %||% 0) > nrow(fits$table)) paste0("<p><em>The first ", nrow(fits$table), " of ", fits$n_rows, " rows; the CSV has all of them.</em></p>") else "",
+         warn,
+         if (!is.null(fits$summary)) paste0("<h3>Replicate fits: mean &plusmn; SD</h3>", html_table(fits$summary)) else "")
+}
+
+# v2.19: the extraction tables (OD at chosen times, time to threshold) of the HTML report; "" when none is configured.
+report_extraction_html <- function(ex) {
+  if (is.null(ex) || length(ex) == 0) return("")
+  paste0("<h2>Extracted values</h2>\n",
+         paste0(vapply(ex, function(e) paste0("<h3>", html_escape(e$title), "</h3><p style='font-size:0.9em;'>", html_escape(e$desc), "</p>",
+                                              html_table(e$table)), character(1)), collapse = "\n"))
 }
 
 # Builds the entire self-contained HTML report as one string.
@@ -1628,34 +1730,11 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
     grid::grid.text(body, x = 0.04, y = 0.92, just = c("left", "top"),
                     gp = grid::gpar(fontsize = 9.5 * fscale, lineheight = 1.3))
   }
-  for (f in analysis$figures %||% list()) {
-    drawn <- FALSE
-    if (!is.null(f$plot)) {
-      drawn <- tryCatch({
-        grid::grid.newpage()
-        grid::grid.text(f$title, y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
-        vp <- if (inherits(f$plot, "gtable") && !is.null(attr(f$plot, "size_mm"))) {
-          # fixed-panel figures are absolute-size: drawn at their physical size, centred in the page area
-          grid::viewport(y = 0.53, width = grid::unit(attr(f$plot, "size_mm")[1], "mm"),
-                         height = grid::unit(attr(f$plot, "size_mm")[2], "mm"))
-        } else if (is.null(f$aspect)) grid::viewport(y = 0.53, height = 0.82) else {
-          # a composed figure keeps its own aspect ratio inside the page area
-          pg <- grDevices::dev.size("in"); bw <- 0.95 * pg[1]; bh <- 0.82 * pg[2]
-          if (f$aspect * bw <= bh) grid::viewport(y = 0.53, width = grid::unit(bw, "in"), height = grid::unit(f$aspect * bw, "in"))
-          else grid::viewport(y = 0.53, width = grid::unit(bh / f$aspect, "in"), height = grid::unit(bh, "in"))
-        }
-        grid::pushViewport(vp)
-        if (inherits(f$plot, "gtable")) grid::grid.draw(f$plot) else print(f$plot, newpage = FALSE)
-        grid::popViewport()
-        if (nzchar(f$caption %||% ""))
-          grid::grid.text(paste(strwrap(f$caption, 110), collapse = "\n"), y = 0.08, just = "top",
-                          gp = grid::gpar(fontsize = 9 * fscale, lineheight = 1.25, col = "grey20"))
-        TRUE
-      }, error = function(e) { f$error <<- conditionMessage(e); FALSE })
-    }
-    if (!drawn) text_page(f$title, paste0("Figure not available: ", f$error %||% "unknown reason"))
+  figs_pdf <- analysis$figures %||% list()
+  if (!is.null(analysis$fits$figure)) {            # v2.19: the fit figure goes before the composed figure
+    kc  <- which(vapply(figs_pdf, function(f) identical(f$type, "composed"), logical(1)))
+    figs_pdf <- append(figs_pdf, list(analysis$fits$figure), after = if (length(kc)) kc[1] - 1L else length(figs_pdf))
   }
-
   # ── Stats table pages (chunked) ──
   fmt_df <- function(df) {
     df2 <- df
@@ -1681,8 +1760,56 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
       grid::pushViewport(vp); grid::grid.draw(g); grid::popViewport()
     }
   }
+  for (f in figs_pdf) {
+    drawn <- FALSE
+    if (!is.null(f$plot)) {
+      drawn <- tryCatch({
+        grid::grid.newpage()
+        grid::grid.text(f$title, y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
+        vp <- if (inherits(f$plot, "gtable") && !is.null(attr(f$plot, "size_mm"))) {
+          # fixed-panel figures are absolute-size: drawn at their physical size, centred in the page area
+          grid::viewport(y = 0.53, width = grid::unit(attr(f$plot, "size_mm")[1], "mm"),
+                         height = grid::unit(attr(f$plot, "size_mm")[2], "mm"))
+        } else if (is.null(f$aspect)) grid::viewport(y = 0.53, height = 0.82) else {
+          # a composed figure keeps its own aspect ratio inside the page area
+          pg <- grDevices::dev.size("in"); bw <- 0.95 * pg[1]; bh <- 0.82 * pg[2]
+          if (f$aspect * bw <= bh) grid::viewport(y = 0.53, width = grid::unit(bw, "in"), height = grid::unit(f$aspect * bw, "in"))
+          else grid::viewport(y = 0.53, width = grid::unit(bh / f$aspect, "in"), height = grid::unit(bh, "in"))
+        }
+        grid::pushViewport(vp)
+        if (inherits(f$plot, "gtable")) grid::grid.draw(f$plot) else print(f$plot, newpage = FALSE)
+        grid::popViewport()
+        if (nzchar(f$caption %||% ""))
+          grid::grid.text(paste(strwrap(f$caption, 110), collapse = "\n"), y = 0.08, just = "top",
+                          gp = grid::gpar(fontsize = 9 * fscale, lineheight = 1.25, col = "grey20"))
+        TRUE
+      }, error = function(e) { f$error <<- conditionMessage(e); FALSE })
+    }
+    if (!drawn) text_page(f$title, paste0("Figure not available: ", f$error %||% "unknown reason"))
+    if (drawn && !is.null(f$table)) page_table(f$table, f$table_title %||% f$title)   # v2.20: the phases / separation table after its figure
+  }
+
   # ── Replicate statistics pages (v2.11.1): same place as in the HTML report,
   #    between the figures and the summary-statistics table ──
+  # v2.19: the Curve fits section (parameter table; the figure page is with the analysis figures above) and the
+  # extraction tables, right after the figures
+  if (!is.null(analysis$fits)) {
+    fx <- analysis$fits
+    text_page("Curve fits", c(fx$notes,
+                              if (!is.null(fx$messages) && nrow(fx$messages))
+                                paste0("Fit warnings: ", paste0(fx$messages$who, ": ", fx$messages$message, collapse = "; "))))
+    ft <- fx$table; ft$Message <- vapply(ft$Message, function(m) paste(strwrap(m, 38), collapse = "\n"), character(1))
+    page_table(ft, "Curve fits: fitted parameters", rows_per_page = 18)
+    if (!is.null(fx$summary)) page_table(fx$summary, "Curve fits: replicate mean \u00b1 SD")
+  }
+  for (ex in analysis$extraction %||% list()) {
+    text_page(ex$title, ex$desc)
+    page_table(ex$table, ex$title)
+  }
+  if (!is.null(analysis$bootstrap)) {          # v2.20
+    text_page(analysis$bootstrap$title, analysis$bootstrap$desc)
+    page_table(analysis$bootstrap$table, analysis$bootstrap$title)
+  }
   if (!is.null(analysis)) {
     st <- analysis$stats
     text_page("Replicate statistics",
@@ -1928,7 +2055,8 @@ journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_ran
     panel_size_mode = "fixed", panel_width_mm = 65, panel_height_mm = 65, panel_square = TRUE,
     axis_subscripts = TRUE,       # v2.16: A550 -> A[550] in axis labels (the Legacy look keeps plain text)
     y_oob = "squish",             # v2.17: a reading below the log-axis floor is drawn on the floor, not deleted
-    enable_threshold = FALSE      # v2.17: no threshold line (the Legacy look and the preset both clear it)
+    enable_threshold = FALSE,     # v2.17: no threshold line (the Legacy look and the preset both clear it)
+    facet_by_group = FALSE        # v2.18: no group facets (the Legacy look and the preset both clear it)
   )
   # v2.12: caps as a fraction of the x range, so the look is the same whether
   # time is in minutes or hours (x_range kept for callers; no longer needed)
@@ -2024,7 +2152,19 @@ figure_size_mm <- function(g) {
 # panel columns / rows of a facet figure), with attr(, "size_mm") = the whole figure's size. Only
 # the panels' null units are replaced; every other null unit is zeroed so the size is absolute.
 fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
-  g   <- ggplot2::ggplotGrob(p)
+  g   <- tryCatch(ggplot2::ggplotGrob(p), error = function(e) {
+    # v2.18: a figure with a plotmath colour-bar title (the heatmap) measures text while the grob is built; with no
+    # device open that goes to R's default pdf() device, which cannot load Arial ("failed to find or load PDF CID
+    # font"). Build it on a scratch svglite / ragg device instead.
+    f <- tempfile(fileext = ".svg"); fp <- tempfile(fileext = ".png"); on.exit(unlink(c(f, fp)), add = TRUE)
+    old <- grDevices::dev.cur()
+    opened <- if (requireNamespace("svglite", quietly = TRUE)) tryCatch({ svglite::svglite(f, width = 4, height = 4); TRUE }, error = function(e2) FALSE)
+              else if (requireNamespace("ragg", quietly = TRUE)) tryCatch({ ragg::agg_png(fp, width = 400, height = 400, res = 72); TRUE }, error = function(e2) FALSE)
+              else FALSE
+    if (!opened) stop(e)
+    on.exit({ grDevices::dev.off(); if (old > 1) tryCatch(grDevices::dev.set(old), error = function(e3) NULL) }, add = TRUE)
+    ggplot2::ggplotGrob(p)
+  })
   lay <- g$layout[grepl("^panel", g$layout$name), , drop = FALSE]
   cols <- sort(unique(unlist(Map(seq, lay$l, lay$r))))
   rows <- sort(unique(unlist(Map(seq, lay$t, lay$b))))
@@ -2106,12 +2246,44 @@ ANALYSIS_METRIC_LABELS <- c(
 ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
                              "Specific growth rate vs time"              = "growth_rate",
                              "Normalized OD vs time"                     = "normalized",
+                             "Separation from the reference (difference vs time)" = "difference",   # v2.20
                              "Replicate overlay"                         = "replicate_overlay",
                              "Curve landmarks (metrics drawn on the curves)" = "landmarks",
+                             "Curve phases (lag, growth, lysis ...)"     = "phases",               # v2.20
                              "MOI dose-response"                         = "dose_response",
-                             "OD heatmap (samples \u00d7 time)"           = "heatmap")
-COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main", ANALYSIS_FIGURE_CHOICES)
+                             "OD heatmap (samples \u00d7 time)"           = "heatmap",
+                             "Metric explorer (one metric against another)" = "metric_explorer",   # v2.18
+                             "Fitted growth curves (Curve fitting tab)"  = "fit_overlay",          # v2.19
+                             "Phenotype heatmap (samples \u00d7 metrics)" = "phenotype_heatmap",   # v2.19
+                             "OD at chosen times (grouped bars or dots)" = "od_at_times",          # v2.21
+                             "Time to an OD threshold (per sample)"      = "time_to_threshold",    # v2.21
+                             "Replicate small multiples (one panel per sample)" = "replicate_facets",   # v2.21
+                             "Fraction of replicates lysed vs time"      = "lysed_fraction")       # v2.21
+COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main",
+                           "Lysis curve, one panel per group" = "main_by_group",   # v2.18
+                           ANALYSIS_FIGURE_CHOICES)
 metric_label <- function(m) { l <- unname(ANALYSIS_METRIC_LABELS[m]); ifelse(is.na(l), m, l) }
+# v2.19: the other numeric columns of the curve-metrics table that the phenotype heatmap can show (the labelled
+# metrics above plus these); metric_label() does not know them, pheno_metric_label() does.
+PHENO_EXTRA_LABELS <- c(
+  initial_od                   = "Initial OD",
+  global_min_od                = "Minimum OD",
+  time_global_min_od           = "Time of minimum",
+  stat_phase_dur               = "Stationary-phase duration",
+  recovery_ratio               = "Recovery ratio",
+  fold_change_final_vs_initial = "Fold change (final / initial)",
+  pct_drop_from_max            = "Drop from peak (%)",
+  steepest_decline_rate        = "Steepest decline rate",
+  lysis_onset_delta            = "Lysis onset minus lag")
+pheno_metric_label <- function(m) {
+  l <- unname(PHENO_EXTRA_LABELS[m])
+  ifelse(is.na(l), as.character(metric_label(m)), l)
+}
+# choices of the heatmap's metric selector: label -> column name
+PHENO_METRIC_CHOICES <- c(setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
+                          setNames(names(PHENO_EXTRA_LABELS), PHENO_EXTRA_LABELS))
+PHENO_DEFAULT_METRICS <- c("lysis_time", "od_drop", "lysis_efficiency", "mu_max", "auc", "infection_strength",
+                           "extinction_time", "t_first_peak")
 # Axis / facet label with units, from the x-axis time unit and the y-axis label.
 metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
   base <- metric_label(m)
@@ -2354,6 +2526,7 @@ LEGACY_BASE <- list(
   x_expand_right        = 0.05,       y_expand_bottom        = 0,
   y_expand_top          = 0.05,       x_axis_label           = "Time (minutes)",
   demo_scenario         = "lysis",
+  sticky_figure = TRUE, quick_edit_open = TRUE,   # v2.21: figure stays in view while the sidebar scrolls; quick-edit strip shown
   y_axis_label          = "A550",     plot_title             = "",
   plot_subtitle         = "",         show_major_gridlines   = FALSE,
   show_minor_gridlines  = FALSE,      font_family            = "sans",
@@ -2403,6 +2576,19 @@ LEGACY_BASE <- list(
   enable_threshold = FALSE, threshold_value = 0.1, threshold_label = "",   # v2.17: horizontal OD threshold line
   threshold_color = "grey40", threshold_linetype = "dashed",
   qc_od_ceiling = 2.5,                # v2.17: QC flag CEILING above this OD
+  facet_by_group = FALSE,             # v2.18: one panel per sample group (journal preset and Legacy look: off)
+  explorer_x = "lysis_time", explorer_y = "od_drop",   # v2.18: metric explorer figure
+  explorer_level = "Per replicate", explorer_labels = FALSE, explorer_logx = FALSE, explorer_logy = FALSE,
+  # v2.19: Curve fitting tab, phenotype heatmap, extraction tables (none of them touches the main figure)
+  fit_models = c("logistic", "gompertz", "baranyi"), fit_until = "peak", fit_log = TRUE,
+  fit_level = "mean", fit_show = "best",
+  pheno_metrics = PHENO_DEFAULT_METRICS,
+  pheno_scale = "z", pheno_values = TRUE,
+  extract_times = "", extract_method = "interpolate",
+  extract_threshold = 0.5, extract_direction = "up", extract_after = "start",
+  # v2.20: bootstrap intervals, the metric summary's error source, the separation figure (the phases figure has no input)
+  boot_metrics = c("lysis_time", "od_drop", "mu_max", "auc", "infection_strength"), boot_n = 1000, boot_seed = 1,
+  metric_error_source = "replicates", diff_mode = "difference", diff_mark = TRUE,
   # v2.11 analysis / dashboard inputs
   analysis_type = "metric_summary", analysis_metrics = c("lysis_time", "od_drop"),
   analysis_dose_metric = "lysis_time", analysis_norm_mode = "reference",
@@ -2420,12 +2606,31 @@ LEGACY_BASE <- list(
   nb_next_steps = "", nb_tags = "",
   nb_passage = "", nb_inducer_conc = "", nb_other_condition = "",   # v2.17
   nb_custom_key1 = "", nb_custom_val1 = "", nb_custom_key2 = "", nb_custom_val2 = "",
-  nb_custom_key3 = "", nb_custom_val3 = ""
+  nb_custom_key3 = "", nb_custom_val3 = "",
+  # v2.21: metric summary styles and brackets, extraction figures, fraction lysed (none touches the main figure)
+  metric_style = "dot", metric_brackets = FALSE,
+  extract_style = "bar", extract_points = TRUE,
+  lysed_mode = "relative", lysed_threshold = 0.5
 )
 
 # The inputs the journal preset sets, at their legacy values.
 legacy_preset_settings <- function() LEGACY_BASE[names(journal_preset_settings(89, 65))]
 APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65))   # v2.16: no panel letter unless the user sets one
+# ── Sample groups (v2.18) ─────────────────────────────────────────────────────
+# The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
+# NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
+# first-appearance order with "Other" last (the facet / panel order).
+sample_group_map <- function(samples, groups, min_groups = 2L) {
+  if (is.null(groups) || !length(samples)) return(NULL)
+  g <- trimws(as.character(unname(groups[samples]))); g[is.na(g)] <- ""
+  named <- unique(g[nzchar(g)])
+  if (length(named) < min_groups) return(NULL)
+  g[!nzchar(g)] <- "Other"
+  out <- setNames(g, samples)
+  attr(out, "levels") <- unique(c(named, if (any(g == "Other")) "Other"))
+  out
+}
+
 # ── Figure bundle archive (v2.17) ─────────────────────────────────────────────
 # "zip" when the zip package or a zip binary is available, else "tar" (utils::tar, always there).
 bundle_archive_kind <- function()
@@ -2469,6 +2674,1212 @@ get_palette_colors <- function(pal, n) {
   )
 }
 
+# ── v2.18 engine: growth fits, phenotype matrix, all-metrics statistics, extraction ──
+# Pure functions (no Shiny state): the UI calls them. See docs/FITS_AND_EXTRACTION.md.
+
+# ── Growth-model fits (Zwietering 1990 / Baranyi-Roberts 1994) ───────────────
+# Every fit is made on the CHANGE from the first reading: y(t) = ln(od(t) / od(t0)) (log_transform =
+# TRUE) or od(t) - od(t0), against tt = t - t0, so the fitted function is f(tt) - f(0) and
+# od(t) = od(t0) * exp(f(tt) - f(0)). For Baranyi f(0) = 0 already. A is therefore the asymptote of f
+# (in ln-OD units, or OD units without the log), mu_max the maximum slope of f (per time unit; a
+# specific growth rate on the log scale) and lag = lambda a DURATION from the first time point.
+gm_logistic <- function(tt, A, mu, lag)       # modified logistic, Zwietering 1990
+  A / (1 + exp(4 * mu / A * (lag - tt) + 2)) - A / (1 + exp(4 * mu / A * lag + 2))
+gm_gompertz <- function(tt, A, mu, lag)       # modified Gompertz, Zwietering 1990
+  A * exp(-exp(mu * exp(1) / A * (lag - tt) + 1)) - A * exp(-exp(mu * exp(1) / A * lag + 1))
+gm_baranyi  <- function(tt, A, mu, lag) {     # Baranyi-Roberts, y0 = 0, h0 = mu * lag, ymax = A
+  h0 <- mu * lag
+  At <- tt + log(exp(-mu * tt) + exp(-h0) - exp(-mu * tt - h0)) / mu      # adjustment function A(t)
+  mu * At - log1p(exp(mu * At - A) - exp(-A))
+}
+GROWTH_MODEL_FUNS <- list(logistic = gm_logistic, gompertz = gm_gompertz, baranyi = gm_baranyi)
+
+# One output row. t0 / log_transform / until are extra columns predict_growth_model() needs.
+gm_fit_row <- function(model, converged = FALSE, n_points = NA_integer_, A = NA_real_, mu_max = NA_real_,
+                       lag = NA_real_, y0 = NA_real_, rss = NA_real_, aic = NA_real_, bic = NA_real_,
+                       r2 = NA_real_, se = c(NA_real_, NA_real_, NA_real_), message = NA_character_,
+                       t0 = NA_real_, log_transform = TRUE, until = "peak") {
+  data.frame(model = model, converged = converged, n_points = as.integer(n_points), A = A, mu_max = mu_max,
+             lag = lag, y0 = y0, rss = rss, aic = aic, bic = bic, r2 = r2,
+             se_A = se[1], se_mu_max = se[2], se_lag = se[3], message = as.character(message),
+             t0 = t0, log_transform = log_transform, until = until, stringsAsFactors = FALSE)
+}
+
+# Fit one or more growth models to a single curve; never errors (a failed model returns
+# converged = FALSE, NA parameters and the reason in `message`).
+#   until = "peak": only the points up to and including the maximum of od are used, so a lysis
+#                   curve is never fitted through its collapse; "all": every point.
+#   Starting values: mu_max = largest centered rolling ln-slope (rolling_slope, window 5), lag = the
+#   engine's rule (first time that slope reaches 10 % of mu_max) or the tangent intercept, A = max(y).
+fit_growth_models <- function(t, od, models = c("logistic", "gompertz", "baranyi"),
+                              until = c("peak", "all"), log_transform = TRUE) {
+  until  <- match.arg(until)
+  models <- match.arg(models, names(GROWTH_MODEL_FUNS), several.ok = TRUE)
+  fail_all <- function(msg, n = 0L, t0 = NA_real_, y0 = NA_real_)
+    do.call(rbind, lapply(models, function(m)
+      gm_fit_row(m, n_points = n, message = msg, y0 = y0, t0 = t0, log_transform = log_transform, until = until)))
+  ok <- is.finite(t) & is.finite(od)
+  t <- as.numeric(t)[ok]; od <- as.numeric(od)[ok]
+  if (length(t) == 0) return(fail_all("no finite data"))
+  o <- order(t); t <- t[o]; od <- od[o]
+  note <- NA_character_
+  if (log_transform) {
+    pos <- od > 0
+    if (!any(pos)) return(fail_all("no positive OD readings (cannot take the logarithm)"))
+    if (any(!pos)) {
+      note <- sprintf("%d non-positive reading(s) dropped before the log transform", sum(!pos))
+      t <- t[pos]; od <- od[pos]
+    }
+  }
+  if (length(od) > 0 && diff(range(od)) == 0)
+    return(fail_all("no growth (flat curve)", length(od), t[1], od[1]))
+  if (until == "peak") { k <- which.max(od); t <- t[seq_len(k)]; od <- od[seq_len(k)] }
+  n <- length(t); od0 <- od[1]; t0 <- t[1]
+  if (n < 4)
+    return(fail_all(sprintf("too few points (%d; need at least 4)%s", n,
+                            if (until == "peak") " up to the peak" else ""), n, t0, od0))
+  if (n < 6) note <- paste(stats::na.omit(c(note, sprintf("only %d points: parameters are poorly determined", n))), collapse = "; ")
+  y  <- if (log_transform) log(od / od0) else od - od0
+  tt <- t - t0
+  if (!is.finite(max(y)) || max(y) <= 1e-8 * max(1, abs(od0)))
+    return(fail_all("no growth up to the peak (flat or declining curve)", n, t0, od0))
+
+  # starting values
+  win <- min(5L, n)
+  rs  <- if (win >= 3) tryCatch(rolling_slope(tt, y, win), error = function(e) rep(NA_real_, n)) else rep(NA_real_, n)
+  if (!any(is.finite(rs) & rs > 0)) rs <- c(NA_real_, diff(y) / diff(tt))   # very short curve: consecutive slopes
+  rs_ok <- which(is.finite(rs) & rs > 0)
+  if (length(rs_ok) == 0) return(fail_all("no positive growth slope", n, t0, od0))
+  kmax  <- rs_ok[which.max(rs[rs_ok])]
+  mu0   <- rs[kmax]
+  lag_rule <- tt[which(rs >= 0.10 * mu0 & is.finite(rs))[1]]
+  lag_tan  <- min(max(tt[kmax] - y[kmax] / mu0, 0), max(tt))
+  lag_starts <- unique(pmin(pmax(c(lag_rule, lag_tan), 0), max(tt)))
+  ymax <- max(y)
+  A_ub <- 5 * ymax
+  starts <- unlist(lapply(c(1, 1.5), function(f) lapply(lag_starts, function(l)
+    c(A = f * ymax, mu = mu0, lag = l))), recursive = FALSE)
+  lower <- c(A = ymax * 1e-3, mu = mu0 * 1e-3, lag = 0)
+  upper <- c(A = A_ub, mu = mu0 * 20, lag = max(tt))
+  dat   <- data.frame(tt = tt, y = y)
+  sst   <- sum((y - mean(y))^2)
+  ctl   <- stats::nls.control(maxiter = 500, scaleOffset = 1e-6 * max(sum(y^2), 1e-12), warnOnly = FALSE)
+
+  rows <- lapply(models, function(m) {
+    form <- stats::as.formula(paste0("y ~ gm_", m, "(tt, A, mu, lag)"))
+    best <- NULL; best_rss <- Inf; last_err <- "did not converge"
+    for (st in starts) {
+      for (alg in c("port", "default")) {
+        st_c <- if (alg == "port") pmin(pmax(st, lower), upper) else st
+        fit <- tryCatch(suppressWarnings(
+          if (alg == "port") stats::nls(form, data = dat, start = as.list(st_c), algorithm = "port",
+                                        lower = lower, upper = upper, control = ctl)
+          else stats::nls(form, data = dat, start = as.list(st_c), control = ctl)),
+          error = function(e) { last_err <<- conditionMessage(e); NULL })
+        if (is.null(fit)) next
+        cf <- stats::coef(fit)
+        if (!all(is.finite(cf)) || cf[["A"]] <= 0 || cf[["mu"]] <= 0 || cf[["lag"]] < -1e-8 * max(1, max(tt))) next
+        r <- sum(stats::resid(fit)^2)
+        if (is.finite(r) && r < best_rss) { best <- fit; best_rss <- r }
+        break                                  # port first; the default algorithm only if port failed
+      }
+    }
+    if (is.null(best))
+      return(gm_fit_row(m, n_points = n, y0 = od0, t0 = t0, log_transform = log_transform, until = until,
+                        message = paste0("did not converge: ", gsub("\\s+", " ", last_err))))
+    cf  <- stats::coef(best)
+    se  <- tryCatch(suppressWarnings(unname(summary(best)$coefficients[, "Std. Error"])),
+                    error = function(e) rep(NA_real_, 3))
+    if (length(se) != 3) se <- rep(NA_real_, 3)
+    k_par <- 4L                                           # A, mu_max, lag + the residual variance
+    aic <- n * (log(2 * pi) + 1 + log(max(best_rss, 1e-30) / n)) + 2 * k_par
+    bic <- n * (log(2 * pi) + 1 + log(max(best_rss, 1e-30) / n)) + log(n) * k_par
+    msg <- note
+    if (cf[["A"]] >= 0.99 * A_ub)
+      msg <- paste(stats::na.omit(c(msg, "asymptote at its upper bound (no plateau reached in the fitted points)")), collapse = "; ")
+    gm_fit_row(m, TRUE, n, A = unname(cf["A"]), mu_max = unname(cf["mu"]), lag = unname(cf["lag"]), y0 = od0,
+               rss = best_rss, aic = aic, bic = bic, r2 = if (sst > 0) 1 - best_rss / sst else NA_real_,
+               se = se, message = msg, t0 = t0, log_transform = log_transform, until = until)
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# Predicted OD of one fit row (as returned by fit_growth_models) at times t, starting from baseline
+# od0 (use fit_row$y0 for the fitted curve itself). Back-transformed (od0 * exp(.)) when the fit was
+# made on the ln scale; all NA for a model that did not converge.
+predict_growth_model <- function(fit_row, t, od0) {
+  fit_row <- fit_row[1, , drop = FALSE]
+  if (!isTRUE(fit_row$converged)) return(rep(NA_real_, length(t)))
+  fun <- GROWTH_MODEL_FUNS[[as.character(fit_row$model)]]
+  t0  <- if ("t0" %in% names(fit_row) && is.finite(fit_row$t0)) fit_row$t0 else 0
+  lg  <- if ("log_transform" %in% names(fit_row)) isTRUE(fit_row$log_transform) else TRUE
+  f   <- fun(t - t0, fit_row$A, fit_row$mu_max, fit_row$lag)
+  if (lg) od0 * exp(f) else od0 + f
+}
+
+# Stacked fits per sample from the app's mean-curve frame (time, variable, mean_value).
+fit_growth_models_by_sample <- function(pd, ...) {
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  out <- lapply(unique(as.character(pd$variable)), function(s) {
+    g <- pd[as.character(pd$variable) == s, , drop = FALSE]
+    cbind(data.frame(sample = s, stringsAsFactors = FALSE), fit_growth_models(g$time, g$mean_value, ...))
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# Stacked fits per sample and replicate from the replicate frame (time, variable, replicate, value).
+fit_growth_models_by_replicate <- function(rep_pd, ...) {
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(NULL)
+  key <- unique(data.frame(sample = as.character(rep_pd$variable), replicate = rep_pd$replicate,
+                           stringsAsFactors = FALSE))
+  out <- lapply(seq_len(nrow(key)), function(i) {
+    g <- rep_pd[as.character(rep_pd$variable) == key$sample[i] & rep_pd$replicate == key$replicate[i], , drop = FALSE]
+    cbind(data.frame(sample = key$sample[i], replicate = key$replicate[i], stringsAsFactors = FALSE),
+          fit_growth_models(g$time, g$value, ...))
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# The converged model with the lowest AIC, one row per sample (and per replicate when the table has a
+# replicate column). A group with no converged model keeps one row with model = NA and the
+# parameters NA.
+best_model <- function(fit_table) {
+  if (is.null(fit_table) || nrow(fit_table) == 0) return(fit_table)
+  keys <- intersect(c("sample", "replicate"), names(fit_table))
+  key_str <- if (length(keys)) do.call(paste, c(lapply(fit_table[keys], as.character), sep = "\r")) else rep("all", nrow(fit_table))
+  rows <- lapply(unique(key_str), function(k) {
+    g  <- fit_table[key_str == k, , drop = FALSE]
+    ok <- which(g$converged %in% TRUE & !is.na(g$aic))
+    if (length(ok)) return(g[ok[which.min(g$aic[ok])], , drop = FALSE])
+    g <- g[1, , drop = FALSE]
+    keep <- c(keys, "n_points", "message", "t0", "log_transform", "until", "y0")
+    for (cc in setdiff(names(g), keep)) g[[cc]] <- if (is.character(g[[cc]])) NA_character_ else NA
+    g$converged <- FALSE
+    g
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# ── Phenotype matrix (metrics x samples heatmap) ─────────────────────────────
+# Columns of a metrics table that are bookkeeping, not phenotypes.
+PHENOTYPE_NON_METRICS <- c("sample", "n_timepoints", "t_start", "t_end", "replicate", "n_replicates")
+
+# Numeric columns of a metrics table that are candidate metrics (bookkeeping columns removed).
+numeric_metric_columns <- function(df) {
+  if (is.null(df) || ncol(df) == 0) return(character(0))
+  setdiff(names(df)[vapply(df, is.numeric, logical(1))], PHENOTYPE_NON_METRICS)
+}
+
+# samples x metrics matrix of a sample-level metrics table (compute_curve_metrics output; a replicate
+# table is averaged per sample). scale = "z": each column centred on its mean and divided by its SD
+# across samples; "range": each column mapped to 0-1 (min -> 0, max -> 1); "none": as is. A metric that
+# is all NA or constant across samples (SD 0, so z and range are undefined), or that is not a numeric
+# column of metrics_df, is not returned and is listed in `dropped` (by its column name).
+phenotype_matrix <- function(metrics_df, metrics = NULL, scale = c("z", "range", "none")) {
+  scale <- match.arg(scale)
+  empty <- list(matrix = matrix(numeric(0), 0, 0), raw = matrix(numeric(0), 0, 0), dropped = character(0),
+                metrics = character(0))
+  if (is.null(metrics_df) || nrow(metrics_df) == 0 || !"sample" %in% names(metrics_df)) return(empty)
+  cand <- if (is.null(metrics)) numeric_metric_columns(metrics_df) else as.character(metrics)
+  usable <- cand[cand %in% names(metrics_df) & vapply(cand, function(m) is.numeric(metrics_df[[m]]), logical(1))]
+  dropped <- setdiff(cand, usable)
+  samples <- unique(as.character(metrics_df$sample))
+  raw <- vapply(usable, function(m)
+    vapply(samples, function(s) {
+      v <- metrics_df[[m]][as.character(metrics_df$sample) == s]
+      v <- v[is.finite(v)]
+      if (length(v)) mean(v) else NA_real_
+    }, numeric(1)), numeric(length(samples)))
+  raw <- matrix(raw, nrow = length(samples), ncol = length(usable), dimnames = list(samples, usable))
+  varies <- vapply(seq_len(ncol(raw)), function(j) {
+    v <- raw[, j]; v <- v[is.finite(v)]
+    length(v) >= 2 && diff(range(v)) > 0
+  }, logical(1))
+  dropped <- c(dropped, colnames(raw)[!varies])
+  raw <- raw[, varies, drop = FALSE]
+  kept <- colnames(raw)
+  mat <- switch(scale,
+    z     = apply(raw, 2, function(v) (v - mean(v, na.rm = TRUE)) / sd(v, na.rm = TRUE)),
+    range = apply(raw, 2, function(v) (v - min(v, na.rm = TRUE)) / (max(v, na.rm = TRUE) - min(v, na.rm = TRUE))),
+    none  = raw)
+  mat <- matrix(mat, nrow = nrow(raw), ncol = ncol(raw))
+  lab <- if (length(kept)) as.character(metric_label(kept)) else character(0)
+  dimnames(mat) <- list(rownames(raw), lab)
+  dimnames(raw) <- list(rownames(raw), lab)
+  list(matrix = mat, raw = raw, dropped = dropped, metrics = kept)
+}
+
+# ── All-metrics statistics ───────────────────────────────────────────────────
+# compare_replicate_metric() for every metric (default: every numeric column of the replicate metrics
+# table except sample / n_timepoints / t_start / t_end / replicate), stacked into one long table.
+# p_adj_holm is the per-metric Holm adjustment from compare_replicate_metric (so it is identical to the
+# Analysis tab); p_adj_bh_across is Benjamini-Hochberg over ALL tests in the table (every metric x
+# comparison), an EXPLORATORY false-discovery control for scanning many metrics at once.
+# stars come from p_adj_holm.
+compare_all_metrics <- function(rm, metrics = NULL, ref_sample = NULL, method = c("welch", "nonparametric")) {
+  method <- match.arg(method)
+  cols <- c("metric", "metric_label", "sample", "versus", "n", "n_versus", "mean", "mean_versus", "difference",
+            "hedges_g", "p", "p_adj_holm", "p_adj_bh_across", "stars", "ci_low", "ci_high", "test")
+  empty <- data.frame(metric = character(0), metric_label = character(0), sample = character(0),
+                      versus = character(0), n = integer(0), n_versus = integer(0), mean = numeric(0),
+                      mean_versus = numeric(0), difference = numeric(0), hedges_g = numeric(0), p = numeric(0),
+                      p_adj_holm = numeric(0), p_adj_bh_across = numeric(0), stars = character(0),
+                      ci_low = numeric(0), ci_high = numeric(0), test = character(0), stringsAsFactors = FALSE)
+  if (is.null(rm) || nrow(rm) == 0) return(list(table = empty, warnings = "No replicate metrics to compare."))
+  if (is.null(metrics)) metrics <- numeric_metric_columns(rm)
+  metrics <- metrics[metrics %in% names(rm)]
+  warns <- character(0); parts <- list()
+  for (m in metrics) {
+    res <- compare_replicate_metric(rm, m, ref_sample = ref_sample, method = method)
+    lab <- as.character(metric_label(m))
+    if (length(res$warnings)) warns <- c(warns, paste0(lab, ": ", res$warnings))
+    pw <- res$pairwise
+    if (is.null(pw) || nrow(pw) == 0) next
+    parts[[length(parts) + 1L]] <- cbind(data.frame(metric = m, metric_label = lab, stringsAsFactors = FALSE), pw)
+  }
+  if (!length(parts)) return(list(table = empty, warnings = warns))
+  tab <- do.call(rbind, c(parts, list(make.row.names = FALSE)))
+  tab$p_adj_bh_across <- p.adjust(tab$p, method = "BH")
+  list(table = tab[, cols], warnings = warns)
+}
+
+# ── Extraction: OD at fixed times, time to an OD threshold, per-sample time windows ──
+# One list element per (sample, replicate) curve of a replicate frame (time, variable, replicate,
+# value); non-finite values dropped, time-sorted.
+extraction_curves <- function(rep_pd) {
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(list())
+  rep_pd <- rep_pd[is.finite(rep_pd$time) & is.finite(rep_pd$value), , drop = FALSE]
+  if (nrow(rep_pd) == 0) return(list())
+  rep_pd <- rep_pd[order(as.character(rep_pd$variable), rep_pd$replicate, rep_pd$time), , drop = FALSE]
+  key <- paste(as.character(rep_pd$variable), rep_pd$replicate, sep = "\r")
+  lapply(split(rep_pd, factor(key, levels = unique(key))), function(g)
+    list(sample = as.character(g$variable[1]), replicate = g$replicate[1], t = g$time, y = g$value))
+}
+
+# Value of every replicate curve at the requested times: linear interpolation between the bracketing
+# points ("interpolate") or the reading at the nearest sampled time ("nearest"). A time outside a
+# curve's own range [first time, last time] gives NA (never extrapolated).
+od_at_times <- function(rep_pd, times, method = c("interpolate", "nearest")) {
+  method <- match.arg(method)
+  times  <- as.numeric(times)
+  curves <- extraction_curves(rep_pd)
+  out <- lapply(curves, function(cv) {
+    inside <- times >= min(cv$t) & times <= max(cv$t)
+    v <- rep(NA_real_, length(times))
+    if (method == "interpolate") {
+      if (length(cv$t) >= 2)
+        v[inside] <- suppressWarnings(stats::approx(cv$t, cv$y, xout = times[inside], ties = mean)$y)
+      else v[inside & times == cv$t[1]] <- cv$y[1]
+    } else {
+      v[inside] <- vapply(times[inside], function(x) cv$y[which.min(abs(cv$t - x))], numeric(1))
+    }
+    data.frame(time_requested = times, sample = cv$sample, replicate = cv$replicate, value = v,
+               stringsAsFactors = FALSE)
+  })
+  if (!length(out))
+    return(data.frame(time_requested = numeric(0), sample = character(0), replicate = numeric(0),
+                      value = numeric(0), stringsAsFactors = FALSE))
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# mean, SD, n (non-missing replicates), SEM and the 95 % CI half-width (t(0.975, n - 1) x SEM, as in the
+# app's summary statistics) of a value column, per group. SD / SEM / CI are NA with fewer than 2 values.
+summarise_replicate_values <- function(x, value_col, group_cols) {
+  if (is.null(x) || nrow(x) == 0) return(NULL)
+  g <- interaction(x[group_cols], drop = TRUE, lex.order = TRUE)
+  rows <- lapply(split(seq_len(nrow(x)), g), function(ix) {
+    v <- x[[value_col]][ix]; v <- v[is.finite(v)]; n <- length(v)
+    sd_v <- if (n >= 2) stats::sd(v) else NA_real_
+    sem  <- if (n >= 2) sd_v / sqrt(n) else NA_real_
+    cbind(x[ix[1], group_cols, drop = FALSE],
+          data.frame(mean = if (n) mean(v) else NA_real_, sd = sd_v, n = n, sem = sem,
+                     ci95 = if (n >= 2) stats::qt(0.975, n - 1) * sem else NA_real_), row.names = NULL)
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+summarise_od_at_times <- function(x) summarise_replicate_values(x, "value", c("time_requested", "sample"))
+
+# First time each replicate curve crosses `threshold`, with linear interpolation between the two
+# bracketing points. "up": the curve goes from below the threshold to at-or-above it; "down": from
+# at-or-above to below. A curve that STARTS on the far side has no crossing until it comes back, so
+# it is not reported as crossing at its first time. `after` limits the search to the part of the curve
+# from "peak" (the first maximum) onward, or from a time (numeric); NA when there is no crossing.
+time_to_od <- function(rep_pd, threshold, direction = c("up", "down"), after = NULL) {
+  direction <- match.arg(direction)
+  curves <- extraction_curves(rep_pd)
+  rows <- lapply(curves, function(cv) {
+    t <- cv$t; y <- cv$y; n <- length(t)
+    first <- 1L
+    if (!is.null(after) && !(length(after) == 1 && is.na(after))) {
+      first <- if (identical(after, "peak")) which.max(y) else which(t >= as.numeric(after))[1]
+      if (is.na(first)) first <- n + 1L
+    }
+    tc <- NA_real_
+    if (n >= 2 && first < n) for (i in (first + 1L):n) {
+      a <- y[i - 1L]; b <- y[i]
+      hit <- if (direction == "up") a < threshold && b >= threshold else a >= threshold && b < threshold
+      if (hit) { tc <- t[i - 1L] + (threshold - a) / (b - a) * (t[i] - t[i - 1L]); break }
+    }
+    data.frame(sample = cv$sample, replicate = cv$replicate, time = tc, threshold = threshold,
+               direction = direction, stringsAsFactors = FALSE)
+  })
+  if (!length(rows))
+    return(data.frame(sample = character(0), replicate = numeric(0), time = numeric(0),
+                      threshold = numeric(0), direction = character(0), stringsAsFactors = FALSE))
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# Per sample: mean, SD, n (replicates that crossed), SEM and 95 % CI half-width of the crossing time,
+# plus n_curves (replicates examined).
+summarise_time_to_od <- function(x) {
+  s <- summarise_replicate_values(x, "time", "sample")
+  if (is.null(s)) return(NULL)
+  s$n_curves <- as.integer(table(factor(x$sample, levels = unique(x$sample)))[as.character(s$sample)])
+  s
+}
+
+# Keep, for each sample named in `windows`, only the rows with time inside its window. windows is a
+# named list sample -> c(min, max); a NULL, missing or NA bound means no limit on that side; samples
+# without an entry are untouched. Works on the mean frame and the replicate frame (columns `variable`
+# and `time`).
+apply_sample_time_windows <- function(df, windows) {
+  if (is.null(df) || nrow(df) == 0 || length(windows) == 0 || is.null(names(windows))) return(df)
+  samp <- as.character(df$variable)
+  keep <- rep(TRUE, nrow(df))
+  for (s in intersect(names(windows), unique(samp))) {
+    w  <- windows[[s]]
+    if (is.list(w)) w <- vapply(w, function(x) if (length(x) == 1) suppressWarnings(as.numeric(x)) else NA_real_, numeric(1))
+    w  <- suppressWarnings(as.numeric(w))
+    lo <- if (length(w) >= 1 && is.finite(w[1])) w[1] else -Inf
+    hi <- if (length(w) >= 2 && is.finite(w[2])) w[2] else Inf
+    sel <- samp == s
+    keep[sel] <- df$time[sel] >= lo & df$time[sel] <= hi
+  }
+  df[keep, , drop = FALSE]
+}
+
+# ── end v2.18 engine ──
+
+# ── v2.20 engine: curve phases, bootstrap intervals, curve differences ──
+# Pure functions (no Shiny session), tested by tests/test_v220_engine.R, documented in
+# docs/PHASES_AND_BOOTSTRAP.md. They do not change any existing metric: every phase
+# boundary is read back from compute_one_curve_metrics(), so the phases agree with the
+# reported numbers (and with the landmarks figure).
+
+# Centered rolling ln-OD slope, built exactly as compute_one_curve_metrics() builds the one
+# behind mu_max / lag_phase (positive readings only; a window touching a reading <= 0 gets no
+# slope). Returns NULL when the engine would not compute one (fewer than 3 points in the window).
+phase_ln_slopes <- function(t, od, smooth_window = 5) {
+  n   <- length(t)
+  win <- min(smooth_window, n)
+  if (!(n >= win && win >= 3)) return(NULL)
+  pos <- is.finite(od) & od > 0
+  lo  <- rep(NA_real_, n); lo[pos] <- log(od[pos])
+  rs  <- tryCatch(rolling_slope(t, lo, win), error = function(e) rep(NA_real_, n))
+  if (any(is.finite(od) & od <= 0)) {
+    off <- floor((win - 1) / 2)
+    for (s in seq_len(n - win + 1)) {
+      idx <- s:(s + win - 1)
+      if (any(!pos[idx])) rs[s + off] <- NA_real_
+    }
+  }
+  rs
+}
+
+# Growth / lysis phases of ONE curve, reconstructed from compute_one_curve_metrics().
+#   lag           t[1] -> lag_phase
+#   exponential   lag_phase -> first time after the fastest-growth window at which the rolling
+#                 ln-slope falls below 50 % of mu_max (the peak if that is earlier / never)
+#   deceleration  that time -> start of the stationary run, else -> lysis onset, else -> t[n]
+#   stationary    the longest contiguous run of points >= 95 % of the peak (the run behind
+#                 stat_phase_dur), clipped to start no earlier than the exponential end; it runs to
+#                 lysis onset, or to t[n] when no lysis is detected; omitted when the run does not
+#                 exist or lysis starts at/inside it
+#   lysis         lysis_time -> trough (the post-peak minimum behind residual_od)
+#   recovery      trough -> t[n] when recovery_slope is finite
+#   post-lysis    trough -> t[n] otherwise
+# Phases that do not apply, or have zero length, are omitted; the rest are contiguous and
+# cover t[1]..t[n]. A curve with no measurable growth (mu_max NA) is one "lag" phase.
+curve_phases <- function(t, od, smooth_window = 5, peak_mode = "global", lysis_threshold = 0.05) {
+  empty <- data.frame(phase = character(0), t_start = numeric(0), t_end = numeric(0),
+                      od_start = numeric(0), od_end = numeric(0), duration = numeric(0),
+                      stringsAsFactors = FALSE)
+  ok <- is.finite(t) & is.finite(od)
+  t <- t[ok]; od <- od[ok]
+  o <- order(t); t <- t[o]; od <- od[o]
+  n <- length(t)
+  if (n < 2 || t[n] <= t[1]) return(empty)
+
+  m <- compute_one_curve_metrics(t, od, "x", smooth_window = smooth_window, peak_mode = peak_mode,
+                                 lysis_threshold = lysis_threshold)
+  t1 <- t[1]; tn <- t[n]
+  emit <- function(ph, b) {
+    keep <- b[-1] > b[-length(b)]
+    ph <- ph[keep]; s <- b[-length(b)][keep]; e <- b[-1][keep]
+    if (!length(ph)) return(empty)
+    data.frame(phase = ph, t_start = s, t_end = e,
+               od_start = stats::approx(t, od, xout = s, ties = mean, rule = 2)$y,
+               od_end   = stats::approx(t, od, xout = e, ties = mean, rule = 2)$y,
+               duration = e - s, stringsAsFactors = FALSE)
+  }
+  lag_only <- function() emit("lag", c(t1, tn))
+  if (!is.finite(m$mu_max)) return(lag_only())
+
+  # peak and trough indices, recovered the way the engine anchors them
+  pk_idx <- which(t == m$time_max_od)[1]
+  if (is.na(pk_idx)) return(lag_only())
+  t_pk <- t[pk_idx]
+
+  # lag -> exponential
+  t_lag <- min(max(m$lag_phase, t1), t_pk)
+  if (!is.finite(t_lag)) t_lag <- t1
+
+  # exponential end: first rolling slope < 50 % of mu_max after the fastest-growth window
+  t_exp <- t_pk
+  rs <- phase_ln_slopes(t, od, smooth_window)
+  if (!is.null(rs)) {
+    valid <- which(is.finite(rs) & rs > 1e-10)
+    if (length(valid) && isTRUE(all.equal(max(rs[valid]), m$mu_max))) {
+      mu_idx <- valid[which.max(rs[valid])]
+      after  <- which(seq_len(n) > mu_idx & is.finite(rs) & rs < 0.5 * m$mu_max)
+      if (length(after)) t_exp <- min(t[after[1]], t_pk)
+    }
+  }
+  t_exp <- max(t_exp, t_lag)
+
+  lys <- m$lysis_time
+  has_lysis <- is.finite(lys)
+
+  # trough (post-peak minimum), as for residual_od / lysis_rate
+  t_tr <- NA_real_
+  if (has_lysis && pk_idx < n) {
+    post <- (pk_idx + 1):n
+    t_tr <- t[pk_idx + which.min(od[post])]
+  }
+
+  # stationary: the longest >= 95 %-of-peak run (the one behind stat_phase_dur)
+  s0 <- NA_real_
+  run <- if (pk_idx > 1) longest_true_run(od >= 0.95 * m$max_od) else NULL
+  if (!is.null(run) && run[["end"]] > run[["start"]]) {
+    r0 <- t[run[["start"]]]; r1 <- t[run[["end"]]]
+    s0 <- max(r0, t_exp)
+    end_ref <- if (has_lysis) lys else tn
+    if (!(r1 > t_exp && s0 < end_ref && (!has_lysis || r1 <= lys + 1e-9))) s0 <- NA_real_
+  }
+  has_stat <- is.finite(s0)
+
+  if (has_lysis) {
+    t_tr <- max(t_tr, lys)
+    x    <- if (has_stat) s0 else lys
+    b <- c(t1, t_lag, t_exp, x, lys, t_tr, tn)
+    nm <- c("lag", "exponential", "deceleration", "stationary", "lysis",
+            if (is.finite(m$recovery_slope)) "recovery" else "post-lysis")
+  } else {
+    x <- if (has_stat) s0 else tn
+    b <- c(t1, t_lag, t_exp, x, tn)
+    nm <- c("lag", "exponential", "deceleration", "stationary")
+  }
+  b <- cummax(pmin(pmax(b, t1), tn))
+  emit(nm, b)
+}
+
+# curve_phases() for every sample of a mean-curve frame (time, variable, mean_value);
+# returns the stacked rows with a leading `sample` column. `...` goes to curve_phases().
+curve_phases_by_sample <- function(pd, ...) {
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  out <- lapply(unique(as.character(pd$variable)), function(v) {
+    g <- pd[as.character(pd$variable) == v, , drop = FALSE]
+    ph <- curve_phases(g$time, g$mean_value, ...)
+    if (nrow(ph) == 0) return(NULL)
+    cbind(sample = v, ph, stringsAsFactors = FALSE)
+  })
+  out <- out[!vapply(out, is.null, logical(1))]
+  if (!length(out)) return(NULL)
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# Percentile-bootstrap confidence intervals for mean-curve metrics, resampling REPLICATES.
+# rep_pd: long un-averaged data (time, variable, replicate, value). For each sample the replicate
+# curves are drawn with replacement (n_replicates draws), averaged at every time point, and the
+# metrics engine is run on that resampled mean curve; the interval is the percentile interval of
+# the finite draws. `estimate` is the metric of the observed mean curve (what the Curve Metrics
+# table reports). NA interval when the sample has < 2 replicates or < 20 finite draws.
+# The draws for one sample depend only on `seed` and the sample's replicate count, so they do
+# not change when other samples are loaded. The caller's RNG state is left untouched.
+bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.95,
+                              smooth_window = 5, peak_smooth_window = 1,
+                              peak_mode = "global", lysis_threshold = 0.05) {
+  cols <- c("sample", "metric", "estimate", "boot_mean", "ci_low", "ci_high",
+            "n_replicates", "n_boot_ok", "method")
+  empty <- data.frame(sample = character(0), metric = character(0), estimate = numeric(0),
+                      boot_mean = numeric(0), ci_low = numeric(0), ci_high = numeric(0),
+                      n_replicates = integer(0), n_boot_ok = integer(0), method = character(0),
+                      stringsAsFactors = FALSE)
+  if (is.null(rep_pd) || nrow(rep_pd) == 0 || !length(metrics)) return(empty)
+  n_boot <- as.integer(n_boot)
+  if (!is.finite(n_boot) || n_boot < 1) stop("n_boot must be a positive integer")
+  if (!is.finite(conf) || conf <= 0 || conf >= 1) stop("conf must be between 0 and 1")
+  metrics <- unique(as.character(metrics))
+  probe <- compute_one_curve_metrics(c(0, 1, 2, 3, 4, 5), c(1, 2, 3, 4, 5, 6), "probe")
+  bad <- setdiff(metrics, names(probe))
+  if (length(bad)) stop("unknown metric(s): ", paste(bad, collapse = ", "))
+  alpha <- (1 - conf) / 2
+
+  # keep the caller's RNG stream intact
+  had_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = globalenv(), inherits = FALSE) else NULL
+  on.exit({
+    if (had_seed) assign(".Random.seed", old_seed, envir = globalenv())
+    else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
+  }, add = TRUE)
+
+  metric_vec <- function(tv, ov, nm) {
+    ok <- is.finite(tv) & is.finite(ov)
+    r <- tryCatch(compute_one_curve_metrics(tv[ok], ov[ok], nm, smooth_window, peak_smooth_window,
+                                            peak_mode, lysis_threshold),
+                  error = function(e) NULL)
+    if (is.null(r)) return(rep(NA_real_, length(metrics)))
+    vapply(metrics, function(k) suppressWarnings(as.numeric(r[[k]][1])), numeric(1))
+  }
+
+  rep_pd <- rep_pd[is.finite(rep_pd$time), , drop = FALSE]
+  out <- lapply(unique(as.character(rep_pd$variable)), function(v) {
+    g     <- rep_pd[as.character(rep_pd$variable) == v, , drop = FALSE]
+    times <- sort(unique(g$time))
+    reps  <- unique(g$replicate[is.finite(g$value)])
+    R     <- length(reps)
+    na_row <- function(est) data.frame(sample = v, metric = metrics, estimate = est,
+                                       boot_mean = NA_real_, ci_low = NA_real_, ci_high = NA_real_,
+                                       n_replicates = R, n_boot_ok = 0L, method = "percentile",
+                                       stringsAsFactors = FALSE)
+    if (R == 0) return(na_row(rep(NA_real_, length(metrics))))
+    # time x replicate matrix, and its 0/1 "observed" companion
+    M <- matrix(NA_real_, length(times), R)
+    gi <- is.finite(g$value)
+    M[cbind(match(g$time[gi], times), match(g$replicate[gi], reps))] <- g$value[gi]
+    obs <- !is.na(M); M0 <- M; M0[!obs] <- 0
+    storage.mode(obs) <- "numeric"
+    est_curve <- rowSums(M0) / rowSums(obs)
+    estimate  <- metric_vec(times, est_curve, v)
+    if (R < 2) return(na_row(estimate))
+
+    set.seed(seed)
+    idx <- matrix(sample.int(R, R * n_boot, replace = TRUE), nrow = R)            # R x n_boot
+    cnt <- vapply(seq_len(n_boot), function(b) tabulate(idx[, b], nbins = R), numeric(R))  # R x n_boot
+    curves <- (M0 %*% cnt) / (obs %*% cnt)                                         # time x n_boot
+    key <- apply(cnt, 2, paste, collapse = ",")
+    # identical resamples (few replicates => few distinct resamples) give identical curves: run
+    # the engine once per distinct resample
+    uk <- unique(key)
+    first <- match(uk, key)
+    res <- vapply(first, function(b) metric_vec(times, curves[, b], v), numeric(length(metrics)))
+    res <- matrix(res, nrow = length(metrics))
+    draws <- res[, match(key, uk), drop = FALSE]                                   # metrics x n_boot
+
+    rows <- lapply(seq_along(metrics), function(i) {
+      x <- draws[i, ]; x <- x[is.finite(x)]
+      okn <- length(x)
+      good <- okn >= 20
+      qs <- if (good) stats::quantile(x, c(alpha, 1 - alpha), names = FALSE, type = 7) else c(NA_real_, NA_real_)
+      data.frame(sample = v, metric = metrics[i], estimate = estimate[i],
+                 boot_mean = if (good) mean(x) else NA_real_,
+                 ci_low = qs[1], ci_high = qs[2], n_replicates = R, n_boot_ok = okn,
+                 method = "percentile", stringsAsFactors = FALSE)
+    })
+    do.call(rbind, rows)
+  })
+  res <- do.call(rbind, c(out, list(make.row.names = FALSE)))
+  res$n_boot_ok <- as.integer(res$n_boot_ok); res$n_replicates <- as.integer(res$n_replicates)
+  res[, cols, drop = FALSE]
+}
+
+# Curve difference versus a reference sample, per time point.
+# pd: time, variable, mean_value (mean curves). mode "difference": diff = mean - reference mean;
+# "log2_ratio": diff = log2(mean / reference mean), NA where either mean is <= 0. With rep_pd
+# (time, variable, replicate, value) every time point also gets a Welch two-sample t-test of the
+# sample's replicates against the reference's (on the raw readings; on log2 readings for
+# "log2_ratio", positive readings only), Holm-adjusted across the sample's time points. The
+# reference's own rows have diff 0 and NA p. Exploratory: n is small and the tests are per time
+# point. Returns sample, time, mean_value, ref_mean, diff[, n, n_ref, p, p_adj_holm, stars].
+curve_difference <- function(pd, ref_sample, rep_pd = NULL, mode = c("difference", "log2_ratio")) {
+  mode <- match.arg(mode)
+  if (is.null(pd) || nrow(pd) == 0) return(NULL)
+  pd <- pd[is.finite(pd$time), , drop = FALSE]
+  if (is.null(ref_sample) || !nzchar(ref_sample) || !ref_sample %in% as.character(pd$variable))
+    stop("reference sample '", ref_sample, "' is not in the data")
+  rg <- pd[as.character(pd$variable) == ref_sample & is.finite(pd$mean_value), , drop = FALSE]
+  ref_mean <- tapply(rg$mean_value, rg$time, mean)
+  dfn <- function(x, r) {
+    if (mode == "difference") x - r
+    else ifelse(is.finite(x) & is.finite(r) & x > 0 & r > 0, log2(x / r), NA_real_)
+  }
+  out <- do.call(rbind, lapply(unique(as.character(pd$variable)), function(v) {
+    g <- pd[as.character(pd$variable) == v, , drop = FALSE]
+    g <- g[order(g$time), , drop = FALSE]
+    r <- unname(ref_mean[match(as.character(g$time), names(ref_mean))])
+    d <- if (v == ref_sample) ifelse(is.finite(g$mean_value) & is.finite(r), 0, NA_real_) else dfn(g$mean_value, r)
+    data.frame(sample = v, time = g$time, mean_value = g$mean_value, ref_mean = r, diff = d,
+               stringsAsFactors = FALSE)
+  }))
+  rownames(out) <- NULL
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(out)
+
+  rep_pd <- rep_pd[is.finite(rep_pd$time) & is.finite(rep_pd$value), , drop = FALSE]
+  vals <- function(v, tm) {
+    x <- rep_pd$value[as.character(rep_pd$variable) == v & rep_pd$time == tm]
+    if (mode == "log2_ratio") log2(x[x > 0]) else x
+  }
+  n_s <- n_r <- p <- rep(NA_real_, nrow(out))
+  for (i in seq_len(nrow(out))) {
+    x <- vals(out$sample[i], out$time[i])
+    y <- vals(ref_sample, out$time[i])
+    n_s[i] <- length(x); n_r[i] <- length(y)
+    if (out$sample[i] == ref_sample || length(x) < 2 || length(y) < 2) next
+    p[i] <- tryCatch(stats::t.test(x, y, var.equal = FALSE)$p.value, error = function(e) NA_real_)
+  }
+  out$n <- as.integer(n_s); out$n_ref <- as.integer(n_r)
+  out$p <- p
+  out$p_adj_holm <- NA_real_
+  for (v in unique(out$sample)) {
+    ix <- which(out$sample == v)
+    out$p_adj_holm[ix] <- stats::p.adjust(out$p[ix], method = "holm")
+  }
+  out$stars <- sig_stars(out$p_adj_holm)
+  out$stars[is.na(out$p_adj_holm)] <- NA_character_
+  out
+}
+
+# First time at which each sample separates from the reference: the earliest time with
+# p_adj_holm < alpha in a curve_difference() table that carries p-values. NA if none (and for
+# the reference itself). Returns sample, first_separation_time, one row per sample.
+first_separation_time <- function(x, alpha = 0.05) {
+  if (is.null(x) || nrow(x) == 0) return(data.frame(sample = character(0), first_separation_time = numeric(0)))
+  if (!"p_adj_holm" %in% names(x)) stop("x needs p-values: call curve_difference() with rep_pd")
+  smp <- unique(as.character(x$sample))
+  data.frame(sample = smp,
+             first_separation_time = vapply(smp, function(v) {
+               s <- x$sample == v & is.finite(x$p_adj_holm) & x$p_adj_holm < alpha
+               if (any(s)) min(x$time[s]) else NA_real_
+             }, numeric(1), USE.NAMES = FALSE),
+             stringsAsFactors = FALSE)
+}
+# ── end v2.20 engine ──
+
+# ── v2.21 figure helpers ──
+# Pure functions (no Shiny state) behind the v2.21 analysis figures: the metric summary's styles and significance
+# brackets, the replicate small multiples and the fraction-lysed curves. Tested by tests/test_v221_figures.R.
+
+# Summary styles of the metric summary (input metric_style); "dot" is the v2.11 look and the default.
+METRIC_STYLE_CHOICES <- c("Dot plot (replicates, mean bar)"         = "dot",
+                          "Bar (mean ± error, replicates as points)" = "bar",
+                          "Box plot"                                 = "box",
+                          "Violin"                                   = "violin")
+
+# The metric summary drawn in a style other than "dot". `long` has sample (factor, display labels), metric
+# (factor, the facet titles) and value; `summ` has metric, sample, mean, lo, hi; `cols_by_label` maps a display
+# label to its colour. bar: columns at the mean, whiskers lo..hi (dark when the whiskers follow the sample colour,
+# which would vanish inside a same-coloured bar), replicates as open circles, the y axis starting at 0; box: one box
+# per sample (outliers as open circles) with the replicates; violin: untrimmed, equal-width densities with the
+# replicates and a mean bar. facet = FALSE draws one panel (used by the time-to-threshold figure).
+metric_summary_styled <- function(style = c("bar", "box", "violin", "dot"), long, summ, cols_by_label,
+                                  eb_col = "sample", ptsz = 3, x_guide = ggplot2::waiver(),
+                                  y_exp = c(0.08, 0.18), facet = TRUE, x_drop = TRUE) {
+  style <- match.arg(style)
+  err_col <- if (identical(eb_col, "sample")) "grey15" else eb_col
+  pt_col  <- if (identical(style, "bar")) "grey15" else NULL   # circles on a coloured bar are drawn dark
+  jit     <- position_jitter(width = 0.12, height = 0, seed = 1)
+  g <- ggplot(long, aes(x = sample, y = value))
+  if (style == "dot") {   # the v2.11 look (the metric summary itself draws it inline): used by the time-to-threshold figure
+    g <- g + (if (identical(eb_col, "sample"))
+        geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi, color = sample), width = 0.3,
+                      linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)
+      else geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi), color = eb_col, width = 0.3,
+                         linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)) +
+      geom_crossbar(data = summ, aes(x = sample, y = mean, ymin = mean, ymax = mean, color = sample),
+                    width = 0.5, linewidth = pt2lw(0.75), inherit.aes = FALSE, na.rm = TRUE)
+  } else if (style == "bar") {
+    g <- g +
+      geom_col(data = summ, aes(x = sample, y = mean, fill = sample), width = 0.6, alpha = 0.85, inherit.aes = FALSE) +
+      geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi), color = err_col, width = 0.3,
+                    linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE) +
+      expand_limits(y = 0)
+    y_exp[1] <- 0   # the columns sit on the axis; a facet that holds negative values gets its own room below via a blank layer
+    lowest <- suppressWarnings(tapply(c(long$value, summ$lo), c(as.character(long$metric), as.character(summ$metric)), min, na.rm = TRUE))
+    neg <- names(lowest)[is.finite(lowest) & lowest < 0]
+    if (length(neg)) {
+      span <- suppressWarnings(tapply(c(long$value, summ$hi), c(as.character(long$metric), as.character(summ$metric)), max, na.rm = TRUE))[neg] - lowest[neg]
+      g <- g + geom_blank(data = data.frame(metric = factor(neg, levels = levels(long$metric)), sample = long$sample[1],
+                                            value = unname(lowest[neg] - 0.08 * span)), aes(x = sample, y = value), inherit.aes = FALSE)
+    }
+  } else if (style == "box") {
+    g <- g + geom_boxplot(aes(color = sample, fill = sample), width = 0.6, alpha = 0.25, outlier.shape = 1,
+                          outlier.size = ptsz * 0.6, linewidth = pt2lw(0.5))
+  } else {
+    g <- g +
+      geom_violin(aes(color = sample, fill = sample), trim = FALSE, scale = "width", width = 0.8, alpha = 0.3,
+                  linewidth = pt2lw(0.5)) +
+      geom_crossbar(data = summ, aes(x = sample, y = mean, ymin = mean, ymax = mean, color = sample),
+                    width = 0.5, linewidth = pt2lw(0.75), inherit.aes = FALSE)
+  }
+  g <- g + if (is.null(pt_col))
+    geom_point(aes(color = sample), shape = 21, fill = "white", size = ptsz * 0.6, stroke = pt2lw(0.5), position = jit)
+  else
+    geom_point(color = pt_col, shape = 21, fill = "white", size = ptsz * 0.6, stroke = pt2lw(0.5), position = jit)
+  if (facet) g <- g + facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 18))
+  g + scale_color_manual(values = cols_by_label, guide = "none") +
+    scale_fill_manual(values = cols_by_label, guide = "none") +
+    scale_x_discrete(guide = x_guide, drop = x_drop) +
+    scale_y_continuous(expand = expansion(mult = y_exp)) +
+    labs(x = NULL, y = NULL)
+}
+
+# Significance brackets for ONE facet of the metric summary. `pw` is the pairwise table of
+# compare_replicate_metric() with its sample / versus columns already mapped to the labels used as x levels;
+# `x_pos` maps those labels to their x positions; y_top is the highest thing drawn in the facet and y_range the
+# facet's data range. Keeps the pairs with p_adj_holm < alpha, the `max_n` most significant of them, stacks them
+# above the data (the narrowest lowest, so a wide bracket never cuts through a narrow one) and returns the
+# segments (a bar and two short ticks per bracket), the star labels, how many pairs were significant / shown and
+# the y the facet must reach to hold the topmost label.
+metric_bracket_layout <- function(pw, x_pos, y_top, y_range, alpha = 0.05, max_n = 6L) {
+  none <- list(segments = NULL, labels = NULL, n_sig = 0L, n_shown = 0L, y_max = NA_real_)
+  if (is.null(pw) || !nrow(pw)) return(none)
+  ok <- is.finite(pw$p_adj_holm) & pw$p_adj_holm < alpha & pw$sample %in% names(x_pos) & pw$versus %in% names(x_pos)
+  pw <- pw[ok, , drop = FALSE]
+  n_sig <- nrow(pw)
+  if (!n_sig) return(none)
+  pw$x1 <- unname(pmin(x_pos[pw$sample], x_pos[pw$versus]))
+  pw$x2 <- unname(pmax(x_pos[pw$sample], x_pos[pw$versus]))
+  pw <- pw[order(pw$p_adj_holm, pw$x2 - pw$x1, pw$x1), , drop = FALSE]
+  pw <- utils::head(pw, max_n)                                          # the most significant
+  pw <- pw[order(pw$x2 - pw$x1, pw$x1, pw$p_adj_holm), , drop = FALSE]  # stacking order, lowest first
+  R <- if (is.finite(y_range) && y_range > 0) y_range else max(abs(y_top), 1, na.rm = TRUE)
+  y <- y_top + 0.06 * R + (seq_len(nrow(pw)) - 1L) * 0.09 * R
+  tick <- 0.025 * R
+  list(segments = data.frame(x = c(pw$x1, pw$x1, pw$x2), xend = c(pw$x2, pw$x1, pw$x2),
+                             y = c(y, y - tick, y - tick), yend = c(y, y, y), stringsAsFactors = FALSE),
+       labels = data.frame(x = (pw$x1 + pw$x2) / 2, y = y, label = pw$stars, p_adj_holm = pw$p_adj_holm,
+                           stringsAsFactors = FALSE),
+       n_sig = n_sig, n_shown = nrow(pw), y_max = max(y) + 0.07 * R)
+}
+
+# The highest value each facet of a built metric-summary plot holds (points, whiskers, box whiskers, violin tails),
+# read from the trained y scales; a named numeric vector over the facet titles, plus the range of each facet.
+facet_y_extent <- function(g, facet_col = "metric") {
+  b  <- ggplot2::ggplot_build(g)
+  ly <- b$layout$layout
+  rg <- lapply(b$layout$panel_scales_y, function(s) s$range$range)
+  titles <- as.character(ly[[facet_col]])
+  list(top = setNames(vapply(ly$PANEL, function(i) max(rg[[as.integer(i)]]), numeric(1)), titles),
+       range = setNames(vapply(ly$PANEL, function(i) diff(range(rg[[as.integer(i)]])), numeric(1)), titles))
+}
+
+# Tints of a colour for the replicate curves of one sample: the sample colour mixed with white at three
+# fixed amounts, so replicates differ in lightness (they stay distinguishable in greyscale) while the mean
+# keeps the full colour.
+REPLICATE_TINTS <- c(0.30, 0.55, 0.75)
+replicate_tint_colors <- function(col, tints = REPLICATE_TINTS) {
+  m <- grDevices::colorRamp(c(col, "#FFFFFF"))(tints)
+  grDevices::rgb(m[, 1], m[, 2], m[, 3], maxColorValue = 255)
+}
+# The colour of every replicate of one sample: replicate indices (any labels) are ranked and cycle through the
+# three tints.
+replicate_curve_colors <- function(col, replicate_ids) {
+  ids <- sort(unique(replicate_ids))
+  tc  <- replicate_tint_colors(col)
+  setNames(tc[((seq_along(ids) - 1L) %% length(tc)) + 1L], as.character(ids))
+}
+
+# Fraction of replicates lysed at each time, per sample. rep_pd has time, variable, replicate, value. A
+# replicate counts as lysed at a time when ALL of these hold: the time is after the sample's peak (the highest
+# per-time mean of its replicates), its OD is below the threshold, and it had reached the threshold earlier (so the
+# low readings of the lag and growth phase, or a threshold the curve never reached, are not "lysis"). mode
+# "relative": the threshold OD is `threshold` x the sample's peak OD (0.5 = half of the peak); "absolute":
+# `threshold` is an OD. The fraction at a time is over the replicates read at that time. Returns one row per
+# sample and time: sample, time, n, n_lysed, fraction, threshold_od, peak_od, t_peak.
+lysed_fraction_curves <- function(rep_pd, threshold, mode = c("relative", "absolute")) {
+  mode <- match.arg(mode)
+  if (!is.numeric(threshold) || length(threshold) != 1 || !is.finite(threshold) || threshold <= 0)
+    stop("The lysed threshold must be a positive number.")
+  empty <- data.frame(sample = character(0), time = numeric(0), n = integer(0), n_lysed = integer(0),
+                      fraction = numeric(0), threshold_od = numeric(0), peak_od = numeric(0),
+                      t_peak = numeric(0), stringsAsFactors = FALSE)
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(empty)
+  rep_pd <- rep_pd[is.finite(rep_pd$time) & is.finite(rep_pd$value), , drop = FALSE]
+  if (nrow(rep_pd) == 0) return(empty)
+  rep_pd$variable <- as.character(rep_pd$variable)
+  out <- lapply(unique(rep_pd$variable), function(s) {
+    d  <- rep_pd[rep_pd$variable == s, , drop = FALSE]
+    tm <- sort(unique(d$time))
+    mu <- vapply(tm, function(t) mean(d$value[d$time == t]), numeric(1))
+    pk <- max(mu); t_pk <- tm[which.max(mu)]
+    thr <- if (mode == "relative") threshold * pk else threshold
+    lysed <- list()
+    for (r in unique(d$replicate)) {
+      dr <- d[d$replicate == r, , drop = FALSE]; dr <- dr[order(dr$time), , drop = FALSE]
+      reached <- cummax(dr$value) >= thr
+      lys <- dr$time > t_pk & dr$value < thr & reached
+      lysed[[length(lysed) + 1L]] <- data.frame(time = dr$time, lysed = lys)
+    }
+    ly <- do.call(rbind, lysed)
+    n_t  <- as.integer(table(factor(ly$time, levels = tm)))
+    n_ly <- as.integer(tapply(ly$lysed, factor(ly$time, levels = tm), sum))
+    data.frame(sample = s, time = tm, n = n_t, n_lysed = n_ly, fraction = n_ly / n_t,
+               threshold_od = thr, peak_od = pk, t_peak = t_pk, stringsAsFactors = FALSE)
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# The first time the fraction lysed reaches `level` (0.5 = half the replicates), per sample, as its own row of
+# (sample, time, fraction); time is NA for a sample that never reaches it.
+lysed_fraction_t50 <- function(curves, level = 0.5) {
+  if (is.null(curves) || nrow(curves) == 0)
+    return(data.frame(sample = character(0), time = numeric(0), fraction = numeric(0), stringsAsFactors = FALSE))
+  do.call(rbind, c(lapply(unique(curves$sample), function(s) {
+    d <- curves[curves$sample == s, , drop = FALSE]; d <- d[order(d$time), , drop = FALSE]
+    i <- which(d$fraction >= level)[1]
+    data.frame(sample = s, time = if (is.na(i)) NA_real_ else d$time[i],
+               fraction = if (is.na(i)) NA_real_ else d$fraction[i], stringsAsFactors = FALSE)
+  }), list(make.row.names = FALSE)))
+}
+# ── end v2.21 figure helpers ──
+
+# ── v2.20: helpers behind the phases figure and the phases / bootstrap / separation tables ──
+# Pure functions (no Shiny state), tested in tests/test_v220_integration.R. See docs/PHASES_AND_BOOTSTRAP.md.
+
+# Phase order and a fixed, colour-blind-safe, muted palette (Okabe-Ito based): lag grey, exponential green,
+# deceleration yellow-green, stationary blue, lysis vermillion, recovery purple, post-lysis grey-blue.
+PHASE_LEVELS <- c("lag", "exponential", "deceleration", "stationary", "lysis", "recovery", "post-lysis")
+PHASE_COLORS <- c(lag = "#9A9A9A", exponential = "#009E73", deceleration = "#B5C227", stationary = "#0072B2",
+                  lysis = "#D55E00", recovery = "#CC79A7", `post-lysis` = "#6F8FAF")
+PHASE_BAND_ALPHA  <- 0.12     # full-height bands behind a single curve
+PHASE_STRIP_ALPHA <- 0.55     # thin strips (several samples): too small to read at 0.12
+PHASE_STRIP_FRAC  <- 0.06     # height of one strip, as a fraction of the panel height
+
+# Where the phase shading goes, in plotted units. `lo`, `hi`: the range of the curves (linear OD, or log10 OD
+# for a log axis); k: number of samples. One sample: bands over the whole panel (5 % padding either side of the
+# curve). Several: k strips of 6 % of the panel each at the top, the curves below them with a 3 % gap and 4 %
+# padding underneath. Returns the panel limits and, per sample (first = top strip), the strip's lower / upper edge.
+phase_layout <- function(lo, hi, k) {
+  span <- if (is.finite(hi - lo) && hi > lo) hi - lo else max(abs(hi), 1) * 0.1
+  if (k <= 1) {
+    pad <- 0.05
+    P   <- span / (1 - 2 * pad)
+    lim <- c(lo - pad * P, hi + pad * P)
+    return(list(limits = lim, strips = NULL, full = lim))
+  }
+  strips_f <- PHASE_STRIP_FRAC * k
+  bot <- 0.04; gap <- 0.03
+  P   <- span / (1 - bot - gap - strips_f)
+  y0  <- lo - bot * P
+  lim <- c(y0, y0 + P)
+  top <- lim[2] - (seq_len(k) - 1) * PHASE_STRIP_FRAC * P
+  list(limits = lim, strips = data.frame(ymin = top - PHASE_STRIP_FRAC * P, ymax = top), full = lim)
+}
+
+# The phases table as shown (Statistics tab, reports): 3 significant digits, an em dash for a non-finite number.
+phases_display_table <- function(ph) {
+  if (is.null(ph) || nrow(ph) == 0) return(NULL)
+  d <- data.frame(Sample = ph$sample, Phase = ph$phase, Start = ph$t_start, End = ph$t_end,
+                  Duration = ph$duration, `OD start` = ph$od_start, `OD end` = ph$od_end,
+                  check.names = FALSE, stringsAsFactors = FALSE)
+  fmt_stats_df(d)
+}
+
+# bootstrap_metrics() output as shown: metric labels, 3 significant digits, counts as plain integers.
+bootstrap_display_table <- function(bt) {
+  if (is.null(bt) || nrow(bt) == 0) return(NULL)
+  d <- data.frame(Sample = bt$sample, Metric = metric_label(bt$metric), Estimate = bt$estimate,
+                  `CI low` = bt$ci_low, `CI high` = bt$ci_high,
+                  `n replicates` = as.character(bt$n_replicates), `n ok draws` = as.character(bt$n_boot_ok),
+                  check.names = FALSE, stringsAsFactors = FALSE)
+  fmt_stats_df(d)
+}
+
+# The metrics bootstrap_metrics() can resample: the numeric columns compute_one_curve_metrics() returns. The
+# reference-relative ones (infection_strength, relative_*, centroid_index, local_virulence, lysis_onset_delta) are
+# added later by compute_curve_metrics() from a reference sample, so the engine does not resample them.
+BOOT_METRIC_NAMES <- local({
+  probe <- compute_one_curve_metrics(c(0, 1, 2, 3, 4, 5), c(1, 2, 3, 4, 5, 6), "probe")
+  names(probe)[vapply(probe, is.numeric, logical(1))]
+})
+BOOT_N_MIN <- 200L; BOOT_N_MAX <- 5000L
+
+# first_separation_time() for the table under the separation figure: the reference is left out (its own
+# time is NA by definition); times are 3 significant digits, "none" when the test never reaches p < alpha.
+separation_display_table <- function(fs, ref = "", tunit = "min") {
+  if (is.null(fs) || nrow(fs) == 0) return(NULL)
+  fs <- fs[as.character(fs$sample) != ref, , drop = FALSE]
+  if (nrow(fs) == 0) return(NULL)
+  d <- data.frame(Sample = as.character(fs$sample),
+                  x = ifelse(is.finite(fs$first_separation_time), formatC(signif(fs$first_separation_time, 3), format = "g"), "none"),
+                  stringsAsFactors = FALSE)
+  names(d)[2] <- paste0("First separation (", tunit, ")")
+  d
+}
+
+# ── v2.19: helpers for the Curve fitting tab, the phenotype heatmap and the extraction tables ──
+# Pure functions (no Shiny state), tested in tests/test_v219_integration.R. See docs/FITS_AND_EXTRACTION.md.
+
+# The points fit_growth_models() actually fits: finite, time-sorted, positive when the fit is on the ln scale,
+# and cut at the maximum when until = "peak" (the same filtering as the engine, so the figure can draw the
+# fitted range in colour and the rest of the curve in grey).
+fit_window_points <- function(t, od, until = "peak", log_transform = TRUE) {
+  ok <- is.finite(t) & is.finite(od)
+  t <- as.numeric(t)[ok]; od <- as.numeric(od)[ok]
+  o <- order(t); t <- t[o]; od <- od[o]
+  if (log_transform) { pos <- od > 0; t <- t[pos]; od <- od[pos] }
+  if (length(od) && identical(until, "peak")) { k <- which.max(od); t <- t[seq_len(k)]; od <- od[seq_len(k)] }
+  list(t = t, od = od)
+}
+
+# The fitted points of every curve of a fit table: a list keyed by sample (mean-curve fits) or by
+# "sample<CR>replicate" (replicate fits). pd: time, variable, mean_value; rep_pd: time, variable, replicate, value.
+fit_windows_from <- function(pd = NULL, rep_pd = NULL, until = "peak", log_transform = TRUE) {
+  out <- list()
+  if (!is.null(pd) && nrow(pd))
+    for (s in unique(as.character(pd$variable))) {
+      g <- pd[as.character(pd$variable) == s, , drop = FALSE]
+      out[[s]] <- fit_window_points(g$time, g$mean_value, until, log_transform)
+    }
+  if (!is.null(rep_pd) && nrow(rep_pd)) {
+    key <- unique(data.frame(s = as.character(rep_pd$variable), r = rep_pd$replicate, stringsAsFactors = FALSE))
+    for (i in seq_len(nrow(key))) {
+      g <- rep_pd[as.character(rep_pd$variable) == key$s[i] & rep_pd$replicate == key$r[i], , drop = FALSE]
+      out[[paste(key$s[i], key$r[i], sep = "\r")]] <- fit_window_points(g$time, g$value, until, log_transform)
+    }
+  }
+  out
+}
+
+# The engine's fit table plus the columns the app shows: best (the converged model with the lowest AIC in its
+# sample / replicate group, flagged once per group), lag_abs (= t0 + lag: the fit `lag` is relative to the first
+# fitted point) and doubling_time (= ln 2 / mu_max, only for a ln-scale fit, where mu_max is a specific rate).
+fit_table_prepare <- function(fits) {
+  if (is.null(fits) || nrow(fits) == 0) return(NULL)
+  keys <- intersect(c("sample", "replicate"), names(fits))
+  kstr <- function(d) do.call(paste, c(lapply(d[c(keys, "model")], as.character), sep = "\r"))
+  bm   <- best_model(fits)
+  fits$best <- kstr(fits) %in% kstr(bm[!is.na(bm$model), , drop = FALSE])
+  conv <- fits$converged %in% TRUE
+  fits$lag_abs <- ifelse(conv, fits$t0 + fits$lag, NA_real_)
+  fits$doubling_time <- ifelse(conv & fits$log_transform %in% TRUE & is.finite(fits$mu_max) & fits$mu_max > 0,
+                               log(2) / fits$mu_max, NA_real_)
+  first <- c(keys, "model", "best", "converged", "n_points", "A", "mu_max", "lag_abs", "doubling_time", "r2", "aic",
+             "se_A", "se_mu_max", "se_lag", "message")
+  fits[, c(first, setdiff(names(fits), first)), drop = FALSE]
+}
+
+# The table as shown on screen: 3 significant digits, a tick for the best model, the lag labelled as an absolute
+# time. The unformatted fit table is what the CSV carries.
+fit_display_table <- function(tab) {
+  if (is.null(tab) || nrow(tab) == 0) return(NULL)
+  f3 <- function(x) ifelse(is.finite(x), formatC(signif(x, 3), format = "g"), "—")
+  d <- data.frame(Sample = as.character(tab$sample), stringsAsFactors = FALSE)
+  if ("replicate" %in% names(tab)) d$Replicate <- as.character(tab$replicate)
+  d$Model     <- ifelse(is.na(tab$model), "—", as.character(tab$model))
+  d$Best      <- ifelse(tab$best %in% TRUE, "✓", "")
+  d$Converged <- ifelse(tab$converged %in% TRUE, "yes", "no")
+  d$Points    <- as.character(tab$n_points)
+  d$A         <- f3(tab$A)
+  d$mu_max    <- f3(tab$mu_max)
+  d[["Lag (time units)"]] <- f3(tab$lag_abs)
+  d[["Doubling time"]]    <- f3(tab$doubling_time)
+  d[["R²"]]          <- f3(tab$r2)
+  d$AIC       <- f3(tab$aic)
+  d[["SE A"]]      <- f3(tab$se_A)
+  d[["SE mu_max"]] <- f3(tab$se_mu_max)
+  d[["SE lag"]]    <- f3(tab$se_lag)
+  d$Message   <- ifelse(is.na(tab$message), "", as.character(tab$message))
+  d
+}
+
+# mean and SD across the converged replicates of A, mu_max and the absolute lag, per sample and model
+# (the replicate-level companion table). n = replicates that converged.
+fit_replicate_summary <- function(tab) {
+  if (is.null(tab) || nrow(tab) == 0 || !"replicate" %in% names(tab)) return(NULL)
+  tab <- tab[tab$converged %in% TRUE, , drop = FALSE]
+  if (nrow(tab) == 0) return(NULL)
+  key <- paste(tab$sample, tab$model, sep = "\r")
+  rows <- lapply(unique(key), function(k) {
+    g <- tab[key == k, , drop = FALSE]
+    stat <- function(v) { v <- v[is.finite(v)]; c(if (length(v)) mean(v) else NA_real_, if (length(v) >= 2) stats::sd(v) else NA_real_) }
+    a <- stat(g$A); m <- stat(g$mu_max); l <- stat(g$lag_abs)
+    data.frame(sample = g$sample[1], model = g$model[1], n = nrow(g), A_mean = a[1], A_sd = a[2],
+               mu_max_mean = m[1], mu_max_sd = m[2], lag_abs_mean = l[1], lag_abs_sd = l[2], stringsAsFactors = FALSE)
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# "mean ± SD" strings (3 significant digits) for the replicate summary; "mean" alone when the SD is undefined.
+fit_replicate_summary_display <- function(sm) {
+  if (is.null(sm) || nrow(sm) == 0) return(NULL)
+  ms <- function(m, s) ifelse(!is.finite(m), "—",
+        ifelse(is.finite(s), paste0(formatC(signif(m, 3), format = "g"), " ± ", formatC(signif(s, 3), format = "g")),
+               formatC(signif(m, 3), format = "g")))
+  data.frame(Sample = sm$sample, Model = sm$model, `Replicates converged` = sm$n,
+             A = ms(sm$A_mean, sm$A_sd), mu_max = ms(sm$mu_max_mean, sm$mu_max_sd),
+             `Lag (time units)` = ms(sm$lag_abs_mean, sm$lag_abs_sd), check.names = FALSE, stringsAsFactors = FALSE)
+}
+
+# The fitted curve of every converged row to draw (best model only, or every converged model), on a fine time
+# grid over its fitted range, back-transformed by predict_growth_model(). `windows`: fit_windows_from().
+fit_curve_frames <- function(tab, windows, show = c("best", "all"), n_grid = 200L) {
+  show <- match.arg(show)
+  if (is.null(tab) || nrow(tab) == 0) return(NULL)
+  has_rep <- "replicate" %in% names(tab)
+  rows <- which(tab$converged %in% TRUE & (show == "all" | tab$best %in% TRUE))
+  out <- lapply(rows, function(i) {
+    r <- tab[i, , drop = FALSE]
+    w <- windows[[if (has_rep) paste(r$sample, r$replicate, sep = "\r") else as.character(r$sample)]]
+    if (is.null(w) || !length(w$t) || !is.finite(r$t0)) return(NULL)
+    tg <- seq(r$t0, max(w$t), length.out = n_grid)
+    data.frame(sample = as.character(r$sample), replicate = if (has_rep) r$replicate else NA_real_,
+               model = as.character(r$model), best = r$best %in% TRUE, time = tg,
+               od = predict_growth_model(r, tg, r$y0), stringsAsFactors = FALSE)
+  })
+  out <- Filter(Negate(is.null), out)
+  if (!length(out)) return(NULL)
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# Times typed in the extraction box ("30, 60 120"; commas, semicolons or spaces): the finite, sorted, unique
+# numbers and the words that were not numbers.
+parse_extract_times <- function(txt) {
+  parts <- trimws(unlist(strsplit(as.character(txt %||% ""), "[,;[:space:]]+")))
+  parts <- parts[nzchar(parts)]
+  v <- suppressWarnings(as.numeric(parts))
+  list(times = sort(unique(v[is.finite(v)])), invalid = parts[!is.finite(v)])
+}
+
+# Long data frame of the phenotype heatmap from phenotype_matrix() output: one row per sample x metric.
+# Rows are in `sample_order` (the first sample on top), columns in the matrix order; `value` is what is
+# filled (z-score, 0-1 or raw), `raw` the unscaled mean, `label` the raw value to print in the cell and
+# `dark` whether the fill is dark enough for white text.
+pheno_heatmap_frame <- function(pm, scale = "z", sample_order = NULL, sample_labels = NULL, metric_labels = NULL) {
+  if (is.null(pm) || length(pm$metrics) == 0 || nrow(pm$matrix) == 0) return(NULL)
+  smp <- rownames(pm$matrix)
+  if (!is.null(sample_order)) smp <- c(intersect(sample_order, smp), setdiff(smp, sample_order))
+  d <- do.call(rbind, lapply(seq_along(pm$metrics), function(j)
+    data.frame(sample = smp, metric = pm$metrics[j], value = unname(pm$matrix[smp, j]),
+               raw = unname(pm$raw[smp, j]), stringsAsFactors = FALSE)))
+  rng <- range(d$value, na.rm = TRUE)
+  d$dark <- if (identical(scale, "z")) abs(d$value) > 0.6 * max(abs(rng), 1e-9)
+            else (d$value - rng[1]) / max(diff(rng), 1e-9) < 0.5       # viridis: low = dark
+  d$dark[is.na(d$dark)] <- FALSE
+  d$label <- ifelse(is.finite(d$raw), formatC(signif(d$raw, 2), format = "g"), NA_character_)   # v2.20.1: two significant digits, no text for an undefined cell
+  mlab <- if (is.null(metric_labels)) pheno_metric_label(pm$metrics) else metric_labels
+  d$metric_key <- d$metric
+  d$metric <- factor(mlab[match(d$metric, pm$metrics)], levels = unique(mlab))
+  slab <- if (is.null(sample_labels)) smp else unname(sample_labels[smp])
+  d$sample_key <- d$sample
+  d$sample <- factor(slab[match(d$sample, smp)], levels = rev(unique(slab)))   # first sample on top
+  d
+}
+
+
+# ── v2.21: navigation helpers and display names ───────────────────────────────
+# The sidebar sections, in order: title -> id key. The same list builds the <details id="sec_<key>"> elements
+# (kc_section) and the "Jump to" menu, so the menu can never name a section that does not exist.
+SIDEBAR_SECTIONS <- c("Axis Settings" = "axis", "Time Point Filtering" = "time_filter", "Region Highlighting" = "regions",
+                      "Time Point Markers" = "markers", "Color Palettes" = "palettes", "Line & Point Settings" = "line_point",
+                      "Label Options" = "labels", "Error Bars / Shadow" = "error_bars", "Journal Figure Preset" = "journal",
+                      "Plot Dimensions & Export" = "export", "Experiment Notebook" = "notebook",
+                      "Stats & Reports" = "stats_reports", "Variable Styling" = "var_styling")
+# One accordion section of the sidebar: a <details> the page script keeps to one-open-at-a-time.
+kc_section <- function(title, ...) {
+  key <- SIDEBAR_SECTIONS[[title]]
+  if (is.null(key)) stop("kc_section: '", title, "' is not in SIDEBAR_SECTIONS")
+  tags$details(class = "kc-section", id = paste0("sec_", key), tags$summary(title), ...)
+}
+# CSS class of the figure column: "kc-sticky" keeps it in view while the sidebar scrolls (checkbox sticky_figure).
+kc_main_class <- function(sticky = TRUE) paste(c("kc-main", if (isTRUE(sticky)) "kc-sticky"), collapse = " ")
+
+# Display names: a named character vector, raw column name -> name shown to the user. Blank / missing = the raw name.
+display_name_of <- function(raw, map) {
+  raw <- as.character(raw); out <- raw
+  if (length(raw) && length(map) && !is.null(names(map))) {
+    hit <- match(raw, names(map))
+    ok  <- !is.na(hit) & !is.na(map[hit]) & nzchar(trimws(map[hit]))
+    out[ok] <- trimws(unname(map[hit[ok]]))
+  }
+  out
+}
+# A table whose `cols` hold sample names: each becomes the display name, with the raw name in a `<col>_raw` column
+# right after it (the CSV form). A `<col>_display` column (curve_metrics_current()) is dropped, already applied.
+# Applying it twice is harmless (a table that already has `<col>_raw` is left alone).
+with_display <- function(df, map, cols = c("sample", "versus")) {
+  if (is.null(df) || !is.data.frame(df)) return(df)
+  for (col in intersect(cols, names(df))) {
+    raw_nm <- paste0(col, "_raw")
+    if (raw_nm %in% names(df)) next
+    raw <- as.character(df[[col]])
+    dsp <- paste0(col, "_display"); if (dsp %in% names(df)) df[[dsp]] <- NULL
+    pos <- match(col, names(df))
+    df[[col]] <- display_name_of(raw, map)
+    df[[raw_nm]] <- raw
+    nms <- names(df); df <- df[c(nms[seq_len(pos)], raw_nm, setdiff(nms[-seq_len(pos)], raw_nm))]
+  }
+  df
+}
+# The same table without the `<col>_raw` columns: what the screen and the reports show (the CSVs keep them).
+drop_raw_columns <- function(df) {
+  if (is.null(df) || !is.data.frame(df)) return(df)
+  df[, !grepl("^(sample|versus|comparison|reference)_raw$", names(df)), drop = FALSE]
+}
+# One name column of a finished display table (e.g. "Sample") mapped to display names.
+map_name_column <- function(df, col, map) {
+  if (!is.null(df) && is.data.frame(df) && col %in% names(df)) df[[col]] <- display_name_of(df[[col]], map)
+  df
+}
+.regex_escape <- function(x) gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", x)
+# Raw names inside a sentence (a warning, a note) replaced by their display names. Whole-name matches only, longest
+# name first, and only for samples that were renamed.
+relabel_text <- function(x, map) {
+  if (!length(x) || !length(map) || is.null(names(map))) return(x)
+  ch <- names(map)[!is.na(map) & nzchar(trimws(map)) & trimws(map) != names(map)]
+  if (!length(ch)) return(x)
+  ch  <- ch[order(-nchar(ch))]
+  tok <- sprintf("\001%d\002", seq_along(ch))
+  x   <- as.character(x)
+  for (i in seq_along(ch))
+    x <- gsub(paste0("(?<![[:alnum:]_])", .regex_escape(ch[i]), "(?![[:alnum:]_])"), tok[i], x, perl = TRUE)
+  for (i in seq_along(ch)) x <- gsub(tok[i], trimws(unname(map[ch[i]])), x, fixed = TRUE)
+  x
+}
+# Tukey's "A-B" comparison labels with both names mapped (every ordered pair of known names is tried).
+relabel_comparison <- function(x, map) {
+  x <- as.character(x)
+  if (!length(x) || !length(map) || is.null(names(map))) return(x)
+  nm <- names(map); g <- expand.grid(a = nm, b = nm, stringsAsFactors = FALSE)
+  g <- g[g$a != g$b, , drop = FALSE]
+  idx <- match(x, paste(g$a, g$b, sep = "-"))
+  out <- x
+  ok  <- !is.na(idx)
+  out[ok] <- paste(display_name_of(g$a[idx[ok]], map), display_name_of(g$b[idx[ok]], map), sep = "-")
+  out
+}
+# "raw column name -> display name" for the report provenance (a sample that was not renamed is listed by its name).
+display_mapping_text <- function(samples, map, arrow = " → ") {
+  samples <- as.character(samples); d <- display_name_of(samples, map)
+  paste(ifelse(d != samples, paste0(samples, arrow, d), samples), collapse = ", ")
+}
+# The selected samples after one quick-edit "show" checkbox: `all` keeps the plot order of the loaded samples.
+toggle_sample_selection <- function(selected, all, sample, show) {
+  selected <- if (is.null(selected)) character(0) else as.character(selected)
+  if (isTRUE(show)) all[all %in% union(selected, sample)] else setdiff(selected, sample)
+}
+# MOI per sample: from the raw column name; for a sample whose raw name carries none, from its display name.
+moi_map_with_display <- function(samples, override = "", map = NULL) {
+  m <- moi_map(samples, override)
+  if (length(map) && length(m)) {
+    d    <- display_name_of(samples, map)
+    need <- !is.finite(m) & d != samples
+    if (any(need)) m[need] <- parse_moi(d[need])
+  }
+  m
+}
+
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
@@ -2503,6 +3914,36 @@ pdf_report_ui <- if (has_gridExtra) {
     "Install 'gridExtra' to enable the PDF report.")
 }
 
+# v2.21: the quick-edit strip under the main figure. The rows (name, colour, show) are rendered by the server for
+# every loaded sample (output quick_edit_rows); the axis labels and the legend position live here (same input ids as
+# before, moved out of the sidebar so one edit and one look at the figure is all it takes).
+quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
+  div(class = "kc-qe-head",
+      span(class = "kc-qe-title", "Quick edit"),
+      tags$button(type = "button", class = "btn btn-link btn-xs kc-qe-toggle", id = "kc_qe_toggle", "Hide quick edit")),
+  div(style = "display:none;", checkboxInput("quick_edit_open", "Show the quick-edit strip", APP_DEFAULTS$quick_edit_open)),
+  conditionalPanel("input.quick_edit_open == true",
+    uiOutput("quick_edit_rows"),
+    div(class = "kc-qe-global",
+      div(class = "kc-qe-field", textInput("x_axis_label", "X-axis label:", "Time (minutes)")),
+      div(class = "kc-qe-field", textInput("y_axis_label", "Y-axis label:", "A550")),
+      div(class = "kc-qe-field",
+          selectInput("legend_position", "Legend position:",
+                      choices = c("Right (outside)"      = "right",
+                                  "Top (outside)"        = "top",
+                                  "Bottom (outside)"     = "bottom",
+                                  "Left (outside)"       = "left",
+                                  "Inside: top-left"     = "inside-top-left",
+                                  "Inside: top-right"    = "inside-top-right",
+                                  "Inside: bottom-left"  = "inside-bottom-left",
+                                  "Inside: bottom-right" = "inside-bottom-right",
+                                  "Inside: emptiest corner (auto)" = "inside-auto",
+                                  "None"                 = "none"),
+                      selected = APP_DEFAULTS$legend_position))),
+    p(class = "kc-qe-note",
+      "The name is what figures, legends, tables, CSV files and reports show; the file's own column name stays the key ",
+      "(the CSV files carry it in a sample_raw column). Untick show to leave a sample out of the figure.")))
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- fluidPage(
   titlePanel("Optical Density (OD) Time-Series Visualization"),
@@ -2514,15 +3955,96 @@ ui <- fluidPage(
          if (el) el.style.backgroundColor = msg.color;
        });"
     )),
+    # v2.21: sticky figure toggle, one-open-at-a-time sidebar sections, the "Jump to" menu, the quick-edit strip
+    tags$script(HTML(
+      "(function() {
+         function sections() { return document.querySelectorAll('details.kc-section'); }
+         function closeOthers(keep) { sections().forEach(function(o) { if (o !== keep && o.open) o.open = false; }); }
+         // accordion: opening a section closes the others (the toggle event fires after the native state change,
+         // so the keyboard (Enter / Space on a summary) and the mouse behave the same)
+         document.addEventListener('toggle', function(ev) {
+           var d = ev.target;
+           if (d && d.tagName === 'DETAILS' && d.classList.contains('kc-section') && d.open) {
+             closeOthers(d);
+             window.requestAnimationFrame(function() { d.scrollIntoView({block: 'nearest'}); });
+           }
+         }, true);
+         // jump menu: open the section, scroll it to the top of the window, move focus to its summary
+         document.addEventListener('change', function(ev) {
+           var t = ev.target;
+           if (!t || t.id !== 'sidebar_jump') return;
+           var d = t.value ? document.getElementById('sec_' + t.value) : null;
+           if (d) {
+             closeOthers(d); d.open = true;
+             window.requestAnimationFrame(function() {
+               d.scrollIntoView({block: 'start'});
+               var s = d.querySelector('summary'); if (s && s.focus) s.focus({preventScroll: true});
+             });
+           }
+           t.value = '';
+         });
+         document.addEventListener('click', function(ev) {
+           var t = ev.target && ev.target.closest ? ev.target.closest('button.kc-collapse-all, button.kc-qe-toggle') : null;
+           if (!t) return;
+           if (t.classList.contains('kc-collapse-all')) { sections().forEach(function(o) { o.open = false; }); }
+           else { var cb = document.getElementById('quick_edit_open'); if (cb) cb.click(); }
+         });
+         // checkbox sticky_figure / quick_edit_open: pure client side, no round trip
+         function qeLabel(on) { var b = document.getElementById('kc_qe_toggle'); if (b) b.textContent = on ? 'Hide quick edit' : 'Show quick edit'; }
+         if (window.jQuery) jQuery(document).on('shiny:inputchanged', function(ev) {
+           if (ev.name === 'sticky_figure') {
+             var m = document.getElementById('main_panel');
+             if (m) m.classList.toggle('kc-sticky', !!ev.value);
+             if (window.kcReportSize) window.kcReportSize();
+           }
+           else if (ev.name === 'quick_edit_open') qeLabel(!!ev.value);
+         });
+         // colour pickers of the strip: an <input type=color> reports to Shiny (debounced) only when the user picks
+         var timers = {};
+         document.addEventListener('input', function(ev) {
+           var t = ev.target;
+           if (!t || !t.classList || !t.classList.contains('kc-qe-color')) return;
+           var sw = document.getElementById(t.id.replace('qe_color_', 'qe_swatch_')); if (sw) sw.style.backgroundColor = t.value;
+           clearTimeout(timers[t.id]);
+           timers[t.id] = setTimeout(function() {
+             if (window.Shiny && Shiny.setInputValue) Shiny.setInputValue(t.id, t.value, {priority: 'event'});
+           }, 150);
+         });
+         // a user click on a show box adds / removes the sample (programmatic updates are not trusted events)
+         document.addEventListener('change', function(ev) {
+           var t = ev.target;
+           if (!ev.isTrusted || !t || t.type !== 'checkbox' || !t.closest || !t.closest('.kc-qe-show')) return;
+           var row = t.closest('.kc-qe-row');
+           if (row && window.Shiny && Shiny.setInputValue)
+             Shiny.setInputValue('qe_show_event', {sample: row.getAttribute('data-sample'), show: t.checked}, {priority: 'event'});
+         });
+         // the server tells the strip the colour each sample really has (sidebar colour, palette or the strip's own)
+         function swatches(m) {
+           for (var i = 0; i < m.ids.length; i++) {
+             var inp = document.getElementById(m.ids[i]), c = m.colors[i];
+             if (inp && document.activeElement !== inp && inp.value.toLowerCase() !== String(c).toLowerCase()) inp.value = c;
+             var sw = document.getElementById(m.ids[i].replace('qe_color_', 'qe_swatch_')); if (sw) sw.style.backgroundColor = c;
+           }
+         }
+         if (window.Shiny && Shiny.addCustomMessageHandler) Shiny.addCustomMessageHandler('kcSwatches', swatches);
+         else if (window.jQuery) jQuery(document).on('shiny:connected', function() { Shiny.addCustomMessageHandler('kcSwatches', swatches); });
+       })();"
+    )),
     # v2.14: the main panel's pixel width, so true-size previews can pick the zoom that fits it
     tags$script(HTML(
       "(function() {
          var timer = null;
          function report() {
            var el = document.getElementById('main_panel');
-           if (el && window.Shiny && Shiny.setInputValue)
+           if (el && window.Shiny && Shiny.setInputValue) {
              Shiny.setInputValue('main_panel_width', Math.round(el.clientWidth));
+             // v2.21: the window height while the figure column is sticky (0 when it is not), so the auto-fit
+             // preview zoom can keep the figure, and the quick-edit strip under it, inside the window
+             Shiny.setInputValue('sticky_viewport_height',
+               getComputedStyle(el).position === 'sticky' ? Math.round(window.innerHeight) : 0);
+           }
          }
+         window.kcReportSize = report;
          window.addEventListener('resize', function() { clearTimeout(timer); timer = setTimeout(report, 200); });
          if (window.jQuery) jQuery(document).on('shiny:connected', report);
        })();"
@@ -2545,6 +4067,41 @@ ui <- fluidPage(
       details[open] > summary::before { content:'\\25BC  '; font-size:.75em; }
       details > summary::before       { content:'\\25B6  '; font-size:.75em; }
       details { margin-bottom:6px; }
+      /* v2.21: layout (flex, not the Bootstrap float grid) so the figure column can stay in view */
+      .kc-layout { display:flex; align-items:flex-start; margin:0 -15px; }
+      .kc-sidebar { flex:0 0 25%; max-width:25%; padding:0 15px; box-sizing:border-box; }
+      .kc-main { flex:1 1 0; min-width:0; padding:0 15px; box-sizing:border-box; }
+      .kc-main.kc-sticky { position:sticky; top:0; align-self:flex-start; max-height:100vh; overflow-y:auto; scrollbar-gutter:stable; background:#fff; }
+      @media (max-width: 767px) {
+        .kc-layout { display:block; }
+        .kc-sidebar { max-width:100%; }
+        .kc-main.kc-sticky { position:static; max-height:none; overflow:visible; }
+      }
+      details > summary:focus-visible { outline:2px solid #0d6efd; outline-offset:1px; }
+      .kc-nav { margin-bottom:8px; }
+      .kc-nav .checkbox { margin:0 0 6px; font-size:.9em; }
+      .kc-nav .form-group { margin-bottom:4px; }
+      .kc-nav .kc-nav-row { display:flex; align-items:center; gap:8px; }
+      .kc-nav select { height:28px; padding:2px 6px; font-size:.9em; }
+      .kc-nav .kc-collapse-all { white-space:nowrap; padding:0 4px; }
+      .kc-qe { border:1px solid #dee2e6; border-radius:4px; background:#f8f9fa; padding:6px 10px 4px; margin:8px 0 10px; font-size:.85em; }
+      .kc-qe-head { display:flex; justify-content:space-between; align-items:center; font-weight:bold; color:#495057; }
+      .kc-qe-toggle { padding:0 4px; }
+      .kc-qe-rows { max-height:230px; overflow-y:auto; margin:2px 0 6px; }
+      .kc-qe-row { display:flex; align-items:center; gap:8px; padding:1px 0; }
+      .kc-qe-row .form-group { margin:0; flex:1 1 auto; min-width:0; }
+      .kc-qe-row .form-control { height:26px; padding:2px 6px; font-size:1em; }
+      .kc-qe-swatch { display:inline-block; width:12px; height:12px; flex:0 0 12px; border:1px solid rgba(0,0,0,.35); border-radius:2px; }
+      .kc-qe-color { width:30px; height:24px; flex:0 0 30px; padding:0; border:1px solid #ccc; background:none; cursor:pointer; }
+      .kc-qe-show { flex:0 0 auto; margin:0; }
+      .kc-qe-show .checkbox { margin:0; }
+      .kc-qe-row:has(.kc-qe-show input:not(:checked)) { opacity:.55; }
+      .kc-qe-global { display:flex; flex-wrap:wrap; gap:10px; margin-top:4px; }
+      .kc-qe-field { flex:1 1 160px; min-width:0; }
+      .kc-qe-field .form-group { margin-bottom:6px; }
+      .kc-qe-field label { font-size:.9em; margin-bottom:1px; }
+      .kc-qe-field .form-control { height:26px; padding:2px 6px; font-size:1em; }
+      .kc-qe-note { font-size:.78em; color:#777; margin:0 0 4px; }
       .color-preview {
         display:inline-block; width:28px; height:28px;
         border:1px solid #ccc; border-radius:4px; flex-shrink:0;
@@ -2569,8 +4126,16 @@ ui <- fluidPage(
     "))
   ),
   
-  sidebarLayout(
-    sidebarPanel(width = 3,
+  div(id = "kc_layout", class = "kc-layout",
+    div(class = "kc-sidebar", tags$form(class = "well kc-well", role = "complementary",
+                 
+                 # v2.21: navigation: keep the figure in view, jump to a section, collapse them all
+                 div(class = "kc-nav",
+                     checkboxInput("sticky_figure", "Keep the figure in view while I scroll the settings", APP_DEFAULTS$sticky_figure),
+                     div(class = "kc-nav-row",
+                         selectInput("sidebar_jump", NULL, width = "100%", selectize = FALSE,
+                                     choices = c("Jump to a section..." = "", SIDEBAR_SECTIONS), selected = ""),
+                         tags$button(type = "button", class = "btn btn-link btn-xs kc-collapse-all", "Collapse all"))),
                  
                  fileInput("file", "Choose CSV File", accept = c("text/csv", ".csv")),
                  selectInput("csv_locale", "CSV format:",
@@ -2621,8 +4186,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Axis Settings ─────────────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Axis Settings"),
+                 kc_section("Axis Settings",
                    div(class = "panel-section",
                        h4("Axis Scales", class = "panel-title"),
                        selectInput("x_scale_type", "X-axis Scale:",
@@ -2688,8 +4252,8 @@ ui <- fluidPage(
                    ),
                    div(class = "panel-section",
                        h4("Labels & Formatting", class = "panel-title"),
-                       textInput("x_axis_label",  "X-axis Label:",  "Time (minutes)"),
-                       textInput("y_axis_label",  "Y-axis Label:",  "A550"),
+                       p(style = "font-size:.8em;color:#777;margin-top:-4px;",
+                         "The X- and Y-axis labels are in the Quick edit strip under the figure."),
                        checkboxInput("axis_subscripts", "Typeset wavelength as subscript (A550 -> A\u2085\u2085\u2080)",
                                      APP_DEFAULTS$axis_subscripts),
                        textInput("plot_title",    "Plot Title:",    ""),
@@ -2745,18 +4309,8 @@ ui <- fluidPage(
                        p(style = "font-size:.8em;color:#777;margin-top:-4px;",
                          "Line widths in pt and lengths in mm, as journals specify them. ",
                          "The app starts in the journal standard; the Legacy look button restores the pre-v2.14 look."),
-                       selectInput("legend_position", "Legend Position:",
-                                   choices = c("Right (outside)"      = "right",
-                                               "Top (outside)"        = "top",
-                                               "Bottom (outside)"     = "bottom",
-                                               "Left (outside)"       = "left",
-                                               "Inside: top-left"     = "inside-top-left",
-                                               "Inside: top-right"    = "inside-top-right",
-                                               "Inside: bottom-left"  = "inside-bottom-left",
-                                               "Inside: bottom-right" = "inside-bottom-right",
-                                               "Inside: emptiest corner (auto)" = "inside-auto",
-                                               "None"                 = "none"),
-                                   selected = APP_DEFAULTS$legend_position),
+                       p(style = "font-size:.8em;color:#777;margin-top:-4px;",
+                         "The legend position is in the Quick edit strip under the figure."),
                        checkboxInput("legend_box_border", "Legend box border", APP_DEFAULTS$legend_box_border),
                        selectInput("legend_order", "Sample order (legend, panels, facets):",
                                    choices = c("Alphabetical (legacy)" = "alpha",
@@ -2804,8 +4358,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Time Point Filtering ──────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Time Point Filtering"),
+                 kc_section("Time Point Filtering",
                    div(class = "panel-section",
                        h4("Restrict Displayed Time Range", class = "panel-title"),
                        p(style = "font-size:.85em;color:#555;",
@@ -2819,13 +4372,18 @@ ui <- fluidPage(
                                         p(style = "font-size:.82em;color:#666;", "Comma-separated values to remove (e.g. 0, 5, 180)."),
                                         textInput("exclude_timepoints", label = NULL, value = "", placeholder = "e.g. 0, 5, 180"),
                                         uiOutput("excluded_timepoints_preview")
-                       )
+                       ),
+                       hr(style = "margin:10px 0;"),
+                       h4("Per-Sample Time Windows", class = "panel-title"),
+                       p(style = "font-size:.82em;color:#666;",
+                         "Keep only the readings of a sample between its \u2018from\u2019 and \u2018to\u2019 times; a blank box is no limit. ",
+                         "Applied after the filter above (and also when it is off), to the figures, statistics and exports; saved with the settings."),
+                       uiOutput("time_windows_ui")
                    )
                  ),
                  
                  # ── Region Highlighting ───────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Region Highlighting"),
+                 kc_section("Region Highlighting",
                    div(class = "panel-section",
                        checkboxInput("enable_highlighting", "Enable Region Highlighting", FALSE),
                        conditionalPanel(condition = "input.enable_highlighting == true",
@@ -2836,8 +4394,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Time Point Markers ────────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Time Point Markers"),
+                 kc_section("Time Point Markers",
                    div(class = "panel-section",
                        checkboxInput("enable_time_markers", "Enable Time Markers", FALSE),
                        conditionalPanel(condition = "input.enable_time_markers == true",
@@ -2866,8 +4423,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Color Palettes ────────────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Color Palettes"),
+                 kc_section("Color Palettes",
                    div(class = "panel-section",
                        selectInput("color_palette", "Color Palette:",
                                    choices  = c("Custom"              = "custom",
@@ -2885,8 +4441,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Line & Point Settings ─────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Line & Point Settings"),
+                 kc_section("Line & Point Settings",
                    div(class = "panel-section",
                        h4("Line Options", class = "panel-title"),
                        sliderInput("line_thickness", "Line Thickness (1 = 2.1 pt):", 0.1, 3, APP_DEFAULTS$line_thickness, 0.05)
@@ -2902,8 +4457,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Label Options ─────────────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Label Options"),
+                 kc_section("Label Options",
                    div(class = "panel-section",
                        checkboxInput("show_end_labels", "Show End-of-Line Labels", FALSE),
                        conditionalPanel(condition = "input.show_end_labels == true",
@@ -2915,8 +4469,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Error Bars / Shadow ───────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Error Bars / Shadow"),
+                 kc_section("Error Bars / Shadow",
                    div(class = "panel-section",
                        selectInput("error_type", "Error Type:",
                                    choices  = c("None" = "none", "SD" = "sd",
@@ -2966,8 +4519,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Journal Figure Preset (v2.10) ─────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Journal Figure Preset"),
+                 kc_section("Journal Figure Preset",
                    div(class = "panel-section",
                        h4("Target Journal & Width", class = "panel-title"),
                        p(style = "font-size:.8em;color:#777;margin-top:-4px;",
@@ -3010,8 +4562,7 @@ ui <- fluidPage(
                  ),
                  
                  # ── Plot Dimensions & Export ──────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Plot Dimensions & Export"),
+                 kc_section("Plot Dimensions & Export",
                    div(class = "panel-section",
                        h4("On-screen Preview", class = "panel-title"),
                        radioButtons("preview_mode", NULL,
@@ -3061,6 +4612,12 @@ ui <- fluidPage(
                          "Everything a figure submission needs in one file: the figure (SVG + PDF) at the current size, ",
                          "the composed figure (SVG, if two or more panels are selected), settings.json, the tidy source data, ",
                          "summary statistics, curve metrics, the legend text, the methods text and a README."),
+                       br(), br(),
+                       downloadButton("downloadAllFigures", "Download all figures (.zip)", style = "width:100%;"),
+                       p(style = "font-size:.78em;color:#777;margin-top:4px;",
+                         "An SVG and a PNG of the main figure, of every analysis figure that can be drawn for this data and of the ",
+                         "composed figure, each at its current size, plus the legend and methods text. Figures that are not ",
+                         "available are listed in SKIPPED.txt."),
                        hr(),
                        h4("PowerPoint Export", class = "panel-title"),
                        p(style = "font-size:.85em;color:#666;",
@@ -3081,8 +4638,7 @@ ui <- fluidPage(
                  # Structured lab-notebook record (modeled on the companion app's
                  # Experiment Notes tab). Everything filled in here is embedded in
                  # the HTML / PDF reports; empty fields are skipped.
-                 tags$details(
-                   tags$summary("Experiment Notebook"),
+                 kc_section("Experiment Notebook",
                    div(class = "panel-section",
                        h4("Experiment Identity", class = "panel-title"),
                        textInput("nb_exp_id",       "Experiment ID / Name:", ""),
@@ -3158,8 +4714,7 @@ ui <- fluidPage(
                  ),
 
                  # ── Stats & Reports ───────────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Stats & Reports"),
+                 kc_section("Stats & Reports",
                    div(class = "panel-section",
                        h4("Statistics Export", class = "panel-title"),
                        p(style = "font-size:.82em;color:#555;",
@@ -3255,22 +4810,26 @@ ui <- fluidPage(
                  ),
 
                  # ── Variable Styling ──────────────────────────────────────────────────────
-                 tags$details(
-                   tags$summary("Variable Styling"),
+                 kc_section("Variable Styling",
                    div(class = "panel-section",
                        h4("Sample Selection", class = "panel-title"),
                        selectInput("selected_samples", "Select Samples:",
                                    choices = character(0), multiple = TRUE),
+                       checkboxInput("facet_by_group", "One panel per group (main figure)", APP_DEFAULTS$facet_by_group),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Type a Group for each sample below. With two or more different groups the lysis curve is split into ",
+                         "one panel per group (shared axes, the group name above each panel); samples without a group go to ",
+                         "\u2018Other\u2019. The Compose figure tab can also add one separate panel per group."),
                        uiOutput("var_settings")
                    )
                  )
                  
-    ), # end sidebarPanel
+    )), # end sidebar
     
-    mainPanel(width = 9, id = "main_panel",
+    div(id = "main_panel", class = kc_main_class(APP_DEFAULTS$sticky_figure),
       uiOutput("figure_standard_bar"),
       tabsetPanel(id = "main_tabs",
-        tabPanel("Lysis curve", br(), uiOutput("plot_container")),
+        tabPanel("Lysis curve", br(), uiOutput("plot_container"), quick_edit_ui),
         # ── Analysis figures (v2.11) ──────────────────────────────────────────
         tabPanel("Analysis figures", br(),
           div(class = "analysis-controls",
@@ -3286,8 +4845,14 @@ ui <- fluidPage(
                   selectInput("analysis_metrics", "Metrics (one facet each):",
                               choices  = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
                               selected = c("lysis_time", "od_drop"), multiple = TRUE),
+                  radioButtons("metric_error_source", "Whiskers:",
+                               choices = c("Replicate spread (SD/SEM/CI as in Error Bars)" = "replicates",
+                                           "Bootstrap 95 % CI of the mean-curve metric" = "bootstrap"),
+                               selected = APP_DEFAULTS$metric_error_source),
                   p(style = "font-size:.78em;color:#777;margin-top:-6px;",
-                    "Open circles: one per replicate; bar: mean; whiskers: \u00b1 SD. ",
+                    "Open circles: one per replicate; bar: mean; whiskers: replicate spread (the main figure's error measure). ",
+                    "With the bootstrap the bar is the mean-curve value and the whiskers its percentile interval from the ",
+                    "Statistics tab (Run bootstrap first; a metric it does not hold keeps the replicate spread). ",
                     "Relative metrics need a reference sample (Stats & Reports).")),
                 conditionalPanel("input.analysis_type == 'dose_response'",
                   selectInput("analysis_dose_metric", "Metric vs MOI:",
@@ -3319,9 +4884,85 @@ ui <- fluidPage(
                     "Every number in the Curve Metrics CSV, placed where it was measured: lag end, ",
                     "\u03bcmax window centre, peak, lysis onset, half of peak, trough. Use it to check ",
                     "the metrics (and the smoothing windows) before you report them.")),
+                conditionalPanel("input.analysis_type == 'phases'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "Each sample's growth and lysis phases (lag, exponential, deceleration, stationary, lysis, recovery / ",
+                    "post-lysis) as shaded bands, with every edge read back from the curve metrics (so it can be checked ",
+                    "against the landmarks figure). One sample: full-height bands behind its curve; several: one thin strip ",
+                    "per sample at the top of the panel. The table is on the Statistics tab (Curve phases).")),
+                conditionalPanel("input.analysis_type == 'difference'",
+                  radioButtons("diff_mode", "Show:",
+                               choices = c("Difference (OD)" = "difference", "log2 ratio" = "log2_ratio"),
+                               selected = APP_DEFAULTS$diff_mode, inline = TRUE),
+                  checkboxInput("diff_mark", "Mark times with p (Holm) < 0.05 with *", APP_DEFAULTS$diff_mark),
+                  p(style = "font-size:.78em;color:#777;",
+                    "Each sample's mean curve minus the reference's (or log2 of their ratio) at every time; the dashed line is no ",
+                    "difference. Needs a reference sample (Stats & Reports). Exploratory: a Welch test per time point.")),
                 conditionalPanel("input.analysis_type == 'heatmap'",
                   p(style = "font-size:.78em;color:#777;",
-                    "Mean OD per sample and time point; for screens with many samples."))
+                    "Mean OD per sample and time point; for screens with many samples.")),
+                conditionalPanel("input.analysis_type == 'metric_explorer'",
+                  selectInput("explorer_x", "X axis:", choices = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
+                              selected = APP_DEFAULTS$explorer_x),
+                  selectInput("explorer_y", "Y axis:", choices = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
+                              selected = APP_DEFAULTS$explorer_y),
+                  radioButtons("explorer_level", "Show:", choices = c("Per replicate", "Per sample mean \u00b1 error"),
+                               selected = APP_DEFAULTS$explorer_level),
+                  checkboxInput("explorer_labels", "Label the points with the sample names", APP_DEFAULTS$explorer_labels),
+                  checkboxInput("explorer_logx", "Log x axis", APP_DEFAULTS$explorer_logx),
+                  checkboxInput("explorer_logy", "Log y axis", APP_DEFAULTS$explorer_logy),
+                  p(style = "font-size:.78em;color:#777;",
+                    "One point per sample: the mean with error bars in both directions (the error measure of the main figure); ",
+                    "open circles are the replicates. Relative metrics need a reference sample (Stats & Reports).")),
+                conditionalPanel("input.analysis_type == 'fit_overlay'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "The mean curve with the fitted growth model(s) drawn over it. The models, the fitted range and the ",
+                    "mean-or-replicate choice are set on the Curve fitting tab, which also has the parameter table.")),
+                conditionalPanel("input.analysis_type == 'phenotype_heatmap'",
+                  selectInput("pheno_metrics", "Metrics (columns):", choices = PHENO_METRIC_CHOICES,
+                              selected = APP_DEFAULTS$pheno_metrics, multiple = TRUE),
+                  radioButtons("pheno_scale", "Colour scale:",
+                               choices = c("z-score per metric" = "z", "0 to 1 per metric" = "range", "raw values" = "none"),
+                               selected = APP_DEFAULTS$pheno_scale),
+                  checkboxInput("pheno_values", "Print the raw value in each cell", APP_DEFAULTS$pheno_values),
+                  uiOutput("pheno_note"),
+                  p(style = "font-size:.78em;color:#777;",
+                    "From the curve metrics of the mean curves. The z-score is across the samples shown, so adding or ",
+                    "removing a sample changes every cell of a column. Relative metrics need a reference sample.")),
+                # ── v2.21 figures ──
+                conditionalPanel("input.analysis_type == 'metric_summary'",
+                  selectInput("metric_style", "Style:", choices = METRIC_STYLE_CHOICES, selected = APP_DEFAULTS$metric_style),
+                  checkboxInput("metric_brackets", "Significance brackets for every pair with p (Holm) < 0.05", APP_DEFAULTS$metric_brackets),
+                  p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                    "Bar: the mean with the whiskers above, replicates as open circles, y axis from 0. Box plot and violin: ",
+                    "one per sample, with the replicates. Brackets use the test chosen on the right, need 2 or more replicates ",
+                    "per sample, show at most 6 per panel and replace the stars against the reference.")),
+                conditionalPanel("input.analysis_type == 'od_at_times'",
+                  radioButtons("extract_style", "Show:", choices = c("Bars" = "bar", "Dots" = "dot"),
+                               selected = APP_DEFAULTS$extract_style, inline = TRUE),
+                  checkboxInput("extract_points", "Replicate points", APP_DEFAULTS$extract_points),
+                  p(style = "font-size:.78em;color:#777;",
+                    "The mean OD at the times typed under Statistics > OD at chosen times (empty: the first, middle and last time ",
+                    "points), the samples side by side, whiskers as in Error Bars. The y axis follows the main figure's scale.")),
+                conditionalPanel("input.analysis_type == 'time_to_threshold'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "The time each replicate crosses the threshold set under Statistics > Time to threshold (OD, up or down, ",
+                    "from the start or from the peak): replicates as open circles, a bar at the mean, whiskers as in Error Bars. ",
+                    "Samples that never cross are listed below.")),
+                conditionalPanel("input.analysis_type == 'replicate_facets'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "One panel per sample: the replicate curves thin (three shades of the sample colour) and the mean bold, ",
+                    "on a shared y axis (log when the main figure's y axis is log).")),
+                conditionalPanel("input.analysis_type == 'lysed_fraction'",
+                  radioButtons("lysed_mode", "Threshold:",
+                               choices = c("Fraction of the sample's peak OD" = "relative", "Absolute OD" = "absolute"),
+                               selected = APP_DEFAULTS$lysed_mode),
+                  numericInput("lysed_threshold", "Lysed below:", APP_DEFAULTS$lysed_threshold, min = 0, step = 0.05),
+                  p(style = "font-size:.78em;color:#777;",
+                    "A replicate counts as lysed after its sample's peak once its OD is below the threshold (0.5 = half of the ",
+                    "peak). The step curve is the fraction of replicates lysed at each time; the point marks when half are.")),
+                conditionalPanel("['metric_summary', 'od_at_times', 'time_to_threshold', 'replicate_facets', 'lysed_fraction'].indexOf(input.analysis_type) >= 0",
+                  uiOutput("analysis_figure_note"))
               ),
               column(3,
                 selectInput("stats_method", "Statistics:",
@@ -3344,6 +4985,10 @@ ui <- fluidPage(
             )
           ),
           uiOutput("analysis_container"),
+          conditionalPanel("input.analysis_type == 'difference'",
+            h5("First separation from the reference", style = "margin-top:10px;"),
+            uiOutput("analysis_separation_note"),
+            tableOutput("analysis_separation_table")),
           h4("Replicate statistics", style = "margin-top:18px;"),
           uiOutput("analysis_stats_notes"),
           tableOutput("analysis_stats_table"),
@@ -3437,6 +5082,15 @@ ui <- fluidPage(
               div(style = "overflow-x:auto;", tableOutput("stats_tab_repmetrics")),
               downloadButton("downloadReplicateMetricsCSV_tab", "Per-replicate metrics (CSV)"))),
           tags$details(class = "stats-section",
+            tags$summary(tags$b("Curve phases")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "The mean curve of each sample split into lag, exponential, deceleration, stationary, lysis and ",
+                "recovery / post-lysis phases (the figure is 'Curve phases' under Analysis figures and the composer)."),
+              uiOutput("phases_note"),
+              div(style = "overflow-x:auto;", tableOutput("phases_table")),
+              downloadButton("downloadPhasesCSV", "Curve phases (CSV)"))),
+          tags$details(class = "stats-section",
             tags$summary(tags$b("Replicate comparison")),
             div(class = "panel-section",
               p(style = "font-size:.78em;color:#777;",
@@ -3446,7 +5100,79 @@ ui <- fluidPage(
               tableOutput("stats_tab_pairwise"),
               tableOutput("stats_tab_omnibus"),
               tableOutput("stats_tab_posthoc"),
-              downloadButton("downloadAnalysisStatsCSV_tab", "Replicate statistics (CSV)"))),
+              downloadButton("downloadAnalysisStatsCSV_tab", "Replicate statistics (CSV)"),
+              h5("First separation from reference", style = "margin-top:14px;"),
+              uiOutput("stats_tab_separation_note"),
+              tableOutput("stats_tab_separation_table"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("OD at chosen times")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "The value of every replicate curve at the times you type, then the mean, SD, n, SEM and 95% CI per ",
+                "sample. Respects the time filters and per-sample windows. A time outside a curve's own range is NA ",
+                "(never extrapolated)."),
+              fluidRow(
+                column(6, textInput("extract_times", "Times (comma separated):", APP_DEFAULTS$extract_times,
+                                    placeholder = "e.g. 30, 60, 120")),
+                column(6, radioButtons("extract_method", "Between readings:",
+                                       choices = c("Interpolate (linear)" = "interpolate", "Nearest reading" = "nearest"),
+                                       selected = APP_DEFAULTS$extract_method, inline = TRUE))),
+              uiOutput("extract_od_note"),
+              div(style = "overflow-x:auto;", tableOutput("extract_od_table")),
+              downloadButton("downloadExtractODSummaryCSV", "Summary (CSV)"),
+              downloadButton("downloadExtractODCSV", "Per-replicate values (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Time to threshold")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "The first time each replicate curve crosses an OD, linearly interpolated between the two readings. ",
+                "'Up' = from below to at or above; 'down' = from at or above to below. A curve that starts on the far ",
+                "side has no crossing until it comes back. Clear the threshold box to leave this table out of the reports."),
+              fluidRow(
+                column(4, numericInput("extract_threshold", "Threshold (OD):", APP_DEFAULTS$extract_threshold, step = 0.05)),
+                column(4, radioButtons("extract_direction", "Crossing:",
+                                       choices = c("Up" = "up", "Down" = "down"),
+                                       selected = APP_DEFAULTS$extract_direction, inline = TRUE)),
+                column(4, radioButtons("extract_after", "Search from:",
+                                       choices = c("Start of the curve" = "start", "Its peak" = "peak"),
+                                       selected = APP_DEFAULTS$extract_after, inline = TRUE))),
+              uiOutput("extract_tt_note"),
+              div(style = "overflow-x:auto;", tableOutput("extract_tt_table")),
+              downloadButton("downloadExtractTTSummaryCSV", "Summary (CSV)"),
+              downloadButton("downloadExtractTTCSV", "Per-replicate crossings (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("All-metrics comparison")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "Every curve metric with finite replicate values, compared with the reference sample (or all pairs) ",
+                "by the test chosen under Analysis figures > Statistics: the same p_adj_holm, stars and Hedges' g as the ",
+                "single-metric tables."),
+              p(class = "stats-note",
+                "p_adj_bh_across is the Benjamini-Hochberg adjustment over every metric and comparison in this table. ",
+                "It is exploratory: the metrics are strongly correlated and three replicates give little power, so use ",
+                "it to rank metrics for follow-up, not as a confirmatory result."),
+              uiOutput("allmetrics_notes"),
+              div(style = "overflow-x:auto;", tableOutput("allmetrics_table")),
+              downloadButton("downloadAllMetricsCSV", "All-metrics comparison (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Bootstrap intervals")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "A percentile interval for the metric of the mean curve, from replicate-level resampling: each draw resamples the ",
+                "replicate curves of a sample with replacement, averages them and recomputes the metric; the interval is the 2.5th ",
+                "and 97.5th percentile of the finite draws. It is not recomputed when inputs change: press Run bootstrap."),
+              p(class = "stats-note",
+                "With n = 3 replicates there are only 10 distinct resamples, so the interval is wide, coarse and can be degenerate ",
+                "(zero width when every resample crosses between the same two readings): a rough indication, not a precise interval."),
+              fluidRow(
+                column(5, selectInput("boot_metrics", "Metrics:", choices = PHENO_METRIC_CHOICES,
+                                      selected = APP_DEFAULTS$boot_metrics, multiple = TRUE)),
+                column(2, numericInput("boot_n", "Draws:", APP_DEFAULTS$boot_n, BOOT_N_MIN, BOOT_N_MAX, 100)),
+                column(2, numericInput("boot_seed", "Seed:", APP_DEFAULTS$boot_seed, step = 1)),
+                column(3, br(), actionButton("boot_run", "Run bootstrap", class = "btn-primary"))),
+              uiOutput("boot_note"),
+              div(style = "overflow-x:auto;", tableOutput("boot_table")),
+              downloadButton("downloadBootCSV", "Bootstrap intervals (CSV)"))),
           tags$details(class = "stats-section",
             tags$summary(tags$b("Methods text (editable)")),
             div(class = "panel-section",
@@ -3459,7 +5185,39 @@ ui <- fluidPage(
                 column(4, actionButton("methods_draft", "Draft from current settings")),
                 column(4, checkboxInput("methods_replace", "replace existing text", APP_DEFAULTS$methods_replace)),
                 column(4, downloadButton("downloadMethodsTxt", "Download methods (.txt)")))))
-        )
+        ),
+        # ── Curve fitting (v2.19): logistic / Gompertz / Baranyi fits of the growth phase ──
+        tabPanel("Curve fitting", br(),
+          div(class = "analysis-controls",
+            fluidRow(
+              column(3,
+                checkboxGroupInput("fit_models", "Models:",
+                                   choices = c("Logistic" = "logistic", "Gompertz" = "gompertz", "Baranyi" = "baranyi"),
+                                   selected = APP_DEFAULTS$fit_models),
+                checkboxInput("fit_log", "Fit ln(OD/OD0)", APP_DEFAULTS$fit_log)),
+              column(3,
+                radioButtons("fit_until", "Fit:",
+                             choices = c("Up to the peak" = "peak", "Whole curve" = "all"),
+                             selected = APP_DEFAULTS$fit_until),
+                radioButtons("fit_level", "Fit to:",
+                             choices = c("Mean curve" = "mean", "Each replicate" = "replicate"),
+                             selected = APP_DEFAULTS$fit_level)),
+              column(3,
+                radioButtons("fit_show", "Draw:",
+                             choices = c("Best model by AIC" = "best", "All converged models" = "all"),
+                             selected = APP_DEFAULTS$fit_show)),
+              column(3,
+                p(style = "font-size:.82em;color:#555;",
+                  "Same colours, fonts and export size as the main figure; the figure is also the 'Fitted growth ",
+                  "curves' choice of the Analysis figures and the composer."),
+                downloadButton("downloadFitFigure", "Download figure", style = "width:100%;"),
+                br(), br(),
+                downloadButton("downloadFitsCSV", "Parameters (CSV)", style = "width:100%;")))),
+          uiOutput("fit_note"),
+          uiOutput("fit_container"),
+          h4("Fitted parameters", style = "margin-top:18px;"),
+          uiOutput("fit_table_ui"),
+          uiOutput("fit_summary_block"))
       )
     )
   )
@@ -3499,8 +5257,21 @@ server <- function(input, output, session) {
     #   $samples — named list keyed by SAMPLE NAME, each a list of per-sample aesthetics
     imported_settings = NULL,
     settings_status   = NULL,
-    style_page        = 1L      # current page in Variable Styling panel (pagination)
+    style_page        = 1L,     # current page in Variable Styling panel (pagination)
+    # v2.21: what the user typed in the quick-edit strip. display_names: raw column name -> name shown in figures,
+    # legends, tables, CSV files and reports (the raw name stays the key everywhere else); qe_colors: raw name -> the
+    # colour picked in the strip (while the sidebar has not overridden it)
+    display_names     = NULL,
+    qe_colors         = list()
   )
+  
+  # v2.21: display-name helpers (the pure versions are at the top of the file)
+  dname   <- function(x) display_name_of(x, rv$display_names)
+  present <- function(df, cols = c("sample", "versus")) with_display(df, rv$display_names, cols)
+  relabel <- function(x) relabel_text(x, rv$display_names)
+  # MOI is read from the raw name; a sample whose raw name has none but whose display name does ("Phage MOI 10") counts.
+  # Shadows the global moi_map() for everything in this server (the analysis builders, the reports).
+  moi_map <- function(samples, override = "") moi_map_with_display(samples, override, rv$display_names)
   
   # v2.16: y-axis-derived labels (main figure, analysis figures, dose-response, heatmap key) go through
   # this so the wavelength can be typeset as a subscript. Plain text when the box is off (and in the
@@ -3617,6 +5388,8 @@ server <- function(input, output, session) {
 
   # Shared ingestion for both file upload and demo data
   ingest_data <- function(data, source_name) {
+    rv$display_names  <- NULL    # v2.21: names and colours typed in the quick-edit strip belong to the old data
+    rv$qe_colors      <- list()
     rv$time_col       <- detect_time_column(data)
     rv$col_map        <- NULL
     rv$replicate_col  <- NULL    # long format: replicate / well column, when the file has one
@@ -3800,12 +5573,14 @@ server <- function(input, output, session) {
       data_inputs     <- c("file", "loadSettings", "selected_samples",
                            "time_filter_range", "exclude_timepoints",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                           "main_panel_width")
+                           "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump")
       # Per-sample dynamic input prefixes — handled separately below
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
                            "use_hex_","hex_color_","legend_label_",
-                           "apply_rgb_","apply_hex_")
+                           "apply_rgb_","apply_hex_",
+                           "tw_min_","tw_max_","group_",
+                           "qe_name_","qe_color_","qe_show_")   # v2.18: per-sample time window and group
       # v2.8 SETTINGS SAVE FIX: these GLOBAL inputs collide with per-sample
       # prefixes ("shape_", "color_") and were silently dropped from saved files
       global_exceptions <- c("shape_size", "color_palette")
@@ -3822,9 +5597,10 @@ server <- function(input, output, session) {
       if (!is.null(samps)) {
         for (vn in samps) {
           vid     <- safe_id(vn)
-          leg     <- input[[paste0("legend_label_", vid)]]
           col_sel <- input[[paste0("color_selector_", vid)]]
-          color   <- if (!is.null(col_sel) && col_sel == "custom")
+          qe_col  <- rv$qe_colors[[vn]]
+          color   <- if (!is.null(qe_col)) qe_col                              # v2.21: picked in the quick-edit strip
+          else if (!is.null(col_sel) && col_sel == "custom")
             normalize_hex_color(input[[paste0("color_", vid)]])
           else if (!is.null(col_sel)) col_sel
           else "#000000"
@@ -3833,8 +5609,12 @@ server <- function(input, output, session) {
             shape        = input[[paste0("shape_",        vid)]],
             shape_filled = input[[paste0("shape_filled_", vid)]],
             line_type    = input[[paste0("line_type_",    vid)]],
-            legend_label = if (!is.null(leg) && nchar(leg) > 0) leg else vn
+            legend_label = display_name_of(vn, rv$display_names),   # v2.21: the display name (the key stays the raw name)
+            group        = trimws(input[[paste0("group_", vid)]] %||% "")      # v2.18; a file with this key also carries the windows
           )
+          tw <- time_window_for(vn)                                             # v2.18: only finite limits are written
+          if (is.finite(tw[1])) sample_aesthetics[[vn]]$tw_min <- unname(tw[1])
+          if (is.finite(tw[2])) sample_aesthetics[[vn]]$tw_max <- unname(tw[2])
         }
       }
       
@@ -3879,10 +5659,12 @@ server <- function(input, output, session) {
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                         "main_panel_width")
+                         "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump")
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
-                         "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_")
+                         "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_",
+                         "tw_min_","tw_max_","group_",
+                           "qe_name_","qe_color_","qe_show_")
     global_exceptions <- c("shape_size", "color_palette")   # see save handler note
     is_sample_inp <- function(nm) !(nm %in% global_exceptions) &&
       any(vapply(sample_prefixes, startsWith, logical(1), x = nm))
@@ -3902,7 +5684,9 @@ server <- function(input, output, session) {
       if (!(nm %in% names(input)))                  next
       tryCatch({
         val <- global[[nm]]
-        if (is.character(val) && (length(val) > 1 || nm == "compose_panels")) {
+        if (nm %in% c("pheno_metrics", "boot_metrics")) {
+          updateSelectInput(session, nm, selected = val)            # v2.19: a multi-select, not a checkbox group
+        } else if (is.character(val) && (length(val) > 1 || nm %in% c("compose_panels", "fit_models"))) {
           updateCheckboxGroupInput(session, nm, selected = val)     # v2.13: checkbox groups
         } else if (is.logical(val) && length(val) == 1) {
           updateCheckboxInput(session, nm, value = val)
@@ -3911,7 +5695,10 @@ server <- function(input, output, session) {
         } else if (is.character(val) && length(val) == 1) {
           updateSelectInput(session, nm, selected = val)
           updateTextInput(session,   nm, value    = val)
-          if (startsWith(nm, "compose_")) updateRadioButtons(session, nm, selected = val)
+          if (startsWith(nm, "compose_") || nm %in% c("explorer_level", "fit_until", "fit_level", "fit_show", "pheno_scale",
+                                                       "extract_method", "extract_direction", "extract_after",
+                                                       "metric_error_source", "diff_mode"))
+            updateRadioButtons(session, nm, selected = val)
         }
         n_global <- n_global + 1L
       }, error = function(e) invisible(NULL))
@@ -3958,6 +5745,7 @@ server <- function(input, output, session) {
       aes   <- imp$samples[[vn]]
       vid   <- safe_id(vn)
       if (!is.null(aes$color)) {
+        clear_qe_color(vn, aes$color)
         updateSelectInput(session, paste0("color_selector_", vid), selected = "custom")
         updateTextInput(session,   paste0("color_",          vid), value   = aes$color)
         updateTextInput(session,   paste0("hex_color_",      vid), value   = aes$color)
@@ -3968,8 +5756,13 @@ server <- function(input, output, session) {
         updateCheckboxInput(session, paste0("shape_filled_", vid), value = aes$shape_filled)
       if (!is.null(aes$line_type))
         updateSelectInput(session, paste0("line_type_", vid), selected = aes$line_type)
-      if (!is.null(aes$legend_label))
-        updateTextInput(session, paste0("legend_label_", vid), value = aes$legend_label)
+      if (!is.null(aes$legend_label))     # v2.21: the saved legend label is the display name (the strip's name box)
+        updateTextInput(session, paste0("qe_name_", vid), value = aes$legend_label)
+      if (!is.null(aes$group)) {     # v2.18: a v2.18 file; a missing window means "no limit", not "leave as is"
+        updateTextInput(session, paste0("group_", vid), value = as.character(aes$group))
+        updateNumericInput(session, paste0("tw_min_", vid), value = if (is.null(aes$tw_min)) NA else aes$tw_min)
+        updateNumericInput(session, paste0("tw_max_", vid), value = if (is.null(aes$tw_max)) NA else aes$tw_max)
+      }
     }
   }
   
@@ -4003,11 +5796,16 @@ server <- function(input, output, session) {
           updateSelectInput(session,   paste0("shape_",          vid), selected = def_shape)
           updateCheckboxInput(session, paste0("shape_filled_",   vid), value    = TRUE)
           updateSelectInput(session,   paste0("line_type_",      vid), selected = "solid")
-          updateTextInput(session,     paste0("legend_label_",   vid), value    = vn)
+          updateTextInput(session,     paste0("group_",          vid), value    = "")        # v2.18
+          updateNumericInput(session,  paste0("tw_min_",         vid), value    = NA)
+          updateNumericInput(session,  paste0("tw_max_",         vid), value    = NA)
         }, error = function(e) invisible(NULL))
       }
     }
     
+    for (v in rv$od_vars)                                 # v2.21: display names and quick-edit colours back to the file's own
+      tryCatch(updateTextInput(session, paste0("qe_name_", safe_id(v)), value = v), error = function(e) invisible(NULL))
+    rv$qe_colors <- list()
     rv$imported_settings <- NULL
     rv$settings_status   <- list(
       type    = "ok",
@@ -4086,8 +5884,12 @@ server <- function(input, output, session) {
       shape_def <- as.character(shape_opts[1 + (i - 1L) %% length(shape_opts)])
       
       imp_aes <- rv$imported_settings$samples[[vn]]
+      qe_c    <- isolate(rv$qe_colors[[vn]])   # v2.21: a colour picked in the quick-edit strip (isolated: this UI must not redraw on every pick)
       
-      if (!is.null(imp_aes)) {
+      if (!is.null(qe_c)) {
+        color_def <- qe_c
+        sel_def   <- "custom"
+      } else if (!is.null(imp_aes)) {
         color_def <- imp_aes$color %||% default_colors[1]
         sel_def   <- "custom"
       } else if (!is.null(rv$palette_colors) && input$color_palette != "custom") {
@@ -4103,7 +5905,7 @@ server <- function(input, output, session) {
       default_shape  <- if (!is.null(imp_aes$shape))       as.character(imp_aes$shape)    else shape_def
       default_lt     <- if (!is.null(imp_aes$line_type))    imp_aes$line_type              else "solid"
       default_filled <- if (!is.null(imp_aes$shape_filled)) imp_aes$shape_filled           else TRUE
-      default_leg    <- if (!is.null(imp_aes$legend_label)) imp_aes$legend_label           else vn
+      default_grp    <- if (!is.null(imp_aes$group))        as.character(imp_aes$group)    else ""   # v2.18
       
       div(
         style = "margin-bottom:12px;padding:10px;border:1px solid #ddd;border-radius:6px;background:#fafafa;",
@@ -4158,7 +5960,8 @@ server <- function(input, output, session) {
               )
             )
         ),
-        textInput(paste0("legend_label_", vid), "Legend Label:", value = default_leg)
+        p(class = "kc-qe-note", "Name in figures, legends and tables: edit it in the Quick edit strip under the figure."),
+        textInput(paste0("group_", vid), "Group:", value = default_grp, placeholder = "e.g. Phage A (optional)")   # v2.18
       )
     })
     
@@ -4177,11 +5980,12 @@ server <- function(input, output, session) {
     
     for (vn in input$selected_samples[safe_id(input$selected_samples) %in% new_samps]) {
       local({
-        vi <- safe_id(vn)
+        vi <- safe_id(vn); vnl <- vn
         registered_color_obs <<- c(registered_color_obs, vi)
         
         observeEvent(input[[paste0("color_selector_", vi)]], {
           sel <- input[[paste0("color_selector_", vi)]]
+          if (!is.null(sel) && sel != "custom") clear_qe_color(vnl, sel)   # v2.21: the sidebar colour wins again
           if (!is.null(sel) && sel != "custom") {
             rc <- tryCatch(col2rgb(sel), error = function(e) NULL)
             if (!is.null(rc)) {
@@ -4196,6 +6000,7 @@ server <- function(input, output, session) {
         
         observeEvent(input[[paste0("color_", vi)]], {
           col <- normalize_hex_color(input[[paste0("color_", vi)]])
+          clear_qe_color(vnl, col)                                          # v2.21: a different sidebar colour wins over the strip's
           session$sendCustomMessage("updateColorPreview",
                                     list(id = paste0("color_preview_", vi), color = col))
           rc <- tryCatch(col2rgb(col), error = function(e) NULL)
@@ -4231,6 +6036,109 @@ server <- function(input, output, session) {
     }
   })
   
+  # ── Quick-edit strip (v2.21) ─────────────────────────────────────────────────
+  # One row per loaded sample under the figure: a colour swatch + picker, the display name and a "show" box.
+  # Sources of truth: the NAME is rv$display_names (fed by the qe_name_<id> boxes; every reader, legends included,
+  # goes through it), the COLOUR is rv$qe_colors while the user picked one here (resolve_aesthetics() reads it first;
+  # a different colour chosen in the sidebar clears it), SHOW is membership of input$selected_samples.
+  QE_MAX_ROWS <- 96L
+  qe_vars <- function() utils::head(rv$od_vars, QE_MAX_ROWS)
+  output$quick_edit_rows <- renderUI({
+    vars <- rv$od_vars
+    if (is.null(vars) || !length(vars))
+      return(p(class = "kc-qe-note", "Load data (or the demo data) to rename and recolour the samples here."))
+    shown <- utils::head(vars, QE_MAX_ROWS)
+    cols  <- isolate(resolve_aesthetics(shown)$colors)
+    hex7  <- function(x) tryCatch(grDevices::rgb(t(grDevices::col2rgb(x)), maxColorValue = 255), error = function(e) "#000000")
+    rows  <- lapply(seq_along(shown), function(i) {
+      vn  <- shown[i]; vid <- safe_id(vn)
+      imp <- isolate(rv$imported_settings$samples[[vn]])
+      nm  <- if (!is.null(imp$legend_label) && nzchar(trimws(imp$legend_label))) imp$legend_label else vn
+      col <- hex7(cols[[i]])
+      div(class = "kc-qe-row", `data-sample` = vn,
+          span(class = "kc-qe-swatch", id = paste0("qe_swatch_", vid), style = paste0("background-color:", col, ";")),
+          textInput(paste0("qe_name_", vid), span(class = "sr-only", paste("Name shown for", vn)), value = nm,
+                    width = "100%", placeholder = vn),
+          tags$input(type = "color", class = "kc-qe-color", id = paste0("qe_color_", vid), value = col,
+                     title = paste("Colour of", vn), `aria-label` = paste("Colour of", vn)),
+          div(class = "kc-qe-show", checkboxInput(paste0("qe_show_", vid), "show", value = TRUE)))
+    })
+    tagList(div(class = "kc-qe-rows", rows),
+            if (length(vars) > length(shown))
+              p(class = "kc-qe-note", sprintf("The first %d of %d samples are listed here; the others keep their file names.",
+                                              length(shown), length(vars))))
+  })
+  outputOptions(output, "quick_edit_rows", suspendWhenHidden = FALSE)   # the inputs must exist whichever tab is showing
+
+  # rv$display_names from the name boxes (a blank box means the raw name). Runs first: everything reads it.
+  observe({
+    vars <- rv$od_vars
+    if (is.null(vars) || !length(vars)) { if (!is.null(isolate(rv$display_names))) rv$display_names <- NULL; return() }
+    nm <- vapply(vars, function(v) {
+      x <- input[[paste0("qe_name_", safe_id(v))]]
+      x <- if (is.null(x) || length(x) != 1 || is.na(x)) "" else trimws(as.character(x))
+      if (nzchar(x)) x else v
+    }, "")
+    names(nm) <- vars
+    if (!identical(isolate(rv$display_names), nm)) rv$display_names <- nm
+  }, priority = 10)
+
+  # The colour the user picked in the strip becomes the sample's colour; the sidebar widgets (when they exist) follow.
+  clear_qe_color <- function(vn, new_hex = NULL) {
+    cur <- isolate(rv$qe_colors); qe <- cur[[vn]]
+    if (is.null(qe)) return(invisible(NULL))
+    if (!is.null(new_hex) && identical(toupper(as.character(new_hex)), toupper(qe))) return(invisible(NULL))
+    cur[[vn]] <- NULL; rv$qe_colors <- cur
+    invisible(NULL)
+  }
+  registered_qe_obs <- character(0)
+  observe({
+    vars <- qe_vars(); req(length(vars))
+    for (vn in vars[!safe_id(vars) %in% registered_qe_obs]) local({
+      vnl <- vn; vi <- safe_id(vn)
+      registered_qe_obs <<- c(registered_qe_obs, vi)
+      observeEvent(input[[paste0("qe_color_", vi)]], {
+        col <- as.character(input[[paste0("qe_color_", vi)]])
+        if (length(col) != 1 || !grepl("^#[0-9A-Fa-f]{6}$", col) || !(vnl %in% rv$od_vars)) return()
+        col <- toupper(col)
+        cur <- isolate(rv$qe_colors); cur[[vnl]] <- col; rv$qe_colors <- cur
+        updateSelectInput(session, paste0("color_selector_", vi), selected = "custom")   # the sidebar follows (no-ops while it is not drawn)
+        updateTextInput(session,   paste0("color_",     vi), value = col)
+        updateTextInput(session,   paste0("hex_color_", vi), value = col)
+      }, ignoreInit = TRUE)
+    })
+  })
+  # A click on a "show" box (the page script reports user clicks only, not the updates below) adds / removes that
+  # sample from Select Samples.
+  observeEvent(input$qe_show_event, {
+    ev <- input$qe_show_event; vn <- as.character(ev$sample)
+    if (length(vn) != 1 || !(vn %in% rv$od_vars)) return()
+    cur <- isolate(input$selected_samples)
+    new <- toggle_sample_selection(cur, rv$od_vars, vn, isTRUE(ev$show))
+    if (!setequal(new, cur)) updateSelectInput(session, "selected_samples", selected = new)
+  })
+  # the whole selection implied by the "show" boxes (the strip's boxes that exist override the select box)
+  quick_edit_selection <- function() {
+    sel <- input$selected_samples
+    for (v in qe_vars()) {
+      s <- input[[paste0("qe_show_", safe_id(v))]]
+      if (!is.null(s)) sel <- toggle_sample_selection(sel, rv$od_vars, v, isTRUE(s))
+    }
+    sel
+  }
+  # the other direction: a change of Select Samples (sidebar, data load, settings) moves the "show" boxes
+  observeEvent(input$selected_samples, {
+    vars <- qe_vars(); cur <- input$selected_samples
+    for (v in vars) updateCheckboxInput(session, paste0("qe_show_", safe_id(v)), value = v %in% cur)
+  }, ignoreNULL = FALSE)
+  # the swatches (and pickers) show the colour each sample really has: sidebar colour, palette or the strip's own
+  observe({
+    vars <- qe_vars(); req(length(vars))
+    cols <- resolve_aesthetics(vars)$colors
+    hex7 <- vapply(cols, function(x) tryCatch(grDevices::rgb(t(grDevices::col2rgb(x)), maxColorValue = 255), error = function(e) "#000000"), "")
+    session$sendCustomMessage("kcSwatches", list(ids = paste0("qe_color_", safe_id(vars)), colors = unname(hex7)))
+  })
+
   # ── Dynamic UI: region / marker settings ────────────────────────────────────
   output$region_settings <- renderUI({
     req(input$region_count, input$enable_highlighting)
@@ -4314,6 +6222,72 @@ server <- function(input, output, session) {
     d
   }
   
+  # ── Per-sample time windows (v2.18) ─────────────────────────────────────────
+  # tw_min_<id> / tw_max_<id> (Time Point Filtering): a sample's rows are kept when from <= time <= to.
+  # A blank box (NA / NULL) is no limit on that side. The windows apply whether or not the global time
+  # filter is on, after it.
+  time_window_for <- function(sample) {
+    vid <- safe_id(sample)
+    num <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1 && is.finite(v)) v else NA_real_ }
+    c(from = num(input[[paste0("tw_min_", vid)]]), to = num(input[[paste0("tw_max_", vid)]]))
+  }
+  # The windows set for `samples` (default: the selected samples) as a data frame (sample, from, to);
+  # zero rows when none is set.
+  time_windows_current <- function(samples = input$selected_samples) {
+    rows <- lapply(samples, function(s) { w <- time_window_for(s)
+      if (all(is.na(w))) NULL else data.frame(sample = s, from = unname(w[1]), to = unname(w[2]), stringsAsFactors = FALSE) })
+    rows <- Filter(Negate(is.null), rows)
+    if (length(rows)) do.call(rbind, rows) else data.frame(sample = character(0), from = numeric(0), to = numeric(0))
+  }
+  # "A 0-120; B from 30" for provenance, the legend and the methods text ("" when no window is set)
+  time_windows_text <- function(samples = input$selected_samples) {
+    tw <- time_windows_current(samples)
+    if (!nrow(tw)) return("")
+    g <- function(x) format(x, trim = TRUE, digits = 10)
+    paste(sprintf("%s %s", dname(tw$sample),
+                  ifelse(is.na(tw$from), paste0("up to ", g(tw$to)),
+                         ifelse(is.na(tw$to), paste0("from ", g(tw$from)), paste0(g(tw$from), "\u2013", g(tw$to))))),
+          collapse = "; ")
+  }
+  # Drops the rows of every sample that lie outside its window. df needs the columns `variable` and
+  # `time` (prepare_plot_data() / prepare_replicate_data() frames); all other columns are kept.
+  apply_time_windows_inputs <- function(df) {
+    if (is.null(df) || nrow(df) == 0 || !all(c("variable", "time") %in% names(df))) return(df)
+    v <- as.character(df$variable); keep <- rep(TRUE, nrow(df))
+    for (s in unique(v)) {
+      w <- time_window_for(s)
+      if (all(is.na(w))) next
+      idx <- v == s
+      if (!is.na(w[1])) keep[idx] <- keep[idx] & df$time >= w[1]
+      if (!is.na(w[2])) keep[idx] <- keep[idx] & df$time <= w[2]
+    }
+    df[keep, , drop = FALSE]
+  }
+  output$time_windows_ui <- renderUI({
+    samps <- input$selected_samples
+    if (is.null(samps) || length(samps) == 0)
+      return(p(style = "color:#999;font-size:.85em;", "Load data and select samples to set per-sample windows."))
+    tp <- rv$all_timepoints
+    rng_txt <- if (!is.null(tp) && length(tp)) paste0("data: ", format(min(tp), digits = 6), "\u2013", format(max(tp), digits = 6)) else NULL
+    cur <- function(id, imp) {   # an imported setting wins (a settings file was just loaded), else keep what is typed
+      v <- if (!is.null(imp)) imp else isolate(input[[id]])
+      v <- suppressWarnings(as.numeric(v)); if (length(v) == 1 && is.finite(v)) v else NA_real_
+    }
+    rows <- lapply(samps, function(vn) {
+      vid <- safe_id(vn); imp <- rv$imported_settings$samples[[vn]]
+      fluidRow(style = "margin-bottom:-8px;",
+        column(4, div(style = "font-size:.82em;padding-top:6px;word-break:break-word;", vn)),
+        column(4, numericInput(paste0("tw_min_", vid), NULL, value = cur(paste0("tw_min_", vid), imp$tw_min), width = "100%")),
+        column(4, numericInput(paste0("tw_max_", vid), NULL, value = cur(paste0("tw_max_", vid), imp$tw_max), width = "100%")))
+    })
+    tagList(
+      fluidRow(column(4, strong("Sample", style = "font-size:.82em;")),
+               column(4, strong("from", style = "font-size:.82em;")),
+               column(4, strong("to", style = "font-size:.82em;"))),
+      do.call(tagList, rows),
+      if (!is.null(rng_txt)) p(style = "font-size:.78em;color:#777;margin-top:6px;", rng_txt))
+  })
+
   # ── Data prep ────────────────────────────────────────────────────────────────
   # Zero-row frames with the usual columns: what prepare_plot_data() / prepare_replicate_data()
   # return when the selected samples match nothing that is loaded (for instance for a moment when a
@@ -4349,6 +6323,7 @@ server <- function(input, output, session) {
                ci95_value = ifelse(n >= 2, qt(0.975, df = pmax(n - 1, 1)) * sem_value, NA_real_))
       names(pd)[names(pd) == rv$group_col] <- "variable"
       names(pd)[names(pd) == rv$time_col]  <- "time"
+      pd <- apply_time_windows_inputs(pd)   # v2.18: per-sample windows, after the global filter
     } else {
       d    <- apply_time_filters(rv$data, rv$time_col)
       meas <- intersect(rv$od_vars_raw, samps)
@@ -4365,7 +6340,7 @@ server <- function(input, output, session) {
         data.frame(time     = rep(t_vec, times = length(idxs)),
                    variable = vn, value = vals, stringsAsFactors = FALSE)
       })
-      pd <- bind_rows(pieces) %>%
+      pd <- apply_time_windows_inputs(bind_rows(pieces)) %>%   # v2.18: per-sample windows, after the global filter
         group_by(time, variable) %>%
         summarise(mean_value = mean(value, na.rm = TRUE),
                   sd_value   = sd(  value, na.rm = TRUE),
@@ -4443,6 +6418,7 @@ server <- function(input, output, session) {
     }
     # KC-7: see prepare_plot_data() above -- same constant blank offset,
     # applied per replicate value here since this frame is un-averaged.
+    out <- apply_time_windows_inputs(out)   # v2.18: per-sample windows, after the global filter
     blank <- input$blank_od %||% 0
     if (is.numeric(blank) && !is.na(blank) && blank != 0) out$value <- out$value - blank
     out %>% filter(is.finite(time) & is.finite(value))
@@ -4456,6 +6432,7 @@ server <- function(input, output, session) {
     line_types <- setNames(character(n), samples)
     leg_labels <- setNames(character(n), samples)
     filled_map <- setNames(logical(n),   samples)
+    groups     <- setNames(character(n), samples)   # v2.18: free-text sample group ("" = none)
     def_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
                     "#984EA3","#FF7F00","#A65628","#F781BF",
                     "#999999","#66C2A5","#FC8D62","#8DA0CB")
@@ -4468,7 +6445,10 @@ server <- function(input, output, session) {
       else def_shapes[(i - 1) %% length(def_shapes) + 1]
       
       sel <- input[[paste0("color_selector_", vid)]]
-      if (!is.null(sel) && sel == "custom")
+      qe_col <- rv$qe_colors[[vn]]
+      if (!is.null(qe_col))                       # v2.21: the colour picked in the quick-edit strip
+        colors[i] <- qe_col
+      else if (!is.null(sel) && sel == "custom")
         colors[i] <- normalize_hex_color(input[[paste0("color_", vid)]])
       else if (!is.null(sel))
         colors[i] <- sel
@@ -4482,14 +6462,16 @@ server <- function(input, output, session) {
       lt <- input[[paste0("line_type_", vid)]]
       line_types[i] <- if (!is.null(lt)) lt else "solid"
       
-      ll <- input[[paste0("legend_label_", vid)]]
-      leg_labels[i] <- if (!is.null(ll) && nchar(ll) > 0) ll else vn
+      leg_labels[i] <- display_name_of(vn, rv$display_names)   # v2.21: the display name (quick-edit strip)
       
       fi <- input[[paste0("shape_filled_", vid)]]
       filled_map[i] <- if (!is.null(fi)) fi else TRUE
+
+      gi <- input[[paste0("group_", vid)]]
+      groups[i] <- if (!is.null(gi) && length(gi) == 1 && !is.na(gi)) trimws(as.character(gi)) else ""
     }
     list(shapes = shapes, colors = colors, line_types = line_types,
-         leg_labels = leg_labels, filled_map = filled_map)
+         leg_labels = leg_labels, filled_map = filled_map, groups = groups)
   }
   
   # ── Shared figure theme (v2.11) ─────────────────────────────────────────────
@@ -4609,6 +6591,12 @@ server <- function(input, output, session) {
     
     if (identical(input$legend_order, "selected"))
       plot_data$variable <- factor(as.character(plot_data$variable), levels = samples)
+    
+    # v2.18: one panel per sample group (facet_by_group, >= 2 distinct non-empty groups). Every layer that
+    # is built from plot_data carries the `group` column; layers without it are drawn in every panel.
+    grp_map <- if (isTRUE(input$facet_by_group)) sample_group_map(samples, aes_vals$groups) else NULL
+    if (!is.null(grp_map))
+      plot_data$group <- factor(unname(grp_map[as.character(plot_data$variable)]), levels = attr(grp_map, "levels"))
     
     # Grey out non-highlighted samples while keeping axis scale stable
     display_colors <- colors
@@ -4750,6 +6738,7 @@ server <- function(input, output, session) {
       rp <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
       if (!is.null(rp) && nrow(rp) > 0) {
         if (input$y_scale_type == "log") rp <- rp[rp$value > 0, , drop = FALSE]
+        if (!is.null(grp_map)) rp$group <- factor(unname(grp_map[as.character(rp$variable)]), levels = attr(grp_map, "levels"))
         jit <- diff(range(plot_data$time, na.rm = TRUE)) * 0.006
         p <- p + geom_point(data = rp, aes(x = time, y = value, color = variable),
                             shape = 1, size = input$shape_size * 0.5, alpha = 0.55,
@@ -4956,6 +6945,14 @@ server <- function(input, output, session) {
                                  n_entries = n_vars, log_y = identical(input$y_scale_type, "log"),
                                  label_chars = max(nchar(unname(leg_labels)), 1))
     
+    if (!is.null(grp_map)) {
+      # v2.18: facet strips read as plain text at the axis-title size, no box; one key for all panels,
+      # outside (an inside key would sit in a corner of the whole panel block, over one facet's curves)
+      p <- p + facet_wrap(~ group, scales = "fixed", labeller = label_wrap_gen(width = 18)) +   # plain-text strips (as the metric summary)
+        theme(strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
+              strip.background = element_blank())
+      if (startsWith(input$legend_position %||% "right", "inside-")) p <- p + theme(legend.position = "right")
+    }
     if (isTRUE(input$custom_aspect_ratio))
       p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
 
@@ -4994,6 +6991,27 @@ server <- function(input, output, session) {
            subtitle = if (nchar(trimws(input$plot_subtitle)) > 0) input$plot_subtitle else NULL,
            caption  = err_caption,
            tag      = if (nzchar(pl_lab)) pl_lab else NULL)
+  }
+  
+  # v2.18: the composer panel "Lysis curve, one panel per group": one single-group main figure per group
+  # (the group's samples only, group name as the title), in group order (first appearance, "Other" last),
+  # named "main_by_group:<group>". An empty list when no sample has a group.
+  main_group_plots <- function() {
+    samps <- input$selected_samples
+    aes_v <- resolve_aesthetics(samps)
+    gm    <- sample_group_map(samps, aes_v$groups, min_groups = 1L)
+    if (is.null(gm)) return(list())
+    pd    <- prepare_plot_data()
+    lv    <- attr(gm, "levels")
+    plots <- lapply(lv, function(g) {
+      gs    <- samps[gm == g]
+      aes_g <- list(shapes = aes_v$shapes[gs], colors = aes_v$colors[gs], line_types = aes_v$line_types[gs],
+                    leg_labels = aes_v$leg_labels[gs], filled_map = aes_v$filled_map[gs])   # no groups: a plain panel
+      tryCatch(build_plot(pd[pd$variable %in% gs, , drop = FALSE], gs, aes_g) + labs(title = g),
+               error = function(e) NULL)
+    })
+    names(plots) <- paste0("main_by_group:", lv)
+    Filter(Negate(is.null), plots)
   }
   
   generate_plot <- function() {
@@ -5056,7 +7074,8 @@ server <- function(input, output, session) {
   }
   # ── Fixed panel size (v2.15) ────────────────────────────────────────────────
   fixed_mode <- function() identical(input$panel_size_mode, "fixed")
-  CURVE_KINDS <- c("main", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response")
+  CURVE_KINDS <- c("main", "main_by_group", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response",
+                   "metric_explorer", "fit_overlay", "phases", "difference")   # v2.19: the fit figure is square, v2.20: so are the phases and separation figures; the phenotype heatmap (like the OD heatmap) is not
   # Panel (plotting area) size in mm for a figure kind: curve figures are square when
   # panel_square is on; the metric summary and heatmap use width x height as given.
   panel_dims_mm <- function(kind = "main") {
@@ -5064,6 +7083,11 @@ server <- function(input, output, session) {
     w  <- cl(input$panel_width_mm, 65)
     h  <- cl(input$panel_height_mm, w)
     if (kind %in% CURVE_KINDS && isTRUE(input$panel_square %||% TRUE)) h <- w
+    if (identical(kind, "phenotype_heatmap")) {   # v2.20.1: the height follows the rows so the tiles stay square-ish
+      n <- tryCatch(nrow(pheno_current()$matrix), error = function(e) NA_integer_)
+      if (!is.finite(n) || n < 1) n <- length(input$selected_samples)
+      h <- min(max(25, 10 * max(n, 1)), 400)
+    }
     c(w, h)
   }
   fixed_figure <- function(p, kind = "main") {
@@ -5127,6 +7151,7 @@ server <- function(input, output, session) {
       tryCatch({
         if (is.logical(val))      updateCheckboxInput(session, nm, value = val)
         else if (is.numeric(val)) updateNumericInput( session, nm, value = val)
+        else if (nm %in% c("pheno_metrics", "boot_metrics")) updateSelectInput(session, nm, selected = val)   # v2.19 / v2.20: multi-selects
         else if (is.character(val) && length(val) > 1) updateCheckboxGroupInput(session, nm, selected = val)
         else { updateSelectInput(session,   nm, selected = val)
                updateRadioButtons(session, nm, selected = val)
@@ -5175,12 +7200,22 @@ server <- function(input, output, session) {
   # as the composed figure does); canvas mode keeps its width and scales the height.
   # v2.14: the zoom that makes the figure fit the main panel (rounded down to 0.25, 0.5-4), or the
   # slider's value when auto-fit is off or the page width is not known (tests, first render).
-  preview_zoom_value <- function(width_in) {
+  # v2.21: with a sticky figure column the main figure's preview also fits the window HEIGHT (`height_in`, the
+  # figure's height; input$sticky_viewport_height is 0 / absent when the column is not sticky): the window minus the
+  # size bar and tabs, and minus the quick-edit strip while it is open, so the figure and the strip are in view together.
+  preview_zoom_value <- function(width_in, height_in = NULL) {
     pw <- input$main_panel_width
     if (isTRUE(input$preview_zoom_auto %||% TRUE) && is.numeric(pw) && length(pw) == 1 && is.finite(pw) &&
         pw > 0 && is.finite(width_in) && width_in > 0) {
       pw <- min(max(pw, 200), 8000)                      # v2.14.1: a sane page width
-      min(max(floor((pw - 24) / (width_in * 96) * 4) / 4, 0.5), 4)
+      z  <- min(max(floor((pw - 24) / (width_in * 96) * 4) / 4, 0.5), 4)
+      vh <- input$sticky_viewport_height
+      if (!is.null(height_in) && is.numeric(vh) && length(vh) == 1 && is.finite(vh) && vh >= 400 &&
+          is.finite(height_in) && height_in > 0) {
+        reserve <- 130 + if (isTRUE(input$quick_edit_open %||% TRUE)) 150 + 30 * min(length(rv$od_vars), 6) else 0
+        z <- min(z, max(floor((vh - reserve) / (height_in * 96) * 4) / 4, 0.5))
+      }
+      z
     } else {
       z <- input$preview_zoom %||% 2
       if (!is.numeric(z) || length(z) != 1 || !is.finite(z)) z <- 2
@@ -5190,7 +7225,7 @@ server <- function(input, output, session) {
   preview_container <- function(plot_id, img_id, size_fun = export_size_in) {
     sz <- size_fun()
     if (identical(input$preview_mode, "wysiwyg")) {
-      z <- preview_zoom_value(sz[1])
+      z <- preview_zoom_value(sz[1], if (identical(img_id, "od_plot_img")) sz[2])
       imageOutput(img_id,
                   width  = paste0(round(sz[1] * 96 * z), "px"),
                   height = paste0(round(sz[2] * 96 * z), "px"))
@@ -5219,7 +7254,7 @@ server <- function(input, output, session) {
     }, res = 96)
     output[[img_id]] <- renderImage({
       plot_inputs_debounced()
-      sz <- size_fun(); z <- preview_zoom_value(sz[1])
+      sz <- size_fun(); z <- preview_zoom_value(sz[1], if (identical(img_id, "od_plot_img")) sz[2])
       pr <- session$clientData$pixelratio %||% 1
       pr <- if (is.numeric(pr) && length(pr) == 1 && is.finite(pr)) min(max(pr, 1), 3) else 1
       f  <- tempfile(fileext = ".png")
@@ -5255,16 +7290,20 @@ server <- function(input, output, session) {
     if (identical(u, "mm")) sprintf("%dx%dmm", as.integer(round(w)), as.integer(round(h)))
     else sprintf("%.1fx%.1fin", w, h)
   }
-  main_download_name <- function()
-    paste0("lysis_curve_", file_label(input$panel_label, "main"), "_", export_size_tag(), ".", input$export_format %||% "svg")
+  # v2.18: the names without the extension, so the "Download all figures" archive uses the same ones
+  main_file_stem <- function() paste0("lysis_curve_", file_label(input$panel_label, "main"), "_", export_size_tag())
+  analysis_file_stem <- function(ty, sz_in = NULL)
+    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(sz_in))
+  composed_file_stem <- function(sz_mm = NULL)
+    paste0("figure_composed", if (!is.null(sz_mm)) sprintf("_%dx%dmm", as.integer(round(sz_mm[1])), as.integer(round(sz_mm[2]))))
+  main_download_name <- function() paste0(main_file_stem(), ".", input$export_format %||% "svg")
   analysis_download_name <- function() {
     ty <- input$analysis_type %||% "figure"
-    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(if (fixed_mode()) analysis_size_in()), ".", input$export_format %||% "svg")
+    paste0(analysis_file_stem(ty, if (fixed_mode()) analysis_size_in()), ".", input$export_format %||% "svg")
   }
   composed_download_name <- function() {
     sz <- tryCatch({ i <- compose_info(); c(i$width_mm, i$height_mm) }, error = function(e) NULL)
-    paste0("figure_composed", if (!is.null(sz)) sprintf("_%dx%dmm", as.integer(round(sz[1])), as.integer(round(sz[2]))),
-           ".", input$export_format %||% "svg")
+    paste0(composed_file_stem(sz), ".", input$export_format %||% "svg")
   }
 
   # ── Figure size bar (v2.14) ──────────────────────────────────────────────────
@@ -5433,7 +7472,9 @@ server <- function(input, output, session) {
     blank <- input$blank_od %||% 0
     s5 <- if (is.numeric(blank) && is.finite(blank) && blank != 0)
       sprintf("Readings are blank-corrected (−%s).", blank) else NULL
-    s6 <- if (isTRUE(input$enable_time_filter)) "Only the displayed time window was analysed." else NULL
+    tw_txt <- time_windows_text()
+    s6 <- if (isTRUE(input$enable_time_filter) || nzchar(tw_txt)) "Only the displayed time window was analysed." else NULL
+    if (nzchar(tw_txt)) s6 <- paste0(s6, " Per-sample time windows: ", tw_txt, ".")
     paste(c(s1, s2, s3, s4, s5, s6), collapse = " ")
   }
   output$figure_legend_text <- renderText({
@@ -5466,6 +7507,22 @@ server <- function(input, output, session) {
                              method     = input$stats_method %||% "welch")
   }
   
+  # v2.21: the comparison tables as the user sees them: sample / versus / comparison in display names (with the raw
+  # names in `<col>_raw` columns, which the CSV keeps and the screen and the reports drop), warnings relabelled.
+  # The figures keep reading analysis_stats_current() (raw names are their keys).
+  analysis_stats_display <- function() {
+    st <- analysis_stats_current(); map <- rv$display_names
+    if (!is.null(st$pairwise)) st$pairwise <- with_display(st$pairwise, map, c("sample", "versus"))
+    if (!is.null(st$posthoc) && "comparison" %in% names(st$posthoc)) {
+      ph <- st$posthoc; raw <- as.character(ph$comparison)
+      ph <- cbind(data.frame(comparison = relabel_comparison(raw, map), comparison_raw = raw, stringsAsFactors = FALSE),
+                  ph[setdiff(names(ph), "comparison")])
+      st$posthoc <- ph
+    }
+    st$warnings <- relabel_text(st$warnings, map)
+    st
+  }
+  
   # The analysis figures show the SAME error measure as the main figure
   # (Error Bars panel): SD, SEM or 95% CI of the per-replicate values; none
   # draws no whiskers. Returns a function(values) -> half-width.
@@ -5483,7 +7540,8 @@ server <- function(input, output, session) {
   # figure_theme_layers(), so it matches the main figure exactly.
   build_analysis_plot <- function(type) {
     dose_no_legend <- FALSE
-    leg_xy <- NULL      # plotted x/y of this figure, for legend_position "inside-auto"
+    fig_notes <- character(0)   # v2.21: lines shown under the figure's controls (attr "figure_note"), never on the artwork
+    leg_xy <- NULL     # plotted x/y of this figure, for legend_position "inside-auto"
     leg_log_y <- FALSE
     ehw    <- error_half_width()
     eb_col <- input$error_bar_color %||% "sample"
@@ -5519,12 +7577,47 @@ server <- function(input, output, session) {
           else waiver()
         summ <- long %>% group_by(metric, sample) %>%
           summarise(mean = mean(value), sd = ehw(value), n = n(), .groups = "drop")
+        summ$lo <- summ$mean - summ$sd; summ$hi <- summ$mean + summ$sd
+        # v2.20: the whiskers can be the bootstrap 95 % CI of the mean-curve metric (Statistics tab, "Run bootstrap")
+        # instead of the replicate spread: the bar is then the mean-curve estimate. A metric the cached bootstrap
+        # does not hold keeps the replicate spread, with a notification.
+        if (identical(input$metric_error_source %||% "replicates", "bootstrap")) {
+          bt <- boot_valid()
+          have <- if (is.null(bt)) character(0) else intersect(mets, unique(as.character(bt$metric)))
+          miss <- setdiff(mets, have)
+          if (length(miss))
+            guard_notify("boot_fallback", paste0(
+              if (is.null(bt)) paste0("No bootstrap result yet (or it is out of date): run it on the Statistics tab. ")
+              else "The cached bootstrap does not hold: ",
+              if (!is.null(bt)) paste0(paste(metric_label(miss), collapse = ", "), ". "),
+              "Those metrics show the replicate spread."))
+          lab_of <- function(m) metric_axis_label(m, tunit = tunit, ylab = input$y_axis_label %||% "OD")
+          smp_of <- unname(labs_v[sample_levels(samps)]); names(smp_of) <- sample_levels(samps)
+          for (m in have) {
+            bm <- bt[bt$metric == m, , drop = FALSE]
+            rr <- which(as.character(summ$metric) == lab_of(m))
+            bi <- match(as.character(summ$sample[rr]), unname(smp_of[bm$sample]))
+            est <- bm$estimate[bi]; ok <- !is.na(bi)
+            summ$lo[rr[ok]]   <- bm$ci_low[bi[ok]];  summ$hi[rr[ok]] <- bm$ci_high[bi[ok]]
+            summ$mean[rr[ok & is.finite(est)]] <- est[ok & is.finite(est)]
+          }
+        }
+        # v2.21: the summary style (dot = the v2.11 look, the default) and optional significance brackets
+        mstyle   <- input$metric_style %||% "dot"
+        if (!mstyle %in% c("bar", "box", "violin")) mstyle <- "dot"
+        brk      <- isTRUE(input$metric_brackets)
+        y_exp    <- if (brk) c(0.08, 0.04) else c(0.08, 0.18)      # brackets bring their own headroom
+        cols_lab <- setNames(unname(cols), unname(labs_v[names(cols)]))
+        if (mstyle != "dot") {
+          g <- metric_summary_styled(mstyle, long, summ, cols_lab, eb_col = eb_col, ptsz = ptsz,
+                                     x_guide = x_guide, y_exp = y_exp)
+        } else {
         g <- ggplot(long, aes(x = sample, y = value))
         if (eb_col == "sample")
-          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = mean - sd, ymax = mean + sd, color = sample),
+          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi, color = sample),
                                  width = 0.3, linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)
         else
-          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = mean - sd, ymax = mean + sd),
+          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi),
                                  color = eb_col, width = 0.3, linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)
         g <- g +
           geom_crossbar(data = summ, aes(x = sample, y = mean, ymin = mean, ymax = mean, color = sample),
@@ -5534,15 +7627,64 @@ server <- function(input, output, session) {
           facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 18)) +
           scale_color_manual(values = setNames(unname(cols), unname(labs_v[names(cols)])), guide = "none") +
           scale_x_discrete(guide = x_guide) +
-          scale_y_continuous(expand = expansion(mult = c(0.08, 0.18))) +   # headroom for marks
+          scale_y_continuous(expand = expansion(mult = y_exp)) +   # headroom for marks
           labs(x = NULL, y = NULL)
-        if (isTRUE(input$stats_mark) && nzchar(ref) && ref %in% rm$sample) {
+        }
+        if (brk) {
+          # v2.21: brackets for ALL pairs with p_adj_holm < 0.05 (compare_replicate_metric with no reference), at most 6 per
+          # facet (the most significant), stacked above what the facet draws; plain geom_segment + geom_text
+          ext   <- tryCatch(facet_y_extent(g), error = function(e) NULL)
+          xlev  <- levels(droplevels(long$sample)); x_pos <- setNames(seq_along(xlev), xlev)
+          seg_l <- list(); lab_l <- list(); blank_l <- list(); warn_l <- character(0); low_n <- FALSE
+          for (m in mets) {
+            lab_m <- metric_axis_label(m, tunit = tunit, ylab = input$y_axis_label %||% "OD")
+            st <- compare_replicate_metric(rm, m, ref_sample = NULL, method = input$stats_method %||% "welch")
+            is_low <- grepl("n < 3", st$warnings, fixed = TRUE)
+            low_n  <- low_n || any(is_low)
+            if (any(!is_low)) warn_l <- c(warn_l, paste0(lab_m, ": ", st$warnings[!is_low]))
+            pw <- st$pairwise
+            if (is.null(pw) || nrow(pw) == 0) next
+            pw$sample <- unname(labs_v[pw$sample]); pw$versus <- unname(labs_v[pw$versus])
+            lv <- long[long$metric == lab_m, , drop = FALSE]
+            top <- if (!is.null(ext)) unname(ext$top[lab_m]) else max(lv$value, na.rm = TRUE)
+            rng <- if (!is.null(ext)) unname(ext$range[lab_m]) else diff(range(lv$value, na.rm = TRUE))
+            lay <- metric_bracket_layout(pw, x_pos, y_top = top, y_range = rng)
+            if (lay$n_sig == 0L) next
+            if (lay$n_sig > lay$n_shown)
+              warn_l <- c(warn_l, sprintf("%s: %d pairs have p < 0.05; the %d most significant are drawn.", lab_m, lay$n_sig, lay$n_shown))
+            lay$segments$metric <- lab_m; lay$labels$metric <- lab_m
+            seg_l[[length(seg_l) + 1L]]     <- lay$segments
+            lab_l[[length(lab_l) + 1L]]     <- lay$labels
+            blank_l[[length(blank_l) + 1L]] <- data.frame(metric = lab_m, x = 1, y = lay$y_max, stringsAsFactors = FALSE)
+          }
+          fig_notes <- c(fig_notes, paste0("Brackets: every pair of samples, ",
+                                           if (identical(input$stats_method %||% "welch", "welch")) "Welch t-test" else "Mann-Whitney test",
+                                           " on the per-replicate values, Holm-adjusted p < 0.05 (stars as in the statistics table); ",
+                                           "at most 6 per panel, the most significant first. A sample needs 2 or more replicate values."))
+          if (low_n) fig_notes <- c(fig_notes, "Some groups have n < 3: low power, so a missing bracket is not evidence of no difference.")
+          fig_notes <- c(fig_notes, warn_l)
+          if (length(seg_l)) {
+            as_facet <- function(d) { d$metric <- factor(d$metric, levels = levels(long$metric)); d }
+            segs <- as_facet(do.call(rbind, seg_l)); labl <- as_facet(do.call(rbind, lab_l)); blk <- as_facet(do.call(rbind, blank_l))
+            g <- g + geom_blank(data = blk, aes(x = x, y = y), inherit.aes = FALSE) +
+              geom_segment(data = segs, aes(x = x, xend = xend, y = y, yend = yend), color = "black",
+                           linewidth = pt2lw(0.5), inherit.aes = FALSE) +
+              geom_text(data = labl, aes(x = x, y = y, label = label), vjust = 0.1, color = "black",
+                        size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                        family = if (nzchar(input$font_family %||% "")) input$font_family else "", inherit.aes = FALSE)
+          } else fig_notes <- c(fig_notes, "No pair of samples reaches p < 0.05 (Holm) for the selected metrics, so no bracket is drawn.")
+        }
+        if (isTRUE(input$stats_mark) && !brk && nzchar(ref) && ref %in% rm$sample) {
           marks <- do.call(rbind, lapply(mets, function(m) {
             st <- compare_replicate_metric(rm, m, ref_sample = ref, method = input$stats_method %||% "welch")
             if (is.null(st$pairwise)) return(NULL)
             lab_m <- metric_axis_label(m, tunit = tunit, ylab = input$y_axis_label %||% "OD")
             top <- long[long$metric == lab_m, , drop = FALSE] %>% group_by(sample) %>%
               summarise(y = max(value), .groups = "drop")
+            if (identical(input$metric_error_source %||% "replicates", "bootstrap")) {   # a bootstrap whisker can reach above the points
+              sm_m <- summ[as.character(summ$metric) == lab_m, , drop = FALSE]
+              top$y <- pmax(top$y, sm_m$hi[match(as.character(top$sample), as.character(sm_m$sample))], na.rm = TRUE)
+            }
             pwd <- st$pairwise[st$pairwise$versus == ref, , drop = FALSE]   # never show all-pairs results as "vs reference"
             if (nrow(pwd) == 0) return(NULL)
             pwd$sample <- factor(unname(labs_v[pwd$sample]), levels = levels(long$sample))
@@ -5698,6 +7840,419 @@ server <- function(input, output, session) {
           labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
         if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
+      phases = {
+        # v2.20: the mean curves with each sample's phases (curve_phases_by_sample(): lag, exponential, deceleration,
+        # stationary, lysis, recovery / post-lysis, every boundary read back from the curve metrics) as translucent
+        # shaded bands behind the curve. With several samples full-height bands would overlap, so each sample gets a
+        # thin strip at the top of the panel (one row per sample, marked by a small square in the sample's colour at its left end) and the curves sit below.
+        pd <- prepare_plot_data(); ph <- phases_current()
+        if (is.null(ph) || nrow(ph) == 0) stop("No phases could be computed: a curve needs at least two readings.")
+        logy <- identical(input$y_scale_type, "log")
+        if (logy) pd <- pd[pd$mean_value > 0, , drop = FALSE]
+        if (nrow(pd) == 0) stop("No data to draw.")
+        smp <- sample_levels(samps); smp <- smp[smp %in% unique(as.character(pd$variable))]
+        pd$variable <- factor(as.character(pd$variable), levels = sample_levels(samps))
+        ph  <- ph[ph$sample %in% smp, , drop = FALSE]
+        k   <- length(smp)
+        tr  <- function(v) if (logy) log10(v) else v
+        inv <- function(v) if (logy) 10^v else v
+        rng <- range(tr(pd$mean_value), na.rm = TRUE)
+        lay <- phase_layout(rng[1], rng[2], k)
+        ph$phase <- factor(ph$phase, levels = PHASE_LEVELS)
+        strips <- k > 1
+        if (strips) {
+          si <- match(ph$sample, smp)
+          ph$ymin <- inv(lay$strips$ymin[si]); ph$ymax <- inv(lay$strips$ymax[si])
+        } else { ph$ymin <- inv(lay$full[1]); ph$ymax <- inv(lay$full[2]) }
+        # y breaks only over the curves (the strips above them carry no values)
+        y_lim <- inv(lay$limits); y_top <- inv(rng[2])
+        y_brk <- function(lim) {
+          b <- if (logy) scales::log_breaks()(range(pd$mean_value)) else scales::extended_breaks()(range(pd$mean_value))
+          b <- b[is.finite(b) & b >= y_lim[1] & b <= y_top * (1 + 1e-9)]
+          if (length(b) >= 2) b else waiver()
+        }
+        t_rng <- range(pd$time, na.rm = TRUE)
+        g <- ggplot() +
+          geom_rect(data = ph, aes(xmin = t_start, xmax = t_end, ymin = ymin, ymax = ymax, fill = phase),
+                    alpha = if (strips) PHASE_STRIP_ALPHA else PHASE_BAND_ALPHA,
+                    colour = if (strips) "white" else NA, linewidth = if (strips) pt2lw(0.25) else 0,
+                    inherit.aes = FALSE)
+        if (strips) {
+          # v2.20.1: no text over the strips; a 1.5 mm square in the sample's colour at the left end of its strip
+          # (pch 15 is 0.75 x the point size on a side: size 2 mm -> 1.5 mm; stroke 0 so no border is added)
+          sq <- data.frame(variable = factor(smp, levels = sample_levels(samps)),
+                           x = t_rng[1] + 0.02 * (t_rng[2] - t_rng[1]),
+                           y = inv((lay$strips$ymin + lay$strips$ymax) / 2), stringsAsFactors = FALSE)
+          g <- g + geom_point(data = sq, aes(x = x, y = y, colour = variable), shape = 15, size = 2, stroke = 0,
+                              show.legend = FALSE, inherit.aes = FALSE)
+        }
+        g <- g +
+          geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable, group = variable),
+                    linewidth = lw) +
+          scale_color_manual(   values = cols, labels = labs_v, name = NULL) +
+          scale_linetype_manual(values = lts,  labels = labs_v, name = NULL) +
+          scale_fill_manual(values = PHASE_COLORS, breaks = intersect(PHASE_LEVELS, as.character(ph$phase)),
+                            drop = TRUE, name = if (strips) "Phase (strips top\u2192bottom\nin legend order)" else "Phase") +
+          guides(color = guide_legend(order = 1), linetype = guide_legend(order = 1),
+                 fill = guide_legend(order = 2, override.aes = list(alpha = 0.6, colour = NA))) +
+          scale_x_continuous(expand = c(0, 0)) +
+          (if (logy) scale_y_log10(limits = y_lim, expand = c(0, 0), breaks = y_brk, labels = y_tick_labels(), oob = y_oob_fn())
+           else scale_y_continuous(limits = y_lim, expand = c(0, 0), breaks = y_brk)) +
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        g
+      },
+      difference = {
+        # v2.20: curve_difference(): each sample's mean curve minus (or log2 ratio to) the reference's, at every
+        # time; '*' above the curve where the Holm-adjusted per-time Welch test is < 0.05. The reference itself is
+        # the dashed zero line. Exploratory (one test per time point on a handful of readings).
+        if (!nzchar(ref) || !ref %in% samps)
+          stop("Pick the uninfected reference sample under Stats & Reports first.")
+        mode <- if (identical(input$diff_mode %||% "difference", "log2_ratio")) "log2_ratio" else "difference"
+        cd   <- difference_current()
+        if (is.null(cd)) stop("No data for the reference sample.")
+        d <- cd[as.character(cd$sample) != ref & is.finite(cd$diff), , drop = FALSE]
+        if (nrow(d) == 0) stop(if (identical(mode, "log2_ratio")) "No sample has a positive mean OD to compare with the reference (log2 ratio)."
+                               else "No other sample to compare with the reference.")
+        d$variable <- factor(as.character(d$sample), levels = sample_levels(samps))
+        ref_lab <- unname(labs_v[ref])
+        yr   <- range(c(0, d$diff)); span <- if (yr[2] > yr[1]) yr[2] - yr[1] else 1
+        leg_xy <- list(x = d$time, y = d$diff, g = d$variable)
+        g <- ggplot(d, aes(x = time, y = diff, color = variable, linetype = variable, shape = variable, group = variable)) +
+          geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
+          geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7)
+        if (isTRUE(input$diff_mark %||% TRUE) && "p_adj_holm" %in% names(d)) {
+          mk <- d[is.finite(d$p_adj_holm) & d$p_adj_holm < 0.05, , drop = FALSE]
+          if (nrow(mk)) {
+            mk$ymark <- mk$diff + 0.04 * span
+            g <- g + geom_point(data = mk, aes(x = time, y = ymark, color = variable), shape = 8, size = ptsz * 0.5,
+                                stroke = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)   # an asterisk marker, readable at any font size
+          }
+        }
+        g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          scale_y_continuous(expand = expansion(mult = c(0.06, 0.14))) +
+          labs(x = input$x_axis_label,
+               y = axis_y_label(if (identical(mode, "log2_ratio")) paste0("log2 (", input$y_axis_label, " / ", ref_lab, ")")
+                                else paste0(input$y_axis_label, " minus ", ref_lab)))
+      },
+      metric_explorer = {
+        # v2.18: one curve metric against another, a point per sample: the mean of the replicates with error
+        # bars in both directions (the main figure's error measure), and with "Per replicate" the replicate
+        # values as open circles. Samples with no finite value for either metric are left out.
+        rm  <- replicate_metric_rows_current()
+        xm  <- input$explorer_x %||% "lysis_time"; ym <- input$explorer_y %||% "od_drop"
+        if (is.null(rm) || !all(c(xm, ym) %in% names(rm))) stop("Metric not available for these samples.")
+        logx <- isTRUE(input$explorer_logx); logy <- isTRUE(input$explorer_logy)
+        d <- data.frame(sample = rm$sample, replicate = rm$replicate, x = rm[[xm]], y = rm[[ym]], stringsAsFactors = FALSE)
+        d <- d[is.finite(d$x) & is.finite(d$y), , drop = FALSE]
+        if (logx) d <- d[d$x > 0, , drop = FALSE]
+        if (logy) d <- d[d$y > 0, , drop = FALSE]
+        if (nrow(d) == 0) stop(paste0("No sample has a finite value for both ", metric_label(xm), " and ", metric_label(ym),
+          if (logx || logy) " above 0 (log axis)" else "",
+          " (a relative metric needs a reference sample under Stats & Reports)."))
+        d$sample <- factor(d$sample, levels = sample_levels(samps))
+        summ <- d %>% group_by(sample) %>%
+          summarise(mx = mean(x), my = mean(y), ex = ehw(x), ey = ehw(y), .groups = "drop")
+        # on a log axis a whisker cannot reach 0 or below: it stops at half the smallest plotted value
+        lo_floor <- function(v) min(v[v > 0]) / 2
+        fx <- if (logx) lo_floor(c(d$x, summ$mx)) else -Inf
+        fy <- if (logy) lo_floor(c(d$y, summ$my)) else -Inf
+        summ$xlo <- pmax(summ$mx - summ$ex, fx); summ$xhi <- summ$mx + summ$ex
+        summ$ylo <- pmax(summ$my - summ$ey, fy); summ$yhi <- summ$my + summ$ey
+        leg_xy    <- list(x = if (logx) log10(summ$mx) else summ$mx, y = summ$my); leg_log_y <- logy
+        eb_aes_v  <- if (eb_col == "sample") aes(x = mx, ymin = ylo, ymax = yhi, color = sample) else aes(x = mx, ymin = ylo, ymax = yhi)
+        eb_aes_h  <- if (eb_col == "sample") aes(y = my, xmin = xlo, xmax = xhi, color = sample) else aes(y = my, xmin = xlo, xmax = xhi)
+        eb_fixed  <- if (eb_col == "sample") list() else list(color = eb_col)
+        g <- ggplot(summ, aes(x = mx, y = my))
+        if (grepl("^Per replicate", input$explorer_level %||% "Per replicate"))
+          g <- g + geom_point(data = d, aes(x = x, y = y, color = sample), shape = 21, fill = "white",
+                              size = ptsz * 0.6, stroke = pt2lw(0.5), inherit.aes = FALSE, show.legend = FALSE)
+        if (any(is.finite(summ$ey)))
+          g <- g + do.call(geom_linerange, c(list(data = summ, mapping = eb_aes_v, linewidth = pt2lw(0.5),
+                                                  inherit.aes = FALSE, na.rm = TRUE, show.legend = FALSE), eb_fixed))
+        if (any(is.finite(summ$ex)))
+          g <- g + do.call(geom_linerange, c(list(data = summ, mapping = eb_aes_h, orientation = "y", linewidth = pt2lw(0.5),
+                                                  inherit.aes = FALSE, na.rm = TRUE, show.legend = FALSE), eb_fixed))
+        g <- g + geom_point(aes(color = sample, shape = sample), size = ptsz)
+        if (isTRUE(input$explorer_labels))
+          g <- g + geom_text(data = summ, aes(x = mx, y = my, label = unname(labs_v[as.character(sample)]), color = sample),
+                             hjust = 0, vjust = -0.6, show.legend = FALSE, inherit.aes = FALSE,
+                             size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                             family = if (nzchar(input$font_family %||% "")) input$font_family else "")
+        num_lab <- scales::label_number(drop0trailing = TRUE, big.mark = "")
+        g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          (if (logx) scale_x_log10(labels = num_lab, expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))
+           else scale_x_continuous(expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))) +
+          (if (logy) scale_y_log10(labels = num_lab, expand = expansion(mult = 0.08))
+           else scale_y_continuous(expand = expansion(mult = 0.08))) +
+          labs(x = axis_y_label(metric_axis_label(xm, tunit = tunit, ylab = input$y_axis_label %||% "OD")),
+               y = axis_y_label(metric_axis_label(ym, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
+        g
+      },
+      fit_overlay = {
+        # v2.19: the mean curve (points, whiskers = the main figure's error measure) with the fitted growth
+        # model(s) drawn over it on a fine time grid. Points inside the fitted range are in the sample colour,
+        # the rest of the curve (after the peak when the fit stops there) in grey. Best model by AIC solid;
+        # with "All converged models" the others are thin and dashed. One computation (fit_results()) feeds
+        # this figure, the Curve fitting tab's tables, the reports and the bundle.
+        fr  <- fit_results(); tab <- fr$table; fs <- fr$settings
+        if (is.null(tab) || nrow(tab) == 0) stop(fr$reason %||% "No fits to draw.")
+        pd  <- prepare_plot_data()
+        logy <- identical(input$y_scale_type, "log")
+        if (logy) pd <- pd[pd$mean_value > 0, , drop = FALSE]
+        if (nrow(pd) == 0) stop("No data to draw.")
+        pd$sample <- as.character(pd$variable)
+        pd$variable <- factor(pd$sample, levels = sample_levels(samps))
+        # the fitted time range of each sample (the union over its replicates at the replicate level)
+        wn  <- names(fr$windows)
+        rng <- lapply(setNames(unique(pd$sample), unique(pd$sample)), function(sm) {
+          tt <- unlist(lapply(fr$windows[wn == sm | startsWith(wn, paste0(sm, "\r"))], function(w) w$t))
+          if (length(tt)) range(tt) else c(NA_real_, NA_real_)
+        })
+        pd$fitted <- mapply(function(sm, t) { r <- rng[[sm]]; is.finite(r[1]) && t >= r[1] && t <= r[2] },
+                            pd$sample, pd$time)
+        et <- input$error_type %||% "sem"; em <- input$error_multiplier %||% 1
+        ev <- if (et == "none") rep(NA_real_, nrow(pd)) else
+          em * switch(et, sd = pd$sd_value, sem = pd$sem_value, ci95 = pd$ci95_value, pd$sem_value)
+        pd$lo <- pd$mean_value - ev; pd$hi <- pd$mean_value + ev
+        if (logy) pd$lo <- pmax(pd$lo, min(pd$mean_value) / 2)       # a whisker cannot reach 0 on a log axis
+        pin <- pd[pd$fitted, , drop = FALSE]; pout <- pd[!pd$fitted, , drop = FALSE]
+        cf  <- fit_curve_frames(tab, fr$windows, show = fs$show)
+        leg_xy <- list(x = pd$time, y = pd$mean_value, g = pd$variable); leg_log_y <- logy
+        eb_aes  <- if (eb_col == "sample") aes(x = time, ymin = lo, ymax = hi, color = variable) else aes(x = time, ymin = lo, ymax = hi)
+        eb_fixed <- if (eb_col == "sample") list() else list(color = eb_col)
+        g <- ggplot()
+        if (nrow(pout)) {
+          po <- pout[is.finite(pout$lo) & is.finite(pout$hi), , drop = FALSE]
+          if (nrow(po)) g <- g + geom_linerange(data = po, aes(x = time, ymin = lo, ymax = hi), color = "grey70",
+                                                linewidth = pt2lw(0.5), show.legend = FALSE)
+          g <- g + geom_point(data = pout, aes(x = time, y = mean_value, shape = variable), color = "grey60",
+                              fill = "grey60", size = ptsz, show.legend = FALSE)
+        }
+        pi_ok <- pin[is.finite(pin$lo) & is.finite(pin$hi), , drop = FALSE]
+        if (nrow(pi_ok))
+          g <- g + do.call(geom_linerange, c(list(data = pi_ok, mapping = eb_aes, linewidth = pt2lw(0.5),
+                                                  show.legend = FALSE), eb_fixed))
+        if (!is.null(cf)) {
+          cf$variable <- factor(cf$sample, levels = sample_levels(samps))
+          cf$grp <- paste(cf$sample, cf$replicate, cf$model, sep = "|")
+          if (logy) cf <- cf[is.finite(cf$od) & cf$od > 0, , drop = FALSE]
+          rep_lvl <- identical(fs$level, "replicate")
+          oth <- cf[!cf$best, , drop = FALSE]; bst <- cf[cf$best, , drop = FALSE]
+          if (nrow(oth)) g <- g + geom_line(data = oth, aes(x = time, y = od, color = variable, group = grp),
+                                            linetype = "dashed", linewidth = pt2lw(0.5), show.legend = FALSE)
+          if (nrow(bst)) g <- g + geom_line(data = bst, aes(x = time, y = od, color = variable, group = grp),
+                                            linewidth = if (rep_lvl) lw * 0.5 else lw, alpha = if (rep_lvl) 0.7 else 1)
+        }
+        g <- g + geom_point(data = pin, aes(x = time, y = mean_value, color = variable, shape = variable, fill = variable),
+                            size = ptsz) +
+          scale_color_manual(values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
+          scale_fill_manual( values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
+          scale_shape_manual(values = shp,  labels = labs_v, limits = sample_levels(samps), name = NULL) +   # same limits: one merged key
+          guides(fill = "none") +
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
+      },
+      phenotype_heatmap = {
+        # v2.19: samples (rows, in sample order) x curve metrics (columns). The fill is the z-score of each metric
+        # across the samples (blue-white-red, centred at 0), its 0-1 range or the raw value (viridis); the cell
+        # text is the raw value. Metrics that are undefined or constant across the samples are left out.
+        pm  <- pheno_current()
+        if (length(pm$metrics) == 0) stop(pheno_empty_reason(pm))
+        scl <- input$pheno_scale %||% "z"
+        d   <- pheno_heatmap_frame(pm, scl, sample_order = sample_levels(samps), sample_labels = labs_v,
+                                   metric_labels = sub("\\s*\\(.*\\)$", "", pheno_metric_label(pm$metrics)))
+        n_met <- length(pm$metrics)
+        fill_name <- switch(scl, z = "z-score", range = "scaled",
+                            if (n_met == 1 && grepl("\\(.*\\)$", metric_axis_label(pm$metrics, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
+                              sub("^.*\\((.*)\\)$", "\\1", metric_axis_label(pm$metrics, tunit = tunit, ylab = input$y_axis_label %||% "OD"))
+                            else "value")
+        g <- ggplot(d, aes(x = metric, y = sample, fill = value)) +
+          geom_tile(color = "white", linewidth = pt2lw(0.5))
+        g <- g + if (scl == "z") {
+          lim <- max(abs(d$value), na.rm = TRUE); if (!is.finite(lim) || lim == 0) lim <- 1
+          scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0,
+                               limits = c(-lim, lim), na.value = "grey90", name = fill_name)
+        } else scale_fill_viridis_c(name = fill_name, na.value = "grey90")
+        # v2.20.1: values at 0.8 x the axis-text size, left out beyond 8 metric columns (they would overlap);
+        # undefined cells carry no text; the columns use the short metric names (no units), wrapped at 12 characters,
+        # horizontal for up to 4 columns, otherwise at 45 degrees
+        if (isTRUE(input$pheno_values %||% TRUE) && n_met <= 8)
+          g <- g + geom_text(aes(label = label, color = dark), size = 0.8 * (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                             na.rm = TRUE,
+                             family = if (nzchar(input$font_family %||% "")) input$font_family else "") +
+            scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "black"), guide = "none")
+        g + scale_x_discrete(labels = scales::label_wrap(12), expand = c(0, 0),
+                             guide = if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+                                     else if (n_met > 4) guide_axis(angle = 45) else waiver()) +
+          scale_y_discrete(expand = c(0, 0)) + labs(x = NULL, y = NULL)
+      },
+      od_at_times = {
+        # v2.21: the mean OD at the times typed under Statistics > OD at chosen times (extract_times, extract_method),
+        # one group of bars (or dots) per time with the samples side by side; whiskers = the main error measure; the
+        # replicates are optional open circles. The bars are drawn as rectangles from a base (0, or a floor on a log axis:
+        # geom_col anchors a log-axis bar at OD 1) at positions dodged by hand, so the whiskers and points line up with them.
+        rp  <- prepare_replicate_data()
+        pt  <- parse_extract_times(input$extract_times)
+        tms <- pt$times
+        if (length(pt$invalid)) fig_notes <- c(fig_notes, paste0("Not read as times: ", paste(pt$invalid, collapse = ", "), "."))
+        if (!length(tms)) {
+          ut <- sort(unique(rp$time))
+          if (!length(ut)) stop("No data.")
+          tms <- unique(ut[c(1, ceiling(length(ut) / 2), length(ut))])
+          fig_notes <- c(fig_notes, paste0("No times typed under Statistics > OD at chosen times: the figure shows the first, middle and last time points (",
+                                           paste(tms, collapse = ", "), " ", tunit, ")."))
+        }
+        x <- od_at_times(rp, tms, if (identical(input$extract_method, "nearest")) "nearest" else "interpolate")
+        n_na <- sum(!is.finite(x$value))
+        if (n_na > 0) fig_notes <- c(fig_notes, sprintf("%d of %d values are outside their curve's time range and left out (a time is never extrapolated).", n_na, nrow(x)))
+        x <- x[is.finite(x$value), , drop = FALSE]
+        logy <- identical(input$y_scale_type, "log")
+        if (logy) x <- x[x$value > 0, , drop = FALSE]
+        if (nrow(x) == 0) stop("No curve has a reading at the requested times.")
+        smp  <- sample_levels(samps); smp <- smp[smp %in% unique(x$sample)]
+        x$sample <- factor(x$sample, levels = smp)
+        K <- length(smp); slot <- 0.8 / K
+        x$xpos <- match(x$time_requested, tms) + (match(as.character(x$sample), smp) - (K + 1) / 2) * slot
+        summ <- x %>% group_by(time_requested, sample) %>%
+          summarise(mean = mean(value), err = ehw(value), n = n(), .groups = "drop") %>% as.data.frame()
+        summ$xpos <- match(summ$time_requested, tms) + (match(as.character(summ$sample), smp) - (K + 1) / 2) * slot
+        summ$lo <- summ$mean - summ$err; summ$hi <- summ$mean + summ$err
+        if (logy) summ$lo <- pmax(summ$lo, min(x$value) / 2)       # a whisker cannot reach 0 on a log axis
+        sty  <- if (identical(input$extract_style, "dot")) "dot" else "bar"
+        hw   <- slot * 0.42
+        base <- if (logy) 10^floor(log10(min(c(x$value, summ$lo), na.rm = TRUE) / 1.2)) else 0
+        pjit <- position_jitter(width = slot * 0.15, height = 0, seed = 1)
+        sg   <- summ[is.finite(summ$lo) & is.finite(summ$hi), , drop = FALSE]
+        g <- ggplot()
+        if (sty == "bar")
+          g <- g + geom_rect(data = summ, aes(xmin = xpos - hw, xmax = xpos + hw, ymin = base, ymax = mean, fill = sample),
+                             alpha = 0.85, inherit.aes = FALSE)
+        if (nrow(sg)) {
+          g <- g + if (sty == "dot" && eb_col == "sample")
+            geom_errorbar(data = sg, aes(x = xpos, ymin = lo, ymax = hi, color = sample), width = slot * 0.35,
+                          linewidth = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)
+          else
+            geom_errorbar(data = sg, aes(x = xpos, ymin = lo, ymax = hi), width = slot * 0.35,
+                          color = if (eb_col == "sample") "grey15" else eb_col,
+                          linewidth = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)
+        }
+        if (isTRUE(input$extract_points %||% TRUE))
+          g <- g + if (sty == "bar")
+            geom_point(data = x, aes(x = xpos, y = value), color = "grey15", shape = 21, fill = "white",
+                       size = ptsz * 0.6, stroke = pt2lw(0.5), position = pjit, show.legend = FALSE)
+          else
+            geom_point(data = x, aes(x = xpos, y = value, color = sample), shape = 21, fill = "white",
+                       size = ptsz * 0.6, stroke = pt2lw(0.5), position = pjit, show.legend = FALSE)
+        if (sty == "dot")
+          g <- g + geom_point(data = summ, aes(x = xpos, y = mean, color = sample, shape = sample), size = ptsz)
+        x_ang_ok <- as.numeric(input$axis_text_angle %||% "0") == 0
+        g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          scale_x_continuous(breaks = seq_along(tms), labels = as.character(tms), expand = expansion(add = 0.5),
+                             guide = if (x_ang_ok && length(tms) >= 6) guide_axis(angle = 45) else waiver()) +
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn())
+        else if (sty == "bar") g + expand_limits(y = 0) + scale_y_continuous(expand = expansion(mult = c(0, 0.08)))
+        else g
+      },
+      time_to_threshold = {
+        # v2.21: per sample, the time its replicates cross extract_threshold in extract_direction (searching from
+        # extract_after: the start or its peak), the same inputs as Statistics > Time to threshold. Dot-plot look of the
+        # metric summary: replicates as open circles, a bar at the mean, whiskers = the main error measure.
+        th <- suppressWarnings(as.numeric(input$extract_threshold))
+        if (length(th) != 1 || !is.finite(th)) {   # an emptied box: the default threshold, said in the note (every figure still renders for Download all figures)
+          th <- APP_DEFAULTS$extract_threshold
+          fig_notes <- c(fig_notes, paste0("No threshold typed under Statistics > Time to threshold: the figure uses the default, OD ", format(th, trim = TRUE), "."))
+        }
+        dirn <- if (identical(input$extract_direction, "down")) "down" else "up"
+        tt   <- time_to_od(prepare_replicate_data(), th, dirn, if (identical(input$extract_after, "peak")) "peak" else NULL)
+        if (nrow(tt) == 0) stop("No data.")
+        smp  <- sample_levels(samps); smp <- smp[smp %in% unique(tt$sample)]
+        n_cur <- table(factor(tt$sample, levels = smp)); n_hit <- tapply(is.finite(tt$time), factor(tt$sample, levels = smp), sum)
+        never <- smp[n_hit == 0]
+        if (all(n_hit == 0)) stop(sprintf("No replicate crosses %s %s%s.", format(th, trim = TRUE),
+                                          if (dirn == "down") "downwards" else "upwards",
+                                          if (identical(input$extract_after, "peak")) " after its peak" else ""))
+        phrase <- paste0(format(th, trim = TRUE), if (dirn == "down") " downwards" else " upwards",
+                         if (identical(input$extract_after, "peak")) ", searched from each curve's peak" else "")
+        if (length(never))
+          fig_notes <- c(fig_notes, paste0("Never crosses ", phrase, ": ", paste(unname(labs_v[never]), collapse = ", "),
+                                           " (no point; its slot is left empty)."))
+        part <- smp[n_hit > 0 & n_hit < n_cur]
+        if (length(part))
+          fig_notes <- c(fig_notes, paste0("Not every replicate crosses: ", paste(sprintf("%s (%d of %d)", unname(labs_v[part]), n_hit[part], n_cur[part]), collapse = ", "),
+                                           "; the mean and whiskers use the replicates that do."))
+        long <- data.frame(sample = factor(tt$sample, levels = smp, labels = unname(labs_v[smp])), metric = "t",
+                           value = tt$time, stringsAsFactors = FALSE)
+        long <- long[is.finite(long$value), , drop = FALSE]
+        summ <- do.call(rbind, lapply(levels(long$sample), function(s) {
+          v <- long$value[long$sample == s]
+          data.frame(metric = "t", sample = factor(s, levels = levels(long$sample)),
+                     mean = if (length(v)) mean(v) else NA_real_, sd = if (length(v)) ehw(v) else NA_real_, n = length(v),
+                     stringsAsFactors = FALSE) }))
+        summ$lo <- summ$mean - summ$sd; summ$hi <- summ$mean + summ$sd
+        x_guide <- if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+          else if (nlevels(long$sample) >= 5 || max(nchar(levels(long$sample))) > 16) guide_axis(angle = 45)
+          else if (max(nchar(levels(long$sample))) > 6) guide_axis(n.dodge = 2)
+          else waiver()
+        metric_summary_styled("dot", long, summ, setNames(unname(cols[smp]), unname(labs_v[smp])), eb_col = eb_col,
+                              ptsz = ptsz, x_guide = x_guide, facet = FALSE, x_drop = FALSE) +
+          labs(x = NULL, y = paste0("Time to ", format(th, trim = TRUE), " (", tunit, ")"))
+      },
+      replicate_facets = {
+        # v2.21: one panel per sample: its replicate curves thin, coloured by replicate index (the sample colour at three
+        # lightness levels, so they differ in greyscale too) and its mean bold in the sample colour; y axis shared.
+        rp <- prepare_replicate_data(); pd <- prepare_plot_data()
+        smp  <- sample_levels(samps); smp <- smp[smp %in% unique(as.character(rp$variable))]
+        if (!length(smp)) stop("No replicate curves for the selected samples.")
+        logy <- identical(input$y_scale_type, "log")
+        rp <- rp[as.character(rp$variable) %in% smp, , drop = FALSE]
+        pd <- pd[as.character(pd$variable) %in% smp, , drop = FALSE]
+        if (logy) { rp <- rp[rp$value > 0, , drop = FALSE]; pd <- pd[pd$mean_value > 0, , drop = FALSE] }
+        rp$col <- NA_character_
+        for (s in smp) { ix <- as.character(rp$variable) == s; rp$col[ix] <- replicate_curve_colors(cols[[s]], rp$replicate[ix])[as.character(rp$replicate[ix])] }
+        pd$col <- unname(cols[as.character(pd$variable)])
+        lab_of <- function(v) factor(as.character(v), levels = smp, labels = unname(labs_v[smp]))
+        rp$panel <- lab_of(rp$variable); pd$panel <- lab_of(pd$variable)
+        rp$curve <- paste(rp$variable, rp$replicate)
+        n_pan <- length(smp)
+        fig_notes <- c(fig_notes, "Thin lines: the replicates, darkest = replicate 1 and lighter for the next ones (three shades, repeated beyond three); bold: the mean. The y axis is shared by all panels.")
+        g <- ggplot() +
+          geom_line(data = rp, aes(x = time, y = value, group = curve, color = col), linewidth = lw * 0.5) +
+          geom_line(data = pd, aes(x = time, y = mean_value, group = panel, color = col), linewidth = lw * 1.3) +
+          scale_color_identity() +
+          facet_wrap(~ panel, ncol = if (n_pan <= 3) n_pan else ceiling(sqrt(n_pan)), labeller = label_wrap_gen(width = 18)) +
+          scale_x_continuous(breaks = scales::breaks_pretty(n = 3)) +
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
+      },
+      lysed_fraction = {
+        # v2.21: the fraction of a sample's replicates that are lysed at each time (lysed_fraction_curves()): after the
+        # sample's peak and below the threshold (lysed_mode "relative": lysed_threshold x its peak OD; "absolute": an OD),
+        # a step curve from 0 to 1, with the first time the fraction reaches 0.5 marked by a point.
+        lmode <- if (identical(input$lysed_mode, "absolute")) "absolute" else "relative"
+        lth   <- suppressWarnings(as.numeric(input$lysed_threshold))
+        if (length(lth) != 1 || !is.finite(lth) || lth <= 0) stop("Enter a positive lysed threshold.")
+        lf <- lysed_fraction_curves(prepare_replicate_data(), lth, lmode)
+        if (nrow(lf) == 0) stop("No data.")
+        lf$variable <- factor(lf$sample, levels = sample_levels(samps))
+        t50 <- lysed_fraction_t50(lf, 0.5); t50$variable <- factor(t50$sample, levels = sample_levels(samps))
+        thr <- lf[!duplicated(lf$sample), c("sample", "threshold_od")]
+        fig_notes <- c(fig_notes, paste0("A replicate counts as lysed after its sample's peak, once its OD is below ",
+          if (lmode == "relative") paste0(format(lth, trim = TRUE), " x the sample's peak OD (", paste(sprintf("%s: %s", unname(labs_v[thr$sample]), signif(thr$threshold_od, 3)), collapse = "; "), ")")
+          else paste0("OD ", format(lth, trim = TRUE)), ". Point: the first time half of the replicates are lysed."))
+        if (any(!is.finite(t50$time)))
+          fig_notes <- c(fig_notes, paste0("Never reaches half lysed: ", paste(unname(labs_v[t50$sample[!is.finite(t50$time)]]), collapse = ", "), "."))
+        leg_xy <- list(x = lf$time, y = lf$fraction, g = lf$variable)
+        g <- ggplot(lf, aes(x = time, y = fraction, color = variable, linetype = variable, group = variable)) +
+          geom_hline(yintercept = 0.5, linewidth = pt2lw(0.5), color = "grey70", linetype = "dashed") +
+          geom_step(linewidth = lw, direction = "hv")
+        t50f <- t50[is.finite(t50$time), , drop = FALSE]
+        t50f$y <- 0.5       # the point sits where the curve's rise crosses the dashed 0.5 line
+        if (nrow(t50f)) g <- g + geom_point(data = t50f, aes(x = time, y = y, color = variable, shape = variable), size = ptsz, inherit.aes = FALSE)
+        g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
+          scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = expansion(mult = 0.03)) +
+          labs(x = input$x_axis_label, y = "Fraction of replicates lysed")
+      },
       heatmap = {
         pd <- prepare_plot_data()
         pd$variable <- factor(pd$variable, levels = rev(sample_levels(samps)), labels = rev(unname(labs_v[sample_levels(samps)])))
@@ -5715,12 +8270,26 @@ server <- function(input, output, session) {
                      strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
                      strip.background = element_blank())
     if (type == "heatmap")        p <- p + theme(legend.position = "right")
+    if (type == "phenotype_heatmap")   # v2.19: a tile figure: the colour key sits outside, no grid
+      p <- p + theme(legend.position = "right", panel.grid = element_blank())
     if (type == "dose_response" && isTRUE(dose_no_legend))
       p <- p + theme(legend.position = "none")   # x axis already says it; the key would hide points
     if (type == "landmarks")   # nine legend entries: outside, never over the curves
       p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
+    if (type == "phases")      # v2.20: the phase key sits outside the panel, never over the strips
+      p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
+    if (type == "time_to_threshold")   # v2.21: the x axis names the samples
+      p <- p + theme(legend.position = "none")
+    if (type == "replicate_facets")    # v2.21: strips name the samples (like the metric summary's facets)
+      p <- p + theme(legend.position = "none",
+                     strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
+                     strip.background = element_blank())
+    if (type == "od_at_times")         # v2.21: bars fill the panel, so the key sits outside
+      p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
     if (isTRUE(input$custom_aspect_ratio)) p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
-    p + coord_cartesian(clip = "off") + labs(tag = if (nzchar(tag)) tag else NULL)
+    p <- p + coord_cartesian(clip = "off") + labs(tag = if (nzchar(tag)) tag else NULL)
+    if (length(fig_notes)) attr(p, "figure_note") <- fig_notes   # v2.21: shown by output$analysis_figure_note
+    p
   }
   
   generate_analysis_plot <- function(type = input$analysis_type %||% "metric_summary") {
@@ -5733,6 +8302,12 @@ server <- function(input, output, session) {
         theme_void()
     })
   }
+  # ── v2.21 figure note ── (one output: the lines a v2.21 figure sets as attr "figure_note", shown under its controls)
+  output$analysis_figure_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    nt <- attr(generate_analysis_plot(input$analysis_type %||% "metric_summary"), "figure_note")
+    if (length(nt)) div(lapply(nt, function(n) div(class = "stats-note", n)))
+  })
   output$analysis_container <- renderUI(preview_container("analysis_plot", "analysis_img", analysis_size_in))
   register_preview("analysis_plot", "analysis_img", analysis_plot_obj, analysis_size_in)
   
@@ -5791,21 +8366,24 @@ server <- function(input, output, session) {
     req(rv$data, input$selected_samples)
     sel   <- input$compose_panels %||% character(0)
     types <- unname(COMPOSE_PANEL_CHOICES[COMPOSE_PANEL_CHOICES %in% sel])   # composed in checkbox order
+    # each requested type gives a named list of plots (one, or one per group for "main_by_group")
     built <- lapply(setNames(types, types), function(ty) {
+      if (identical(ty, "main_by_group")) return(tryCatch(main_group_plots(), error = function(e) list()))
       p <- tryCatch(if (identical(ty, "main")) generate_plot() else generate_analysis_plot(ty),
                     error = function(e) NULL)
-      if (is.null(p) || is_placeholder_plot(p)) NULL else p
+      if (is.null(p) || is_placeholder_plot(p)) list() else setNames(list(p), ty)
     })
-    ok      <- !vapply(built, is.null, logical(1))
+    ok      <- vapply(built, length, integer(1)) > 0
     skipped <- names(COMPOSE_PANEL_CHOICES)[match(types[!ok], COMPOSE_PANEL_CHOICES)]
-    plots   <- built[ok]; n <- length(plots)
+    plots   <- if (any(ok)) do.call(c, unname(built[ok])) else list()
+    n <- length(plots)
     ncol    <- min(as.integer(input$compose_ncol %||% "2"), max(n, 1L))
     rows    <- if (n) ceiling(n / ncol) else 0L
     w_mm    <- compose_width_mm_value()
     h_mm    <- max(rows, 1L) * (input$compose_panel_height_mm %||% 60)
     fig <- if (n >= 1 && fixed_mode()) {
       # v2.15: every panel keeps its fixed panel size; the grid is as wide / tall as its cells need
-      items <- lapply(names(plots), function(ty) fixed_figure(plots[[ty]] + labs(tag = NULL), ty))
+      items <- lapply(names(plots), function(nm) fixed_figure(plots[[nm]] + labs(tag = NULL), sub(":.*$", "", nm)))
       g <- compose_fixed_figure(items, ncol = ncol, tag_size = input$compose_tag_size %||% 8,
                                 font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a",
                                 tags_on = isTRUE(input$compose_tags %||% TRUE))
@@ -5817,7 +8395,7 @@ server <- function(input, output, session) {
                      tags_on = isTRUE(input$compose_tags %||% TRUE))
     else NULL
     list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
-         types = names(plots), width_mm = w_mm, height_mm = h_mm)
+         types = unique(sub(":.*$", "", names(plots))), width_mm = w_mm, height_mm = h_mm)
   })
   compose_size_in <- function() { i <- compose_info(); c(i$width_mm, i$height_mm) / 25.4 }
   compose_plot_current <- function() {
@@ -5871,17 +8449,17 @@ server <- function(input, output, session) {
     notes <- st$warnings
     if (!is.null(st$pairwise))
       notes <- c(paste0("Metric: ", metric_label(st$metric), ". ",
-                        if (nzchar(input$metrics_ref_sample %||% "")) paste0("Each sample vs reference '", input$metrics_ref_sample, "'. ") else "All pairs. ",
+                        if (nzchar(input$metrics_ref_sample %||% "")) paste0("Each sample vs reference '", dname(input$metrics_ref_sample), "'. ") else "All pairs. ",
                         "p values Holm-adjusted; Hedges' g = standardized mean difference; ",
                         "95% CI of the difference (Welch)."), notes)
     else notes <- c("No comparison possible yet: load data with 2+ replicates per sample.", notes)
     div(lapply(notes, function(n) div(class = "stats-note", n)))
   }
   # v2.16: one builder per table, used by the Analysis tab and the Statistics tab (own output ids)
-  stats_notes_build    <- function() { req(rv$data); stats_notes_ui(analysis_stats_current()) }
-  stats_pairwise_build <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$pairwise) }
-  stats_omnibus_build  <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$omnibus) }
-  stats_posthoc_build  <- function() { req(rv$data); fmt_stats_table(analysis_stats_current()$posthoc) }
+  stats_notes_build    <- function() { req(rv$data); stats_notes_ui(analysis_stats_display()) }
+  stats_pairwise_build <- function() { req(rv$data); fmt_stats_table(drop_raw_columns(analysis_stats_display()$pairwise)) }
+  stats_omnibus_build  <- function() { req(rv$data); fmt_stats_table(analysis_stats_display()$omnibus) }
+  stats_posthoc_build  <- function() { req(rv$data); fmt_stats_table(drop_raw_columns(analysis_stats_display()$posthoc)) }
   output$analysis_stats_notes   <- renderUI(stats_notes_build())
   output$analysis_stats_table   <- renderTable(stats_pairwise_build(), striped = TRUE, spacing = "xs")
   output$analysis_stats_omnibus <- renderTable(stats_omnibus_build(),  striped = TRUE, spacing = "xs")
@@ -5889,10 +8467,11 @@ server <- function(input, output, session) {
   analysis_stats_csv_name <- function() paste0("replicate_stats_", analysis_stat_metric(), "_",
                                                format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
   analysis_stats_csv_content <- function(file) {
-    st <- analysis_stats_current()
+    st <- analysis_stats_display()
     con <- file(file, open = "w", encoding = "UTF-8"); on.exit(close(con))
     writeLines(paste0("# metric,", st$metric, " ; method,", input$stats_method %||% "welch",
-                      " ; reference,", input$metrics_ref_sample %||% ""), con)
+                      " ; reference,", dname(input$metrics_ref_sample %||% ""),
+                      " ; reference_raw,", input$metrics_ref_sample %||% ""), con)
     for (w in st$warnings) writeLines(paste0("# ", w), con)
     if (!is.null(st$pairwise)) { writeLines("# pairwise", con); write.csv(st$pairwise, con, row.names = FALSE) }
     if (!is.null(st$omnibus))  { writeLines("# omnibus",  con); write.csv(st$omnibus,  con, row.names = FALSE) }
@@ -5920,7 +8499,7 @@ server <- function(input, output, session) {
              paste0(t_rng[1], " – ", t_rng[2], " ", time_unit_from_label(input$x_axis_label))),
         card("Error measure", toupper(input$error_type %||% "none"),
              if (identical(input$error_display_mode, "shadow")) "shaded band" else "error bars"),
-        card("Reference", if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample else "none set",
+        card("Reference", if (nzchar(input$metrics_ref_sample %||% "")) dname(input$metrics_ref_sample) else "none set",
              "for infection metrics and statistics"),
         card("Figure", sprintf("%s × %s mm", round(sz[1] * 25.4), round(sz[2] * 25.4)),
              paste0(input$font_family, " ", input$axis_label_font_size, "/", input$axis_text_font_size,
@@ -5937,10 +8516,11 @@ server <- function(input, output, session) {
               recovery_slope = "Recovery", infection_strength = "Infection strength")
     cols <- cols[names(cols) %in% names(m)]
     out  <- m[, names(cols), drop = FALSE]
+    out$sample <- dname(out$sample)    # v2.21: after the replicate match below would be wrong, so match on `m` (raw) first
     f3   <- function(x) ifelse(is.finite(x), formatC(signif(x, 3), format = "g"), "—")
     for (cc in setdiff(names(out), "sample")) out[[cc]] <- f3(out[[cc]])
     if (!is.null(rm)) {
-      idx <- match(m$sample, rm$sample)
+      idx <- match(m$sample, rm$sample)    # raw names on both sides
       for (cc in intersect(c("lysis_time", "od_drop"), names(out))) {
         sdv <- rm[[paste0(cc, "_sd")]][idx]
         # "—" alone when the mean-curve value is NA; "value ± sd" only for a finite value
@@ -5980,8 +8560,8 @@ server <- function(input, output, session) {
   output$dash_fig_norm_title <- renderText(
     if (nzchar(input$metrics_ref_sample %||% "")) "Normalized OD (vs reference)" else "Replicate overlay (set a reference for normalized OD)")
   output$dash_fig_metrics <- dash_plot(function() generate_analysis_plot("metric_summary"))
-  output$dash_notes <- renderUI({ req(rv$data); stats_notes_ui(analysis_stats_current()) })
-  output$dash_stats <- renderTable({ req(rv$data); fmt_stats_table(analysis_stats_current()$pairwise) },
+  output$dash_notes <- renderUI({ req(rv$data); stats_notes_ui(analysis_stats_display()) })
+  output$dash_stats <- renderTable({ req(rv$data); fmt_stats_table(drop_raw_columns(analysis_stats_display()$pairwise)) },
                                    striped = TRUE, spacing = "xs")
   output$dash_notebook <- renderUI({
     fields <- c(nb_exp_id = "Experiment", nb_experimenter = "Experimenter", nb_project = "Project",
@@ -6012,24 +8592,37 @@ server <- function(input, output, session) {
                ci95_half_width = pd$ci95_value,
                stringsAsFactors = FALSE)
   }
+  # v2.21: the same table as the user sees it: sample = display name, sample_raw = the file's column name (the CSV
+  # keeps both; the screen and the reports drop sample_raw). stats_table_export() itself keeps the raw names.
+  stats_table_display <- function() present(stats_table_export(), "sample")
 
   # v2.16: each CSV has one filename / content function, shared by the sidebar button and the
   # Statistics tab button (a Shiny output id can only be bound once, so each has a second id).
   stats_csv_name   <- function() paste0("summary_stats_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
   stats_csv_content <- function(file) {
     req(rv$data, input$selected_samples)
-    write.csv(stats_table_export(), file, row.names = FALSE)
+    write.csv(stats_table_display(), file, row.names = FALSE)
   }
   output$downloadStatsCSV     <- downloadHandler(filename = stats_csv_name, content = stats_csv_content)
   output$downloadStatsCSV_tab <- downloadHandler(filename = stats_csv_name, content = stats_csv_content)
 
+  # `sample` stays the file's column name (the key the figures and the reference / MOI logic match on); v2.21 adds
+  # `sample_display`, the name the user gave it (while any sample is renamed). present(., "sample") turns that into the table the user sees
+  # (sample = display name, sample_raw = column name), which is what the screen, the CSV files and the reports use.
   curve_metrics_current <- function() {
-    compute_curve_metrics(prepare_plot_data(),
+    m <- compute_curve_metrics(prepare_plot_data(),
                           smooth_window       = input$metrics_smooth_window %||% 5,
                           ref_sample          = input$metrics_ref_sample,
                           peak_smooth_window  = input$metrics_peak_smooth_window %||% 1,
                           peak_mode           = input$metrics_peak_mode %||% "global",
                           lysis_threshold     = lysis_threshold_current())
+    # only while a sample is renamed, so an untouched session returns exactly the engine's table
+    if (is.data.frame(m) && "sample" %in% names(m) && !"sample_display" %in% names(m) && any(dname(m$sample) != m$sample)) {
+      nms <- names(m); pos <- match("sample", nms)
+      m$sample_display <- dname(m$sample)
+      m <- m[c(nms[seq_len(pos)], "sample_display", nms[-seq_len(pos)])]
+    }
+    m
   }
 
   # KC-2: warn when any sample has non-positive OD readings, since those
@@ -6040,7 +8633,7 @@ server <- function(input, output, session) {
     if (is.null(m) || !"n_nonpositive_od" %in% colnames(m)) return(NULL)
     bad <- m[m$n_nonpositive_od > 0, c("sample", "n_nonpositive_od"), drop = FALSE]
     if (nrow(bad) == 0) return(NULL)
-    txt <- paste0(bad$sample, " (", bad$n_nonpositive_od, ")", collapse = ", ")
+    txt <- paste0(dname(bad$sample), " (", bad$n_nonpositive_od, ")", collapse = ", ")
     div(style = "background:#fff3cd;border:1px solid #ffe69c;border-radius:4px;
                  padding:6px 8px;margin:4px 0 8px;font-size:.78em;color:#664d03;",
         HTML(paste0("<b>Non-positive OD detected</b> (samples, count of points): ", txt,
@@ -6065,7 +8658,7 @@ server <- function(input, output, session) {
         tags$b(paste0("Data quality flags (", nrow(q), ")")),
         tags$ul(style = "margin:4px 0 0;padding-left:16px;",
                 lapply(seq_len(nrow(q)), function(i)
-                  tags$li(tags$b(q$flag[i]), " ", q$sample[i], ": ", q$detail[i]))))
+                  tags$li(tags$b(q$flag[i]), " ", dname(q$sample[i]), ": ", relabel(q$detail[i])))))
   }
   output$qc_flags_ui         <- renderUI(qc_flags_ui_build())
   output$qc_flags_ui_metrics <- renderUI(qc_flags_ui_build())
@@ -6074,7 +8667,7 @@ server <- function(input, output, session) {
   metrics_csv_name <- function() paste0("curve_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
   metrics_csv_content <- function(file) {
     req(rv$data, input$selected_samples)
-    write.csv(curve_metrics_current(), file, row.names = FALSE)
+    write.csv(present(curve_metrics_current(), "sample"), file, row.names = FALSE)
   }
   output$downloadMetricsCSV     <- downloadHandler(filename = metrics_csv_name, content = metrics_csv_content)
   output$downloadMetricsCSV_tab <- downloadHandler(filename = metrics_csv_name, content = metrics_csv_content)
@@ -6092,7 +8685,7 @@ server <- function(input, output, session) {
   repmetrics_csv_name <- function() paste0("replicate_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
   repmetrics_csv_content <- function(file) {
     req(rv$data, input$selected_samples)
-    write.csv(replicate_metrics_current(), file, row.names = FALSE)
+    write.csv(present(replicate_metrics_current(), "sample"), file, row.names = FALSE)
   }
   output$downloadReplicateMetricsCSV     <- downloadHandler(filename = repmetrics_csv_name, content = repmetrics_csv_content)
   output$downloadReplicateMetricsCSV_tab <- downloadHandler(filename = repmetrics_csv_name, content = repmetrics_csv_content)
@@ -6102,7 +8695,7 @@ server <- function(input, output, session) {
   # replicate comparison uses the same builders as the Analysis tab (own output ids). Outputs in a
   # tab that is not showing are not computed, so this costs nothing until it is opened.
   STATS_TAB_MAX_ROWS <- 2000L
-  stats_tab_summary_df <- function() { req(rv$data, input$selected_samples); stats_table_export() }
+  stats_tab_summary_df <- function() { req(rv$data, input$selected_samples); drop_raw_columns(stats_table_display()) }
   output$stats_tab_summary_note <- renderUI({
     n <- nrow(stats_tab_summary_df())
     if (n > STATS_TAB_MAX_ROWS)
@@ -6130,7 +8723,7 @@ server <- function(input, output, session) {
     df
   }
   output$stats_tab_metrics <- renderTable({
-    req(rv$data, input$selected_samples); m <- curve_metrics_current(); req(m); tab_sig(m)
+    req(rv$data, input$selected_samples); m <- curve_metrics_current(); req(m); tab_sig(drop_raw_columns(present(m, "sample")))
   }, striped = TRUE, spacing = "xs")
   output$stats_tab_metric_defs <- renderTable({
     req(rv$data, input$selected_samples); m <- curve_metrics_current(); req(m)
@@ -6138,12 +8731,483 @@ server <- function(input, output, session) {
     data.frame(Metric = keys, Definition = unname(METRIC_DEFINITIONS[keys]), stringsAsFactors = FALSE)
   }, striped = TRUE, spacing = "xs")
   output$stats_tab_repmetrics <- renderTable({
-    req(rv$data, input$selected_samples); m <- replicate_metrics_current(); req(m); tab_sig(m)
+    req(rv$data, input$selected_samples); m <- replicate_metrics_current(); req(m); tab_sig(drop_raw_columns(present(m, "sample")))
   }, striped = TRUE, spacing = "xs")
   output$stats_tab_notes    <- renderUI(stats_notes_build())
   output$stats_tab_pairwise <- renderTable(stats_pairwise_build(), striped = TRUE, spacing = "xs")
   output$stats_tab_omnibus  <- renderTable(stats_omnibus_build(),  striped = TRUE, spacing = "xs")
   output$stats_tab_posthoc  <- renderTable(stats_posthoc_build(),  striped = TRUE, spacing = "xs")
+
+  # ── Curve fitting (v2.19) ────────────────────────────────────────────────────
+  # Logistic / Gompertz / Baranyi fits of the growth phase (engine: fit_growth_models and friends; see
+  # docs/FITS_AND_EXTRACTION.md). fit_results() is the ONE computation: the Curve fitting tab's figure and
+  # tables, the "Fitted growth curves" analysis figure, the reports, the bundle and the methods sentence all read
+  # it, and it is recomputed only when the fit inputs or the data change.
+  fit_tab_seen <- reactiveVal(FALSE)           # the methods draft mentions the fits once the tab has been used
+  observeEvent(input$main_tabs, { if (identical(input$main_tabs, "Curve fitting")) fit_tab_seen(TRUE) })
+  fit_settings <- function() {
+    ms <- intersect(input$fit_models, names(GROWTH_MODEL_FUNS))
+    list(models = names(GROWTH_MODEL_FUNS)[names(GROWTH_MODEL_FUNS) %in% ms],
+         until  = if (identical(input$fit_until %||% "peak", "all")) "all" else "peak",
+         log    = isTRUE(input$fit_log %||% TRUE),
+         level  = if (identical(input$fit_level %||% "mean", "replicate")) "replicate" else "mean",
+         show   = if (identical(input$fit_show %||% "best", "all")) "all" else "best")
+  }
+  fit_results <- reactive({
+    req(rv$data, input$selected_samples)
+    fs   <- fit_settings()
+    none <- function(why) list(settings = fs, table = NULL, windows = list(), reason = why)
+    if (!length(fs$models)) return(none("Select at least one model to fit."))
+    pd <- prepare_plot_data()
+    if (is.null(pd) || nrow(pd) == 0) return(none("No data for the selected samples."))
+    if (identical(fs$level, "replicate")) {
+      rp  <- prepare_replicate_data()
+      raw <- fit_growth_models_by_replicate(rp, models = fs$models, until = fs$until, log_transform = fs$log)
+      win <- fit_windows_from(rep_pd = rp, until = fs$until, log_transform = fs$log)
+    } else {
+      raw <- fit_growth_models_by_sample(pd, models = fs$models, until = fs$until, log_transform = fs$log)
+      win <- fit_windows_from(pd = pd, until = fs$until, log_transform = fs$log)
+    }
+    tab <- fit_table_prepare(raw)
+    if (is.null(tab)) return(none("No fits could be computed."))
+    tab <- tab[order(match(as.character(tab$sample), sample_levels(input$selected_samples))), , drop = FALSE]
+    rownames(tab) <- NULL
+    list(settings = fs, table = tab, windows = win, reason = NULL)
+  })
+  fit_table_current <- function() fit_results()$table
+
+  fit_fixed_info <- reactive(fixed_figure(generate_analysis_plot("fit_overlay"), "fit_overlay"))
+  fit_plot_obj <- function() if (fixed_mode()) fit_fixed_info() else generate_analysis_plot("fit_overlay")
+  fit_size_in <- function() {
+    if (!fixed_mode()) return(export_size_in())
+    tryCatch(size_from_grob(fit_fixed_info(), "fit_overlay"),
+             error = function(e) { if (inherits(e, "shiny.silent.error")) fixed_fallback_in("fit_overlay") else stop(e) })
+  }
+  output$fit_container <- renderUI(preview_container("fit_plot", "fit_img", fit_size_in))
+  register_preview("fit_plot", "fit_img", fit_plot_obj, fit_size_in)
+  output$downloadFitFigure <- downloadHandler(
+    filename = function() paste0(analysis_file_stem("fit_overlay", if (fixed_mode()) fit_size_in()), ".", input$export_format %||% "svg"),
+    content  = function(file) {
+      sz   <- fit_size_in(); fmt <- input$export_format
+      args <- list(filename = file, plot = fit_plot_obj(), device = export_device(fmt),
+                   width = sz[1], height = sz[2], units = "in", dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
+      if (identical(fmt, "tiff")) args$compression <- "lzw"
+      do.call(ggsave, args)
+    }
+  )
+  fit_csv_stamp <- function() format(Sys.time(), "%Y%m%d_%H%M%S")
+  output$downloadFitsCSV <- downloadHandler(
+    filename = function() paste0("curve_fits_", fit_csv_stamp(), ".csv"),
+    content  = function(file) {
+      req(rv$data, input$selected_samples)
+      tab <- fit_table_current(); req(tab)
+      utils::write.csv(present(tab, "sample"), file, row.names = FALSE)
+    })
+  output$downloadFitsSummaryCSV <- downloadHandler(
+    filename = function() paste0("curve_fits_replicate_summary_", fit_csv_stamp(), ".csv"),
+    content  = function(file) {
+      req(rv$data, input$selected_samples)
+      sm <- fit_replicate_summary(fit_table_current()); req(sm)
+      utils::write.csv(present(sm, "sample"), file, row.names = FALSE)
+    })
+
+  # what a fit table says about its own reliability: the engine's `message` for every row that has one
+  fit_message_rows <- function(tab) {
+    if (is.null(tab) || nrow(tab) == 0) return(NULL)
+    m <- !is.na(tab$message) & nzchar(tab$message)
+    if (!any(m)) return(NULL)
+    d <- tab[m, , drop = FALSE]
+    data.frame(who = paste0(dname(d$sample), if ("replicate" %in% names(d)) paste0(" (replicate ", d$replicate, ")") else "",
+                            ", ", ifelse(is.na(d$model), "", d$model)),
+               message = d$message, poor = grepl("poorly determined", d$message, fixed = TRUE), stringsAsFactors = FALSE)
+  }
+  fit_note_text <- function(fs) {
+    c(range = if (identical(fs$until, "peak"))
+        paste0("Fit range: each curve is fitted from its first reading up to its highest point, the growth before lysis. ",
+               "The points after the peak are drawn in grey and are not part of the fit; a curve that peaks early leaves ",
+               "few points (a model needs at least 4, and fewer than 6 are flagged as poorly determined).")
+      else "Fit range: every reading of each curve is fitted. Use this for curves without lysis; fitted through a collapse the growth models compromise between the rise and the fall.",
+      scale = if (fs$log) "The fit is on ln(OD/OD0), so mu_max is a specific growth rate (per time unit) and the doubling time is ln 2 / mu_max."
+              else "The fit is on the OD change from the first reading, so mu_max is a slope in OD per time unit and no doubling time is given.",
+      lag   = "Lag convention: the fit's lag is measured from the first fitted point, so the table gives the absolute lag, 'Lag (time units)' = start time of the fit + lag, on the time axis of the figure.",
+      best  = "Best model: the converged model with the lowest AIC (the models have the same number of parameters, so this is the lowest residual sum of squares). A difference of about 2 AIC units or less is not meaningful, and on a short curve the AIC can prefer a poorly determined Baranyi fit: judge each fit against the drawn curve.")
+  }
+  output$fit_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    fr <- fit_results(); fs <- fr$settings
+    notes <- lapply(fit_note_text(fs), function(n) div(class = "stats-note", n))
+    mr <- fit_message_rows(fr$table)
+    warn <- if (!is.null(mr)) {
+      shown <- utils::head(mr[order(!mr$poor), , drop = FALSE], 12L)
+      div(style = "background:#fff3cd;border:1px solid #ffe69c;border-radius:4px;padding:6px 8px;margin:6px 0;font-size:.82em;color:#664d03;",
+          tags$b(sprintf("Fit warnings (%d)", nrow(mr))),
+          tags$ul(style = "margin:4px 0 0;padding-left:16px;",
+                  lapply(seq_len(nrow(shown)), function(i)
+                    tags$li(if (shown$poor[i]) tags$b(style = "color:#b02a37;", shown$who[i], ": ", shown$message[i])
+                            else tagList(shown$who[i], ": ", shown$message[i])))),
+          if (nrow(mr) > nrow(shown)) p(style = "margin:4px 0 0;", sprintf("... and %d more (see the Message column).", nrow(mr) - nrow(shown))))
+    }
+    tagList(notes, warn)
+  })
+  FIT_TABLE_MAX_ROWS <- 400L
+  output$fit_table_ui <- renderUI({
+    req(rv$data, input$selected_samples)
+    fr <- fit_results(); tab <- fr$table
+    if (is.null(tab)) return(p(class = "stats-note", fr$reason %||% "No fits to show."))
+    d <- fit_display_table(present(tab, "sample"))
+    poor <- !is.na(tab$message) & grepl("poorly determined", tab$message, fixed = TRUE)
+    n <- min(nrow(d), FIT_TABLE_MAX_ROWS)
+    tagList(
+      div(style = "overflow-x:auto;",
+          tags$table(class = "table table-condensed table-striped", style = "font-size:.85em;width:auto;",
+            tags$thead(tags$tr(lapply(names(d), function(nm) tags$th(nm)))),
+            tags$tbody(lapply(seq_len(n), function(i)
+              tags$tr(style = if (poor[i]) "background:#fff3cd;" else if (tab$best[i] %in% TRUE) "font-weight:600;" else NULL,
+                      lapply(seq_along(d), function(j) tags$td(d[[j]][i]))))))),
+      if (nrow(d) > n) p(class = "stats-note", sprintf("The first %d of %d rows are shown; the CSV has all of them.", n, nrow(d))),
+      p(style = "font-size:.78em;color:#777;", "Best = lowest AIC. Amber rows are poorly determined fits. Numbers: 3 significant digits."))
+  })
+  output$fit_summary_block <- renderUI({
+    req(rv$data, input$selected_samples)
+    fr <- fit_results()
+    if (!identical(fr$settings$level, "replicate") || is.null(fr$table)) return(NULL)
+    tagList(h4("Replicate fits: mean ± SD", style = "margin-top:18px;"),
+            p(class = "stats-note", "Per sample and model, over the replicates whose fit converged (Replicates converged)."),
+            div(style = "overflow-x:auto;", tableOutput("fit_summary_table")),
+            downloadButton("downloadFitsSummaryCSV", "Replicate summary (CSV)"))
+  })
+  output$fit_summary_table <- renderTable({
+    req(rv$data, input$selected_samples)
+    sm <- fit_replicate_summary(fit_results()$table); req(sm)
+    fit_replicate_summary_display(present(sm, "sample"))
+  }, striped = TRUE, spacing = "xs")
+  # the sentence the methods draft gains once the Curve fitting tab has been used
+  fit_methods_sentence <- function() {
+    if (!isTRUE(fit_tab_seen())) return(character(0))
+    fr  <- tryCatch(fit_results(), error = function(e) NULL)
+    tab <- if (is.null(fr)) NULL else fr$table
+    if (is.null(tab) || nrow(tab) == 0) return(character(0))
+    fs <- fr$settings
+    nm <- unname(c(logistic = "modified logistic (Zwietering et al., 1990)", gompertz = "modified Gompertz (Zwietering et al., 1990)",
+                   baranyi = "Baranyi-Roberts (1994)")[fs$models])
+    mod_txt <- if (length(nm) == 1) nm else paste0(paste(nm[-length(nm)], collapse = ", "), " and ", nm[length(nm)])
+    paste0("Growth curves were also described by fitting the ", mod_txt, " growth model", if (length(nm) == 1) "" else "s",
+           " by non-linear least squares to ", if (fs$log) "ln(OD/OD0)" else "the change in OD from the first reading", " of the ",
+           if (identical(fs$level, "replicate")) "individual replicate curves" else "mean curve", " of each sample, ",
+           if (identical(fs$until, "peak")) "from the first reading up to the peak" else "over the whole curve",
+           "; the best model was the one with the lowest Akaike information criterion, and the lag is reported as an absolute time ",
+           "(the start of the fitted range plus the fitted lag).")
+  }
+
+  # ── Phenotype heatmap (v2.19) ────────────────────────────────────────────────
+  pheno_current <- function() {
+    cm   <- curve_metrics_current()
+    mets <- input$pheno_metrics
+    n_s  <- if (is.null(cm)) 0L else length(unique(cm$sample))
+    out  <- if (!length(mets) || is.null(cm)) list(matrix = matrix(numeric(0), 0, 0), raw = matrix(numeric(0), 0, 0),
+                                                    dropped = character(0), metrics = character(0))
+            else phenotype_matrix(cm, metrics = mets, scale = input$pheno_scale %||% "z")
+    out$n_samples <- n_s; out$selected <- length(mets)
+    out
+  }
+  pheno_empty_reason <- function(pm) {
+    if (isTRUE(pm$selected == 0)) "Select at least one metric."
+    else if (isTRUE(pm$n_samples < 2)) "The phenotype heatmap compares samples: select at least two."
+    else paste0("None of the selected metrics varies across the samples (left out: ",
+                paste(pheno_metric_label(pm$dropped), collapse = ", "),
+                "). A relative metric needs a reference sample (Stats & Reports).")
+  }
+  pheno_dropped_text <- function(pm) {
+    if (!length(pm$dropped)) return("")
+    paste0("Left out because undefined or the same in every sample: ", paste(pheno_metric_label(pm$dropped), collapse = ", "), ".")
+  }
+  output$pheno_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    txt <- pheno_dropped_text(pheno_current())
+    if (nzchar(txt)) p(class = "stats-note", txt)
+  })
+
+  # ── Extraction tables (v2.19): OD at chosen times, time to threshold, all-metrics comparison ──
+  od_at_times_rep_current <- function() {
+    tm <- parse_extract_times(input$extract_times)$times
+    if (!length(tm)) return(NULL)
+    od_at_times(prepare_replicate_data(), tm, if (identical(input$extract_method, "nearest")) "nearest" else "interpolate")
+  }
+  od_at_times_summary_current <- function() {
+    x <- od_at_times_rep_current()
+    if (is.null(x) || nrow(x) == 0) return(NULL)
+    s <- summarise_od_at_times(x)
+    if (is.null(s)) return(NULL)
+    names(s)[names(s) == "time_requested"] <- "time"
+    s
+  }
+  extract_threshold_value <- function() {
+    th <- suppressWarnings(as.numeric(input$extract_threshold))
+    if (length(th) == 1 && is.finite(th)) th else NA_real_
+  }
+  time_to_od_rep_current <- function() {
+    th <- extract_threshold_value()
+    if (!is.finite(th)) return(NULL)
+    time_to_od(prepare_replicate_data(), th, if (identical(input$extract_direction, "down")) "down" else "up",
+               if (identical(input$extract_after, "peak")) "peak" else NULL)
+  }
+  time_to_od_summary_current <- function() {
+    x <- time_to_od_rep_current()
+    if (is.null(x) || nrow(x) == 0) return(NULL)
+    summarise_time_to_od(x)
+  }
+  all_metrics_current <- function() {
+    rm <- replicate_metric_rows_current()
+    if (is.null(rm) || nrow(rm) == 0) return(list(table = NULL, warnings = "No replicate metrics to compare."))
+    mets <- setdiff(numeric_metric_columns(rm), "n_nonpositive_od")      # the QC counter is not a phenotype
+    mets <- mets[vapply(mets, function(m) any(is.finite(rm[[m]])), logical(1))]
+    if (!length(mets)) return(list(table = NULL, warnings = "No metric has a finite replicate value."))
+    res <- compare_all_metrics(rm, metrics = mets, ref_sample = input$metrics_ref_sample, method = input$stats_method %||% "welch")
+    if (!is.null(res$table) && nrow(res$table) == 0) res$table <- NULL
+    if (!is.null(res$table)) res$table$metric_label <- as.character(pheno_metric_label(res$table$metric))   # readable names for the extra columns too
+    res
+  }
+  # the extraction tables as {file name -> unformatted data frame}, only those the user has configured (times typed;
+  # a finite threshold): the figure bundle writes them and the reports show them
+  extraction_tables_current <- function() {
+    out <- list()
+    od <- tryCatch(od_at_times_rep_current(), error = function(e) NULL)
+    if (!is.null(od) && nrow(od)) {
+      out[["od_at_times_summary.csv"]]       <- present(od_at_times_summary_current(), "sample")   # v2.21: display name + sample_raw
+      out[["od_at_times_per_replicate.csv"]] <- present(od, "sample")
+    }
+    tt <- tryCatch(time_to_od_rep_current(), error = function(e) NULL)
+    if (!is.null(tt) && nrow(tt)) {
+      out[["time_to_threshold_summary.csv"]]       <- present(summarise_time_to_od(tt), "sample")
+      out[["time_to_threshold_per_replicate.csv"]] <- present(tt, "sample")
+    }
+    Filter(Negate(is.null), out)
+  }
+
+  output$extract_od_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    pt <- parse_extract_times(input$extract_times)
+    if (!length(pt$times) && !length(pt$invalid)) return(p(class = "stats-note", "Type one or more times, for example 30, 60, 120."))
+    div(if (length(pt$invalid)) div(class = "stats-note", paste0("Not read as times: ", paste(pt$invalid, collapse = ", "), ".")),
+        if (length(pt$times)) {
+          x <- od_at_times_rep_current()
+          na <- if (is.null(x)) 0L else sum(!is.finite(x$value))
+          if (na > 0) div(class = "stats-note", sprintf("%d of %d values are NA: the time is outside that curve's range (a time is never extrapolated).", na, nrow(x)))
+        })
+  })
+  output$extract_od_table <- renderTable({
+    req(rv$data, input$selected_samples)
+    s <- od_at_times_summary_current(); req(s)
+    s$n <- as.integer(s$n)
+    tab_sig(drop_raw_columns(present(s, "sample")))
+  }, striped = TRUE, spacing = "xs")
+  extract_stamp <- function() format(Sys.time(), "%Y%m%d_%H%M%S")
+  output$downloadExtractODSummaryCSV <- downloadHandler(
+    filename = function() paste0("od_at_times_summary_", extract_stamp(), ".csv"),
+    content  = function(file) { req(rv$data, input$selected_samples); s <- od_at_times_summary_current(); req(s); utils::write.csv(present(s, "sample"), file, row.names = FALSE) })
+  output$downloadExtractODCSV <- downloadHandler(
+    filename = function() paste0("od_at_times_per_replicate_", extract_stamp(), ".csv"),
+    content  = function(file) { req(rv$data, input$selected_samples); x <- od_at_times_rep_current(); req(x); utils::write.csv(present(x, "sample"), file, row.names = FALSE) })
+
+  output$extract_tt_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    th <- extract_threshold_value()
+    if (!is.finite(th)) return(p(class = "stats-note", "Enter a threshold (OD) to see the times."))
+    s <- time_to_od_summary_current()
+    none <- if (is.null(s)) character(0) else dname(as.character(s$sample[s$n == 0]))
+    if (length(none))
+      div(class = "stats-note", paste0("No replicate of ", paste(none, collapse = ", "), " crosses OD ", th, " ",
+                                       if (identical(input$extract_direction, "down")) "downwards" else "upwards",
+                                       if (identical(input$extract_after, "peak")) " after its peak" else "", " (NA)."))
+  })
+  output$extract_tt_table <- renderTable({
+    req(rv$data, input$selected_samples)
+    s <- time_to_od_summary_current(); req(s)
+    s$n <- as.integer(s$n); s$n_curves <- as.integer(s$n_curves)
+    tab_sig(drop_raw_columns(present(s, "sample")))
+  }, striped = TRUE, spacing = "xs")
+  output$downloadExtractTTSummaryCSV <- downloadHandler(
+    filename = function() paste0("time_to_threshold_summary_", extract_stamp(), ".csv"),
+    content  = function(file) { req(rv$data, input$selected_samples); s <- time_to_od_summary_current(); req(s); utils::write.csv(present(s, "sample"), file, row.names = FALSE) })
+  output$downloadExtractTTCSV <- downloadHandler(
+    filename = function() paste0("time_to_threshold_per_replicate_", extract_stamp(), ".csv"),
+    content  = function(file) { req(rv$data, input$selected_samples); x <- time_to_od_rep_current(); req(x); utils::write.csv(present(x, "sample"), file, row.names = FALSE) })
+
+  output$allmetrics_notes <- renderUI({
+    req(rv$data, input$selected_samples)
+    res <- all_metrics_current()
+    ref <- input$metrics_ref_sample %||% ""
+    notes <- c(paste0(if (nzchar(ref)) paste0("Each sample vs reference '", dname(ref), "'. ") else "All pairs of samples. ",
+                      if (identical(input$stats_method %||% "welch", "nonparametric")) "Mann-Whitney U" else "Welch t",
+                      " per comparison; p_adj_holm is adjusted within each metric, p_adj_bh_across across the whole table."),
+               relabel(res$warnings))
+    div(lapply(notes, function(n) div(class = "stats-note", n)))
+  })
+  output$allmetrics_table <- renderTable({
+    req(rv$data, input$selected_samples)
+    res <- all_metrics_current(); req(res$table)
+    fmt_stats_table(drop_raw_columns(present(res$table)))
+  }, striped = TRUE, spacing = "xs")
+  output$downloadAllMetricsCSV <- downloadHandler(
+    filename = function() paste0("all_metrics_comparison_", extract_stamp(), ".csv"),
+    content  = function(file) { req(rv$data, input$selected_samples); res <- all_metrics_current(); req(res$table); utils::write.csv(present(res$table), file, row.names = FALSE) })
+
+  # ── Curve phases, bootstrap intervals and separation from the reference (v2.20) ───────────────────────────
+  # Engine: curve_phases_by_sample(), bootstrap_metrics(), curve_difference(), first_separation_time(); see
+  # docs/PHASES_AND_BOOTSTRAP.md. Every table / figure below reads the same reactive or the same cache.
+  phases_current <- reactive({
+    req(rv$data, input$selected_samples)
+    ph <- curve_phases_by_sample(prepare_plot_data(),
+                                 smooth_window   = input$metrics_smooth_window %||% 5,
+                                 peak_mode       = input$metrics_peak_mode %||% "global",
+                                 lysis_threshold = lysis_threshold_current())
+    if (is.null(ph)) return(NULL)
+    ph[order(match(ph$sample, sample_levels(input$selected_samples)), seq_len(nrow(ph))), , drop = FALSE]   # sample order, phases in time order
+  })
+  output$phases_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    ph <- phases_current()
+    miss <- dname(setdiff(input$selected_samples, if (is.null(ph)) character(0) else unique(ph$sample)))
+    div(div(class = "stats-note", paste0(
+          "Times in ", time_unit_from_label(input$x_axis_label), ". Each phase edge is read back from the curve metrics of the mean curve ",
+          "(the metrics smoothing window, peak mode and lysis threshold under Stats & Reports; the peak-detection smoothing window is not used), ",
+          "so it can be checked against the Curve landmarks figure. Phases that do not apply, or have zero length, are left out. ",
+          "OD start / end are the curve values at the edges.")),
+        if (length(miss)) div(class = "stats-note", paste0("No phases for: ", paste(miss, collapse = ", "), " (fewer than two readings).")))
+  })
+  output$phases_table <- renderTable({
+    req(rv$data, input$selected_samples)
+    d <- phases_display_table(present(phases_current(), "sample")); req(d); d
+  }, striped = TRUE, spacing = "xs")
+  output$downloadPhasesCSV <- downloadHandler(
+    filename = function() paste0("curve_phases_", extract_stamp(), ".csv"),
+    content  = function(file) { req(rv$data, input$selected_samples); ph <- phases_current(); req(ph); utils::write.csv(present(ph, "sample"), file, row.names = FALSE) })
+
+  # separation from the reference: the per-time difference (with Welch p) and the first time it is significant
+  difference_current <- reactive({
+    req(rv$data, input$selected_samples)
+    ref <- input$metrics_ref_sample %||% ""
+    pd  <- prepare_plot_data()
+    if (!nzchar(ref) || !ref %in% as.character(pd$variable)) return(NULL)
+    curve_difference(pd, ref, rep_pd = prepare_replicate_data(),
+                     mode = if (identical(input$diff_mode %||% "difference", "log2_ratio")) "log2_ratio" else "difference")
+  })
+  separation_current <- function() {
+    cd <- difference_current()
+    if (is.null(cd) || !"p_adj_holm" %in% names(cd)) return(NULL)
+    first_separation_time(cd)
+  }
+  separation_table_build <- function() {
+    req(rv$data, input$selected_samples)
+    d <- separation_display_table(separation_current(), input$metrics_ref_sample %||% "",
+                                  time_unit_from_label(input$x_axis_label))
+    req(d); map_name_column(d, "Sample", rv$display_names)
+  }
+  separation_note_build <- function() {
+    req(rv$data, input$selected_samples)
+    ref <- input$metrics_ref_sample %||% ""
+    if (!nzchar(ref) || !ref %in% input$selected_samples)
+      return(div(class = "stats-note", "Pick the uninfected reference sample under Stats & Reports to see when each sample separates from it."))
+    div(class = "stats-note", paste0(
+      "First sampled time at which the Welch test of the sample's replicates against the reference's (",
+      if (identical(input$diff_mode %||% "difference", "log2_ratio")) "on log2 readings, i.e. a ratio different from 1" else "on the OD readings",
+      "), Holm-adjusted across that sample's time points, gives p < 0.05. Exploratory: one test per time point on a few readings, ",
+      "so with n = 3 the test has little power and the time is later than the true divergence ('none' = never reached)."))
+  }
+  output$analysis_separation_note  <- renderUI(separation_note_build())
+  output$analysis_separation_table <- renderTable(separation_table_build(), striped = TRUE, spacing = "xs")
+  output$stats_tab_separation_note  <- renderUI(separation_note_build())
+  output$stats_tab_separation_table <- renderTable(separation_table_build(), striped = TRUE, spacing = "xs")
+
+  # bootstrap intervals: computed only when "Run bootstrap" is pressed, cached with a signature of the data and
+  # metric settings it was run on. A change to the data, the time filters / windows / blank, the sample selection or
+  # the metric settings makes the cache out of date: the table stays visible with a notice, but the metric summary,
+  # the reports and the bundle ignore it until it is run again.
+  boot_cache <- reactiveVal(NULL)
+  boot_signature <- function() {
+    rp <- prepare_replicate_data()
+    list(source = rv$data_source %||% "", samples = sort(as.character(input$selected_samples)),
+         smooth = input$metrics_smooth_window %||% 5, peak_smooth = input$metrics_peak_smooth_window %||% 1,
+         peak_mode = input$metrics_peak_mode %||% "global", thr = lysis_threshold_current(),
+         n = nrow(rp), sum_value = signif(sum(rp$value), 10), sum_time = signif(sum(rp$time), 10),
+         sum_rep = sum(as.numeric(rp$replicate)), sum_var = sum(match(as.character(rp$variable), as.character(input$selected_samples))))
+  }
+  boot_state <- function() {          # list(cache, valid): the cached run and whether it still matches the data
+    b <- boot_cache()
+    if (is.null(b)) return(list(cache = NULL, valid = FALSE))
+    sig <- tryCatch(boot_signature(), error = function(e) NULL)
+    list(cache = b, valid = !is.null(sig) && identical(sig, b$signature))
+  }
+  boot_valid <- function() {          # the cached table, or NULL when there is none / it is out of date
+    st <- boot_state()
+    if (st$valid && !is.null(st$cache$table) && nrow(st$cache$table) > 0) st$cache$table else NULL
+  }
+  run_bootstrap_now <- function() {
+    if (is.null(rv$data) || !length(input$selected_samples)) {
+      guard_notify("boot_run", "Load data and select samples first: the bootstrap resamples their replicates.")
+      return(invisible(NULL))
+    }
+    sel <- as.character(input$boot_metrics %||% character(0))
+    mets <- sel[sel %in% BOOT_METRIC_NAMES]
+    dropped <- setdiff(sel, mets)
+    if (!length(mets)) {
+      guard_notify("boot_run", if (length(sel)) "None of the chosen metrics can be bootstrapped (reference-relative metrics are not resampled): choose at least one other."
+                               else "Choose at least one metric to bootstrap.")
+      return(invisible(NULL))
+    }
+    nb <- suppressWarnings(as.integer(round(as.numeric(input$boot_n %||% 1000))))
+    if (!length(nb) || is.na(nb)) nb <- 1000L
+    nb <- min(max(nb, BOOT_N_MIN), BOOT_N_MAX)
+    sd <- suppressWarnings(as.integer(round(as.numeric(input$boot_seed %||% 1))))
+    if (!length(sd) || is.na(sd)) sd <- 1L
+    bt <- tryCatch(
+      bootstrap_metrics(prepare_replicate_data(), mets, n_boot = nb, seed = sd,
+                        smooth_window = input$metrics_smooth_window %||% 5,
+                        peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
+                        peak_mode = input$metrics_peak_mode %||% "global", lysis_threshold = lysis_threshold_current()),
+      error = function(e) { guard_notify("boot_run", paste("Bootstrap failed:", friendly_error_message(e)), "error"); NULL })
+    if (is.null(bt)) return(invisible(NULL))
+    boot_cache(list(table = bt, metrics = mets, dropped = dropped, n_boot = nb, seed = sd,
+                    signature = boot_signature(), time = format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
+    guard_notify("boot_run", sprintf("Bootstrap done: %d draws per sample for %d metric%s.", nb, length(mets),
+                                     if (length(mets) == 1) "" else "s"), "message")
+    invisible(bt)
+  }
+  observeEvent(input$boot_run, run_bootstrap_now())
+  output$boot_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    st <- boot_state(); b <- st$cache
+    if (is.null(b)) return(div(class = "stats-note", "No bootstrap has been run yet: choose the metrics and press Run bootstrap."))
+    few <- !is.null(b$table) && any(b$table$n_replicates < 3, na.rm = TRUE)
+    div(
+      if (!st$valid)
+        div(style = "background:#fff3cd;border:1px solid #ffe69c;border-radius:4px;padding:6px 8px;margin:6px 0;font-size:.82em;color:#664d03;",
+            tags$b("Out of date: "), "the data, the filters, the samples or the metric settings changed since this bootstrap was run (",
+            b$time, "). Run it again; until then the metric summary, the reports and the figure bundle do not use it."),
+      div(class = "stats-note", sprintf("Run %s: %d draws per sample, seed %d, metrics: %s.", b$time, b$n_boot, b$seed,
+                                        paste(metric_label(b$metrics), collapse = ", "))),
+      if (length(b$dropped))
+        div(class = "stats-note", paste0("Not bootstrapped: ", paste(metric_label(b$dropped), collapse = ", "),
+                                         " (relative to the reference sample, so not a property of one curve; the engine does not resample them).")),
+      if (few) div(class = "stats-note", "A sample with fewer than two replicates has no interval (NA)."))
+  })
+  output$boot_table <- renderTable({
+    req(rv$data, input$selected_samples)
+    b <- boot_cache(); req(b)
+    d <- bootstrap_display_table(present(b$table, "sample")); req(d); d
+  }, striped = TRUE, spacing = "xs")
+  output$downloadBootCSV <- downloadHandler(
+    filename = function() paste0("bootstrap_intervals_", extract_stamp(), ".csv"),
+    content  = function(file) { b <- boot_cache(); req(b, b$table); utils::write.csv(present(b$table, "sample"), file, row.names = FALSE) })
+  # the sentence the methods draft gains once a (current) bootstrap exists
+  boot_methods_sentence <- function() {
+    st <- tryCatch(boot_state(), error = function(e) NULL)
+    if (is.null(st) || !st$valid || is.null(st$cache$table) || nrow(st$cache$table) == 0) return(character(0))
+    b <- st$cache
+    paste0("Percentile bootstrap 95% confidence intervals of the mean-curve metrics (", paste(metric_label(b$metrics), collapse = ", "),
+           ") were obtained by resampling the replicate curves of each sample with replacement (", b$n_boot,
+           " draws, seed ", b$seed, "), averaging the drawn curves and recomputing each metric on the resampled mean curve.")
+  }
 
   # Methods paragraph drafted from the current settings: what was measured, how the mean and the
   # error statistic were computed, how the metrics were defined and which tests were run. Plain text
@@ -6154,6 +9218,7 @@ server <- function(input, output, session) {
     if (is.null(pd) || nrow(pd) == 0) return("")
     nb <- function(id) { v <- input[[id]]; if (is.null(v) || !nzchar(trimws(as.character(v)))) NULL else trimws(as.character(v)) }
     samps <- input$selected_samples
+    dsamps <- dname(samps)     # v2.21: the sentence names the samples as the user named them
     ylab  <- nb("y_axis_label") %||% "optical density"
     tunit <- time_unit_from_label(input$x_axis_label)
     n_rng <- suppressWarnings(range(pd$n, na.rm = TRUE))
@@ -6178,12 +9243,13 @@ server <- function(input, output, session) {
                " was followed as ", ylab, " over time (", tunit, ").")
       else paste0("Culture density was measured as ", ylab, " over time (", tunit, ")."),
       " ", length(samps), " sample", if (length(samps) == 1) "" else "s",
-      " (", if (length(samps) <= 8) paste(samps, collapse = ", ") else paste0(paste(samps[1:8], collapse = ", "), ", ..."),
+      " (", if (length(samps) <= 8) paste(dsamps, collapse = ", ") else paste0(paste(dsamps[1:8], collapse = ", "), ", ..."),
       ") were measured in ", n_txt, " each.")
     blank <- input$blank_od %||% 0
     s2 <- paste0(
       if (is.numeric(blank) && is.finite(blank) && blank != 0) paste0("Readings were blank-corrected by subtracting ", blank, ". ") else "",
-      if (isTRUE(input$enable_time_filter)) "Only the displayed time window was analysed. " else "",
+      if (isTRUE(input$enable_time_filter) || nzchar(time_windows_text())) "Only the displayed time window was analysed. " else "",
+      if (nzchar(time_windows_text())) paste0("Per-sample time windows: ", time_windows_text(), ". ") else "",
       "At each time point the mean of the replicates was plotted. ", err)
     win <- input$metrics_smooth_window %||% 5
     pw  <- input$metrics_peak_smooth_window %||% 1
@@ -6203,7 +9269,7 @@ server <- function(input, output, session) {
     s4 <- paste0(
       if (length(samps) < 2) "No statistical comparison was made (a single sample)."
       else paste0(
-        if (nzchar(ref) && ref %in% samps) paste0("Each sample was compared with the reference sample '", ref, "'")
+        if (nzchar(ref) && ref %in% samps) paste0("Each sample was compared with the reference sample '", dname(ref), "'")
         else "All pairs of samples were compared",
         " on the per-replicate metric '", st_metric, "' using ",
         if (nonpar) "the Mann–Whitney U test" else "Welch's t-test (unequal variances)",
@@ -6214,7 +9280,7 @@ server <- function(input, output, session) {
         else ""))
     s5 <- paste0("Analysis and figures were produced with the Lysis Curve OD Visualization App v", APP_VERSION,
                  " (R ", R.version$major, ".", R.version$minor, ").")
-    paste(c(s1, s2, s3, s4, s5), collapse = " ")
+    paste(c(s1, s2, s3, fit_methods_sentence(), boot_methods_sentence(), s4, s5), collapse = " ")   # v2.19: + the fits, once the tab was used; v2.20: + the bootstrap, once run
   }
   observeEvent(input$methods_draft, {
     if (is.null(rv$data) || !length(input$selected_samples)) {
@@ -6334,25 +9400,44 @@ server <- function(input, output, session) {
       }
       write_json(settings_json_list(), file.path(dir, "settings.json"), pretty = TRUE, auto_unbox = TRUE)
       rp <- prepare_replicate_data()
-      src <- data.frame(time = rp$time, sample = as.character(rp$variable), replicate = rp$replicate,
+      src <- data.frame(time = rp$time, sample = as.character(rp$variable), replicate = rp$replicate,   # the source data keeps the file's own names
                         value = rp$value, stringsAsFactors = FALSE)
       utils::write.csv(src, file.path(dir, "source_data_tidy.csv"), row.names = FALSE)
-      utils::write.csv(stats_table_export(), file.path(dir, "summary_statistics.csv"), row.names = FALSE)
-      cm <- tryCatch(curve_metrics_current(), error = function(e) NULL)
+      utils::write.csv(stats_table_display(), file.path(dir, "summary_statistics.csv"), row.names = FALSE)
+      cm <- tryCatch(present(curve_metrics_current(), "sample"), error = function(e) NULL)
       if (!is.null(cm)) utils::write.csv(cm, file.path(dir, "curve_metrics.csv"), row.names = FALSE)
+      # v2.19: the fit parameters (current Curve fitting tab settings) and the configured extraction tables
+      extra_csv <- character(0)
+      ft <- tryCatch(fit_table_current(), error = function(e) NULL)
+      if (!is.null(ft) && nrow(ft) > 0) {
+        utils::write.csv(present(ft, "sample"), file.path(dir, "fits.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "fits.csv")
+      }
+      # v2.20: the curve phases (every sample, phase, edges, duration, OD at the edges) and, when a current one is cached,
+      # the bootstrap intervals
+      ph <- tryCatch(phases_current(), error = function(e) NULL)
+      if (!is.null(ph) && nrow(ph) > 0) {
+        utils::write.csv(present(ph, "sample"), file.path(dir, "phases.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "phases.csv")
+      }
+      bt <- tryCatch(boot_valid(), error = function(e) NULL)
+      if (!is.null(bt)) {
+        utils::write.csv(present(bt, "sample"), file.path(dir, "bootstrap.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "bootstrap.csv")
+      }
+      for (nm in names(ex_tabs <- tryCatch(extraction_tables_current(), error = function(e) list()))) {
+        utils::write.csv(ex_tabs[[nm]], file.path(dir, nm), row.names = FALSE); extra_csv <- c(extra_csv, nm)
+      }
       leg <- trimws(figure_legend_string())
       writeLines(enc2utf8(leg), file.path(dir, "figure_legend.txt"), useBytes = TRUE)
       mth <- trimws(input$methods_text %||% "")
       if (nzchar(mth)) writeLines(enc2utf8(mth), file.path(dir, "methods.txt"), useBytes = TRUE)
       mm <- bundle_size_mm()
       files <- c(made, "settings.json", "source_data_tidy.csv", "summary_statistics.csv",
-                 if (!is.null(cm)) "curve_metrics.csv", "figure_legend.txt", if (nzchar(mth)) "methods.txt", "README.txt")
+                 if (!is.null(cm)) "curve_metrics.csv", extra_csv, "figure_legend.txt", if (nzchar(mth)) "methods.txt", "README.txt")
       writeLines(enc2utf8(c(
         "FIGURE BUNDLE",
         paste0("Lysis Curve OD Visualization App v", APP_VERSION),
         paste0("Created: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
         paste0("Data source: ", rv$data_source %||% "(unknown)"),
-        paste0("Samples: ", paste(input$selected_samples, collapse = ", ")),
+        paste0("Samples: ", display_mapping_text(input$selected_samples, rv$display_names)),   # v2.21: "column name -> display name" where renamed
         sprintf("Figure size: %d x %d mm (%.2f x %.2f in)", mm[1], mm[2], sz[1], sz[2]),
         sprintf("Fonts: %s; title %s pt, axis labels %s pt, axis text %s pt, legend %s pt",
                 input$font_family %||% "sans", input$title_font_size %||% "", input$axis_label_font_size %||% "",
@@ -6362,6 +9447,69 @@ server <- function(input, output, session) {
         "",
         "settings.json can be loaded back with Load Settings to reproduce the figure's look.")),
         file.path(dir, "README.txt"), useBytes = TRUE)
+      write_bundle_archive(file, tmp, fold)
+    }
+  )
+
+  # ── Download all figures (v2.18) ─────────────────────────────────────────────
+  # One SVG and one PNG of the main figure, of every analysis figure that renders for the current data and of
+  # the composed figure, each at the size it has in the app (the same sized file names as the single downloads),
+  # plus figure_legend.txt and methods.txt. A figure that returns the "not available" placeholder (or fails) is
+  # not written; SKIPPED.txt lists it with the reason.
+  all_figures_folder <- function() { mm <- bundle_size_mm(); sprintf("all_figures_%dx%dmm", mm[1], mm[2]) }
+  placeholder_reason <- function(p) {
+    lab <- tryCatch(p$layers[[1]]$aes_params$label, error = function(e) NULL)
+    if (is.character(lab) && length(lab) == 1) gsub("\\s+", " ", sub("^(Plot error|Figure not available): *", "", lab)) else "not available"
+  }
+  output$downloadAllFigures <- downloadHandler(
+    filename = function() paste0(all_figures_folder(), ".", bundle_archive_kind()),
+    content  = function(file) {
+      req(rv$data, input$selected_samples)
+      tmp  <- tempfile("allfig_"); dir.create(tmp)
+      on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+      fold <- all_figures_folder(); dir <- file.path(tmp, fold); dir.create(dir)
+      skipped <- character(0)
+      # an SVG and a PNG of one figure: obj (ggplot or fixed-panel gtable), size in inches
+      write_pair <- function(obj, stem, w_in, h_in) {
+        for (fmt in c("svg", "png")) {
+          args <- list(filename = file.path(dir, paste0(stem, ".", fmt)), plot = obj, device = export_device(fmt),
+                       width = w_in, height = h_in, units = "in", bg = "white", limitsize = FALSE)
+          if (identical(fmt, "png")) args$dpi <- export_dpi_for("png", w_in, h_in)
+          do.call(ggsave, args)
+        }
+      }
+      attempt <- function(label, expr) tryCatch(expr, error = function(e)
+        skipped <<- c(skipped, paste0(label, ": ", friendly_error_message(e))))
+      attempt("Lysis curve (main)", { sz <- export_size_in(); write_pair(main_plot_obj(), main_file_stem(), sz[1], sz[2]) })
+      for (ty in unname(ANALYSIS_FIGURE_CHOICES)) {
+        lab <- names(ANALYSIS_FIGURE_CHOICES)[match(ty, ANALYSIS_FIGURE_CHOICES)]
+        attempt(lab, {
+          p <- generate_analysis_plot(ty)
+          if (is_placeholder_plot(p)) {
+            skipped <- c(skipped, paste0(lab, " [", ty, "]: ", placeholder_reason(p)))
+          } else {
+            if (fixed_mode()) { g <- fixed_figure(p, ty); sz <- size_from_grob(g, ty); obj <- g }
+            else { sz <- export_size_in(); obj <- p }
+            write_pair(obj, analysis_file_stem(ty, if (fixed_mode()) sz), sz[1], sz[2])
+          }
+        })
+      }
+      if (has_patchwork) attempt("Composed figure", {
+        comp <- compose_info()
+        if (is.null(comp$plot)) skipped <- c(skipped, "Composed figure: no panel is available for this selection.")
+        else {
+          write_pair(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+          if (length(comp$skipped))
+            skipped <- c(skipped, paste0("Composed figure, panel left out: ", comp$skipped))
+        }
+      }) else skipped <- c(skipped, "Composed figure: the 'patchwork' package is not installed.")
+      writeLines(enc2utf8(trimws(figure_legend_string())), file.path(dir, "figure_legend.txt"), useBytes = TRUE)
+      mth <- trimws(input$methods_text %||% "")
+      if (!nzchar(mth)) mth <- trimws(tryCatch(draft_methods_text(), error = function(e) ""))   # the drafted paragraph when the box is empty
+      writeLines(enc2utf8(mth), file.path(dir, "methods.txt"), useBytes = TRUE)
+      if (length(skipped))
+        writeLines(enc2utf8(c("Figures that were not written (not available for the current data and settings):", "", skipped)),
+                   file.path(dir, "SKIPPED.txt"), useBytes = TRUE)
       write_bundle_archive(file, tmp, fold)
     }
   )
@@ -6376,6 +9524,10 @@ server <- function(input, output, session) {
              if (length(excl)) paste0("; excluded points: ", paste(sort(excl), collapse = ", "))
              else "")
     } else "none (all time points shown)"
+    tw_txt <- time_windows_text(samps)   # v2.18: per-sample windows, listed after the global filter
+    if (nzchar(tw_txt))
+      filter_txt <- if (isTRUE(input$enable_time_filter)) paste0(filter_txt, "; per-sample windows: ", tw_txt)
+                    else paste0("no global filter; per-sample windows: ", tw_txt)
     error_txt <- if (input$error_type == "none") "none" else
       paste0(switch(input$error_type, sd = "SD", sem = "SEM", ci95 = "95% CI"),
              if (!is.null(input$error_multiplier) && input$error_multiplier != 1)
@@ -6402,7 +9554,7 @@ server <- function(input, output, session) {
                 if (identical(input$metrics_peak_mode %||% "global", "first_local"))
                   "first peak before a > 10 % decline" else "global maximum",
                 input$metrics_lysis_threshold_pct %||% 5,
-                if (nzchar(input$metrics_ref_sample %||% "")) input$metrics_ref_sample
+                if (nzchar(input$metrics_ref_sample %||% "")) display_mapping_text(input$metrics_ref_sample, rv$display_names)
                 else "none (infection metrics omitted)",
                 # v2.14.1 memory diagnostics: the limit R runs under and the pixel sizes used
                 tryCatch({
@@ -6433,13 +9585,13 @@ server <- function(input, output, session) {
          notes       = input$report_notes,
          methods     = trimws(input$methods_text %||% ""),   # v2.16: edited on the Statistics tab
          legend      = figure_legend_string(),               # v2.17: the Figure Legend Text, under the main figure
-         qc_df       = qc_current(),                         # v2.17: QC flags section (NULL when not computable)
+         qc_df       = { q <- qc_current(); if (is.null(q)) NULL else { q$sample <- dname(q$sample); q$detail <- relabel(q$detail); q } },   # v2.17: QC flags section (NULL when not computable)
          generated   = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
          data_file   = rv$data_source %||% "(unknown)",
          format      = if (rv$is_long_format) "long" else
                        paste0("wide (replicate columns pooled by name)"),
          time_col    = rv$time_col %||% "",
-         samples_txt = paste(samps, collapse = ", "),
+         samples_txt = display_mapping_text(samps, rv$display_names),   # v2.21: raw column name -> display name where renamed
          filter_txt  = filter_txt,
          error_txt   = error_txt,
          settings_df = settings_df,
@@ -6466,10 +9618,84 @@ server <- function(input, output, session) {
   # without a reference sample) and the dose-response only when an MOI is
   # known. A figure that cannot be built is recorded as a note, not as a
   # placeholder image.
+  # One figure of the report: the plot built by build_analysis_plot() (a fixed-panel gtable in fixed mode, at its
+  # own computed size) and, for the HTML report, its PNG; a figure that cannot be built is recorded as an error
+  # note, except dose_response and phenotype_heatmap, which are left out silently (a placeholder would only be noise).
+  report_figure_entry <- function(ty, title, caption, render_png = FALSE) {
+    f <- list(type = ty, title = title, caption = caption)
+    p <- tryCatch(build_analysis_plot(ty), error = function(e) e)
+    if (inherits(p, "error")) {
+      if (ty %in% c("dose_response", "phenotype_heatmap")) return(NULL)
+      f$error <- conditionMessage(p); return(f)
+    }
+    f$plot <- p
+    if (fixed_mode()) {          # v2.15: drawn with its fixed panel, at its own computed size (HTML and PDF)
+      fg <- fixed_figure(p, ty)
+      f$plot <- fg
+      if (render_png) f$b64 <- report_png_b64(fg, size_in = size_from_grob(fg, ty))
+    } else if (render_png) f$b64 <- report_png_b64(p)
+    f
+  }
+  # v2.19: the "Curve fits" section: the fit figure at export size, the parameter table (3 significant digits) and
+  # what the fit is (settings of the Curve fitting tab). NULL when nothing could be fitted.
+  report_fits_payload <- function(render_png = FALSE) {
+    fr <- tryCatch(fit_results(), error = function(e) NULL)
+    if (is.null(fr) || is.null(fr$table) || nrow(fr$table) == 0) return(NULL)
+    fs  <- fr$settings
+    cap <- paste0("Mean curve (points; whiskers: the main figure's error measure) with the fitted ",
+                  paste(unname(c(logistic = "logistic", gompertz = "Gompertz", baranyi = "Baranyi")[fs$models]), collapse = ", "),
+                  " model", if (length(fs$models) == 1) "" else "s", if (identical(fs$level, "replicate")) " fitted to each replicate" else "",
+                  ". Solid line: best model by AIC", if (identical(fs$show, "all")) "; dashed: the other converged models" else "", ". ",
+                  if (identical(fs$until, "peak")) "Grey points lie after the peak and were not fitted. " else "")
+    fig <- report_figure_entry("fit_overlay", "Fitted growth curves", cap, render_png)
+    d   <- fit_display_table(present(fr$table, "sample"))
+    n   <- nrow(d)
+    if (n > 300) d <- d[seq_len(300), , drop = FALSE]
+    sm  <- if (identical(fs$level, "replicate")) fit_replicate_summary_display(present(fit_replicate_summary(fr$table), "sample")) else NULL
+    list(figure = fig, table = d, n_rows = n, summary = sm,
+         notes = unname(fit_note_text(fs)), messages = fit_message_rows(fr$table))
+  }
+  # v2.19: the extraction tables the user has configured (OD at typed times; time to a threshold), as
+  # list(od = , tt = ) with a data frame and a one-line description each.
+  report_extraction_payload <- function() {
+    ex <- tryCatch(extraction_tables_current(), error = function(e) list())
+    if (!length(ex)) return(NULL)
+    out <- list()
+    if (!is.null(ex[["od_at_times_summary.csv"]])) {
+      tm <- parse_extract_times(input$extract_times)$times
+      out$od <- list(title = "OD at chosen times", table = drop_raw_columns(ex[["od_at_times_summary.csv"]]),
+                     desc = paste0("Value of each replicate curve at ", paste(tm, collapse = ", "), " (",
+                                   if (identical(input$extract_method, "nearest")) "nearest reading" else "linear interpolation between readings",
+                                   "); mean, SD, n (replicates with a value), SEM and 95% CI half-width per sample."))
+    }
+    if (!is.null(ex[["time_to_threshold_summary.csv"]])) {
+      th <- extract_threshold_value()
+      out$tt <- list(title = "Time to threshold", table = drop_raw_columns(ex[["time_to_threshold_summary.csv"]]),
+                     desc = paste0("First time each replicate curve crosses OD ", th, " ",
+                                   if (identical(input$extract_direction, "down")) "downwards" else "upwards", ", searching from ",
+                                   if (identical(input$extract_after, "peak")) "its peak" else "the start of the curve",
+                                   " (linear interpolation); n = replicates that crossed, of n_curves examined."))
+    }
+    if (length(out)) out else NULL
+  }
+
+  # v2.20: the cached bootstrap table (only when it still matches the data), with a description of the run
+  report_bootstrap_payload <- function() {
+    st <- tryCatch(boot_state(), error = function(e) NULL)
+    if (is.null(st) || !st$valid || is.null(st$cache$table) || nrow(st$cache$table) == 0) return(NULL)
+    b <- st$cache
+    list(title = "Bootstrap intervals", table = bootstrap_display_table(present(b$table, "sample")),
+         desc = paste0("Percentile bootstrap intervals of the mean-curve metrics: replicate curves resampled with replacement (",
+                       b$n_boot, " draws per sample, seed ", b$seed, "), averaged, metric recomputed; estimate = the Curve Metrics value, CI = ",
+                       "2.5th and 97.5th percentile of the finite draws, n ok draws = draws with a finite metric. ",
+                       "With n = 3 replicates there are at most 10 distinct resamples, so the intervals are wide and coarse (zero-width is possible)."))
+  }
+
   report_analysis_payload <- function(render_png = FALSE) {
     if (!isTRUE(input$report_include_analysis %||% TRUE)) return(NULL)
     samps <- input$selected_samples
     ref   <- input$metrics_ref_sample %||% ""
+    ref_d <- dname(ref)     # v2.21: the reference as the user named it, for the captions
     tunit <- time_unit_from_label(input$x_axis_label)
     ylab  <- input$y_axis_label %||% "OD"
     mets  <- input$analysis_metrics %||% c("lysis_time", "od_drop")
@@ -6479,21 +9705,29 @@ server <- function(input, output, session) {
     types <- c("metric_summary", "growth_rate",
                if (nzchar(ref)) "normalized" else "replicate_overlay",
                "landmarks",
+               "phases",                                                    # v2.20: figure + table after the landmarks
+               if (nzchar(ref) && ref %in% samps) "difference",             # v2.20: needs a reference sample
                # dose-response only with >= 2 distinct positive MOI levels (v2.12.4); a
                # single level would only produce the "Figure not available" message
-               if (length(unique(moi[is.finite(moi) & moi > 0])) >= 2) "dose_response")
+               if (length(unique(moi[is.finite(moi) & moi > 0])) >= 2) "dose_response",
+               "phenotype_heatmap")   # v2.19: skipped silently when it cannot be drawn (one sample, no varying metric)
     titles <- c(metric_summary    = "Metric summary (replicates, mean ± SD)",
                 growth_rate       = "Specific growth rate vs time",
                 normalized        = "Normalized OD vs time",
                 replicate_overlay = "Replicate overlay",
                 landmarks         = "Curve landmarks",
-                dose_response     = "MOI dose-response")
+                phases            = "Curve phases",
+                difference        = "Separation from the reference",
+                dose_response     = "MOI dose-response",
+                phenotype_heatmap = "Phenotype heatmap")
     captions <- c(
       metric_summary = paste0(
-        "Per-replicate values (open circles), mean (bar) ± SD (whiskers) for ",
+        if (identical(input$metric_error_source %||% "replicates", "bootstrap"))
+          "Per-replicate values (open circles), mean-curve value (bar) and bootstrap 95% percentile interval of the mean-curve metric (whiskers; replicate-level resampling, see Bootstrap intervals; a metric without a current bootstrap shows the replicate spread) for "
+        else "Per-replicate values (open circles), mean (bar) ± SD (whiskers) for ",
         paste(vapply(mets, metric_axis_label, "", tunit = tunit, ylab = ylab), collapse = ", "), ".",
         if (isTRUE(input$stats_mark) && nzchar(ref))
-          paste0(" Marks: significance vs reference '", ref, "' (",
+          paste0(" Marks: significance vs reference '", ref_d, "' (",
                  if (identical(input$stats_method, "nonparametric")) "Mann-Whitney" else "Welch t",
                  ", Holm-adjusted; see Replicate statistics).") else ""),
       growth_rate = paste0(
@@ -6502,30 +9736,51 @@ server <- function(input, output, session) {
         "The dashed line marks μ = 0."),
       normalized = if (norm_mode == "t0")
         paste0("Mean ", ylab, " of each sample divided by its own value at t = 0; the dashed line marks a ratio of 1.")
-      else paste0("Mean ", ylab, " of each sample divided by the mean ", ylab, " of the reference '", ref,
+      else paste0("Mean ", ylab, " of each sample divided by the mean ", ylab, " of the reference '", ref_d,
                   "' at the same time point; the dashed line marks a ratio of 1."),
       replicate_overlay = "Individual replicate curves (thin lines) with the mean curve (thick line) per sample.",
       landmarks = paste0("Mean curves with the computed landmarks drawn where they come from: lag end, centre of the μmax window, ",
                          "peak, lysis onset (> ", lysis_threshold_current() * 100, " % decline from the peak), half of the peak and the trough."),
+      phases = paste0(
+        "Mean curves with each sample's phases shaded: lag, exponential, deceleration, stationary, lysis and recovery / post-lysis. ",
+        "Every edge is read back from the curve metrics of the mean curve (smoothing window ", win, " points, ",
+        if (identical(input$metrics_peak_mode %||% "global", "first_local")) "first-peak mode" else "global peak",
+        ", lysis onset at a > ", lysis_threshold_current() * 100, " % decline from the peak), so it can be checked on the landmarks figure. ",
+        "Phases that do not apply are omitted. ",
+        if (length(samps) > 1) "Each sample's phases are the thin strip at the top of the panel, in the order of the legend; the curves are below them."
+        else "The bands run over the full height of the panel behind the curve."),
+      difference = if (nzchar(ref)) paste0(
+        if (identical(input$diff_mode %||% "difference", "log2_ratio"))
+          paste0("log2 of the mean ", ylab, " of each sample over that of the reference '", ref_d, "' at each time point")
+        else paste0("Mean ", ylab, " of each sample minus that of the reference '", ref_d, "' at each time point"),
+        "; the dashed line marks no difference (the reference itself). ",
+        if (isTRUE(input$diff_mark %||% TRUE)) "* : Welch test of the replicates against the reference at that time, Holm-adjusted across the sample's time points, p < 0.05. " else "",
+        "Exploratory: one test per time point on a few replicate readings. First separation times are in the table below.") else "",
       dose_response = paste0(
         metric_axis_label(input$analysis_dose_metric %||% "lysis_time", tunit = tunit, ylab = ylab),
-        " per replicate (open circles) and mean ± SD (filled symbols) against MOI (log scale)."))
-    figs <- lapply(types, function(ty) {
-      f <- list(type = ty, title = unname(titles[ty]), caption = unname(captions[ty]))
-      p <- tryCatch(build_analysis_plot(ty), error = function(e) e)
-      if (inherits(p, "error")) {
-        if (ty == "dose_response") return(NULL)   # silently skipped: never embed a placeholder for it
-        f$error <- conditionMessage(p); return(f)
+        " per replicate (open circles) and mean ± SD (filled symbols) against MOI (log scale)."),
+      phenotype_heatmap = tryCatch({
+        pm <- pheno_current()
+        paste0("Samples (rows) by curve metrics (columns) of the mean curves. Colour: ",
+               switch(input$pheno_scale %||% "z", z = "z-score of each metric across the samples (blue below the mean, red above)",
+                      range = "each metric scaled to 0-1 across the samples", "the raw value"),
+               if (isTRUE(input$pheno_values %||% TRUE)) "; cell text: the raw value" else "", ". ",
+               pheno_dropped_text(pm))
+      }, error = function(e) "Samples by curve metrics of the mean curves."))
+    figs <- lapply(types, function(ty) report_figure_entry(ty, unname(titles[ty]), unname(captions[ty]), render_png))
+    figs <- Filter(Negate(is.null), figs)
+    # v2.20: a table follows the phases and the separation figure (the phases table, the first separation times)
+    figs <- lapply(figs, function(f) {
+      if (!is.null(f$error)) return(f)
+      if (identical(f$type, "phases")) {
+        f$table <- tryCatch(phases_display_table(present(phases_current(), "sample")), error = function(e) NULL)
+        f$table_title <- paste0("Curve phases (times in ", tunit, "; 3 significant digits)")
+      } else if (identical(f$type, "difference")) {
+        f$table <- tryCatch(map_name_column(separation_display_table(separation_current(), ref, tunit), "Sample", rv$display_names), error = function(e) NULL)
+        f$table_title <- "First separation from the reference"
       }
-      f$plot <- p
-      if (fixed_mode()) {          # v2.15: drawn with its fixed panel, at its own computed size (HTML and PDF)
-        fg <- fixed_figure(p, ty)
-        f$plot <- fg
-        if (render_png) f$b64 <- report_png_b64(fg, size_in = size_from_grob(fg, ty))
-      } else if (render_png) f$b64 <- report_png_b64(p)
       f
     })
-    figs <- Filter(Negate(is.null), figs)
     # v2.13: the composed figure closes the list, when at least two panels are selected
     comp <- if (has_patchwork) tryCatch(compose_info(), error = function(e) NULL) else NULL
     if (!is.null(comp) && comp$n >= 2) {
@@ -6539,9 +9794,12 @@ server <- function(input, output, session) {
       if (render_png) f$b64 <- report_png_b64(comp$plot, size_in = c(comp$width_mm, comp$height_mm) / 25.4)
       figs <- c(figs, list(f))
     }
-    st <- analysis_stats_current()
+    st <- analysis_stats_display()
+    st$pairwise <- drop_raw_columns(st$pairwise); st$posthoc <- drop_raw_columns(st$posthoc)   # the report tables carry the display names only
     list(figures = figs, stats = st, metric_label = metric_label(st$metric),
-         ref_sample = ref, method = input$stats_method %||% "welch")
+         ref_sample = ref_d, method = input$stats_method %||% "welch",
+         fits = report_fits_payload(render_png), extraction = report_extraction_payload(),   # v2.19
+         bootstrap = report_bootstrap_payload())   # v2.20: NULL unless a current bootstrap is cached
   }
 
   # The report bodies live outside the download handlers so the test suites
@@ -6549,16 +9807,16 @@ server <- function(input, output, session) {
   # pin the "Generated" timestamp.
   html_report_string <- function(meta = report_meta()) {
     req(rv$data, input$selected_samples)
-    metrics <- curve_metrics_current()
+    metrics <- drop_raw_columns(present(curve_metrics_current(), "sample"))
     img_b64 <- report_png_b64(main_plot_obj())
-    build_html_report(meta, img_b64, stats_table_export(), metrics,
+    build_html_report(meta, img_b64, drop_raw_columns(stats_table_display()), metrics,
                       analysis = report_analysis_payload(render_png = TRUE))
   }
   pdf_report_file <- function(file, meta = report_meta()) {
     req(rv$data, input$selected_samples)
-    metrics <- curve_metrics_current()
+    metrics <- drop_raw_columns(present(curve_metrics_current(), "sample"))
     build_pdf_report(file, meta, main_plot_obj(),
-                     stats_table_export(), metrics,
+                     drop_raw_columns(stats_table_display()), metrics,
                      width  = max(export_size_in()[1], 8),
                      height = max(export_size_in()[2], 6),
                      analysis = report_analysis_payload(render_png = FALSE))
@@ -6632,7 +9890,7 @@ server <- function(input, output, session) {
           
           # Title text box
           prs <- ph_with(prs,
-                         value    = new_samp,
+                         value    = dname(new_samp),
                          location = ph_location(left = 0, top = 0, width = sw, height = title_h))
           
           # Plot area below the title

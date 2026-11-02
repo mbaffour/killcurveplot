@@ -1,5 +1,254 @@
 # Changelog
 
+## v2.21.0 — 2026-11-01
+
+**Sticky figure, accordion sidebar with a jump menu, quick-edit strip, rename samples everywhere.**
+Three usability complaints: the figure scrolled out of view while a long sidebar was edited, renaming a sample
+was buried in Variable Styling and only changed the legend, and finding a section in a sidebar of thirteen was
+slow. The default main figure is unchanged (the v2.9 byte-identical check is unchanged); the two new inputs
+have `APP_DEFAULTS` entries (placed right after `demo_scenario`).
+
+- **Sticky figure.** The layout is now a flex row (`#kc_layout`, sidebar 25 %); the figure column
+  (`#main_panel`: size bar, tabs, figure) is `position: sticky; top: 0; max-height: 100vh` with its own
+  scrolling, so it stays in view while the sidebar scrolls. `sticky_figure` (checkbox at the top of the
+  sidebar, default on, saved with the settings) removes the `kc-sticky` class in the browser; on a window
+  narrower than 768 px the columns stack and nothing is pinned. While the column is pinned the auto-fit
+  preview zoom also fits the window height (`sticky_viewport_height`, reported by the page; the main figure
+  only; the quick-edit strip is reserved for while it is open), so the figure and the strip are in view
+  together. Every existing input and output id is unchanged.
+- **Accordion sidebar.** The thirteen sidebar sections are `kc_section()` details elements that close each
+  other (one open at a time; native `<details>`, so Enter / Space on a summary still work). **Jump to a
+  section...** (`sidebar_jump`, UI only, not saved) opens a section, scrolls it to the top of the window and
+  focuses its summary; **Collapse all** closes them. The Statistics tab's sections stay independent.
+- **Quick-edit strip** under the figure (Lysis curve tab; `quick_edit_open`, default on, *Hide quick edit*
+  link). One row per loaded sample: a 12 px swatch, the name (`qe_name_<id>`), a colour picker
+  (`qe_color_<id>`) and a **show** box (`qe_show_<id>`: a click removes / adds the sample in Select Samples,
+  in plot order). The X- and Y-axis labels and the legend position were **moved** here from the sidebar
+  (same input ids; a one-line note remains in Axis Settings and Figure Layout). A colour picked in the strip
+  is the sample's colour (`rv$qe_colors`, read first by `resolve_aesthetics()`); the sidebar colour widgets
+  follow it, a different colour chosen in the sidebar replaces it, and the swatches follow the sidebar.
+- **Rename samples everywhere.** `rv$display_names` (raw column name -> display name) is fed by the name
+  boxes. The legend labels read it (the Variable Styling "Legend Label" box is gone: one source of truth),
+  and so do the tables of the Statistics tab and the Dashboard, the curve-metrics, per-replicate-metrics,
+  statistics (`sample`, `versus`, Tukey `comparison`, warnings and notes), extraction, phases, bootstrap and
+  fit tables, the all-metrics comparison, the QC flags, the reports (the data provenance lists
+  "raw column name → display name"), the Figure Legend Text, the methods text and the PowerPoint slide titles.
+  The CSV downloads and the bundle's tables carry `sample` (display) with `sample_raw` right after it (and
+  `versus_raw`, `comparison_raw`). The raw column name stays the key in `rv$col_map`, `selected_samples`, the
+  reference sample and the settings file (`sample_aesthetics` still keys by raw name; its `legend_label` is
+  the display name, so older files load). MOI is read from the raw name; a display name fills in a sample
+  whose raw name has no MOI. `curve_metrics_current()` gains a `sample_display` column while any sample is
+  renamed. The bundle's `source_data_tidy.csv` keeps the file's own names.
+- Tests: `tests/test_v221_ui.R`.
+
+### More figures
+
+**Four new analysis figures, and the metric summary gains three more styles and significance brackets.**
+The default main figure and the default metric summary are unchanged; every new input has an
+`APP_DEFAULTS` entry (the last entries of the base list) and is saved with the settings. The new figures are
+analysis types, so they are also composer panels and files of *Download all figures*.
+
+- **Metric summary styles** (`metric_style`): "Dot plot (replicates, mean bar)" (default, the v2.11 look),
+  "Bar (mean ± error, replicates as points)", "Box plot" and "Violin".
+  - Bar: columns in the sample colour (alpha 0.85, width 0.6), whiskers = the main error measure (drawn dark
+    when the whisker colour follows the sample, since a same-coloured whisker vanishes inside its bar),
+    replicates as open circles on top, and the y axis starts at 0 (a facet with negative values gets its own
+    room below the axis).
+  - Box plot: one box per sample (outliers as open circles) with the replicate points. Violin: untrimmed,
+    equal-width densities (`trim = FALSE`, `scale = "width"`) with the replicate points and a mean bar.
+- **Significance brackets** (`metric_brackets`, off by default): a bracket with its stars for every pair of
+  samples that reaches Holm-adjusted p < 0.05 in `compare_replicate_metric()` (all pairs: no reference), stacked above
+  what the facet draws (points, whiskers, box whiskers, violin tails), the narrowest lowest, at most 6 per
+  facet (the most significant), stars at the axis-text size. Plain `geom_segment` + `geom_text` (no `ggsignif`).
+  The stars against the reference are off while brackets are on. A sample needs 2 or more replicate values;
+  groups with n < 3 add the low-power warning to the figure's note, and a facet with more than 6 significant
+  pairs says so. The note appears under the Analysis tab's controls, never on the artwork.
+- **OD at chosen times** (`od_at_times`): grouped bars (or dots with `extract_style` = "Dots") of the mean
+  OD at the times typed in the Statistics tab's *OD at chosen times* box (`extract_times`, `extract_method`
+  are shared); the samples sit side by side, whiskers = the main error measure, replicate points optional
+  (`extract_points`). With no times typed it shows the first, middle and last time points and says so in the
+  note. A log y axis (the main figure's scale) draws the bars from a floor below the data, since `geom_col`
+  anchors a log bar at OD 1. A time outside a curve's range is left out (never extrapolated) and counted in the note.
+- **Time to an OD threshold** (`time_to_threshold`): per sample, the time its replicates cross
+  `extract_threshold` in `extract_direction` (from the start or, with `extract_after`, from the peak), in the
+  dot-plot look of the metric summary: replicates as open circles, a bar at the mean, whiskers = the main error
+  measure; y label "Time to 0.15 (min)". Samples that never cross keep their (empty) slot and are listed in the
+  note; a threshold nothing crosses is "Figure not available" with the reason.
+- **Replicate small multiples** (`replicate_facets`): one panel per sample sharing the panel area (the
+  fixed 65 mm is split between the panels), each showing its replicate curves thin in three shades of the
+  sample colour (so they differ in greyscale too) and the mean bold in the sample colour; y axis shared,
+  log when `y_scale_type` is log.
+- **Fraction of replicates lysed** (`lysed_fraction`): a step curve from 0 to 1 per sample, the fraction of
+  its replicates lysed at each time, with the first time the fraction reaches 0.5 marked by a point on a
+  dashed 0.5 line. A replicate is lysed at a time when it is after the sample's peak (the highest per-time
+  mean), its OD is below the threshold, and it had reached that threshold before, so the lag and growth phase and a
+  threshold the curve never reached are not lysis. `lysed_mode` "relative" (default): `lysed_threshold` (0.5)
+  × the sample's peak OD; "absolute": an OD. `lysed_fraction_curves()` and `lysed_fraction_t50()` are tested
+  directly (on the demo Uninfected stays at 0 and Phage MOI 10 reaches 1 by 105 min).
+- **Gallery**: the lysis panel list gains "Fraction of replicates lysed" and "OD at chosen times" after the
+  dose-response, and the phenotype heatmap no longer prints its cell values in the composite
+  (`pheno_values = FALSE` in `tools/render_gallery.R`; the cells are too narrow).
+- Tests: `tests/test_v221_figures.R` (helpers, every style, brackets, the four figures, the fixed panel
+  and the composer).
+
+## v2.20.0 — 2026-10-20
+
+**Curve phases figure, bootstrap intervals, separation from the reference, gallery update.**
+The v2.20 engine functions (`curve_phases_by_sample`, `bootstrap_metrics`, `curve_difference`,
+`first_separation_time`) now have a user interface. The default main figure is unchanged (the v2.9
+byte-identical check is unchanged); every new input has an `APP_DEFAULTS` entry and is saved with
+the settings (the Run bootstrap button is not).
+
+- **Curve phases** (analysis type `phases`; also in the Analysis figures select, the composer and
+  Download all figures). The mean curves of the landmarks figure (same colours, `y_scale_type` for the
+  y axis) with each sample's phases shaded: lag grey, exponential green, deceleration yellow-green,
+  stationary blue, lysis vermillion, recovery purple, post-lysis grey-blue (a fixed, muted,
+  colour-blind-safe palette; phase key outside right). One sample: full-height translucent bands
+  (alpha 0.12) behind its curve. Several samples: bands would overlap, so each sample gets a thin
+  strip (6 % of the panel height, one row per sample, stacked at the top, labelled on the left in the
+  sample's colour at the axis-text size) and the curves sit below; strips are drawn at alpha 0.55
+  because 0.12 is unreadable on a strip. The phases follow the metrics smoothing window, peak mode and
+  lysis threshold (not the peak-detection smoothing window, which `curve_phases()` does not take).
+  - **Statistics tab, "Curve phases"**: the phases table (sample, phase, start, end, duration, OD
+    start, OD end; 3 significant digits) and a CSV (unformatted). `phases.csv` goes into the figure
+    bundle; the HTML and PDF reports show the figure and the table right after the landmarks figure.
+- **Bootstrap intervals** (Statistics tab section). `boot_metrics` (multi-select, default lysis onset,
+  OD drop, μmax, AUC, infection strength), `boot_n` (200-5000, default 1000), `boot_seed` (default 1) and
+  a **Run bootstrap** button. The bootstrap is computed only when the button is pressed and cached
+  (with a signature of the replicate data and the metric settings); a change to the data, the filters or
+  windows, the blank, the sample selection or the metrics settings marks it **out of date** with a notice
+  (the table stays visible; the metric summary, the reports and the bundle ignore it until it is run
+  again). The table: sample, metric, estimate, CI low, CI high, n replicates, n ok draws; CSV; a note
+  that it is a percentile interval from replicate-level resampling and is wide / degenerate at n = 3.
+  `infection_strength` (and the other reference-relative metrics) are not bootstrapped: they are not
+  produced by `compute_one_curve_metrics()`, which `bootstrap_metrics()` resamples, so a run drops them
+  and says so in the note.
+  - **Metric summary error source**: `metric_error_source` = "Replicate spread (SD/SEM/CI as in Error
+    Bars)" (default) or "Bootstrap 95 % CI of the mean-curve metric": the bar is then the mean-curve
+    estimate and the whiskers the bootstrap interval. A metric missing from the cached bootstrap (or no
+    current cache) keeps the replicate spread, with a notification. The report caption follows.
+  - Reports and bundle: a **Bootstrap intervals** section and `bootstrap.csv` when a current bootstrap is
+    cached; the drafted methods text gains a sentence.
+- **Separation from the reference** (analysis type `difference`, needs a reference sample; the
+  placeholder says so without one). `diff_mode` ("Difference (OD)" or "log2 ratio") and `diff_mark`
+  (default on). Each non-reference sample's `curve_difference()` against time, a dashed zero line, the
+  figure's colours, shapes and theme, and an asterisk marker above the curve where
+  `p_adj_holm < 0.05`. Under the figure (Analysis tab) and in the Statistics tab's Replicate comparison
+  section ("First separation from reference"): `first_separation_time()` per sample (the reference is
+  left out; "none" when never reached). Reports: the figure and the table when a reference is set.
+- **Gallery**: `tools/render_gallery.R` draws phases, difference, fit_overlay and phenotype_heatmap too
+  (order: main, landmarks, phases, replicate_overlay, growth_rate, normalized, difference,
+  metric_summary, dose_response, fit_overlay, phenotype_heatmap, heatmap) and, with more than 8 panels,
+  composes three columns at 183 mm with 55 mm per panel row (two columns as before up to 8).
+  `docs/gallery/gallery.png` is regenerated.
+- Tests: `tests/test_v220_integration.R`; the report image counts in `tests/test_v219_integration.R`
+  rose by two (the phases and the separation figure).
+
+## v2.19.0 — 2026-10-20
+
+**Curve fitting tab, phenotype heatmap, extraction tables and the all-metrics comparison.**
+The v2.18 engine functions (`fit_growth_models`, `phenotype_matrix`, `compare_all_metrics`,
+`od_at_times`, `time_to_od`, ...) now have a user interface. Nothing changes the default
+main figure (the v2.9 byte-identical check is unchanged); every new input has an
+`APP_DEFAULTS` entry and is saved with the settings.
+
+- **Curve fitting tab** (new, after Statistics). Inputs: `fit_models` (Logistic / Gompertz /
+  Baranyi, all by default), `fit_until` ("Up to the peak" or "Whole curve"), `fit_log` (fit
+  ln(OD/OD0)), `fit_level` ("Mean curve" or "Each replicate"), `fit_show` ("Best model by
+  AIC" or "All converged models"). One reactive, `fit_results()`, holds the fit table, so the
+  figure, the tables, the reports, the bundle and the methods sentence share one computation,
+  made only when the fit inputs or the data change.
+  - **Figure** (analysis type `fit_overlay`; also in the Analysis figures select, the composer
+    and Download all figures): the mean curve as points with the main figure's error measure
+    as whiskers, the fitted curve of each sample on a 200-point time grid from
+    `predict_growth_model()` (solid = best model by AIC; with "All converged models" the others
+    are thin and dashed; at replicate level one thin curve per replicate), the sample colours
+    and shapes of the main figure, `y_scale_type` for the y axis, points after the peak in grey
+    when the fit stops there. Same theme, fixed square panel and export as every analysis
+    figure; its own preview and download on the tab.
+  - **Parameter table**: sample, (replicate), model, best (a tick), converged, points, A, mu_max,
+    "Lag (time units)" = the fit's start time + its `lag` (the fit lag is relative to the first
+    fitted point), doubling time = ln 2 / mu_max (none when the fit is not on the ln scale), R²,
+    AIC, the three standard errors and the engine's `message`, at 3 significant digits, with
+    the poorly determined fits highlighted. CSV button (all rows, unformatted). At replicate
+    level a second table gives mean ± SD of A, mu_max and the absolute lag per sample and model
+    over the converged replicates, with its own CSV.
+  - **Notes** under the controls: the fit range, the ln-scale meaning of mu_max, the lag
+    convention, how to read AIC on short curves, and every row that carries a `message`
+    ("only 5 points: parameters are poorly determined" in bold).
+- **Phenotype heatmap** (analysis type `phenotype_heatmap`): `phenotype_matrix()` on the curve
+  metrics, samples (rows, sample order) by metrics (columns). `pheno_metrics` (multi-select over
+  every metric label plus the other numeric columns of the metrics table; default lysis onset,
+  OD drop, lysis efficiency, μmax, AUC, infection strength, extinction time, time of first
+  peak), `pheno_scale` (z-score / 0-1 range / raw), `pheno_values` (print the raw value in
+  each cell, axis-text size). z-scores use a blue-white-red scale centred at 0, the other
+  scales viridis; the legend title is "z-score", "scaled" or the unit. The panel is not forced
+  square (a non-curve kind, like the OD heatmap). Metrics that are undefined or constant across
+  the samples are left out and listed in a note.
+- **Extraction** (Statistics tab, before Methods text). **OD at chosen times**: `extract_times`
+  ("30, 60, 120"), `extract_method` (interpolate / nearest), a table of time, sample, mean, SD, n,
+  SEM and CI95, and per-replicate and summary downloads. **Time to threshold**:
+  `extract_threshold` (0.5), `extract_direction` (up / down), `extract_after` (start / peak),
+  the per-sample summary and the per-replicate crossings. Both use `prepare_replicate_data()`,
+  so they follow the filters, per-sample windows and blank. **All-metrics comparison**:
+  `compare_all_metrics()` over every metric with finite replicate values, with the current
+  statistics method and reference, its warnings, a CSV, and the note that `p_adj_bh_across` is
+  exploratory.
+- **Reports and bundle**: with "Include analysis figures and statistics" on, the HTML and PDF
+  reports gain a **Curve fits** section (the fit figure at export size, the parameter table,
+  the notes and warnings), the **Phenotype heatmap** figure, and **Extracted values** (the OD-at-times
+  table when times are typed, the time-to-threshold table while the threshold box is not empty).
+  The figure bundle adds `fits.csv` and the configured extraction CSVs. The drafted methods text
+  gains a sentence on the fitted models and range once the Curve fitting tab has been used.
+- Tests: `tests/test_v219_integration.R`; the report image counts in `tests/test_v211_analysis.R`
+  rose by two (the heatmap and the fit figure).
+
+## v2.18.0 — 2026-10-20
+
+**Per-sample time windows, sample groups and facets, metric explorer, download all figures.**
+
+- **Per-sample time windows**: Time Point Filtering has a table under the global filter
+  with a *from* and a *to* box per selected sample (`tw_min_<id>`, `tw_max_<id>`; blank =
+  no limit). `apply_time_windows_inputs(df)` drops the rows of each sample outside its
+  window in `prepare_plot_data()` and `prepare_replicate_data()`, right after the global
+  time filter (and also when the global filter is off), keeping the `variable` and `time`
+  columns, so every figure, statistic, metric and export follows. The windows are saved in
+  Save Settings (per sample, like the legend label; a blank limit is simply not written),
+  restored by Load Settings, reset by Clear, and listed in the report provenance, the
+  Figure Legend Text and the drafted methods.
+- **Sample groups and facets**: a per-sample **Group** text box in Variable Styling
+  (`group_<id>`, saved and loaded like the legend label). New checkbox `facet_by_group`
+  (off; the Legacy look and the journal preset both set it off): with at least two distinct
+  non-empty groups the main figure becomes `facet_wrap(~ group, scales = "fixed")`, the
+  strip text is the group name at the axis-title size without a strip background, samples
+  with an empty group go to a panel called "Other", and the legend stays outside. With the
+  fixed panel size, `fixed_panel_grob()` already divided the panel area among the panel
+  rows and columns of a facet figure, so the panel area you set is shared by the facets
+  (unchanged). The composer has a new panel **Lysis curve, one panel per group**
+  (`main_by_group`): one single-group main figure per group, titled with the group name, in
+  group order with "Other" last and tagged a, b, c in that order; it is left out (and
+  listed) when no sample has a group.
+- **Metric explorer** (analysis figure `metric_explorer`): `explorer_x` and `explorer_y`
+  choose any two metrics (defaults lysis onset and OD drop), `explorer_level` ("Per
+  replicate" / "Per sample mean ± error") whether the replicate values are drawn as open
+  circles, `explorer_labels` adds text labels at the points (`geom_text`, axis-text size),
+  `explorer_logx` / `explorer_logy` log10 axes. One point per sample, the mean with error
+  bars in both directions from the main figure's error measure (`error_half_width()`),
+  sample colours and shapes from the per-sample styling, axis labels from
+  `metric_axis_label()`. It uses the shared journal theme and, in fixed-panel mode, a square
+  panel. Also available in the composer.
+- **Download all figures (.zip)** (Plot Dimensions & Export): `all_figures_<W>x<H>mm.zip` with
+  an SVG and a PNG of the main figure, of every analysis figure that renders for the current
+  data and of the composed figure (the existing sized names), `figure_legend.txt` and
+  `methods.txt`; figures that return the "not available" placeholder are listed with their
+  reason in `SKIPPED.txt`. Same archive code as the figure bundle (`zip::zip`, else
+  `utils::zip`, else a `.tar`).
+- `fixed_panel_grob()` builds its grob on a scratch device when the plain build fails: a
+  figure with a plotmath colour-bar title (the heatmap) used to fail with "failed to find or
+  load PDF CID font" in fixed-panel mode when no graphics device was open.
+- Tests: `tests/test_v218_features.R`; `tests/test_v211_analysis.R` now expects the composer's
+  new `main_by_group` choice.
+
 ## v2.17.0 — 2026-10-19
 
 **Log-axis clipping, QC flags, notebook exports, figure bundle, threshold line, gradient palettes.**

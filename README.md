@@ -155,21 +155,27 @@ picker — Auto-detect (the default, sniffed from the header line), US/UK, or Eu
 
 ## Using the App
 
+### Navigating the app (new in v2.21)
+
+The **figure stays in view** while you scroll the settings: the figure column (size bar, tabs and the figure) is pinned to the top of the window, so you change a setting and see the effect without scrolling back up (untick **Keep the figure in view while I scroll the settings** at the top of the sidebar to get the old, scrolling layout; on a narrow window the columns stack and nothing is pinned). While the column is pinned the auto-fit preview also fits the window height, so the figure and the strip below it are in view together. The sidebar is an **accordion**: opening a section closes the other one, so only one is ever open; the **Jump to a section...** menu above them opens any section and scrolls it to the top (it takes keyboard focus too), and **Collapse all** closes them. Under the figure, the **Quick edit** strip has one row per loaded sample: a colour swatch and picker, the **name** shown in figures and tables, and a **show** box that adds or removes the sample from the figure; below the rows are the **X-axis label**, **Y-axis label** and **Legend position** (moved here from the sidebar, same settings). *Hide quick edit* collapses the strip.
+
+**Renaming a sample** (the name box in the strip) changes the name everywhere the sample is shown: the legends and labels of every figure, the tables of the Statistics tab and the Dashboard, the curve-metrics, per-replicate-metrics, statistics, extraction, phases, bootstrap and fit tables and their CSV downloads, the reports, the Figure Legend Text and the drafted methods text. The CSV files keep the file's own column name in a `sample_raw` column next to the display `sample` column (and `versus_raw` where a table has a `versus` column), the reports list the mapping "raw column name → display name" in the data provenance, and Save Settings stores the name per sample (the existing `legend_label` entry). The column name stays the key: Select Samples, the reference sample and the MOI override box use it (a sample whose column name carries no MOI but whose display name does, for example "Phage MOI 10", counts as that MOI). The raw source-data CSV in the figure bundle keeps the file's own names. A colour picked in the strip is the sample's colour; picking another colour for that sample in Variable Styling replaces it, and the strip's swatch follows the sidebar.
+
 ### Loading Data
 
 Click **"Browse..."** next to "Choose CSV File" and select your file. The plot will appear automatically on the right side.
 
 ### Selecting Samples
 
-Under **Variable Styling → Sample Selection**, use the dropdown to check or uncheck which samples appear on the plot.
+Under **Variable Styling → Sample Selection**, use the dropdown to check or uncheck which samples appear on the plot, or untick **show** in the Quick edit strip under the figure.
 
 ### Adjusting the Plot
 
 All settings are in the left sidebar, organized into collapsible sections. Click on any section header to expand it.
 
-**Axis Settings** — Change between linear, logarithmic, square root, or reverse axis scales. Customize tick marks, axis labels, fonts, and gridlines. The default Y-axis is logarithmic (common for OD data). *Readings below the axis floor* (new in v2.17) decides what happens to a post-lysis reading that falls below the log-axis minimum: **Clip to the floor** (the default) draws it on the floor so the curve and its points stay visible, **Drop (legacy)** deletes it as earlier versions did (the Legacy look keeps this).
+**Axis Settings** — Change between linear, logarithmic, square root, or reverse axis scales. Customize tick marks, fonts, and gridlines (the axis labels and the legend position are in the Quick edit strip under the figure). The default Y-axis is logarithmic (common for OD data). *Readings below the axis floor* (new in v2.17) decides what happens to a post-lysis reading that falls below the log-axis minimum: **Clip to the floor** (the default) draws it on the floor so the curve and its points stay visible, **Drop (legacy)** deletes it as earlier versions did (the Legacy look keeps this).
 
-**Time Point Filtering** — Restrict the displayed time range or exclude specific time points (e.g., removing an outlier at time 0).
+**Time Point Filtering** — Restrict the displayed time range or exclude specific time points (e.g., removing an outlier at time 0). New in v2.18: under the global filter, a **per-sample time window** table gives every selected sample its own *from* and *to* time (blank = no limit), for example to cut a sample at the point where it crashes or to drop a late contaminated reading of one well type. The windows are applied after the global filter (and also when it is off) to the figures, statistics, metrics and exports; they are saved with the settings and listed in the report provenance, the figure legend text and the methods text.
 
 **Region Highlighting** — Add colored rectangular regions to highlight specific areas of the plot (e.g., a growth phase).
 
@@ -183,7 +189,7 @@ All settings are in the left sidebar, organized into collapsible sections. Click
 
 **Error Bars / Shadow** — Display variability as error bars (T-shaped or lines) or as a shaded ribbon around each line. Choose between SD, SEM, or 95% CI. If you only have one replicate per sample per time point, error bars will simply not appear (there's no variability to show).
 
-**Variable Styling** — Fine-tune each sample individually: set its color (from presets, HEX code, or RGB sliders), point shape (circle, square, triangle, etc.), line type (solid, dashed, dotted, etc.), and legend label.
+**Variable Styling** — Fine-tune each sample individually: set its color (from presets, HEX code, or RGB sliders), point shape (circle, square, triangle, etc.), line type (solid, dashed, dotted, etc.); the sample's name is edited in the Quick edit strip under the figure. New in v2.18: a free-text **Group** per sample (for example the phage, host or medium). Tick **One panel per group (main figure)** and the lysis curve is split into one panel per group with shared axes and the group name above each panel (needs two or more different groups; samples without a group go to "Other"); with *fixed panel size* the panel area you set is divided among the panels. In **Compose figure**, the panel **Lysis curve, one panel per group** adds one separate single-group figure per group, lettered a, b, c in group order. Groups are saved with the settings.
 
 ### Saving and Loading Settings
 
@@ -325,6 +331,8 @@ Expand the **Plot Dimensions & Export** section.
 
 **Figure bundle (new in v2.17).** **"Download figure bundle (.zip)"** (`figure_bundle_<W>x<H>mm.zip`) packs everything a figure submission needs: the main figure as SVG and PDF at the current size, the composed figure as SVG (when two or more panels are selected in the composer), `settings.json` (the same document as Save Settings), `source_data_tidy.csv` (time, sample, replicate, value), `summary_statistics.csv`, `curve_metrics.csv`, `figure_legend.txt`, `methods.txt` (when the Statistics tab's methods box has text) and a `README.txt` with the app version, date, data source, figure size and fonts. If neither the `zip` package nor a `zip` program is available it is written as a `.tar` instead.
 
+**Download all figures (new in v2.18).** **"Download all figures (.zip)"** (`all_figures_<W>x<H>mm.zip`) writes one SVG and one PNG of the main figure, of every analysis figure that can be drawn for the current data and of the composed figure, each at the size it has in the app and under the same sized file names as the single downloads, plus `figure_legend.txt` and `methods.txt` (the Statistics tab's text, or the drafted paragraph when that box is empty). A figure that is not available (for example the normalized OD without a reference sample) is not written; `SKIPPED.txt` in the archive lists it with the reason.
+
 Recommended settings: use the **Journal Figure Preset** above (column width
 in mm, SVG) and finish in Inkscape. For a quick slide figure, PNG at 300 dpi
 and the pixel canvas are fine.
@@ -353,7 +361,10 @@ without rescaling. Pick a figure, set its panel label (empty by default; the fil
   μmax, AUC, infection strength, ...); open circles are individual replicates,
   the bar is the mean, whiskers ± SD. With a reference sample set (Stats &
   Reports) and *Mark significance* ticked, Holm-adjusted stars appear above
-  each sample.
+  each sample. **Whiskers** (v2.20) can instead be the *Bootstrap 95 % CI of the
+  mean-curve metric*: the bar is then the metric of the mean curve and the whiskers
+  the percentile interval from the Statistics tab's *Bootstrap intervals* (run it
+  first; a metric it does not hold keeps the replicate spread, with a notice).
 - **Specific growth rate vs time** — μ(t) = d ln(OD)/dt per replicate by the
   same rolling regression as μmax, shown as mean ± SD band. Lysis is a
   negative rate, so onset and lysis rate are visible rather than inferred.
@@ -369,6 +380,55 @@ without rescaling. Pick a figure, set its panel label (empty by default; the fil
 - **Curve landmarks** — lag end, μmax window centre, peak, lysis onset, half
   of peak and trough drawn on each mean curve, so every number in the Curve
   Metrics CSV can be checked by eye before it is reported.
+- **Curve phases** (v2.20) — the mean curves with each sample's phases (lag,
+  exponential, deceleration, stationary, lysis, recovery or post-lysis) shaded
+  in a fixed colour-blind-safe palette, every edge read back from the curve
+  metrics so it can be checked on the landmarks figure. One sample: full-height
+  bands behind the curve; several: one thin labelled strip per sample at the top
+  of the panel. The table is in the Statistics tab (*Curve phases*).
+- **Separation from the reference** (v2.20) — each sample's mean curve minus the
+  reference's (or the log2 ratio) against time, a dashed zero line, and an
+  asterisk where the Holm-adjusted per-time Welch test is < 0.05; the first
+  separation time of each sample is listed under the figure. Needs a reference
+  sample; exploratory (one test per time point on a few readings).
+- **Metric explorer** (v2.18) — any curve metric against any other (default
+  lysis onset against OD drop), one point per sample: the mean with error bars
+  in both directions (the main figure's error measure), and with *Per
+  replicate* the replicate values as open circles. Optional sample-name labels
+  at the points and a log x and / or y axis. Samples with no value for one of
+  the metrics (a relative metric needs a reference sample) are left out.
+- **Fitted growth curves** (v2.19) — the mean curve with the logistic, Gompertz
+  and / or Baranyi fit drawn over it; the models, range and level are set on the
+  **Curve fitting** tab (see [Curve fitting](#curve-fitting)).
+- **Phenotype heatmap** (v2.19) — samples (rows) by curve metrics (columns),
+  filled with each metric's z-score across the samples (or its 0-1 range, or the
+  raw value) with the raw value printed in each cell. Choose the metrics and the
+  scale in the controls; the default set is lysis onset, OD drop, lysis
+  efficiency, μmax, AUC, infection strength, extinction time and time of first
+  peak. A metric that is undefined or the same in every sample is left out (and
+  named in a note), and the z-score is across the samples shown, so adding or
+  removing a sample changes every cell of a column.
+- **Metric summary styles and brackets** (v2.21) — the metric summary also as *Bar*
+  (the mean with whiskers, replicates as open circles, y axis from 0), *Box plot* or
+  *Violin*, each with the replicate points. Tick *Significance brackets* to draw a
+  bracket and stars for every pair of samples with Holm-adjusted p < 0.05 (all pairs,
+  at most 6 per panel, the most significant first); the stars against the reference
+  are then hidden, and the low-n warning is shown in a note under the controls.
+- **OD at chosen times** (v2.21) — grouped bars (or dots) of the mean OD at the times
+  typed in the Statistics tab's *OD at chosen times* box, the samples side by side,
+  whiskers as in Error Bars, replicate points optional; empty box: the first, middle
+  and last time points. Log y when the main figure's y axis is log.
+- **Time to an OD threshold** (v2.21) — per sample, when its replicates cross the
+  threshold set in the Statistics tab (up or down, from the start or the peak): replicate
+  circles, a bar at the mean, whiskers as in Error Bars. Samples that never cross are
+  listed in the note.
+- **Replicate small multiples** (v2.21) — one panel per sample with its replicate curves
+  thin (three shades of the sample colour, readable in greyscale) and the mean bold, on a
+  shared y axis.
+- **Fraction of replicates lysed** (v2.21) — a step curve per sample from 0 to 1: the
+  fraction of replicates that are past the sample's peak and below the threshold (half its
+  peak OD by default, or an absolute OD), with the time half of them are lysed marked by a
+  point.
 
 All of these show the **same error measure as the main figure** (SD, SEM or
 95% CI from the Error Bars panel) and the same sample order. A rendered set of
@@ -393,6 +453,34 @@ lysis curve, growth rate, normalized OD (or replicate overlay) and metric
 summary as small multiples; the statistics; and the Experiment Notebook
 fields you have filled in.
 
+### Curve fitting
+
+The **Curve fitting** tab (after Statistics) fits the logistic and Gompertz models
+(Zwietering et al. 1990) and the Baranyi-Roberts model (1994) to the growth phase of each
+curve, by non-linear least squares on ln(OD/OD0) (details and formulas in
+[docs/FITS_AND_EXTRACTION.md](docs/FITS_AND_EXTRACTION.md)). Controls: **Models**,
+**Fit** (*Up to the peak*, the growth before lysis, or *Whole curve*), **Fit ln(OD/OD0)**,
+**Fit to** (*Mean curve* or *Each replicate*) and **Draw** (*Best model by AIC*, or *All
+converged models*).
+
+- The **figure** shows the mean curve (points, whiskers = the main figure's error measure) with
+  the fitted curve of each sample on a fine time grid: solid for the best model by AIC, thin and
+  dashed for the others. Points after the peak are drawn in grey: they are not part of the fit.
+  It follows the figure theme, the fixed square panel and the export settings, and is also
+  available in Analysis figures, the composer and Download all figures.
+- The **parameter table** lists sample, (replicate), model, best (✓), converged, A, mu_max,
+  **Lag (time units)**, doubling time (ln 2 / mu_max), R², AIC, the standard errors and the
+  engine's message, with 3 significant digits; **Parameters (CSV)** has every row. With *Each
+  replicate*, a second table gives mean ± SD of A, mu_max and the lag per sample and model.
+- **Lag convention**: the fit's lag is measured from the first fitted point, so the table's lag is
+  the start time of the fit plus the fitted lag, an absolute time on the figure's axis.
+- **Read the fit, not only the AIC.** AIC can prefer a poorly determined Baranyi fit on a short
+  curve, and a lysis curve that peaks early leaves few points. Rows whose message says
+  "poorly determined" are highlighted; judge every fit against the curve drawn over the data.
+- The Methods draft (Statistics tab) names the fitted models and range once this tab has been
+  used, and the HTML and PDF reports get a **Curve fits** section (figure and table) when
+  *Include analysis figures and statistics* is on. The figure bundle adds `fits.csv`.
+
 ### Statistics tab
 
 The **Statistics** tab (after Dashboard) puts the descriptive statistics where you
@@ -403,7 +491,29 @@ the `DT` package installed the table is searchable and paged at 25 rows, and
 the definition of every metric below it, **Per-replicate metrics (mean ± SD)**, and
 **Replicate comparison** (the same pairwise, omnibus and post-hoc tables as the
 Analysis figures tab; method, reference and metric are set there). Every section
-has its own CSV button. **Methods text (editable)** starts empty: **Draft from
+has its own CSV button. Three sections extract values (v2.19), all following the time filters, the
+per-sample windows and the blank: **OD at chosen times** (type times such as `30, 60, 120`, choose
+linear interpolation or the nearest reading; a table of mean, SD, n, SEM and CI95 per time and sample,
+plus a per-replicate CSV; a time outside a curve's range is NA, never extrapolated), **Time to
+threshold** (the first time each replicate crosses an OD going up or down, searching from the start
+or from the peak, interpolated between readings; a per-sample summary and the per-replicate
+crossings; clear the threshold box to leave it out of the reports) and **All-metrics comparison**
+(every metric with finite replicate values compared with the reference sample by the current
+statistics method, with its warnings and a CSV; `p_adj_bh_across` is a Benjamini-Hochberg
+adjustment over the whole table and is exploratory: the metrics are correlated and three replicates
+give little power, so use it to rank metrics for follow-up, not as a confirmatory result). Typed
+times and a threshold also add the tables to the HTML / PDF reports and the figure bundle.
+Three more sections (v2.20): **Curve phases** (the phases table: sample, phase,
+start, end, duration, OD at the edges; CSV), **Bootstrap intervals** (choose the metrics,
+the number of draws and the seed, press **Run bootstrap**: a percentile interval of each
+metric of the mean curve from resampling the replicate curves with replacement; the result
+is cached and marked out of date when the data, filters or metric settings change; wide and
+coarse at n = 3; reference-relative metrics such as infection strength are not resampled; CSV)
+and, inside **Replicate comparison**, **First separation from reference** (the first time each
+sample's replicates differ from the reference's at p_adj_holm < 0.05). The phases table and a
+current bootstrap are also in the HTML / PDF reports and the figure bundle (`phases.csv`,
+`bootstrap.csv`); the report also shows the phases and separation figures.
+**Methods text (editable)** starts empty: **Draft from
 current settings** writes a methods paragraph (measurement, replicates and n,
 how the mean and error statistic were computed, the μmax window, peak mode,
 lysis threshold and smoothing, and the statistical tests) that you then edit
@@ -454,7 +564,7 @@ legend text states the measure and n.
 
 ### Everything stays editable
 
-All of this is live: change the Y-axis label (Axis Settings → Labels & Formatting), rename any legend entry (Variable Styling → Legend Label), switch fonts and sizes (title, axis labels, axis text, and legend each have their own size control), recolor any sample, then re-download the figure or regenerate the report — the outputs always reflect the current state of the plot.
+All of this is live: change the Y-axis label (Quick edit strip under the figure), rename any legend entry (the name box in the Quick edit strip under the figure, which renames the sample in the tables and reports too), switch fonts and sizes (title, axis labels, axis text, and legend each have their own size control), recolor any sample, then re-download the figure or regenerate the report — the outputs always reflect the current state of the plot.
 
 ---
 
@@ -498,4 +608,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.9 — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.20.0 (2026-11-01) — Michael Baffour Awuah / Ramsey Lab*
