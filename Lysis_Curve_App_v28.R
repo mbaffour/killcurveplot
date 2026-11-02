@@ -2261,7 +2261,8 @@ ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "me
                              "Fraction of replicates lysed vs time"      = "lysed_fraction")       # v2.21
 COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main",
                            "Lysis curve, one panel per group" = "main_by_group",   # v2.18
-                           ANALYSIS_FIGURE_CHOICES)
+                           ANALYSIS_FIGURE_CHOICES,
+                           "Compare two datasets (Compare tab)" = "compare")        # v2.22
 metric_label <- function(m) { l <- unname(ANALYSIS_METRIC_LABELS[m]); ifelse(is.na(l), m, l) }
 # v2.19: the other numeric columns of the curve-metrics table that the phenotype heatmap can show (the labelled
 # metrics above plus these); metric_label() does not know them, pheno_metric_label() does.
@@ -2610,11 +2611,43 @@ LEGACY_BASE <- list(
   # v2.21: metric summary styles and brackets, extraction figures, fraction lysed (none touches the main figure)
   metric_style = "dot", metric_brackets = FALSE,
   extract_style = "bar", extract_points = TRUE,
-  lysed_mode = "relative", lysed_threshold = 0.5
+  lysed_mode = "relative", lysed_threshold = 0.5,
+  # v2.22: Compare tab, project themes, notes on the figure, batch export, night mode (none touches the main figure by default)
+  compare_label_a = "Dataset A", compare_label_b = "Dataset B", compare_mode = "overlay", compare_overlay_style = "linetype",
+  compare_alpha_b = 0.5, compare_common_only = FALSE,
+  theme_autoapply = TRUE,
+  notes_show_caption = FALSE, notes_caption_fields = c("exp_id", "host_strain", "phage_plasmid", "moi"), notes_caption_size = 6,
+  notes_pptx_slide = FALSE,
+  batch_outputs = "main", batch_format = "svg", batch_dpi = 300, batch_size_mode = "current", batch_width_mm = 89, batch_height_mm = 65,
+  night_mode = FALSE
 )
 
 # The inputs the journal preset sets, at their legacy values.
 legacy_preset_settings <- function() LEGACY_BASE[names(journal_preset_settings(89, 65))]
+
+# v2.22: the "N4 paper look": the defaults of the N4 Lysis Curve Shiny App (v1.1, the app the N4 paper figures were made with)
+# as one list, in the legacy_preset_settings() pattern. The Legacy look is the v2.9 look; the N4 app differs from it in the axis
+# text (20, not 16), the point stroke (1.5, not 0.5), the end-label size (ggplot mm there, pt here: 20 mm = 57 pt), no error
+# caption, and it always drew bars the way these switches select. The legend text of the N4 app had no control: it came from
+# theme_prism(base_size = 14), whose legend.text is 0.8 x 14 = 11.2 pt (read off a render of the old app). Differences that
+# remain are in docs/COMPARE_PRESETS_EXPORTS.md.
+N4_PRESET_KEYS <- c("x_scale_type", "y_scale_type", "use_advanced_ticks", "y_log_min_exponent", "y_log_max_exponent", "custom_x_limits",
+                    "custom_y_limits", "x_expand_left", "x_expand_right", "y_expand_bottom", "y_expand_top", "show_major_gridlines",
+                    "show_minor_gridlines", "show_points", "error_type", "error_multiplier", "asymmetric_error", "error_bar_style",
+                    "error_bar_position", "bold_title", "italic_axis_labels", "axis_text_angle", "label_bold", "label_offset",
+                    "enable_highlighting", "enable_time_markers")
+n4_preset_settings <- function()
+  modifyList(c(legacy_preset_settings(), LEGACY_BASE[setdiff(N4_PRESET_KEYS, names(legacy_preset_settings()))]),
+             list(title_font_size = 20, axis_label_font_size = 20, axis_text_font_size = 20, legend_font_size = 11.2,
+                  point_stroke = 1.5, shape_size = 3, line_thickness = 1,
+                  label_font_size = 57,                       # the N4 app's end-label size 20 is ggplot mm: 20 x 2.845 pt
+                  show_error_caption = FALSE,                 # no caption on the N4 figures (the Figure Legend Text box carries measure + n)
+                  y_oob = "squish", legend_position = "right", legend_order = "alpha", y_tick_label_style = "legacy",
+                  export_format = "pdf", export_units = "in", export_width = 10, export_height = 8, export_dpi = 300,
+                  preview_mode = "canvas", plot_width = 800, panel_size_mode = "fit", theme_base_pt = 0, axis_subscripts = FALSE,
+                  error_log_floor = FALSE, error_cap_relative = FALSE, error_bar_color = "sample", error_display_mode = "bars",
+                  error_bar_width = 1, error_bar_thickness = 0.8,
+                  font_family = "sans", color_palette = "custom", x_tick_interval = 30))
 APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65))   # v2.16: no panel letter unless the user sets one
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
@@ -3880,6 +3913,558 @@ moi_map_with_display <- function(samples, override = "", map = NULL) {
   m
 }
 
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+# v2.22: compare, presets, old-settings import, project themes, notes exports, batch export, parity
+# frames. Pure helpers (no shiny state) so the test suite can call them directly; the server-side
+# wiring is in the "v2.22" block at the end of server().
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+# ── Old settings files (N4 flat JSON, lysis-curve-app structure) ──────────────────────────────────
+# A settings file is one of: "current" (global_settings + sample_aesthetics keyed by sample name, this app
+# and the v2.5+ structure of the companion app), "lca" (the companion app's file with an experiment_notes
+# block, notes_* inputs, floating labels, panel / matrix keys) or "n4" (the N4 paper app: the whole of
+# reactiveValuesToList(input) written WITHOUT auto_unbox, so every scalar is a one-element array and the
+# per-sample controls are positional: color_selector_1, shape_2, ...).
+OLD_NOTES_MAP <- c(exp_id = "nb_exp_id", date = "nb_date", experimenter = "nb_experimenter", project = "nb_project",
+                   institution = "nb_institution", exp_type = "nb_exp_type", host_strain = "nb_host_strain",
+                   phage_plasmid = "nb_phage_plasmid", moi = "nb_moi", replicate = "nb_replicate", passage = "nb_passage",
+                   media = "nb_media", temperature = "nb_temperature", time_inf = "nb_time_inf", inducer = "nb_inducer",
+                   inducer_conc = "nb_inducer_conc", extra_cond = "nb_other_condition", observations = "nb_observations",
+                   issues = "nb_issues", next_steps = "nb_next_steps", tags = "nb_tags",
+                   custom_key1 = "nb_custom_key1", custom_val1 = "nb_custom_val1", custom_key2 = "nb_custom_key2",
+                   custom_val2 = "nb_custom_val2", custom_key3 = "nb_custom_key3", custom_val3 = "nb_custom_val3")
+# N4 ids that exist here under another name
+OLD_ID_RENAMES <- c(x_major_step = "x_tick_interval")
+# Old controls with no counterpart (reason shown in the import report)
+OLD_IGNORED_REASONS <- c(
+  x_minor_step = "no separate x minor interval (minor ticks are half the major interval)",
+  y_major_step = "linear / sqrt y tick intervals are not available", y_minor_step = "linear / sqrt y tick intervals are not available",
+  plot_height = "the canvas height follows the export size", line_type = "the global line type is not used (set it per sample)",
+  time_col_choice = "no time-column override in this version", error_cap_type = "inert in the old app",
+  use_od_filter = "OD-range exclusion is not available", od_min = "OD-range exclusion is not available",
+  od_max = "OD-range exclusion is not available",
+  exclude_times = "time-point exclusions belong to the data: set them under Time Point Filtering",
+  floating_labels = "floating legend labels are not available")
+OLD_SAMPLE_KEY_RE <- "^(color_selector|color|shape|shape_filled|line_type|legend_label|exclude_var|use_rgb|red|green|blue|alpha|use_hex|hex_color|apply_rgb|apply_hex)_([0-9]+)$"
+OLD_NEVER_GLOBAL <- c("file", "loadSettings", "selected_samples", "time_filter_range", "exclude_timepoints", "samples_select_all",
+                      "samples_deselect_all", "saveSettings", "clearSettings", "load_demo", "compare_file")
+LEGEND_POSITIONS_OK <- c("right", "left", "top", "bottom", "none", "inside-auto", "inside-top-left", "inside-top-right",
+                         "inside-bottom-left", "inside-bottom-right")
+
+# one JSON value as an R scalar / vector: a one-element array (list) becomes its element, NULL / empty -> NULL
+settings_unbox <- function(v) {
+  if (is.null(v)) return(NULL)
+  if (is.list(v)) {
+    if (!length(v)) return(NULL)
+    if (all(vapply(v, function(x) is.atomic(x) && length(x) == 1, logical(1)))) {
+      u <- unlist(v, use.names = FALSE)
+      return(if (length(u) == 1) u else u)
+    }
+    return(NULL)                      # a nested object (e.g. the file input's data frame) is not a setting
+  }
+  if (length(v) == 0) NULL else v
+}
+# a settings file as one of "current", "lca", "n4"
+legacy_settings_kind <- function(s) {
+  if (!is.list(s)) return("current")
+  if (is.null(s[["global_settings"]]) && is.null(s[["sample_aesthetics"]]) && is.null(s[["samples"]])) {
+    nm <- names(s)
+    if (length(nm) && (any(grepl(OLD_SAMPLE_KEY_RE, nm)) || any(nm %in% c("x_scale_type", "y_scale_type", "error_type", "x_axis_label",
+                                                                           "font_family", "line_thickness", "export_format"))))
+      return("n4")
+    return("current")
+  }
+  gs <- names(s[["global_settings"]] %||% list())
+  if (!is.null(s[["experiment_notes"]]) || !is.null(s[["floating_labels"]]) || any(grepl("^notes_", gs)) ||
+      any(vapply(s[["sample_aesthetics"]] %||% list(), function(a) any(c("panel", "leg_row", "leg_col") %in% names(a)), logical(1))))
+    return("lca")
+  "current"
+}
+n4_shape_decode <- function(code) {
+  code <- suppressWarnings(as.numeric(code))
+  if (length(code) != 1 || !is.finite(code)) return(list(shape = NULL, filled = NULL))
+  open <- c(`1` = 16, `0` = 15, `2` = 17, `5` = 18, `6` = 25)   # the N4 app's open shapes -> this app's shape + "Filled" off
+  if (as.character(code) %in% names(open)) list(shape = unname(open[[as.character(code)]]), filled = FALSE)
+  else list(shape = code, filled = NULL)
+}
+# The positional per-sample keys of an N4 flat file as list(i = list(color, shape, shape_filled, line_type, legend_label, hidden))
+n4_positional_samples <- function(flat) {
+  m <- regmatches(names(flat), regexec(OLD_SAMPLE_KEY_RE, names(flat)))
+  m <- Filter(function(x) length(x) == 3, m)
+  if (!length(m)) return(list())
+  idx <- sort(unique(as.integer(vapply(m, `[`, "", 3))))
+  out <- lapply(idx, function(i) {
+    g <- function(k) settings_unbox(flat[[paste0(k, "_", i)]])
+    sel <- g("color_selector"); col <- g("color")
+    colr <- if (!is.null(sel) && identical(as.character(sel), "custom")) col else sel
+    if (!is.null(colr)) colr <- tryCatch(normalize_hex_color(as.character(colr)), error = function(e) NULL)
+    sh <- n4_shape_decode(g("shape"))
+    lab <- g("legend_label"); lab <- if (!is.null(lab) && nzchar(trimws(as.character(lab)))) trimws(as.character(lab)) else NULL
+    lt  <- g("line_type")
+    ex  <- g("exclude_var")
+    filled <- g("shape_filled")
+    a <- list(color = colr, shape = sh$shape, shape_filled = if (!is.null(filled)) isTRUE(as.logical(filled)) else sh$filled,
+              line_type = if (!is.null(lt)) as.character(lt) else NULL, legend_label = lab, hidden = if (isTRUE(as.logical(ex))) TRUE else NULL)
+    a[!vapply(a, is.null, logical(1))]
+  })
+  setNames(out, as.character(idx))
+}
+# Number of individual per-sample settings (color, shape, filled, line type, name, group, hidden) in a named list
+count_sample_settings <- function(samples) {
+  sum(vapply(samples, function(a) sum(names(a) %in% c("color", "shape", "shape_filled", "line_type", "legend_label", "group", "hidden")), numeric(1)))
+}
+# Translate an old settings file into this app's structure. s = the parsed JSON (jsonlite::fromJSON(simplifyVector = FALSE));
+# od_vars = the loaded samples, in order (NULL = no data yet: positional per-sample keys are returned in $positional);
+# known_ids = input ids that exist (NULL = keep every key). Returns
+#   kind, s (list(global_settings, sample_aesthetics) in this app's structure), unselect (samples the old file hid),
+#   positional (when no data), ignored (named character: key -> reason), notes (character), n_global (keys kept),
+#   n_sample_settings.
+translate_old_settings <- function(s, od_vars = NULL, known_ids = NULL) {
+  kind <- legacy_settings_kind(s)
+  if (identical(kind, "current"))
+    return(list(kind = kind, s = s, unselect = character(0), positional = NULL, ignored = character(0), notes = character(0),
+                n_global = length(s[["global_settings"]] %||% list()), n_sample_settings = NA_integer_))
+  ignored <- character(0); notes <- character(0)
+  ign <- function(key, why) ignored[[key]] <<- why
+  keep_id <- function(id) is.null(known_ids) || id %in% known_ids
+  # ---- global settings -----------------------------------------------------------------------------------
+  raw <- if (identical(kind, "n4")) s else (s[["global_settings"]] %||% list())
+  g <- list(); positional_flat <- list()
+  for (nm in names(raw)) {
+    if (nm %in% c("global_settings", "sample_aesthetics", "samples", "version", "saved_at")) next
+    if (grepl(OLD_SAMPLE_KEY_RE, nm)) { positional_flat[[nm]] <- raw[[nm]]; next }
+    if (nm %in% OLD_NEVER_GLOBAL) next
+    v <- settings_unbox(raw[[nm]])
+    if (is.null(v)) next
+    id <- if (nm %in% names(OLD_ID_RENAMES)) OLD_ID_RENAMES[[nm]]
+          else if (grepl("^notes_", nm) && sub("^notes_", "", nm) %in% names(OLD_NOTES_MAP)) OLD_NOTES_MAP[[sub("^notes_", "", nm)]]
+          else nm
+    if (nm %in% names(OLD_IGNORED_REASONS)) { ign(nm, OLD_IGNORED_REASONS[[nm]]); next }
+    if (identical(id, "font_family") && identical(tolower(as.character(v)), "helvetica")) v <- "Helvetica"
+    if (identical(id, "color_palette") && identical(as.character(v), "publication")) {
+      v <- "colorblind"; notes <- c(notes, "Palette 'publication' (Okabe-Ito in the old app) was mapped to 'colorblind', this app's Okabe-Ito palette.")
+    }
+    if (identical(id, "legend_position") && !(as.character(v) %in% LEGEND_POSITIONS_OK)) { ign(nm, paste0("legend position '", v, "' is not available")); next }
+    if (identical(id, "error_display_mode") && !(as.character(v) %in% c("bars", "shadow"))) { ign(nm, paste0("error display '", v, "' is not available")); next }
+    if (!keep_id(id)) { ign(nm, "not a control in this version"); next }
+    g[[id]] <- v
+  }
+  if (identical(kind, "lca") && !is.null(s[["experiment_notes"]])) {
+    for (k in names(s[["experiment_notes"]])) {
+      id <- OLD_NOTES_MAP[k]
+      if (is.na(id)) { ign(paste0("experiment_notes$", k), "unknown notes field"); next }
+      v <- settings_unbox(s[["experiment_notes"]][[k]]); if (is.null(v)) next
+      if (!keep_id(id)) { ign(paste0("experiment_notes$", k), "not a control in this version"); next }
+      g[[unname(id)]] <- v
+    }
+  }
+  # inch sizes: a file without export_units is inches (the pre-v2.10 rule); say so explicitly
+  if (is.null(g$export_units) && any(c("export_width", "export_height") %in% names(g))) {
+    g$export_units <- "in"
+    notes <- c(notes, "Export sizes of the old file are inches: the units were switched to inches so 10 x 8 stays 10 x 8 in.")
+  }
+  # ---- per-sample settings -------------------------------------------------------------------------------
+  samples <- list(); unselect <- character(0); positional <- NULL
+  if (identical(kind, "n4")) {
+    pos <- n4_positional_samples(positional_flat)
+    n_file <- if (length(pos)) max(as.integer(names(pos))) else 0L
+    if (is.null(od_vars)) {
+      positional <- pos
+      if (length(pos)) notes <- c(notes, "Per-sample settings are positional: they will be applied, in order, to the samples of the next data file.")
+    } else {
+      if (length(pos) && n_file != length(od_vars))
+        notes <- c(notes, sprintf("The file styles %d samples but %d are loaded: matched by position, the first %d.",
+                                  n_file, length(od_vars), min(n_file, length(od_vars))))
+      for (i in names(pos)) {
+        k <- as.integer(i)
+        if (k > length(od_vars)) { ign(paste0("sample ", i), "no sample at this position"); next }
+        a <- pos[[i]]
+        if (isTRUE(a$hidden)) unselect <- c(unselect, od_vars[k])
+        samples[[od_vars[k]]] <- a
+      }
+    }
+    # the RGB / hex helper widgets only ever fed color_i; they are consumed, not ignored
+  } else if (identical(kind, "lca")) {
+    sa <- s[["sample_aesthetics"]] %||% s[["samples"]] %||% list()
+    for (nm in names(sa)) {
+      a <- lapply(sa[[nm]], settings_unbox)
+      a <- a[!vapply(a, is.null, logical(1))]
+      for (k in intersect(c("panel", "leg_row", "leg_col"), names(a))) {
+        ign(paste0(nm, "$", k), "panel / matrix-legend placement is not available"); a[[k]] <- NULL
+      }
+      samples[[nm]] <- a
+    }
+    if (!is.null(s[["floating_labels"]])) ign("floating_labels", OLD_IGNORED_REASONS[["floating_labels"]])
+  }
+  list(kind = kind, s = list(global_settings = g, sample_aesthetics = samples), unselect = unselect, positional = positional,
+       ignored = ignored, notes = notes, n_global = length(g),
+       n_sample_settings = count_sample_settings(samples))
+}
+# "N global, M sample settings applied, K ignored" (the settings status text and the notification)
+legacy_import_message <- function(kind, n_global, n_sample, n_ignored)
+  sprintf("%s settings imported: %d global, %d sample settings applied, %d ignored.",
+          switch(kind, n4 = "N4 app", lca = "Lysis Curve App", "Settings file"), n_global, n_sample, n_ignored)
+
+# ── Notes: caption, pages, exports ────────────────────────────────────────────────────────────────
+NOTES_CAPTION_FIELDS <- c("Experiment ID" = "exp_id", "Date" = "date", "Experimenter" = "experimenter", "Type" = "exp_type",
+                          "Host" = "host_strain", "Phage / plasmid" = "phage_plasmid", "MOI" = "moi", "Replicate" = "replicate",
+                          "Inducer" = "inducer", "Inducer conc." = "inducer_conc", "Medium" = "media", "Temperature" = "temperature")
+NOTES_CAPTION_LABELS <- c(exp_id = "ID", date = "Date", experimenter = "By", exp_type = "Type", host_strain = "Host",
+                          phage_plasmid = "Phage/Plasmid", moi = "MOI", replicate = "Rep", inducer = "Inducer",
+                          inducer_conc = "Conc", media = "Media", temperature = "Temp")
+# notes: a named list keyed by the short field names (exp_id, host_strain, ...); fields: the keys to include, in order.
+# "ID: x  |  Host: y": empty fields are skipped; "" when nothing is left.
+build_notes_caption <- function(notes, fields) {
+  if (is.null(fields) || !length(fields) || is.null(notes)) return("")
+  parts <- vapply(as.character(fields), function(f) {
+    lab <- NOTES_CAPTION_LABELS[f]; v <- notes[[f]]
+    v <- if (is.null(v)) "" else trimws(paste(as.character(v), collapse = " "))
+    if (is.na(lab) || !nzchar(v)) "" else paste0(lab, ": ", v)
+  }, character(1))
+  parts <- parts[nzchar(parts)]
+  if (!length(parts)) "" else paste(parts, collapse = "  |  ")
+}
+# The notes as titled sections of (label, value) rows; empty rows dropped, empty sections dropped.
+notes_sections <- function(notes) {
+  v <- function(k) { x <- notes[[k]]; if (is.null(x)) "" else trimws(paste(as.character(x), collapse = " ")) }
+  sec <- function(title, rows) {
+    rows <- Filter(function(r) nzchar(r[[2]]), lapply(rows, function(r) list(r[[1]], v(r[[2]]))))
+    if (length(rows)) list(title = title, rows = rows) else NULL
+  }
+  custom <- Filter(Negate(is.null), lapply(1:3, function(i) {
+    k <- v(paste0("custom_key", i)); if (nzchar(k)) list(k, v(paste0("custom_val", i))) else NULL
+  }))
+  secs <- list(
+    sec("Experiment identity", list(c("Experiment ID", "exp_id"), c("Date", "date"), c("Experimenter", "experimenter"),
+                                    c("Project", "project"), c("Institution", "institution"))),
+    sec("Biological parameters", list(c("Experiment type", "exp_type"), c("Host strain(s)", "host_strain"),
+                                      c("Phage / plasmid", "phage_plasmid"), c("MOI", "moi"), c("Replicate / batch", "replicate"),
+                                      c("Passage #", "passage"))),
+    sec("Conditions", list(c("Growth medium", "media"), c("Temperature (°C)", "temperature"), c("Time of infection", "time_inf"),
+                           c("Inducer", "inducer"), c("Inducer concentration", "inducer_conc"), c("Other condition", "extra_cond"))),
+    if (length(custom)) list(title = "Custom fields", rows = custom),
+    sec("Notes", list(c("Observations / results", "observations"), c("Issues / anomalies", "issues"),
+                      c("Next steps", "next_steps"), c("Tags", "tags"))))
+  Filter(Negate(is.null), secs)
+}
+notes_file_prefix <- function(notes) {
+  id <- gsub("[^A-Za-z0-9_-]+", "_", trimws(paste(notes$exp_id %||% "", collapse = "")))
+  paste0(if (nzchar(id)) paste0(id, "_") else "", "notes_", format(Sys.time(), "%Y%m%d"))
+}
+write_notes_html <- function(file, notes, caveat = NULL) {
+  esc <- function(x) html_escape(x)
+  ttl <- trimws(paste(notes$exp_id %||% "", collapse = "")); ttl <- if (nzchar(ttl)) paste0("Experiment notes – ", ttl) else "Experiment notes"
+  body <- vapply(notes_sections(notes), function(s) {
+    rows <- vapply(s$rows, function(r) sprintf("<tr><th>%s</th><td>%s</td></tr>", esc(r[[1]]), gsub("\n", "<br>", esc(r[[2]]))), "")
+    sprintf("<h2>%s</h2><table>%s</table>", esc(s$title), paste(rows, collapse = ""))
+  }, "")
+  html <- paste0("<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><title>", esc(ttl), "</title><style>",
+                 "body{font-family:Arial,sans-serif;max-width:800px;margin:30px auto;color:#222;line-height:1.5}",
+                 "h1{background:#2c3e50;color:#fff;padding:12px 16px;border-radius:4px;font-size:20px}",
+                 "h2{font-size:14px;background:#ecf0f1;padding:5px 10px;margin:18px 0 6px}",
+                 "table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;width:32%;color:#555;vertical-align:top;padding:3px 8px 3px 0}",
+                 "td{padding:3px 0}.meta{color:#888;font-size:12px}.caveat{background:#fff3cd;border:1px solid #ffeeba;padding:8px 10px;font-size:12px}",
+                 "</style></head><body><h1>", esc(ttl), "</h1><p class=\"meta\">Exported ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                 " (Lysis Curve OD Visualization App v", APP_VERSION, ")</p>",
+                 if (!is.null(caveat) && nzchar(caveat)) paste0("<p class=\"caveat\">", esc(caveat), "</p>") else "",
+                 if (length(body)) paste(body, collapse = "") else "<p>(no notebook fields filled in)</p>", "</body></html>")
+  writeLines(enc2utf8(html), file, useBytes = TRUE)
+  invisible(file)
+}
+write_notes_json <- function(file, notes) {
+  keys <- names(OLD_NOTES_MAP)
+  out <- c(list(exported_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), app_version = APP_VERSION),
+           setNames(lapply(keys, function(k) { x <- notes[[k]]; if (is.null(x)) "" else trimws(paste(as.character(x), collapse = " ")) }), keys))
+  jsonlite::write_json(out, file, pretty = TRUE, auto_unbox = TRUE)
+  invisible(file)
+}
+# One page of notes drawn with grid on the open device (the PDF and PNG exports share it)
+draw_notes_page <- function(notes, font = "") {
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(width = 0.93, height = 0.95))
+  gp <- function(...) grid::gpar(fontfamily = font, ...)
+  ttl <- trimws(paste(notes$exp_id %||% "", collapse = ""))
+  grid::grid.rect(x = 0, y = 1, width = 1, height = 0.06, just = c("left", "top"), gp = gp(fill = "#2c3e50", col = NA))
+  grid::grid.text(if (nzchar(ttl)) paste0("Experiment notes – ", ttl) else "Experiment notes", x = 0.015, y = 0.97,
+                  just = c("left", "top"), gp = gp(fontsize = 13, col = "white", fontface = "bold"))
+  y <- 0.9; lh <- 0.026
+  for (s in notes_sections(notes)) {
+    grid::grid.rect(x = 0, y = y, width = 1, height = 0.028, just = c("left", "top"), gp = gp(fill = "#ecf0f1", col = NA))
+    grid::grid.text(toupper(s$title), x = 0.012, y = y - 0.004, just = c("left", "top"), gp = gp(fontsize = 8, fontface = "bold", col = "#2c3e50"))
+    y <- y - 0.036
+    for (r in s$rows) {
+      grid::grid.text(paste0(r[[1]], ":"), x = 0.012, y = y, just = c("left", "top"), gp = gp(fontsize = 8, col = "#555555"))
+      lines <- strwrap(gsub("\n", " ", r[[2]]), width = 80)
+      for (ln in lines) {
+        grid::grid.text(ln, x = 0.30, y = y, just = c("left", "top"), gp = gp(fontsize = 8, col = "#111111"))
+        y <- y - lh
+      }
+      if (!length(lines)) y <- y - lh
+      if (y < 0.04) break
+    }
+    y <- y - 0.012
+    if (y < 0.04) break
+  }
+  grid::grid.text(paste0("Lysis Curve OD Visualization App v", APP_VERSION, " - ", format(Sys.time(), "%Y-%m-%d %H:%M")),
+                  x = 0.5, y = 0.005, just = c("center", "bottom"), gp = gp(fontsize = 7, col = "#aaaaaa"))
+  grid::popViewport()
+  invisible(NULL)
+}
+write_notes_pdf <- function(file, notes) {
+  dev <- export_device("pdf")
+  if (is.character(dev)) grDevices::pdf(file, width = 8.5, height = 11) else dev(file, width = 8.5, height = 11)
+  tryCatch(draw_notes_page(notes), finally = grDevices::dev.off())
+  invisible(file)
+}
+write_notes_png <- function(file, notes) {
+  if (has_ragg) ragg::agg_png(file, width = 2550, height = 3300, res = 300) else grDevices::png(file, width = 2550, height = 3300, res = 300)
+  tryCatch(draw_notes_page(notes), finally = grDevices::dev.off())
+  invisible(file)
+}
+# lines for the PowerPoint notes slide
+notes_slide_text <- function(notes) {
+  out <- character(0)
+  for (s in notes_sections(notes))
+    out <- c(out, "", paste0(toupper(s$title)), vapply(s$rows, function(r) paste0(r[[1]], ": ", gsub("\n", " ", r[[2]])), ""))
+  trimws(paste(out, collapse = "\n"))
+}
+
+# ── Technical replicates (pseudoreplication caveat) ───────────────────────────────────────────────
+TECHNICAL_REPLICATE_COLS <- c("well", "well_id", "wellid", "technical_replicate")
+STATS_TECHNICAL_REP_CAVEAT <- paste0(
+  "Replicate identity comes from a column named '%s', which holds TECHNICAL replicates (wells of one culture), not ",
+  "independent biological replicates. Treat these p-values with caution: technical replicates should be averaged to one ",
+  "value per biological unit before any inferential test.")
+# the caveat text for a replicate column name, or NULL when that column is not a technical-replicate column
+technical_rep_caveat_for <- function(rep_col) {
+  if (is.null(rep_col) || length(rep_col) != 1 || is.na(rep_col) || !nzchar(rep_col)) return(NULL)
+  if (!tolower(rep_col) %in% TECHNICAL_REPLICATE_COLS) return(NULL)
+  sprintf(STATS_TECHNICAL_REP_CAVEAT, rep_col)
+}
+# a stats table with the caveat as a `caveat` column (unchanged when there is none)
+with_caveat_column <- function(df, caveat) {
+  if (!is.null(caveat) && nzchar(caveat) && !is.null(df) && is.data.frame(df) && nrow(df) > 0) df$caveat <- caveat
+  df
+}
+
+# ── Welch + Wilcoxon side by side ─────────────────────────────────────────────────────────────────
+STATS_METHOD_BOTH <- "both"
+# the method the single-test code paths use when the option "both" is chosen (Welch)
+stats_base_method <- function(method) if (identical(method, STATS_METHOD_BOTH)) "welch" else method
+stats_test_label <- function(method)
+  switch(method %||% "welch", both = "Welch t + Mann-Whitney", nonparametric = "Mann-Whitney", "Welch t")
+# crm = compare_replicate_metric (or a stand-in with its signature). Runs it for Welch and for Mann-Whitney and
+# returns Welch's result with p_welch, p_wilcoxon and the Benjamini-Hochberg adjustment of each within the metric
+# (across the pairs of this metric); `p` stays the Welch p value so every downstream reader keeps working.
+compare_replicate_metric_both <- function(crm, rm, metric, ref_sample = NULL) {
+  w <- crm(rm, metric, ref_sample = ref_sample, method = "welch")
+  n <- crm(rm, metric, ref_sample = ref_sample, method = "nonparametric")
+  out <- w
+  if (!is.null(w$pairwise) && nrow(w$pairwise) > 0) {
+    pw <- w$pairwise
+    key <- function(d) paste(d$sample, d$versus, sep = "\r")
+    wil <- if (!is.null(n$pairwise)) n$pairwise$p[match(key(pw), key(n$pairwise))] else rep(NA_real_, nrow(pw))
+    pw$p_welch          <- pw$p
+    pw$p_wilcoxon       <- wil
+    pw$p_adj_bh_welch   <- p.adjust(pw$p_welch, method = "BH")
+    pw$p_adj_bh_wilcoxon <- p.adjust(pw$p_wilcoxon, method = "BH")
+    pw$test <- stats_test_label("both")
+    out$pairwise <- pw
+  }
+  if (!is.null(n$omnibus) && !is.null(out$omnibus) && identical(names(n$omnibus), names(out$omnibus)))
+    out$omnibus <- rbind(out$omnibus, n$omnibus)
+  else if (!is.null(n$omnibus) && is.null(out$omnibus)) out$omnibus <- n$omnibus
+  out$warnings <- unique(c(w$warnings, n$warnings))
+  out
+}
+
+# ── Project themes (named per-sample style sets, JSON in themes/) ─────────────────────────────────
+# The folder: option killcurve.themes_dir (tests), else a global APP_DIR, else themes/ in the working directory
+# (run_app.R starts the app from the app folder).
+themes_dir_path <- function() {
+  o <- getOption("killcurve.themes_dir")
+  if (is.character(o) && length(o) == 1 && nzchar(o)) return(o)
+  ad <- if (exists("APP_DIR", inherits = TRUE)) get("APP_DIR", inherits = TRUE) else NULL
+  file.path(if (is.character(ad) && length(ad) == 1 && nzchar(ad)) ad else getwd(), "themes")
+}
+theme_key  <- function(nm) gsub("^_+|_+$", "", gsub("[^A-Za-z0-9]+", "_", trimws(nm %||% "")))
+theme_path <- function(nm, dir = themes_dir_path()) file.path(dir, paste0(theme_key(nm), ".json"))
+theme_list <- function(dir = themes_dir_path()) {
+  if (!dir.exists(dir)) return(character(0))
+  sort(sub("\\.json$", "", basename(list.files(dir, pattern = "\\.json$"))))
+}
+# aes_map: sample name -> list(color, shape, shape_filled, line_type, legend_label). The quick-edit colours and display
+# names ride along (sample name -> value) so a theme restores what the strip shows.
+theme_write <- function(name, aes_map, qe_colors = NULL, display_names = NULL, dir = themes_dir_path()) {
+  key <- theme_key(name)
+  if (!nzchar(key)) stop("Enter a theme name.")
+  if (!dir.exists(dir)) dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+  aes_map <- lapply(aes_map, function(a) a[intersect(names(a), c("color", "shape", "shape_filled", "line_type", "legend_label"))])
+  qc <- qe_colors[intersect(names(aes_map), names(qe_colors))]
+  dn <- if (length(display_names)) as.list(display_names[intersect(names(aes_map), names(display_names))]) else list()
+  jsonlite::write_json(list(version = "1.0", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = name,
+                            sample_aesthetics = aes_map, qe_colors = as.list(qc), display_names = dn),
+                       theme_path(key, dir), pretty = TRUE, auto_unbox = TRUE)
+  invisible(key)
+}
+# the theme as list(sample_aesthetics, qe_colors, display_names), or NULL when missing / unreadable / empty
+theme_read <- function(name, dir = themes_dir_path()) {
+  f <- theme_path(name, dir)
+  if (!nzchar(theme_key(name)) || !file.exists(f)) return(NULL)
+  s <- tryCatch(jsonlite::fromJSON(f, simplifyVector = FALSE), error = function(e) NULL)
+  sa <- s[["sample_aesthetics"]] %||% s[["samples"]]
+  if (is.null(sa) || !length(sa)) return(NULL)
+  list(sample_aesthetics = sa, qe_colors = s$qe_colors %||% list(), display_names = s$display_names %||% list())
+}
+theme_delete <- function(name, dir = themes_dir_path()) {
+  f <- theme_path(name, dir)
+  isTRUE(nzchar(theme_key(name)) && file.exists(f) && file.remove(f))
+}
+# the entries of a theme that apply to `samples` (the names that match), as the same structure
+theme_for_samples <- function(theme, samples) {
+  hit <- intersect(samples, names(theme$sample_aesthetics))
+  list(sample_aesthetics = theme$sample_aesthetics[hit], qe_colors = theme$qe_colors[intersect(hit, names(theme$qe_colors))],
+       display_names = theme$display_names[intersect(hit, names(theme$display_names))], matched = hit)
+}
+
+# ── Cumulative-build parity (PowerPoint slides, GIF frames) ───────────────────────────────────────
+# A build that adds one line per slide must keep the panel where it is: every frame gets the same pinned panel
+# (fixed_panel_grob), the same legend column width (the FINAL frame's, which is the widest) and, for a legend taller than
+# the panel, the same pad rows above and below; the panel then sits at the same place and the figure has the same size in
+# every frame. If anything else still differs (a label that appears only once all samples are shown) the frame takes the
+# final frame's width and height vectors, which makes the geometry identical by construction.
+gtable_is_panel_cell <- function(nm) grepl("^panel(-[0-9]+-[0-9]+)?$", nm)
+gtable_panel_row <- function(g) {
+  pos <- g$layout[gtable_is_panel_cell(g$layout$name), , drop = FALSE]
+  if (nrow(pos)) pos[1, ] else NULL
+}
+gtable_legend_col <- function(g) {
+  pos <- gtable_panel_row(g); if (is.null(pos)) return(NULL)
+  lay <- g$layout
+  hit <- lay[lay$name == "guide-box-right" & lay$l > pos$l, , drop = FALSE]
+  if (nrow(hit) < 1) hit <- lay[grepl("guide-box", lay$name, fixed = TRUE) & lay$l > pos$l & lay$name != "guide-box-inside", , drop = FALSE]
+  if (nrow(hit) < 1) return(NULL)
+  as.integer(min(hit$l))
+}
+# pt of pad (per side) a right-hand legend needs to fit beside its pinned panel; 0 = it fits (or there is none)
+legend_pad_pt <- function(g) {
+  pos <- gtable_panel_row(g); if (is.null(pos)) return(0)
+  li <- which(g$layout$name == "guide-box-right" & g$layout$l > pos$l)
+  if (length(li) != 1L || g$layout$t[li] != pos$t || g$layout$b[li] != pos$t) return(0)
+  tryCatch({
+    f <- tempfile(fileext = ".svg"); on.exit(unlink(f), add = TRUE)
+    old <- grDevices::dev.cur(); svglite::svglite(f, width = 8, height = 8)
+    on.exit({ grDevices::dev.off(); if (old > 1) tryCatch(grDevices::dev.set(old), error = function(e) NULL) }, add = TRUE)
+    need <- grid::convertHeight(grid::grobHeight(g$grobs[[li]]), "pt", valueOnly = TRUE)
+    have <- grid::convertHeight(g$heights[pos$t], "pt", valueOnly = TRUE)
+    if (!is.finite(need) || !is.finite(have) || need <= have + 0.01) 0 else (need - have) / 2
+  }, error = function(e) 0)
+}
+add_legend_pad <- function(g, pad) {
+  if (!is.finite(pad) || pad <= 0 || !requireNamespace("gtable", quietly = TRUE)) return(g)
+  pos <- gtable_panel_row(g); if (is.null(pos)) return(g)
+  li <- which(g$layout$name == "guide-box-right" & g$layout$l > pos$l)
+  if (length(li) != 1L || g$layout$t[li] != pos$t || g$layout$b[li] != pos$t) return(g)
+  pt <- pos$t
+  g <- gtable::gtable_add_rows(g, grid::unit(pad, "pt"), pos = pt - 1L)    # above the panel row
+  g <- gtable::gtable_add_rows(g, grid::unit(pad, "pt"), pos = pt + 1L)    # below it
+  li <- which(g$layout$name == "guide-box-right" & g$layout$t == pt + 1L)
+  if (length(li) == 1L) { g$layout$t[li] <- pt; g$layout$b[li] <- pt + 2L }
+  attr(g, "size_mm") <- figure_size_mm(g)
+  g
+}
+expand_for_tall_legend <- function(g) add_legend_pad(g, legend_pad_pt(g))
+# plots: ggplots, frame 1 .. n (n = all samples). Returns list(grobs, w_in, h_in, w_mm, h_mm, panel_w_mm, panel_h_mm, fitted, fallback):
+# every grob is a gtable with the same panel and the same size. fit_w_in / fit_h_in (optional): a box the figure must fit
+# (a slide); the panel is shrunk, identically in every frame, until it does.
+build_parity_frames <- function(plots, panel_w_mm, panel_h_mm, fit_w_in = NULL, fit_h_in = NULL, max_iter = 4L, tol_mm = 0.2) {
+  once <- function(pw, ph) {
+    gs  <- lapply(plots, function(p) fixed_panel_grob(p, pw, ph))
+    n   <- length(gs)
+    pad <- legend_pad_pt(gs[[n]])
+    if (pad > 0) gs <- lapply(gs, add_legend_pad, pad = pad)      # the final frame's pad goes into every frame
+    gf  <- gs[[n]]; lcol <- gtable_legend_col(gf)
+    fallback <- FALSE
+    if (n > 1L) for (k in seq_len(n - 1L)) {
+      gk <- gs[[k]]; lk <- gtable_legend_col(gk)
+      if (!is.null(lk) && !is.null(lcol)) gk$widths[lk] <- gf$widths[lcol]
+      mk <- figure_size_mm(gk); mf <- attr(gf, "size_mm")
+      if (any(abs(mk - mf) > tol_mm) && length(gk$widths) == length(gf$widths) && length(gk$heights) == length(gf$heights)) {
+        gk$widths <- gf$widths; gk$heights <- gf$heights; fallback <- TRUE
+        mk <- figure_size_mm(gk)
+      }
+      attr(gk, "size_mm") <- mk
+      gs[[k]] <- gk
+    }
+    sz <- attr(gf, "size_mm")
+    list(grobs = gs, w_mm = sz[1], h_mm = sz[2], fallback = fallback)
+  }
+  pw <- panel_w_mm; ph <- panel_h_mm
+  res <- once(pw, ph); fitted <- FALSE
+  if (!is.null(fit_w_in) && !is.null(fit_h_in)) {
+    it <- 0L
+    while (it < max_iter && (res$w_mm / 25.4 > fit_w_in + 1e-6 || res$h_mm / 25.4 > fit_h_in + 1e-6)) {
+      # the margins (axis text, titles, legend) do not shrink with the panel: take the excess off the panel, same factor on both sides
+      ew <- max(0, res$w_mm - fit_w_in * 25.4); eh <- max(0, res$h_mm - fit_h_in * 25.4)
+      s  <- max(min((pw - ew - 0.3) / pw, (ph - eh - 0.3) / ph, 0.999), 0.1)
+      pw <- pw * s; ph <- ph * s
+      res <- once(pw, ph); fitted <- TRUE; it <- it + 1L
+    }
+  }
+  c(res, list(w_in = res$w_mm / 25.4, h_in = res$h_mm / 25.4, panel_w_mm = pw, panel_h_mm = ph, fitted = fitted))
+}
+
+# ── Compare: composite sample keys ────────────────────────────────────────────────────────────────
+# Overlay draws both datasets in one panel through build_plot(), whose scales are keyed by sample: the keys are
+# "A||<sample>" and "B||<sample>"; colour and shape come from the sample, the dataset from the line type or transparency.
+compare_key <- function(ds, samples) paste0(ds, "||", samples)
+compare_key_sample  <- function(keys) sub("^[AB]\\|\\|", "", keys)
+compare_key_dataset <- function(keys) sub("\\|\\|.*$", "", keys)
+# two labels that differ (blank -> default; equal labels get " (2)" on the second)
+compare_labels <- function(a, b) {
+  a <- trimws(a %||% ""); b <- trimws(b %||% "")
+  if (!nzchar(a)) a <- "Dataset A"; if (!nzchar(b)) b <- "Dataset B"
+  if (identical(a, b)) b <- paste0(b, " (2)")
+  c(A = a, B = b)
+}
+# keys in plot order: every sample's A key then its B key
+compare_keys_in_order <- function(samples, samples_a, samples_b)
+  unlist(lapply(samples, function(s) c(if (s %in% samples_a) compare_key("A", s), if (s %in% samples_b) compare_key("B", s))), use.names = FALSE)
+# The aesthetics of the composite keys from the aesthetics of the samples (aes_u = resolve_aesthetics() output over the union).
+# style: "linetype" (dataset B is dashed, or dotted when the sample line is dashed already) or "alpha" (dataset B is
+# drawn with `alpha_b` opacity: colour with an alpha channel).
+compare_overlay_aesthetics <- function(keys, aes_u, labels, disp, style = "linetype", alpha_b = 0.5) {
+  smp <- compare_key_sample(keys); ds <- compare_key_dataset(keys)
+  pick <- function(x) setNames(unname(x[smp]), keys)
+  cols <- pick(aes_u$colors); lt <- pick(aes_u$line_types)
+  isB <- ds == "B"
+  if (identical(style, "alpha")) cols[isB] <- vapply(cols[isB], function(cc) grDevices::adjustcolor(cc, alpha.f = alpha_b), "")
+  else lt[isB] <- ifelse(lt[isB] == "dashed", "dotted", "dashed")
+  list(shapes = pick(aes_u$shapes), colors = cols, line_types = lt,
+       leg_labels = setNames(paste0(disp[smp], " (", labels[ds], ")"), keys), filled_map = pick(aes_u$filled_map))
+}
+
+# ── Batch export ──────────────────────────────────────────────────────────────────────────────────
+BATCH_EXTRA_CHOICES <- c("Composed figure" = "composed", "Compare figure (needs a second dataset)" = "compare",
+                         "Summary statistics (CSV)" = "csv_summary", "Replicate statistics (CSV)" = "csv_replicate_stats",
+                         "Curve metrics (CSV)" = "csv_metrics", "Raw data, wide (CSV)" = "csv_raw_wide", "Experiment notes (HTML + JSON)" = "notes")
+batch_output_choices <- function()
+  c(list("Lysis curve (main)" = "main"), as.list(setNames(paste0("analysis:", ANALYSIS_FIGURE_CHOICES), names(ANALYSIS_FIGURE_CHOICES))),
+    as.list(BATCH_EXTRA_CHOICES))
+BATCH_FORMATS <- c("SVG" = "svg", "PDF" = "pdf", "PNG" = "png", "TIFF (LZW)" = "tiff", "JPEG" = "jpeg")
+# A wide table (time + one column per sample / replicate) from a replicate frame (time, variable, replicate, value)
+raw_wide_from_replicates <- function(rp) {
+  if (is.null(rp) || !nrow(rp)) return(data.frame(time = numeric(0)))
+  nrep <- tapply(rp$replicate, rp$variable, function(x) length(unique(x)))
+  rp$col <- ifelse(nrep[as.character(rp$variable)] > 1, paste0(rp$variable, "_rep", rp$replicate), as.character(rp$variable))
+  cols <- unique(rp$col)
+  tt <- sort(unique(rp$time))
+  out <- data.frame(time = tt, check.names = FALSE)
+  for (cn in cols) { s <- rp[rp$col == cn, ]; out[[cn]] <- s$value[match(tt, s$time)] }
+  out
+}
+
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
@@ -3955,6 +4540,18 @@ ui <- fluidPage(
          if (el) el.style.backgroundColor = msg.color;
        });"
     )),
+    # v2.22: night mode: a class on <body> (the page only; figures, exports and settings are unchanged)
+    tags$script(HTML("Shiny.addCustomMessageHandler('kcNight', function(on) { document.body.classList.toggle('kc-night', !!on); });")),
+    tags$style(HTML(paste(
+      "body.kc-night { background:#14171c; color:#d7dce2; }",
+      "body.kc-night .well, body.kc-night .kc-well { background:#1b2028; border-color:#2f3640; }",
+      "body.kc-night .panel-section, body.kc-night .analysis-controls, body.kc-night .dash-card, body.kc-night .kc-qe { background:#222831; border-color:#2f3640; color:#d7dce2; }",
+      "body.kc-night h1, body.kc-night h2, body.kc-night h3, body.kc-night h4, body.kc-night h5, body.kc-night label, body.kc-night .control-label { color:#d7dce2; }",
+      "body.kc-night .form-control, body.kc-night .selectize-input, body.kc-night pre { background:#14171c; color:#d7dce2; border-color:#3a4450; }",
+      "body.kc-night .nav-tabs > li > a { color:#aab4c0; } body.kc-night .nav-tabs > li.active > a { background:#222831; color:#fff; border-color:#2f3640; }",
+      "body.kc-night .stats-note, body.kc-night .settings-status.warn { background:#3b3320; color:#f2dba0; border-color:#5a4a1c; }",
+      "body.kc-night .settings-status.ok { background:#1f3a2a; color:#bfe8cb; border-color:#2f5a40; }",
+      "body.kc-night details > summary, body.kc-night p { color:#c4ccd6; } body.kc-night a { color:#7db7f0; }"))),
     # v2.21: sticky figure toggle, one-open-at-a-time sidebar sections, the "Jump to" menu, the quick-edit strip
     tags$script(HTML(
       "(function() {
@@ -4132,6 +4729,7 @@ ui <- fluidPage(
                  # v2.21: navigation: keep the figure in view, jump to a section, collapse them all
                  div(class = "kc-nav",
                      checkboxInput("sticky_figure", "Keep the figure in view while I scroll the settings", APP_DEFAULTS$sticky_figure),
+                     checkboxInput("night_mode", "Night mode (dark page; the figure stays as it is)", APP_DEFAULTS$night_mode),
                      div(class = "kc-nav-row",
                          selectInput("sidebar_jump", NULL, width = "100%", selectize = FALSE,
                                      choices = c("Jump to a section..." = "", SIDEBAR_SECTIONS), selected = ""),
@@ -4437,6 +5035,23 @@ ui <- fluidPage(
                                                 "Blue to red (dose gradient)"  = "blue_red"),
                                    selected = APP_DEFAULTS$color_palette),
                        htmlOutput("palette_preview")
+                   ),
+                   # v2.22: project themes (per-sample styles kept by sample name, as JSON files in themes/)
+                   div(class = "panel-section",
+                       h4("Project Themes", class = "panel-title"),
+                       p(style = "font-size:.82em;color:#555;margin-bottom:8px;",
+                         "A theme remembers each sample's colour, shape, filled, line type and display name by sample name, ",
+                         "so \"WT\" stays black / solid / circle in every session."),
+                       selectInput("active_theme", "Active theme:", choices = c("None" = ""), selected = ""),
+                       checkboxInput("theme_autoapply", "Auto-apply to matching sample names on data load", APP_DEFAULTS$theme_autoapply),
+                       fluidRow(
+                         column(7, textInput("theme_name", "Theme name:", "")),
+                         column(5, actionButton("save_theme", "Save styles as theme", style = "margin-top:25px;width:100%;font-size:.78em;"))),
+                       fluidRow(
+                         column(6, actionButton("apply_theme", "Apply now", style = "width:100%;font-size:.8em;")),
+                         column(6, actionButton("delete_theme", "Delete theme", style = "width:100%;font-size:.78em;background:#dc3545;color:white;border:none;"))),
+                       p(style = "font-size:.8em;color:#888;margin-top:8px;margin-bottom:0;",
+                         "Themes are JSON files in the ", tags$code("themes/"), " folder next to the app; commit it to share a lab-standard look.")
                    )
                  ),
                  
@@ -4461,7 +5076,7 @@ ui <- fluidPage(
                    div(class = "panel-section",
                        checkboxInput("show_end_labels", "Show End-of-Line Labels", FALSE),
                        conditionalPanel(condition = "input.show_end_labels == true",
-                                        numericInput("label_font_size", "Label Font Size (pt):", APP_DEFAULTS$label_font_size, 3, 36),
+                                        numericInput("label_font_size", "Label Font Size (pt):", APP_DEFAULTS$label_font_size, 3, 60),
                                         checkboxInput("label_bold",  "Bold Labels",              TRUE),
                                         numericInput("label_offset", "Label Offset (% x-axis):", 3.5, 0, 20)
                        )
@@ -4546,6 +5161,11 @@ ui <- fluidPage(
                                     style = "background:#2C3E50;color:white;border:none;width:100%;"),
                        actionButton("apply_legacy_look", "Legacy look (v2.9 defaults)",
                                     style = "background:#f8f9fa;color:#495057;border:1px solid #ced4da;width:100%;margin-top:6px;"),
+                       actionButton("apply_n4_look", "N4 paper look (N4 app defaults)",
+                                    style = "background:#f8f9fa;color:#495057;border:1px solid #ced4da;width:100%;margin-top:6px;"),
+                       p(style = "font-size:.78em;color:#777;margin-top:4px;",
+                         "N4 paper look: the defaults of the N4 Lysis Curve Shiny App (10 x 8 in, PDF, 20 pt text, point stroke 1.5, ",
+                         "x ticks every 30, bars drawn as that app drew them)."),
                        p(style = "font-size:.78em;color:#777;margin-top:4px;",
                          "The app starts in the journal standard (Nature single column, 89 x 65 mm). ",
                          "Legacy look restores the pre-v2.14 start: 10 x 8 in, 20 pt text, PDF, pixel canvas."),
@@ -4618,11 +5238,30 @@ ui <- fluidPage(
                          "An SVG and a PNG of the main figure, of every analysis figure that can be drawn for this data and of the ",
                          "composed figure, each at its current size, plus the legend and methods text. Figures that are not ",
                          "available are listed in SKIPPED.txt."),
+                       div(style = "margin-top:8px;",
+                         h5("Batch export: choose the outputs", style = "margin-bottom:4px;"),
+                         div(class = "panel-section",
+                           p(style = "font-size:.78em;color:#777;",
+                             "Tick what goes into the archive, then the format, resolution and size. Outputs that cannot be made for ",
+                             "this data are listed in SKIPPED.txt."),
+                           checkboxGroupInput("batch_outputs", NULL, choices = unlist(batch_output_choices()), selected = APP_DEFAULTS$batch_outputs),
+                           div(style = "font-size:.8em;margin:-6px 0 6px;", actionLink("batch_select_all", "all"), " \u00b7 ", actionLink("batch_select_none", "none")),
+                           fluidRow(
+                             column(6, selectInput("batch_format", "Format:", choices = BATCH_FORMATS, selected = APP_DEFAULTS$batch_format)),
+                             column(6, numericInput("batch_dpi", "DPI (raster):", APP_DEFAULTS$batch_dpi, 72, 1200))),
+                           radioButtons("batch_size_mode", "Figure size:",
+                                        choices = c("As in the app (panel / export size)" = "current", "One size for every single figure (mm)" = "custom"),
+                                        selected = APP_DEFAULTS$batch_size_mode),
+                           conditionalPanel("input.batch_size_mode == 'custom'",
+                             fluidRow(column(6, numericInput("batch_width_mm", "Width (mm):", APP_DEFAULTS$batch_width_mm, 10, 1500, 1)),
+                                      column(6, numericInput("batch_height_mm", "Height (mm):", APP_DEFAULTS$batch_height_mm, 10, 1500, 1)))),
+                           downloadButton("downloadBatchExport", "Download the selected outputs (.zip)", style = "width:100%;"))),
                        hr(),
                        h4("PowerPoint Export", class = "panel-title"),
                        p(style = "font-size:.85em;color:#666;",
                          "Cumulative build: slide 1 shows sample 1, slide 2 adds sample 2, etc. Each slide title shows the newly-added sample name. Final slide = all samples, identical to the main plot."),
                        pptx_ui,
+                       checkboxInput("notes_pptx_slide", "Add an Experiment Notes slide to the PowerPoint", APP_DEFAULTS$notes_pptx_slide),
                        hr(),
                        h4("Animated GIF Export", class = "panel-title"),
                        p(style = "font-size:.85em;color:#666;",
@@ -4709,7 +5348,21 @@ ui <- fluidPage(
                        p(style = "font-size:.78em;color:#777;margin-top:4px;",
                          "The .txt lists every filled notebook field (key: value per line) followed by the figure legend ",
                          "text and the methods text. The .csv is ONE row with one column per filled field (custom keys ",
-                         "become column names): append it to your master experiment spreadsheet.")
+                         "become column names): append it to your master experiment spreadsheet."),
+                       br(),
+                       downloadButton("download_notes_pdf",  "Notes page (.pdf)",  style = "width:100%;"), br(), br(),
+                       downloadButton("download_notes_html", "Notes page (.html)", style = "width:100%;"), br(), br(),
+                       downloadButton("download_notes_json", "Notes (.json)",      style = "width:100%;"), br(), br(),
+                       downloadButton("download_notes_png",  "Notes page (.png, 300 dpi)", style = "width:100%;")
+                   ),
+                   div(class = "panel-section",
+                       h4("Notes on the Figure", class = "panel-title"),
+                       checkboxInput("notes_show_caption", "Put the ticked notebook fields under the figure", APP_DEFAULTS$notes_show_caption),
+                       checkboxGroupInput("notes_caption_fields", "Fields:", choices = NOTES_CAPTION_FIELDS,
+                                          selected = APP_DEFAULTS$notes_caption_fields),
+                       numericInput("notes_caption_size", "Caption size (pt):", APP_DEFAULTS$notes_caption_size, 3, 20, 0.5),
+                       p(style = "font-size:.78em;color:#777;", "Preview:"),
+                       verbatimTextOutput("notes_caption_preview", placeholder = TRUE)
                    )
                  ),
 
@@ -4967,7 +5620,8 @@ ui <- fluidPage(
               column(3,
                 selectInput("stats_method", "Statistics:",
                             choices = c("Welch t / ANOVA + Tukey"        = "welch",
-                                        "Mann-Whitney / Kruskal-Wallis"  = "nonparametric"),
+                                        "Mann-Whitney / Kruskal-Wallis"  = "nonparametric",
+                                        "Welch + Wilcoxon side by side (BH within metric)" = "both"),
                             selected = "welch"),
                 checkboxInput("stats_mark", "Mark significance vs reference on the metric summary", TRUE),
                 p(style = "font-size:.78em;color:#777;margin-top:-6px;",
@@ -5033,6 +5687,34 @@ ui <- fluidPage(
               "available is left out.")),
           uiOutput("compose_container")),
         # ── Dashboard (v2.11) ─────────────────────────────────────────────────
+        # ── Compare (v2.22): a second dataset beside the main one ─────────────────
+        tabPanel("Compare", br(),
+          div(class = "analysis-controls",
+            fluidRow(
+              column(4,
+                fileInput("compare_file", "Second dataset:", accept = c("text/csv", ".csv", if (requireNamespace("readxl", quietly = TRUE)) c(".xlsx", ".xls"))),
+                uiOutput("compare_status"),
+                selectInput("compare_samples_b", "Samples of the second dataset (all when empty):", choices = character(0), multiple = TRUE),
+                checkboxInput("compare_common_only", "Only samples present in both datasets", APP_DEFAULTS$compare_common_only)),
+              column(4,
+                fluidRow(column(6, textInput("compare_label_a", "Label, main data:", APP_DEFAULTS$compare_label_a)),
+                         column(6, textInput("compare_label_b", "Label, second data:", APP_DEFAULTS$compare_label_b))),
+                radioButtons("compare_mode", "Layout:",
+                             choices = c("Overlay (one panel)" = "overlay", "Facet (one panel per dataset)" = "facet"),
+                             selected = APP_DEFAULTS$compare_mode),
+                conditionalPanel("input.compare_mode == 'overlay'",
+                  radioButtons("compare_overlay_style", "The second dataset is drawn:",
+                               choices = c("Dashed (line type)" = "linetype", "Lighter (transparency)" = "alpha"),
+                               selected = APP_DEFAULTS$compare_overlay_style),
+                  conditionalPanel("input.compare_overlay_style == 'alpha'",
+                    numericInput("compare_alpha_b", "Opacity of the second dataset:", APP_DEFAULTS$compare_alpha_b, 0.1, 1, 0.05)))),
+              column(4,
+                p(style = "font-size:.82em;color:#555;",
+                  "Same colours (by sample), display names, fonts, axes, error bars and size as the main figure. In the facet layout every ",
+                  "panel keeps the fixed panel size. The figure is also a panel of the Compose tab and part of Download all figures."),
+                downloadButton("downloadCompare", "Download figure", style = "width:100%;"),
+                uiOutput("compare_note")))),
+          uiOutput("compare_container")),
         tabPanel("Dashboard", br(),
           uiOutput("dash_cards"),
           uiOutput("dash_qc"),
@@ -5489,6 +6171,7 @@ server <- function(input, output, session) {
 
     # After loading data, auto-apply any imported per-sample aesthetics for matching names
     apply_imported_sample_aesthetics()
+    theme_autoapply_on_load()      # v2.22: and the active project theme, when its sample names match
   }
 
   observeEvent(input$file, {
@@ -5573,7 +6256,9 @@ server <- function(input, output, session) {
       data_inputs     <- c("file", "loadSettings", "selected_samples",
                            "time_filter_range", "exclude_timepoints",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                           "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump")
+                           "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump",
+                           "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
+                           "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none")   # v2.22
       # Per-sample dynamic input prefixes — handled separately below
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
@@ -5646,6 +6331,15 @@ server <- function(input, output, session) {
     )
     if (is.null(s)) return()
     
+    # v2.22: an old file (the N4 app's flat JSON, the lysis-curve-app structure) is translated into this structure first:
+    # ids renamed, notes_* -> nb_*, positional per-sample keys mapped onto the loaded samples, inch sizes marked as inches
+    conv <- translate_old_settings(s, rv$od_vars, known_ids = union(names(input), names(APP_DEFAULTS)))
+    if (!identical(conv$kind, "current")) {
+      s <- conv$s
+      rv$pending_positional <- conv$positional
+    }
+    ignored_unknown <- character(0)
+    
     # Support both v2.5 structured format and legacy flat format
     global     <- if (!is.null(s$global_settings))   s$global_settings   else list()
     sample_aes <- if (!is.null(s$sample_aesthetics)) s$sample_aesthetics
@@ -5659,7 +6353,9 @@ server <- function(input, output, session) {
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                         "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump")
+                         "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump",
+                         "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
+                         "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none")   # v2.22
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
                          "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_",
@@ -5681,12 +6377,14 @@ server <- function(input, output, session) {
     n_global <- 0L
     for (nm in names(global)) {
       if (nm %in% data_inputs || is_sample_inp(nm)) next
-      if (!(nm %in% names(input)))                  next
+      if (!(nm %in% names(input)))                  { ignored_unknown <- c(ignored_unknown, nm); next }
       tryCatch({
         val <- global[[nm]]
         if (nm %in% c("pheno_metrics", "boot_metrics")) {
           updateSelectInput(session, nm, selected = val)            # v2.19: a multi-select, not a checkbox group
-        } else if (is.character(val) && (length(val) > 1 || nm %in% c("compose_panels", "fit_models"))) {
+        } else if (identical(nm, "nb_date") && is.character(val) && length(val) == 1) {
+          updateDateInput(session, nm, value = tryCatch(as.Date(val), error = function(e) NULL))   # v2.22: notes_date of an old file
+        } else if (is.character(val) && (length(val) > 1 || nm %in% c("compose_panels", "fit_models", "batch_outputs", "notes_caption_fields"))) {
           updateCheckboxGroupInput(session, nm, selected = val)     # v2.13: checkbox groups
         } else if (is.logical(val) && length(val) == 1) {
           updateCheckboxInput(session, nm, value = val)
@@ -5726,9 +6424,25 @@ server <- function(input, output, session) {
       paste0("<ul class='match-list'>", match_lines, unmatch_lines, "</ul>")
     } else NULL
     
+    legacy_msg <- NULL
+    if (!identical(conv$kind, "current")) {     # v2.22: "N global, M sample settings applied, K ignored" (status text and notification)
+      n_ign <- length(conv$ignored) + length(ignored_unknown)
+      n_smp <- if (is.na(conv$n_sample_settings)) 0L else conv$n_sample_settings
+      legacy_msg <- legacy_import_message(conv$kind, n_global, n_smp, n_ign)
+      extra <- c(conv$notes,
+                 if (!is.null(conv$positional) && length(conv$positional)) "Per-sample styles wait for data: they are applied, by position, when a file is loaded.",
+                 if (length(conv$ignored)) paste0("Ignored: ", paste0(names(conv$ignored), " (", conv$ignored, ")", collapse = "; ")),
+                 if (length(ignored_unknown)) paste0("Not a control here: ", paste(utils::head(ignored_unknown, 12), collapse = ", "),
+                                                      if (length(ignored_unknown) > 12) ", ..." else ""))
+      details_html <- paste0(details_html %||% "", if (length(extra)) paste0("<ul class='match-list'>", paste0("<li>", html_escape(extra), "</li>", collapse = ""), "</ul>") else "")
+      rv$last_import <- list(kind = conv$kind, n_global = n_global, n_sample_settings = n_smp, n_ignored = n_ign,
+                             ignored = c(names(conv$ignored), ignored_unknown), unselect = conv$unselect, notes = conv$notes,
+                             samples = names(conv$s$sample_aesthetics), message = legacy_msg)
+      tryCatch(showNotification(legacy_msg, type = "message", duration = 10), error = function(e) invisible(NULL))
+    }
     rv$settings_status <- list(
       type    = "ok",
-      msg     = paste0(n_global, " global setting(s) applied. ", sample_msg),
+      msg     = if (!is.null(legacy_msg)) legacy_msg else paste0(n_global, " global setting(s) applied. ", sample_msg),
       details = details_html
     )
   })
@@ -5736,36 +6450,25 @@ server <- function(input, output, session) {
   # Applies imported per-sample aesthetics to any matching currently-loaded samples.
   # Called both after loadSettings and after a new CSV is loaded.
   apply_imported_sample_aesthetics <- function() {
+    # v2.22: positional per-sample keys of an N4 file loaded before any data: resolve them against the samples loaded now
+    if (!is.null(rv$pending_positional) && length(rv$od_vars)) {
+      pos <- rv$pending_positional; rv$pending_positional <- NULL
+      named <- list(); hide <- character(0)
+      for (i in names(pos)) {
+        k <- as.integer(i)
+        if (k <= length(rv$od_vars)) { named[[rv$od_vars[k]]] <- pos[[i]]; if (isTRUE(pos[[i]]$hidden)) hide <- c(hide, rv$od_vars[k]) }
+      }
+      rv$imported_settings <- list(global = rv$imported_settings$global %||% list(),
+                                   samples = modifyList(rv$imported_settings$samples %||% list(), named))
+      if (length(hide)) updateSelectInput(session, "selected_samples", selected = setdiff(rv$od_vars, hide))
+    }
     imp <- rv$imported_settings
     if (is.null(imp) || is.null(imp$samples) || length(imp$samples) == 0) return()
     cur_samps <- isolate(input$selected_samples)
     if (is.null(cur_samps) || length(cur_samps) == 0) return()
-    for (vn in cur_samps) {
-      if (!vn %in% names(imp$samples)) next
-      aes   <- imp$samples[[vn]]
-      vid   <- safe_id(vn)
-      if (!is.null(aes$color)) {
-        clear_qe_color(vn, aes$color)
-        updateSelectInput(session, paste0("color_selector_", vid), selected = "custom")
-        updateTextInput(session,   paste0("color_",          vid), value   = aes$color)
-        updateTextInput(session,   paste0("hex_color_",      vid), value   = aes$color)
-      }
-      if (!is.null(aes$shape))
-        updateSelectInput(session, paste0("shape_", vid), selected = as.character(aes$shape))
-      if (!is.null(aes$shape_filled))
-        updateCheckboxInput(session, paste0("shape_filled_", vid), value = aes$shape_filled)
-      if (!is.null(aes$line_type))
-        updateSelectInput(session, paste0("line_type_", vid), selected = aes$line_type)
-      if (!is.null(aes$legend_label))     # v2.21: the saved legend label is the display name (the strip's name box)
-        updateTextInput(session, paste0("qe_name_", vid), value = aes$legend_label)
-      if (!is.null(aes$group)) {     # v2.18: a v2.18 file; a missing window means "no limit", not "leave as is"
-        updateTextInput(session, paste0("group_", vid), value = as.character(aes$group))
-        updateNumericInput(session, paste0("tw_min_", vid), value = if (is.null(aes$tw_min)) NA else aes$tw_min)
-        updateNumericInput(session, paste0("tw_max_", vid), value = if (is.null(aes$tw_max)) NA else aes$tw_max)
-      }
-    }
+    apply_sample_aes(imp$samples, cur_samps)     # v2.22: the per-sample updates live in apply_sample_aes() (also used by themes)
   }
-  
+
   # ── Settings: Clear ──────────────────────────────────────────────────────────
   # Revokes all imported settings: resets global visual settings to app defaults
   # AND restores per-sample aesthetics to position-based defaults.
@@ -7017,8 +7720,8 @@ server <- function(input, output, session) {
   generate_plot <- function() {
     req(rv$data, input$selected_samples)
     tryCatch(
-      build_plot(prepare_plot_data(), input$selected_samples,
-                 resolve_aesthetics(input$selected_samples)),
+      add_notes_caption(build_plot(prepare_plot_data(), input$selected_samples,
+                                   resolve_aesthetics(input$selected_samples))),   # v2.22: + the notes caption when ticked
       error = function(e) {
         # Return a blank ggplot with the error message rather than crashing the session
         plot_error_figure(friendly_error_message(e))
@@ -7075,7 +7778,7 @@ server <- function(input, output, session) {
   # ── Fixed panel size (v2.15) ────────────────────────────────────────────────
   fixed_mode <- function() identical(input$panel_size_mode, "fixed")
   CURVE_KINDS <- c("main", "main_by_group", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response",
-                   "metric_explorer", "fit_overlay", "phases", "difference")   # v2.19: the fit figure is square, v2.20: so are the phases and separation figures; the phenotype heatmap (like the OD heatmap) is not
+                   "metric_explorer", "fit_overlay", "phases", "difference", "compare")   # v2.19: the fit figure is square, v2.20: so are the phases and separation figures; the phenotype heatmap (like the OD heatmap) is not
   # Panel (plotting area) size in mm for a figure kind: curve figures are square when
   # panel_square is on; the metric summary and heatmap use width x height as given.
   panel_dims_mm <- function(kind = "main") {
@@ -7092,6 +7795,7 @@ server <- function(input, output, session) {
   }
   fixed_figure <- function(p, kind = "main") {
     d <- panel_dims_mm(kind)
+    if (identical(kind, "compare")) d[1] <- d[1] * compare_panel_count(p)   # v2.22: a facet compare figure keeps the panel size per panel
     fixed_panel_grob(p, d[1], d[2])
   }
   main_fixed_info    <- reactive(fixed_figure(generate_plot(), "main"))
@@ -7152,7 +7856,7 @@ server <- function(input, output, session) {
         if (is.logical(val))      updateCheckboxInput(session, nm, value = val)
         else if (is.numeric(val)) updateNumericInput( session, nm, value = val)
         else if (nm %in% c("pheno_metrics", "boot_metrics")) updateSelectInput(session, nm, selected = val)   # v2.19 / v2.20: multi-selects
-        else if (is.character(val) && length(val) > 1) updateCheckboxGroupInput(session, nm, selected = val)
+        else if (is.character(val) && (length(val) > 1 || nm %in% c("batch_outputs"))) updateCheckboxGroupInput(session, nm, selected = val)
         else { updateSelectInput(session,   nm, selected = val)
                updateRadioButtons(session, nm, selected = val)
                updateTextInput(session,    nm, value    = val) }
@@ -7658,7 +8362,7 @@ server <- function(input, output, session) {
             blank_l[[length(blank_l) + 1L]] <- data.frame(metric = lab_m, x = 1, y = lay$y_max, stringsAsFactors = FALSE)
           }
           fig_notes <- c(fig_notes, paste0("Brackets: every pair of samples, ",
-                                           if (identical(input$stats_method %||% "welch", "welch")) "Welch t-test" else "Mann-Whitney test",
+                                           if (identical(input$stats_method %||% "welch", "nonparametric")) "Mann-Whitney test" else "Welch t-test",
                                            " on the per-replicate values, Holm-adjusted p < 0.05 (stars as in the statistics table); ",
                                            "at most 6 per panel, the most significant first. A sample needs 2 or more replicate values."))
           if (low_n) fig_notes <- c(fig_notes, "Some groups have n < 3: low power, so a missing bracket is not evidence of no difference.")
@@ -8369,7 +9073,7 @@ server <- function(input, output, session) {
     # each requested type gives a named list of plots (one, or one per group for "main_by_group")
     built <- lapply(setNames(types, types), function(ty) {
       if (identical(ty, "main_by_group")) return(tryCatch(main_group_plots(), error = function(e) list()))
-      p <- tryCatch(if (identical(ty, "main")) generate_plot() else generate_analysis_plot(ty),
+      p <- tryCatch(if (identical(ty, "main")) generate_plot() else if (identical(ty, "compare")) generate_compare_plot() else generate_analysis_plot(ty),
                     error = function(e) NULL)
       if (is.null(p) || is_placeholder_plot(p)) list() else setNames(list(p), ty)
     })
@@ -8453,7 +9157,9 @@ server <- function(input, output, session) {
                         "p values Holm-adjusted; Hedges' g = standardized mean difference; ",
                         "95% CI of the difference (Welch)."), notes)
     else notes <- c("No comparison possible yet: load data with 2+ replicates per sample.", notes)
-    div(lapply(notes, function(n) div(class = "stats-note", n)))
+    cav <- technical_rep_caveat()      # v2.22: pseudoreplication banner
+    tagList(if (!is.null(cav)) div(class = "settings-status warn", style = "margin-bottom:8px;", cav),
+            div(lapply(notes, function(n) div(class = "stats-note", n))))
   }
   # v2.16: one builder per table, used by the Analysis tab and the Statistics tab (own output ids)
   stats_notes_build    <- function() { req(rv$data); stats_notes_ui(analysis_stats_display()) }
@@ -8473,9 +9179,9 @@ server <- function(input, output, session) {
                       " ; reference,", dname(input$metrics_ref_sample %||% ""),
                       " ; reference_raw,", input$metrics_ref_sample %||% ""), con)
     for (w in st$warnings) writeLines(paste0("# ", w), con)
-    if (!is.null(st$pairwise)) { writeLines("# pairwise", con); write.csv(st$pairwise, con, row.names = FALSE) }
-    if (!is.null(st$omnibus))  { writeLines("# omnibus",  con); write.csv(st$omnibus,  con, row.names = FALSE) }
-    if (!is.null(st$posthoc))  { writeLines("# posthoc (Tukey HSD)", con); write.csv(st$posthoc, con, row.names = FALSE) }
+    if (!is.null(st$pairwise)) { writeLines("# pairwise", con); write.csv(with_stats_caveat(st$pairwise), con, row.names = FALSE) }
+    if (!is.null(st$omnibus))  { writeLines("# omnibus",  con); write.csv(with_stats_caveat(st$omnibus),  con, row.names = FALSE) }
+    if (!is.null(st$posthoc))  { writeLines("# posthoc (Tukey HSD)", con); write.csv(with_stats_caveat(st$posthoc), con, row.names = FALSE) }
   }
   output$downloadAnalysisStatsCSV     <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
   output$downloadAnalysisStatsCSV_tab <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
@@ -9050,7 +9756,7 @@ server <- function(input, output, session) {
   }, striped = TRUE, spacing = "xs")
   output$downloadAllMetricsCSV <- downloadHandler(
     filename = function() paste0("all_metrics_comparison_", extract_stamp(), ".csv"),
-    content  = function(file) { req(rv$data, input$selected_samples); res <- all_metrics_current(); req(res$table); utils::write.csv(present(res$table), file, row.names = FALSE) })
+    content  = function(file) { req(rv$data, input$selected_samples); res <- all_metrics_current(); req(res$table); utils::write.csv(with_stats_caveat(present(res$table)), file, row.names = FALSE) })
 
   # ── Curve phases, bootstrap intervals and separation from the reference (v2.20) ───────────────────────────
   # Engine: curve_phases_by_sample(), bootstrap_metrics(), curve_difference(), first_separation_time(); see
@@ -9265,6 +9971,7 @@ server <- function(input, output, session) {
       "Per-replicate metrics were computed the same way on each replicate curve and are reported as mean ± SD.")
     ref <- input$metrics_ref_sample %||% ""
     nonpar <- identical(input$stats_method %||% "welch", "nonparametric")
+    both   <- identical(input$stats_method %||% "welch", STATS_METHOD_BOTH)     # v2.22: Welch and Mann-Whitney side by side
     st_metric <- tryCatch(metric_label(analysis_stat_metric()), error = function(e) "the per-replicate metric")
     s4 <- paste0(
       if (length(samps) < 2) "No statistical comparison was made (a single sample)."
@@ -9272,11 +9979,13 @@ server <- function(input, output, session) {
         if (nzchar(ref) && ref %in% samps) paste0("Each sample was compared with the reference sample '", dname(ref), "'")
         else "All pairs of samples were compared",
         " on the per-replicate metric '", st_metric, "' using ",
-        if (nonpar) "the Mann–Whitney U test" else "Welch's t-test (unequal variances)",
-        "; p values were adjusted for multiple comparisons by the Holm method, and effect sizes are reported as Hedges' g with the 95% confidence interval of the difference.",
+        if (both) "Welch's t-test (unequal variances) and the Mann–Whitney U test side by side" else if (nonpar) "the Mann–Whitney U test" else "Welch's t-test (unequal variances)",
+        if (both) "; p values were adjusted for multiple comparisons by the Holm method (Welch) and by the Benjamini–Hochberg method within each metric (both tests), and effect sizes are reported as Hedges' g with the 95% confidence interval of the difference."
+        else "; p values were adjusted for multiple comparisons by the Holm method, and effect sizes are reported as Hedges' g with the 95% confidence interval of the difference.",
         if (length(samps) >= 3)
           paste0(" Differences among three or more groups were tested with ",
-                 if (nonpar) "the Kruskal–Wallis test." else "one-way ANOVA followed by Tukey's HSD.")
+                 if (both) "one-way ANOVA followed by Tukey's HSD and the Kruskal–Wallis test."
+                 else if (nonpar) "the Kruskal–Wallis test." else "one-way ANOVA followed by Tukey's HSD.")
         else ""))
     s5 <- paste0("Analysis and figures were produced with the Lysis Curve OD Visualization App v", APP_VERSION,
                  " (R ", R.version$major, ".", R.version$minor, ").")
@@ -9494,6 +10203,12 @@ server <- function(input, output, session) {
           }
         })
       }
+      if (!is.null(rv_cmp$ds)) attempt("Compare figure", {     # v2.22
+        p <- generate_compare_plot()
+        if (is_placeholder_plot(p)) skipped <- c(skipped, paste0("Compare figure: ", placeholder_reason(p)))
+        else if (fixed_mode()) { g <- fixed_figure(p, "compare"); sz <- size_from_grob(g, "compare"); write_pair(g, compare_file_stem(), sz[1], sz[2]) }
+        else { sz <- export_size_in(); write_pair(p, compare_file_stem(), sz[1], sz[2]) }
+      })
       if (has_patchwork) attempt("Composed figure", {
         comp <- compose_info()
         if (is.null(comp$plot)) skipped <- c(skipped, "Composed figure: no panel is available for this selection.")
@@ -9851,67 +10566,45 @@ server <- function(input, output, session) {
       content = function(file) {
         library(officer); library(rvg)
         req(rv$data, input$selected_samples)
-        samps  <- input$selected_samples
-        aes_v  <- resolve_aesthetics(samps)
-        pd_all <- prepare_plot_data(samples = samps)
-        sw     <- max(export_size_in()[1], 4)   # slide width  (inches)
-        sh     <- max(export_size_in()[2], 3)   # slide height (inches)
-        
-        # Title bar: 0.5 in tall at top of slide; plot fills the rest
-        title_h  <- 0.5
-        plot_top <- title_h
-        plot_h   <- sh - title_h
-        
-        # Font size for title: scale with slide width, min 12 pt
-        title_pt <- max(12, round(sw * 2.2))
-        
-        prs <- read_pptx()
-        
+        samps <- input$selected_samples
+        prs   <- read_pptx()
+        ss    <- tryCatch(officer::slide_size(prs), error = function(e) list(width = 10, height = 7.5))
+        title_h <- 0.5
+        # v2.22: parity frames. Every slide carries the same pinned panel, legend column and figure size (build_parity_frames), so
+        # the graph box is full size on slide 1 and does not move as curves are added; the panel shrinks to fit the slide when needed.
+        fr <- presentation_frames(samps, canvas_w_in = ss$width, canvas_h_in = ss$height - title_h,
+                                  fit_w_in = ss$width - 0.1, fit_h_in = ss$height - title_h - 0.1)
+        left_x <- max(0, (ss$width - fr$w_in) / 2)
         for (k in seq_along(samps)) {
-          visible_samps <- samps[1:k]
-          new_samp      <- samps[k]   # the sample added on this slide
-          
-          # Slice aesthetics to only the visible subset (preserving original colours)
-          aes_k <- list(
-            shapes     = aes_v$shapes[    visible_samps],
-            colors     = aes_v$colors[    visible_samps],
-            line_types = aes_v$line_types[visible_samps],
-            leg_labels = aes_v$leg_labels[visible_samps],
-            filled_map = aes_v$filled_map[visible_samps]
-          )
-          
-          # Data: only visible samples, but axes come from pd_all limits via build_plot
-          pd_k <- pd_all[pd_all$variable %in% visible_samps, , drop = FALSE]
-          
-          # highlight_samples = NULL → all drawn samples in full colour, none greyed
-          p_k <- build_plot(pd_k, visible_samps, aes_k, highlight_samples = NULL)
-          
           prs <- add_slide(prs, layout = "Blank", master = "Office Theme")
-          
-          # Title text box
-          prs <- ph_with(prs,
-                         value    = dname(new_samp),
-                         location = ph_location(left = 0, top = 0, width = sw, height = title_h))
-          
-          # Plot area below the title
-          prs <- ph_with(prs,
-                         dml(ggobj = p_k, bg = "white"),
-                         location = ph_location(left = 0, top = plot_top,
-                                                width = sw, height = plot_h))
+          prs <- ph_with(prs, value = dname(samps[k]),     # the sample added on this slide
+                         location = ph_location(left = left_x, top = 0, width = fr$w_in, height = title_h))
+          # local() forces the grob NOW: dml() captures `code` unevaluated and a bare loop variable would resolve to the last frame
+          prs <- local({
+            g_k <- fr$grobs[[k]]
+            ph_with(prs, dml(code = grid::grid.draw(g_k), bg = "white"),
+                    location = ph_location(left = left_x, top = title_h, width = fr$w_in, height = fr$h_in))
+          })
         }
-        
-        # Final slide: all samples, full colour, no title override
-        p_final <- build_plot(pd_all, samps, aes_v, highlight_samples = NULL)
+        # final slide: all samples, centred, no title
         prs <- add_slide(prs, layout = "Blank", master = "Office Theme")
-        prs <- ph_with(prs,
-                       dml(ggobj = p_final, bg = "white"),
-                       location = ph_location(left = 0, top = 0, width = sw, height = sh))
-        
+        prs <- local({
+          g_f <- fr$grobs[[length(fr$grobs)]]
+          ph_with(prs, dml(code = grid::grid.draw(g_f), bg = "white"),
+                  location = ph_location(left = left_x, top = max(0, (ss$height - fr$h_in) / 2), width = fr$w_in, height = fr$h_in))
+        })
+        if (isTRUE(input$notes_pptx_slide)) {       # v2.22: the Experiment Notebook as the last slide
+          prs <- add_slide(prs, layout = "Blank", master = "Office Theme")
+          prs <- ph_with(prs, value = "Experiment Notes",
+                         location = ph_location(left = 0.3, top = 0.2, width = ss$width - 0.6, height = 0.5))
+          prs <- ph_with(prs, value = { tx <- notes_slide_text(notes_current()); if (nzchar(tx)) tx else "(no notebook fields filled in)" },
+                         location = ph_location(left = 0.3, top = 0.8, width = ss$width - 0.6, height = ss$height - 1.0))
+        }
         print(prs, target = file)
       }
     )
   }
-  
+
   # ── GIF Export ───────────────────────────────────────────────────────────────
   # Cumulative build: frame k shows samples 1..k in full colour (no grey mask).
   # Axes stay consistent because pd_all establishes the full data range — only
@@ -9925,48 +10618,538 @@ server <- function(input, output, session) {
         library(gifski)
         req(rv$data, input$selected_samples)
         samps  <- input$selected_samples
-        aes_v  <- resolve_aesthetics(samps)
-        pd_all <- prepare_plot_data(samples = samps)
         px_in  <- function(x, lo, def) { x <- suppressWarnings(as.integer(x)); if (!is.finite(x)) def else min(max(x, lo), 4000L) }
         w_px   <- px_in(input$gif_width,  200L, 800L)       # v2.14.1: bounded, NA-safe
         h_px   <- px_in(input$gif_height, 150L, 600L)
         fps    <- max(suppressWarnings(as.numeric(input$gif_fps %||% 1)), 0.2, na.rm = TRUE)
-        
+        # v2.22: parity frames: the same pinned panel, legend column and figure size in every frame, centred in a w x h pixel frame
+        fr <- presentation_frames(samps, canvas_w_in = w_px / 96, canvas_h_in = h_px / 96,
+                                  fit_w_in = w_px / 96 - 0.1, fit_h_in = h_px / 96 - 0.1)
         tmp_dir <- tempfile(); dir.create(tmp_dir)
         on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
-        
-        frame_files <- character(length(samps))
-        for (k in seq_along(samps)) {
-          visible_samps <- samps[1:k]
-          
-          # Slice aesthetics to only the visible subset
-          aes_k <- list(
-            shapes     = aes_v$shapes[    visible_samps],
-            colors     = aes_v$colors[    visible_samps],
-            line_types = aes_v$line_types[visible_samps],
-            leg_labels = aes_v$leg_labels[visible_samps],
-            filled_map = aes_v$filled_map[visible_samps]
-          )
-          
-          # Filter data to visible samples; axes scale from pd_all range implicitly
-          # via the scale limits set in build_plot using the supplied data
-          pd_k <- pd_all[pd_all$variable %in% visible_samps, , drop = FALSE]
-          
-          p_k   <- build_plot(pd_k, visible_samps, aes_k, highlight_samples = NULL)
+        frame_files <- character(length(fr$grobs))
+        for (k in seq_along(fr$grobs)) {
           fpath <- file.path(tmp_dir, sprintf("frame_%03d.png", k))
-          ggsave(fpath, plot = p_k, device = "png",
-                 width = w_px / 96, height = h_px / 96,
-                 units = "in", dpi = raster_dpi(w_px / 96, h_px / 96, 96))
+          if (has_ragg) ragg::agg_png(fpath, width = w_px, height = h_px, res = 96) else grDevices::png(fpath, width = w_px, height = h_px, res = 96)
+          tryCatch({ grid::grid.newpage(); grid::grid.draw(fr$grobs[[k]]) }, finally = grDevices::dev.off())
           frame_files[k] <- fpath
         }
-        
-        gifski(frame_files, gif_file = file,
-               width = w_px, height = h_px,
-               delay = 1 / fps, loop = TRUE)
+        gifski(frame_files, gif_file = file, width = w_px, height = h_px, delay = 1 / fps, loop = TRUE)
       }
     )
   }
-  
+
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  # v2.22: compare, presets, old-settings import, project themes, notes exports, batch export,
+  # parity frames. (Pure helpers are at the top of the file; see docs/COMPARE_PRESETS_EXPORTS.md.)
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  server_env <- environment()
+
+  # ── Stats method "both" (Welch + Wilcoxon side by side) ─────────────────────────────────────────
+  # compare_replicate_metric() / compare_all_metrics() only know "welch" and "nonparametric". These two shadow them
+  # for this server (the way moi_map() is shadowed): "both" is handled here, everything else goes to the originals.
+  # The pairwise table of "both" is Welch's plus p_welch, p_wilcoxon and their Benjamini-Hochberg adjustment within the
+  # metric; every single-test code path (all-metrics table, brackets, dose response) uses Welch.
+  .crm_base <- compare_replicate_metric
+  .cam_base <- compare_all_metrics
+  compare_replicate_metric <- function(rm, metric, ref_sample = NULL, method = "welch", ...) {
+    extra <- list(...)
+    base  <- function(rm, metric, ref_sample = NULL, method = "welch")
+      do.call(.crm_base, c(list(rm, metric, ref_sample = ref_sample, method = method), extra))
+    if (identical(method, STATS_METHOD_BOTH)) compare_replicate_metric_both(base, rm, metric, ref_sample)
+    else base(rm, metric, ref_sample, method)
+  }
+  compare_all_metrics <- function(rm, metrics = NULL, ref_sample = NULL, method = "welch", ...)
+    .cam_base(rm, metrics = metrics, ref_sample = ref_sample, method = stats_base_method(method), ...)
+
+  # ── Technical-replicate caveat ──────────────────────────────────────────────────────────────────
+  technical_rep_caveat <- function() technical_rep_caveat_for(rv$replicate_col)
+  with_stats_caveat    <- function(df) with_caveat_column(df, technical_rep_caveat())
+
+  # ── N4 paper look ───────────────────────────────────────────────────────────────────────────────
+  observeEvent(input$apply_n4_look, {
+    apply_settings(n4_preset_settings())
+    showNotification("N4 paper look applied (the settings of the N4 Lysis Curve Shiny App: 10 x 8 in, 20 pt text, PDF, pixel canvas).",
+                     type = "message", duration = 8)
+  })
+
+  # ── Night mode (UI only: a CSS class on <body>; not part of the figure and not saved) ──────────────
+  observeEvent(input$night_mode, session$sendCustomMessage("kcNight", isTRUE(input$night_mode)), ignoreInit = TRUE)
+
+  # ── Sample styles: one place that applies a per-sample list (settings import, project themes) ──────
+  # aes_map: sample name -> list(color, shape, shape_filled, line_type, legend_label, group, tw_min, tw_max, hidden).
+  # The entries are also kept in rv$imported_settings$samples, which the sidebar and the quick-edit rows read when they
+  # are drawn (a sample list that is only just being drawn has no inputs to update yet). via_qe: the colour goes into
+  # the quick-edit colour (rv$qe_colors), which wins over the sidebar widgets. Returns the number of samples matched.
+  apply_sample_aes <- function(aes_map, samps, via_qe = FALSE) {
+    if (is.null(aes_map) || !length(aes_map) || is.null(samps) || !length(samps)) return(0L)
+    hit <- intersect(samps, names(aes_map))
+    if (!length(hit)) return(0L)
+    imp <- isolate(rv$imported_settings) %||% list(global = list(), samples = list())
+    hide <- character(0)
+    for (vn in hit) {
+      aes <- aes_map[[vn]]; vid <- safe_id(vn)
+      imp$samples[[vn]] <- modifyList(imp$samples[[vn]] %||% list(), aes)
+      if (!is.null(aes$color)) {
+        hex <- tryCatch(normalize_hex_color(as.character(aes$color)), error = function(e) as.character(aes$color))
+        if (via_qe) { cur <- isolate(rv$qe_colors); cur[[vn]] <- toupper(hex); rv$qe_colors <- cur } else clear_qe_color(vn, aes$color)
+        updateSelectInput(session, paste0("color_selector_", vid), selected = "custom")
+        updateTextInput(session,   paste0("color_",          vid), value   = hex)
+        updateTextInput(session,   paste0("hex_color_",      vid), value   = hex)
+      }
+      if (!is.null(aes$shape))
+        updateSelectInput(session, paste0("shape_", vid), selected = as.character(aes$shape))
+      if (!is.null(aes$shape_filled))
+        updateCheckboxInput(session, paste0("shape_filled_", vid), value = aes$shape_filled)
+      if (!is.null(aes$line_type))
+        updateSelectInput(session, paste0("line_type_", vid), selected = aes$line_type)
+      if (!is.null(aes$legend_label) && nzchar(trimws(as.character(aes$legend_label)))) {   # the display name (the quick-edit strip's name box)
+        lab <- trimws(as.character(aes$legend_label))
+        updateTextInput(session, paste0("qe_name_", vid), value = lab)
+        if (vn %in% rv$od_vars) {
+          dn <- isolate(rv$display_names)
+          if (is.null(dn)) dn <- setNames(rv$od_vars, rv$od_vars)
+          dn[[vn]] <- lab; rv$display_names <- dn
+        }
+      }
+      if (!is.null(aes$group)) {     # v2.18: a v2.18 file; a missing window means "no limit", not "leave as is"
+        updateTextInput(session, paste0("group_", vid), value = as.character(aes$group))
+        updateNumericInput(session, paste0("tw_min_", vid), value = if (is.null(aes$tw_min)) NA else aes$tw_min)
+        updateNumericInput(session, paste0("tw_max_", vid), value = if (is.null(aes$tw_max)) NA else aes$tw_max)
+      }
+      if (isTRUE(aes$hidden)) hide <- c(hide, vn)
+    }
+    rv$imported_settings <- imp
+    if (length(hide)) {          # a sample the old file hid is taken out of Select Samples (an explicit part of that import)
+      cur <- isolate(input$selected_samples) %||% rv$od_vars
+      updateSelectInput(session, "selected_samples", selected = setdiff(cur, hide))
+    }
+    length(hit)
+  }
+
+  # ── Project themes ──────────────────────────────────────────────────────────────────────────────
+  refresh_theme_choices <- function(selected = NULL) {
+    nms <- theme_list()
+    sel <- selected %||% isolate(input$active_theme) %||% ""
+    if (!(sel %in% nms)) sel <- ""
+    updateSelectInput(session, "active_theme", choices = c("None" = "", setNames(nms, nms)), selected = sel)
+    invisible(nms)
+  }
+  refresh_theme_choices()
+  # the style of each loaded sample: colour (the quick-edit colour wins), shape, filled, line type, display name
+  collect_sample_aesthetics <- function(samps) {
+    aes_v <- resolve_aesthetics(samps)
+    hex <- function(x) tryCatch(normalize_hex_color(as.character(x)), error = function(e) as.character(x))
+    lapply(setNames(samps, samps), function(vn)
+      list(color = hex(aes_v$colors[[vn]]), shape = unname(aes_v$shapes[[vn]]), shape_filled = unname(aes_v$filled_map[[vn]]),
+           line_type = unname(aes_v$line_types[[vn]]), legend_label = unname(aes_v$leg_labels[[vn]])))
+  }
+  # Save the current styles of the loaded samples as a theme; the key (file name) or NULL
+  theme_save_current <- function(name) {
+    samps <- rv$od_vars
+    if (is.null(samps) || !length(samps)) stop("Load data before saving a theme.")
+    theme_write(name, collect_sample_aesthetics(samps), qe_colors = rv$qe_colors, display_names = rv$display_names)
+  }
+  # Apply a saved theme to the samples whose names match; the number of samples styled
+  theme_apply_named <- function(name, samps = rv$od_vars) {
+    th <- theme_read(name)
+    if (is.null(th)) return(NA_integer_)
+    m <- theme_for_samples(th, samps)
+    aes_map <- m$sample_aesthetics
+    for (vn in names(m$qe_colors)) aes_map[[vn]]$color <- m$qe_colors[[vn]]
+    apply_sample_aes(aes_map, samps, via_qe = TRUE)
+  }
+  theme_autoapply_on_load <- function() {
+    key <- isolate(input$active_theme) %||% ""
+    if (!isTRUE(isolate(input$theme_autoapply)) || !nzchar(key)) return(invisible(NULL))
+    tryCatch({
+      k <- theme_apply_named(key, rv$od_vars)
+      if (is.na(k)) showNotification(sprintf("Theme '%s' could not be read: styles not applied.", key), type = "warning")
+      else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
+    }, error = function(e) invisible(NULL))
+    invisible(NULL)
+  }
+  observeEvent(input$save_theme, {
+    nm <- trimws(input$theme_name %||% "")
+    if (!nzchar(theme_key(nm))) { showNotification("Enter a theme name before saving.", type = "warning"); return() }
+    key <- tryCatch(theme_save_current(nm), error = function(e) { showNotification(conditionMessage(e), type = "warning"); NULL })
+    if (is.null(key)) return()
+    refresh_theme_choices(selected = key)
+    showNotification(sprintf("Theme '%s' saved (%d samples).", key, length(rv$od_vars)), type = "message")
+  })
+  observeEvent(input$apply_theme, {
+    key <- input$active_theme %||% ""
+    if (!nzchar(key)) { showNotification("Select a theme first.", type = "warning"); return() }
+    k <- theme_apply_named(key, rv$od_vars)
+    if (is.na(k)) showNotification(sprintf("Theme '%s' is missing or unreadable.", key), type = "warning")
+    else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
+  })
+  observeEvent(input$delete_theme, {
+    key <- input$active_theme %||% ""
+    if (!nzchar(key)) { showNotification("Select a theme to delete.", type = "warning"); return() }
+    showModal(modalDialog(title = "Delete theme", size = "s", easyClose = TRUE,
+                          p("Permanently delete the theme ", tags$b(key), " from the themes folder?"),
+                          footer = tagList(modalButton("Cancel"),
+                                           actionButton("delete_theme_confirm", "Delete", style = "background:#dc3545;color:white;border:none;"))))
+  })
+  observeEvent(input$delete_theme_confirm, {
+    key <- input$active_theme %||% ""; removeModal()
+    if (!nzchar(key)) return()
+    ok <- tryCatch(theme_delete(key), error = function(e) FALSE)
+    refresh_theme_choices(selected = "")
+    showNotification(if (ok) sprintf("Theme '%s' deleted.", key) else sprintf("Theme '%s' could not be deleted.", key),
+                     type = if (ok) "message" else "warning")
+  })
+
+  # ── Compare: a second dataset through the same ingest path ──────────────────────────────────────
+  # ingest_frame() is ingest_data() without the session side effects: it returns the dataset's structure (data, time
+  # column, samples, column map, long / wide, replicate column, stacked blocks, time points) instead of writing rv. It calls
+  # the same detectors (detect_time_column, is_long_format_detect, detect_od_column_idx, detect_od_columns,
+  # infer_wide_replicates, detect_replicate_column, coerce_sentinel_columns, parse_time_column); a test compares the two.
+  ingest_frame <- function(data, source_name = "") {
+    notes <- character(0)
+    tc <- detect_time_column(data)
+    pt <- parse_time_column(data[[tc]])
+    if (isTRUE(pt$converted)) {
+      data[[tc]] <- pt$values
+      notes <- c(notes, paste0("Time column '", tc, "' was written as clock time / date-time; converted to minutes."))
+    }
+    group_names <- c("variable","Variable","condition","Condition","treatment","Treatment","sample","Sample","group","Group")
+    rep_names   <- colnames(data)[tolower(colnames(data)) %in%
+                     c("replicate","rep","rep_id","replicate_id","well","well_id","wellid","technical_replicate","biological_replicate","repeat")]
+    cs <- coerce_sentinel_columns(data, skip_cols = c(tc, group_names, rep_names), time_values = data[[tc]])
+    data <- cs$data
+    if (!is.null(cs$report))
+      notes <- c(notes, paste0(nrow(cs$report), " non-numeric reading(s) (", paste(utils::head(unique(cs$report$value), 3), collapse = ", "),
+                               ") were treated as missing; affected column(s): ", paste(unique(cs$report$sample), collapse = ", "), "."))
+    ds <- list(data = data, data_source = source_name, time_col = tc, is_long_format = is_long_format_detect(data),
+               col_map = NULL, od_vars = NULL, od_vars_raw = NULL, group_col = NULL, value_col = NULL, replicate_col = NULL,
+               n_blocks = NULL, block_id = NULL, all_timepoints = NULL, sentinel_report = cs$report, notes = notes)
+    if (ds$is_long_format) {
+      found    <- group_names[group_names %in% colnames(data)]
+      rep_col0 <- detect_replicate_column(data, tc, NULL, NULL)
+      group_col <- if (length(found) > 0) found[1] else {
+        dv    <- sapply(data, function(x) length(unique(x)) / nrow(data))
+        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), c(tc, rep_col0))
+        if (length(cands)) cands[1] else setdiff(colnames(data), c(tc, rep_col0))[1]
+      }
+      rep_col <- detect_replicate_column(data, tc, group_col, NULL)
+      vc <- detect_od_columns(data, c(tc, group_col, rep_col))
+      if (length(vc) > 1) vc <- vc[1]
+      rep_col <- detect_replicate_column(data, tc, group_col, vc)
+      ds$group_col <- group_col; ds$value_col <- vc; ds$replicate_col <- rep_col
+      ds$od_vars <- as.character(unique(data[[group_col]])); ds$od_vars_raw <- ds$od_vars
+    } else {
+      idx <- detect_od_column_idx(data, tc)
+      cn  <- colnames(data); oc <- unique(cn[idx])
+      ds$col_map <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
+      ds$od_vars <- oc; ds$od_vars_raw <- oc
+      wb <- infer_wide_replicates(data, tc)
+      if (!is.null(wb$reps) && wb$reps > 1) {
+        ds$n_blocks <- wb$reps; ds$block_id <- wb$block_id
+        ds$notes <- c(ds$notes, paste0("Detected ", wb$reps, " stacked time blocks (the time column restarts); each block is treated as one replicate."))
+      }
+    }
+    all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[tc]])))))
+    ds$all_timepoints <- all_t[is.finite(all_t)]
+    ds
+  }
+  # prepare_plot_data() / prepare_replicate_data() / apply_time_filters() re-bound to another dataset: copies of the
+  # three closures whose enclosing environment holds `rv` = the dataset (a list from ingest_frame), so the second file
+  # goes through exactly the code of the first (filters, blank subtraction, replicate pooling, SD / SEM / CI).
+  compare_scope <- function(ds) {
+    e <- new.env(parent = server_env); e$rv <- ds
+    for (nm in c("prepare_plot_data", "prepare_replicate_data", "apply_time_filters")) {
+      f <- get(nm, envir = server_env); environment(f) <- e; assign(nm, f, envir = e)
+    }
+    e
+  }
+  rv_cmp <- reactiveValues(ds = NULL, error = NULL)
+  compare_read_file <- function(path, name = path) {
+    ext <- tolower(tools::file_ext(name))
+    if (ext %in% c("xlsx", "xls")) {
+      if (!requireNamespace("readxl", quietly = TRUE)) stop("Reading Excel files needs the 'readxl' package: install.packages('readxl')")
+      as.data.frame(readxl::read_excel(path), stringsAsFactors = FALSE, check.names = FALSE)
+    } else read_csv_locale_aware(path, input$csv_locale %||% "auto")
+  }
+  compare_load <- function(path, name = path) {
+    ds <- ingest_frame(compare_read_file(path, name), name)
+    rv_cmp$ds <- ds; rv_cmp$error <- NULL
+    updateSelectInput(session, "compare_samples_b", choices = ds$od_vars, selected = ds$od_vars)
+    for (nt in ds$notes) tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)
+    invisible(ds)
+  }
+  observeEvent(input$compare_file, {
+    f <- input$compare_file; req(f)
+    tryCatch(compare_load(f$datapath, f$name), error = function(e) {
+      rv_cmp$ds <- NULL; rv_cmp$error <- conditionMessage(e)
+    })
+  })
+  output$compare_status <- renderUI({
+    if (!is.null(rv_cmp$error)) return(div(class = "settings-status warn", paste("Could not read the file:", rv_cmp$error)))
+    ds <- rv_cmp$ds
+    if (is.null(ds)) return(p(style = "font-size:.82em;color:#777;", "Load a second CSV (or Excel) file with the same layout as the main data."))
+    div(class = "settings-status ok", HTML(paste0("<b>", html_escape(ds$data_source), "</b><br/>",
+                                                  "Format: <b>", if (ds$is_long_format) "long" else "wide", "</b> &middot; time column: <b>",
+                                                  html_escape(ds$time_col), "</b> &middot; ", length(ds$all_timepoints), " time points<br/>",
+                                                  "Samples: ", html_escape(paste(ds$od_vars, collapse = ", ")))))
+  })
+  compare_labels_now <- function() compare_labels(input$compare_label_a, input$compare_label_b)
+  # the samples of each dataset: A = Select Samples, B = the chosen ones (all when none is chosen); common-only keeps the intersection
+  compare_sample_sets <- function() {
+    ds <- rv_cmp$ds
+    sA <- input$selected_samples
+    sB <- input$compare_samples_b
+    sB <- if (is.null(sB) || !length(sB)) ds$od_vars else intersect(sB, ds$od_vars)
+    if (isTRUE(input$compare_common_only)) { common <- intersect(sA, sB); sA <- common; sB <- common }
+    list(A = sA, B = sB)
+  }
+  compare_unavailable <- function(why)
+    ggplot() + annotate("text", x = 0.5, y = 0.5, size = 3.5, color = "grey30",
+                        label = paste(strwrap(paste("Figure not available:", why), width = 44), collapse = "\n")) + theme_void()
+  # The compare figure. Overlay: one panel, both datasets, colours / shapes by sample (display names apply), the dataset by
+  # line type (B dashed) or transparency (B lighter); built by build_plot() over composite sample keys. Facet: one panel per
+  # dataset, same scales. Every theme / size / error setting is the main figure's.
+  generate_compare_plot <- function() {
+    ds <- rv_cmp$ds
+    if (is.null(rv$data) || is.null(input$selected_samples)) return(compare_unavailable("load the main data first."))
+    if (is.null(ds)) return(compare_unavailable("load a second dataset on the Compare tab."))
+    tryCatch({
+      ss  <- compare_sample_sets()
+      if (!length(ss$A) || !length(ss$B)) return(compare_unavailable("no samples selected in one of the datasets."))
+      lab <- compare_labels_now()
+      sc  <- compare_scope(ds)
+      pdA <- prepare_plot_data(samples = ss$A)
+      pdB <- sc$prepare_plot_data(samples = ss$B)
+      samples <- unique(c(ss$A, ss$B))
+      aes_u <- resolve_aesthetics(samples)
+      if (identical(input$compare_mode %||% "overlay", "facet")) {
+        pd <- dplyr::bind_rows(dplyr::mutate(pdA, dataset = lab[["A"]]), dplyr::mutate(pdB, dataset = lab[["B"]]))
+        pd$dataset <- factor(pd$dataset, levels = unname(lab))
+        used <- samples[samples %in% unique(as.character(pd$variable))]
+        aes_f <- lapply(aes_u[c("shapes", "colors", "line_types", "leg_labels", "filled_map")], function(x) x[used])
+        p <- build_plot(pd, used, aes_f) +
+          facet_wrap(~ dataset, nrow = 1, scales = "fixed", labeller = label_wrap_gen(width = 18)) +
+          theme(strip.text = element_text(size = input$axis_label_font_size, face = "plain"), strip.background = element_blank())
+        if (startsWith(input$legend_position %||% "right", "inside-")) p <- p + theme(legend.position = "right")
+      } else {
+        pdA$variable <- compare_key("A", pdA$variable); pdB$variable <- compare_key("B", pdB$variable)
+        keys <- compare_keys_in_order(samples, ss$A, ss$B)
+        aes_k <- compare_overlay_aesthetics(keys, aes_u, lab, aes_u$leg_labels,
+                                            style = input$compare_overlay_style %||% "linetype",
+                                            alpha_b = suppressWarnings(as.numeric(input$compare_alpha_b %||% 0.5)))
+        p <- build_plot(dplyr::bind_rows(pdA, pdB), keys, aes_k)
+      }
+      # the replicate-point layer of build_plot() reads the MAIN data only (it would sit in both panels): not drawn here
+      is_rep_points <- function(l) inherits(l$geom, "GeomPoint") && identical(l$aes_params$shape, 1) && isFALSE(l$show.legend)
+      p$layers <- Filter(Negate(is_rep_points), p$layers)
+      add_notes_caption(p)
+    }, error = function(e) {
+      if (inherits(e, "shiny.silent.error")) stop(e)
+      plot_error_figure(friendly_error_message(e))
+    })
+  }
+  compare_panel_count <- function(p) {
+    if (inherits(p$facet, "FacetNull")) return(1L)
+    tryCatch(length(unique(ggplot2::ggplot_build(p)$layout$layout$PANEL)), error = function(e) 1L)
+  }
+  compare_fixed_info <- reactive({
+    p <- generate_compare_plot()
+    fixed_figure(p, "compare")
+  })
+  compare_plot_obj <- function() if (fixed_mode()) compare_fixed_info() else generate_compare_plot()
+  compare_size_in <- function() {
+    if (!fixed_mode()) return(export_size_in())
+    tryCatch(size_from_grob(compare_fixed_info(), "compare"),
+             error = function(e) { if (inherits(e, "shiny.silent.error")) fixed_fallback_in("compare") else stop(e) })
+  }
+  compare_file_stem <- function() {
+    lab <- compare_labels_now()
+    paste0("compare_", file_label(lab[["A"]], "A"), "_vs_", file_label(lab[["B"]], "B"), "_",
+           export_size_tag(if (fixed_mode()) compare_size_in()))
+  }
+  output$compare_container <- renderUI(preview_container("compare_plot", "compare_img", compare_size_in))
+  register_preview("compare_plot", "compare_img", compare_plot_obj, compare_size_in)
+  output$compare_note <- renderUI({
+    ds <- rv_cmp$ds
+    if (is.null(ds) || is.null(rv$data)) return(NULL)
+    ss <- compare_sample_sets()
+    only_a <- setdiff(ss$A, ss$B); only_b <- setdiff(ss$B, ss$A)
+    div(class = "stats-note",
+        sprintf("%d sample(s) in the main data, %d in the second; %d in both.", length(ss$A), length(ss$B), length(intersect(ss$A, ss$B))),
+        if (length(only_a)) paste0(" Only in the main data: ", paste(dname(only_a), collapse = ", "), "."),
+        if (length(only_b)) paste0(" Only in the second: ", paste(only_b, collapse = ", "), "."),
+        " Same samples are matched by column name; the blank subtraction, time filters and error settings of the main figure apply to both.")
+  })
+  # One figure file in format `fmt` (ggplot or fixed-panel gtable); raster formats are capped by raster_dpi().
+  save_figure <- function(obj, file, w_in, h_in, fmt, dpi = NULL) {
+    args <- list(filename = file, plot = obj, device = export_device(fmt), width = w_in, height = h_in,
+                 units = "in", bg = "white", limitsize = FALSE)
+    if (fmt %in% c("png", "tiff", "jpeg")) args$dpi <- raster_dpi(w_in, h_in, dpi %||% input$export_dpi %||% 300)
+    if (identical(fmt, "tiff")) args$compression <- "lzw"
+    do.call(ggsave, args)
+    invisible(file)
+  }
+  output$downloadCompare <- downloadHandler(
+    filename = function() paste0(compare_file_stem(), ".", input$export_format %||% "svg"),
+    content  = function(file) {
+      req(rv$data, rv_cmp$ds)
+      sz <- compare_size_in(); fmt <- input$export_format %||% "svg"
+      save_figure(compare_plot_obj(), file, sz[1], sz[2], fmt, input$export_dpi)
+    })
+
+  # ── Notes: caption on the figure, exports ───────────────────────────────────────────────────────
+  notes_current <- function() {
+    g <- function(id) { v <- input[[id]]; if (is.null(v) || !length(v)) "" else paste(as.character(v), collapse = " ") }
+    setNames(lapply(names(OLD_NOTES_MAP), function(k) g(OLD_NOTES_MAP[[k]])), names(OLD_NOTES_MAP))
+  }
+  notes_caption_text <- function() build_notes_caption(notes_current(), input$notes_caption_fields)
+  output$notes_caption_preview <- renderText({
+    cap <- notes_caption_text()
+    if (nzchar(cap)) cap else "(no field ticked, or the ticked fields are empty)"
+  })
+  # width the caption is wrapped to: the panel (fixed mode) or the export width
+  caption_width_mm <- function() {
+    if (fixed_mode()) return(panel_dims_mm("main")[1] + 20)
+    w <- suppressWarnings(as.numeric(input$export_width %||% 89)); if (!is.finite(w) || w <= 0) w <- 89
+    if (identical(input$export_units %||% "mm", "mm")) w else w * 25.4
+  }
+  add_notes_caption <- function(p) {
+    if (!isTRUE(input$notes_show_caption)) return(p)
+    cap <- notes_caption_text(); if (!nzchar(cap)) return(p)
+    sz <- suppressWarnings(as.numeric(input$notes_caption_size %||% 6)); if (!is.finite(sz) || sz <= 0) sz <- 6
+    nchar_line <- max(20L, floor(caption_width_mm() / (sz * 0.3528 * 0.52)))
+    cap <- paste(strwrap(cap, width = nchar_line), collapse = "\n")
+    old <- tryCatch(p$labels$caption, error = function(e) NULL)
+    p + labs(caption = if (is.character(old) && length(old) == 1 && nzchar(old)) paste0(old, "\n", cap) else cap) +
+      theme(plot.caption = element_text(size = sz, hjust = 1, color = "grey30"))
+  }
+  notes_dl <- function(ext, writer) downloadHandler(
+    filename = function() paste0(notes_file_prefix(notes_current()), ".", ext),
+    content  = function(file) writer(file, notes_current()))
+  output$download_notes_pdf  <- notes_dl("pdf",  write_notes_pdf)
+  output$download_notes_png  <- notes_dl("png",  write_notes_png)
+  output$download_notes_json <- notes_dl("json", write_notes_json)
+  output$download_notes_html <- downloadHandler(
+    filename = function() paste0(notes_file_prefix(notes_current()), ".html"),
+    content  = function(file) write_notes_html(file, notes_current(), technical_rep_caveat()))
+
+  # ── Batch export: choose the outputs, the format, the dpi and the size ─────────────────────────
+  observeEvent(input$batch_select_all,  updateCheckboxGroupInput(session, "batch_outputs", selected = unname(unlist(batch_output_choices()))))
+  observeEvent(input$batch_select_none, updateCheckboxGroupInput(session, "batch_outputs", selected = character(0)))
+  # raw data as a wide table: the loaded file when it was wide, else the replicate values (time + one column per sample / replicate)
+  raw_wide_table <- function() {
+    if (!isTRUE(rv$is_long_format)) return(rv$data)
+    raw_wide_from_replicates(prepare_replicate_data(samples = rv$od_vars))
+  }
+  # Writes the chosen outputs into `dir`; returns list(files, skipped). size_mm: NULL = the size each figure has in the app
+  # (the fixed panel / export size / composed size), else c(width, height) in mm for every single figure.
+  batch_export_build <- function(dir, outputs, fmt = "svg", dpi = 300, size_mm = NULL) {
+    written <- character(0); skipped <- character(0)
+    skip <- function(label, why) skipped <<- c(skipped, paste0(label, ": ", why))
+    put  <- function(obj, stem, w_in, h_in) {
+      f <- file.path(dir, paste0(stem, ".", fmt)); save_figure(obj, f, w_in, h_in, fmt, dpi); written <<- c(written, basename(f))
+    }
+    csv  <- function(df, name) { utils::write.csv(df, file.path(dir, name), row.names = FALSE, fileEncoding = "UTF-8"); written <<- c(written, name) }
+    attempt <- function(label, expr) tryCatch(expr, error = function(e) skip(label, friendly_error_message(e)))
+    sz_custom <- if (!is.null(size_mm)) size_mm / 25.4 else NULL
+    # one figure: p = the ggplot, kind = its panel kind, stem = the file stem
+    one_figure <- function(label, p, kind, stem_fun) {
+      if (is_placeholder_plot(p)) return(skip(label, placeholder_reason(p)))
+      if (!is.null(sz_custom)) return(put(p, stem_fun(sz_custom), sz_custom[1], sz_custom[2]))
+      if (fixed_mode()) { g <- fixed_figure(p, kind); s <- size_from_grob(g, kind); put(g, stem_fun(s), s[1], s[2]) }
+      else { s <- export_size_in(); put(p, stem_fun(NULL), s[1], s[2]) }
+    }
+    sel <- as.character(outputs)
+    if ("main" %in% sel) attempt("Lysis curve (main)",
+      one_figure("Lysis curve (main)", generate_plot(), "main", function(s) if (is.null(s)) main_file_stem() else paste0("lysis_curve_main_", export_size_tag(s))))
+    for (ty in sub("^analysis:", "", sel[startsWith(sel, "analysis:")])) {
+      lab <- names(ANALYSIS_FIGURE_CHOICES)[match(ty, ANALYSIS_FIGURE_CHOICES)]
+      attempt(lab, one_figure(lab, generate_analysis_plot(ty), ty, function(s) analysis_file_stem(ty, if (!is.null(s) && (fixed_mode() || !is.null(sz_custom))) s)))
+    }
+    if ("composed" %in% sel) {
+      if (!has_patchwork) skip("Composed figure", "the 'patchwork' package is not installed.")
+      else attempt("Composed figure", {
+        comp <- compose_info()
+        if (is.null(comp$plot)) skip("Composed figure", "no panel is available for this selection.")
+        else put(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+      })
+    }
+    if ("compare" %in% sel) {
+      if (is.null(rv_cmp$ds)) skip("Compare figure", "load a second dataset on the Compare tab.")
+      else attempt("Compare figure", {
+        p <- generate_compare_plot()
+        if (is_placeholder_plot(p)) skip("Compare figure", placeholder_reason(p))
+        else if (!is.null(sz_custom)) put(p, compare_file_stem(), sz_custom[1], sz_custom[2])
+        else if (fixed_mode()) { g <- fixed_figure(p, "compare"); s <- size_from_grob(g, "compare"); put(g, compare_file_stem(), s[1], s[2]) }
+        else { s <- export_size_in(); put(p, compare_file_stem(), s[1], s[2]) }
+      })
+    }
+    if ("csv_summary" %in% sel) attempt("Summary statistics", csv(with_stats_caveat(stats_table_display()), "summary_statistics.csv"))
+    if ("csv_replicate_stats" %in% sel) attempt("Replicate statistics", {
+      st <- analysis_stats_display(); made <- FALSE
+      for (nm in c("pairwise", "omnibus", "posthoc")) if (!is.null(st[[nm]]) && nrow(st[[nm]]) > 0) {
+        csv(with_stats_caveat(st[[nm]]), paste0("replicate_statistics_", nm, ".csv")); made <- TRUE
+      }
+      if (!made) skip("Replicate statistics", "no comparison possible (needs 2 or more replicates in two samples).")
+    })
+    if ("csv_metrics" %in% sel) attempt("Curve metrics", csv(present(curve_metrics_current(), "sample"), "curve_metrics.csv"))
+    if ("csv_raw_wide" %in% sel) attempt("Raw data (wide)", csv(raw_wide_table(), "raw_data_wide.csv"))
+    if ("notes" %in% sel) attempt("Experiment notes", {
+      write_notes_html(file.path(dir, "notes.html"), notes_current(), technical_rep_caveat())
+      write_notes_json(file.path(dir, "notes.json"), notes_current())
+      written <<- c(written, "notes.html", "notes.json")
+    })
+    if (length(skipped))
+      writeLines(enc2utf8(c("Outputs that were not written:", "", skipped)), file.path(dir, "SKIPPED.txt"), useBytes = TRUE)
+    list(files = written, skipped = skipped)
+  }
+  batch_size_now <- function() {
+    if (!identical(input$batch_size_mode %||% "current", "custom")) return(NULL)
+    w <- suppressWarnings(as.numeric(input$batch_width_mm)); h <- suppressWarnings(as.numeric(input$batch_height_mm))
+    if (!is.finite(w) || !is.finite(h) || w < 10 || h < 10) return(NULL)
+    mx <- SIZE_MAX_IN * 25.4
+    c(min(w, mx), min(h, mx))
+  }
+  output$downloadBatchExport <- downloadHandler(
+    filename = function() paste0("lysis_export_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".", bundle_archive_kind()),
+    content  = function(file) {
+      req(rv$data, input$selected_samples)
+      outs <- input$batch_outputs
+      if (is.null(outs) || !length(outs)) stop("Tick at least one output.")
+      tmp <- tempfile("batch_"); dir.create(tmp); on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+      fold <- "lysis_export"; dir <- file.path(tmp, fold); dir.create(dir)
+      fmt <- input$batch_format %||% "svg"
+      res <- batch_export_build(dir, outs, fmt, input$batch_dpi %||% 300, batch_size_now())
+      if (!length(res$files)) stop(paste(c("Nothing could be written.", res$skipped), collapse = " "))
+      write_bundle_archive(file, tmp, fold)
+    })
+
+  # ── Cumulative build for PowerPoint and GIF: the panel does not move between slides / frames ─────
+  # Every frame is the full-axes figure with the samples added so far, built by build_plot() and pinned by
+  # build_parity_frames(): the same panel, legend column and figure size in all of them. The axes are the whole data's
+  # (expand_limits), so a curve that is only drawn later does not rescale the axes either.
+  presentation_frames <- function(samps, canvas_w_in = NULL, canvas_h_in = NULL, fit_w_in = NULL, fit_h_in = NULL) {
+    aes_v  <- resolve_aesthetics(samps)
+    pd_all <- prepare_plot_data(samples = samps)
+    rt <- range(pd_all$time, na.rm = TRUE)
+    ecol <- switch(input$error_type %||% "sem", sd = "sd_value", ci95 = "ci95_value", none = NULL, "sem_value")
+    err  <- if (is.null(ecol)) 0 else pd_all[[ecol]] * (input$error_multiplier %||% 1)
+    yv <- c(pd_all$mean_value, pd_all$mean_value + err, pd_all$mean_value - err)
+    yv <- yv[is.finite(yv)]; if (identical(input$y_scale_type, "log")) yv <- yv[yv > 0]
+    ry <- if (length(yv)) range(yv) else NULL
+    plots <- lapply(seq_along(samps), function(k) {
+      vs <- samps[seq_len(k)]
+      aes_k <- list(shapes = aes_v$shapes[vs], colors = aes_v$colors[vs], line_types = aes_v$line_types[vs],
+                    leg_labels = aes_v$leg_labels[vs], filled_map = aes_v$filled_map[vs])
+      p <- build_plot(pd_all[pd_all$variable %in% vs, , drop = FALSE], vs, aes_k, highlight_samples = NULL)
+      p + expand_limits(x = rt, y = ry)
+    })
+    pm <- if (fixed_mode()) panel_dims_mm("main")
+          else c(0.62 * (canvas_w_in %||% 8) * 25.4, 0.7 * (canvas_h_in %||% 6) * 25.4)
+    build_parity_frames(plots, pm[1], pm[2], fit_w_in = fit_w_in, fit_h_in = fit_h_in)
+  }
+
 }
 
 shinyApp(ui, server)

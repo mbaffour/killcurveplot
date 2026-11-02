@@ -25,8 +25,9 @@ d <- env$APP_DEFAULTS
 check("APP_DEFAULTS: every v2.21 input, the default figure unchanged (dot, no brackets)",
       identical(d$metric_style, "dot") && identical(d$metric_brackets, FALSE) && identical(d$extract_style, "bar") &&
       isTRUE(d$extract_points) && identical(d$lysed_mode, "relative") && d$lysed_threshold == 0.5)
-check("the new entries are the LAST of APP_DEFAULTS' base list (merge-safe)",
-      identical(tail(names(env$LEGACY_BASE), 6), c("metric_style", "metric_brackets", "extract_style", "extract_points", "lysed_mode", "lysed_threshold")))
+check("the new entries sit together, in order, at the end of the v2.21 block of APP_DEFAULTS' base list (later versions append after them)",
+      identical(names(env$LEGACY_BASE)[match("metric_style", names(env$LEGACY_BASE)) + 0:5],
+                c("metric_style", "metric_brackets", "extract_style", "extract_points", "lysed_mode", "lysed_threshold")))
 check("neither preset touches them",
       !any(grepl("^(metric_style|metric_brackets|extract_style|extract_points|lysed_)", names(env$legacy_preset_settings()))) &&
       !any(grepl("^(metric_style|metric_brackets|extract_style|extract_points|lysed_)", names(env$journal_preset_settings(89, 65)))))
