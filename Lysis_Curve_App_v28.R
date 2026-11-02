@@ -3366,6 +3366,834 @@ first_separation_time <- function(x, alpha = 0.05) {
 }
 # ── end v2.20 engine ──
 
+# ── v2.22 stats engine ──
+# Pure functions (no Shiny state): Prism-style column, grouped and time-course statistics for lysis-curve data.
+# Tested by tests/test_v222_stats.R; documented in docs/STATISTICS_REFERENCE.md.
+# Conventions (as the rest of the app): tidy data.frames; every function returns an NA row with a `note` column
+# on bad input (n = 1, constant values, NA, missing reference) instead of an error; every test sits in a tryCatch.
+# n is usually 3 per sample, so every result is exploratory: a non-significant result is not evidence of no
+# difference, and Shapiro / Levene / Bartlett have almost no power at n = 3 (see the `note` columns).
+# base R + stats first. rstatix / car / nlme / mvtnorm are optional: used through requireNamespace(), with a
+# base-R fallback or an NA row and a note when absent. (car and rstatix are not needed by anything here.)
+#
+# Replicate frames: functions that take a `long` frame accept EITHER the explicit column names (sample / time / od /
+# well / replicate) OR the app's own replicate frame (variable / time / value / replicate), so the UI can pass
+# rep_pd directly. A missing `well` id is built as <sample>_<replicate>.
+
+.s22_num <- function(x) suppressWarnings(as.numeric(x))
+.s22_fin <- function(x) { x <- .s22_num(x); x[is.finite(x)] }
+.s22_level <- function(level) { level <- .s22_num(level)[1]; if (!is.finite(level) || level <= 0 || level >= 1) 0.95 else level }
+.s22_pct <- function(level) format(round(100 * level, 1), trim = TRUE)
+
+# Normalise a replicate frame to sample / time / od / well / replicate (NULL when it cannot be done).
+.s22_as_long <- function(x, response = "od", time = "time", sample = "sample", id = "well") {
+  if (is.null(x) || !is.data.frame(x) || nrow(x) == 0) return(NULL)
+  pick <- function(...) { for (nm in c(...)) if (!is.null(nm) && nm %in% names(x)) return(nm); NA_character_ }
+  s_col <- pick(sample, "sample", "variable"); t_col <- pick(time, "time", "Time")
+  y_col <- pick(response, "od", "value");      w_col <- pick(id, "well")
+  if (is.na(s_col) || is.na(t_col) || is.na(y_col)) return(NULL)
+  smp <- as.character(x[[s_col]])
+  rep_v <- if ("replicate" %in% names(x)) as.character(x[["replicate"]]) else rep(NA_character_, nrow(x))
+  well <- if (!is.na(w_col)) as.character(x[[w_col]])
+          else if ("replicate" %in% names(x)) paste(smp, rep_v, sep = "_") else smp
+  d <- data.frame(sample = smp, time = .s22_num(x[[t_col]]), od = .s22_num(x[[y_col]]),
+                  well = well, replicate = rep_v, stringsAsFactors = FALSE)
+  d <- d[!is.na(d$sample) & is.finite(d$time), , drop = FALSE]
+  if (nrow(d) == 0) NULL else d
+}
+
+# Adjust only the finite p-values; the family size m is the number of finite p-values.
+.s22_padj <- function(p, method = c("holm", "bonferroni", "sidak")) {
+  method <- match.arg(method); out <- rep(NA_real_, length(p)); ok <- is.finite(p); m <- sum(ok)
+  if (m == 0) return(out)
+  out[ok] <- switch(method, holm = stats::p.adjust(p[ok], "holm"), bonferroni = pmin(1, p[ok] * m),
+                    sidak = pmin(1, 1 - (1 - p[ok])^m))
+  out
+}
+
+# Shapiro-Wilk guarded against n < 3, n > 5000 and constant data. Returns list(W, p, note).
+.s22_shapiro <- function(x) {
+  x <- .s22_fin(x); n <- length(x)
+  if (n < 3)    return(list(W = NA_real_, p = NA_real_, note = "n < 3: Shapiro-Wilk not defined"))
+  if (n > 5000) return(list(W = NA_real_, p = NA_real_, note = "n > 5000: Shapiro-Wilk not defined"))
+  if (diff(range(x)) == 0) return(list(W = NA_real_, p = NA_real_, note = "constant values"))
+  sw <- tryCatch(stats::shapiro.test(x), error = function(e) NULL)
+  if (is.null(sw)) return(list(W = NA_real_, p = NA_real_, note = "Shapiro-Wilk failed"))
+  list(W = unname(sw$statistic), p = sw$p.value,
+       note = if (n < 8) paste0("n = ", n, ": Shapiro-Wilk has almost no power to reject normality; p > 0.05 is not evidence of normality") else "")
+}
+
+# ── 1. Descriptives ───────────────────────────────────────────────────────────
+# One row. skewness is the sample skewness G1 and kurtosis the EXCESS kurtosis G2, both bias-corrected as in
+# Prism / Excel / SAS (G1 needs n >= 3, G2 n >= 4); t-based CI of the mean; quantiles are type 7 (R default).
+describe_column <- function(x, level = 0.95) {
+  level <- .s22_level(level); x <- .s22_fin(x); n <- length(x)
+  na <- NA_real_
+  out <- data.frame(n = n, mean = na, sd = na, sem = na, cv_pct = na, ci_lo = na, ci_hi = na, median = na,
+                    q1 = na, q3 = na, iqr = na, min = na, max = na, range = na, skewness = na, kurtosis = na,
+                    geo_mean = na, shapiro_p = na, note = "", stringsAsFactors = FALSE)
+  if (n == 0) { out$note <- "no finite values"; return(out) }
+  m <- mean(x); out$mean <- m
+  q <- unname(stats::quantile(x, c(0.25, 0.75), type = 7))
+  out$median <- stats::median(x); out$q1 <- q[1]; out$q3 <- q[2]; out$iqr <- q[2] - q[1]
+  out$min <- min(x); out$max <- max(x); out$range <- max(x) - min(x)
+  if (all(x > 0)) out$geo_mean <- exp(mean(log(x)))
+  notes <- character(0)
+  if (n >= 2) {
+    s <- stats::sd(x); out$sd <- s; out$sem <- s / sqrt(n)
+    out$cv_pct <- if (m != 0) 100 * s / abs(m) else na
+    tq <- stats::qt(1 - (1 - level) / 2, df = n - 1)
+    out$ci_lo <- m - tq * s / sqrt(n); out$ci_hi <- m + tq * s / sqrt(n)
+    if (s > 0) {
+      m2 <- mean((x - m)^2); m3 <- mean((x - m)^3); m4 <- mean((x - m)^4)
+      if (n >= 3) out$skewness <- sqrt(n * (n - 1)) / (n - 2) * m3 / m2^1.5
+      if (n >= 4) out$kurtosis <- (n - 1) / ((n - 2) * (n - 3)) * ((n + 1) * (m4 / m2^2 - 3) + 6)
+    } else notes <- c(notes, "constant values: skewness / kurtosis undefined")
+  } else notes <- c(notes, "n = 1: spread and CI undefined")
+  if (!all(x > 0)) notes <- c(notes, "geometric mean undefined (value <= 0)")
+  sw <- .s22_shapiro(x); out$shapiro_p <- sw$p
+  if (n < 3) notes <- c(notes, sw$note)
+  out$note <- paste(notes[nzchar(notes)], collapse = "; ")
+  out
+}
+
+# describe_column() applied to every sample x metric of a per-replicate metrics table (the shape
+# compute_replicate_metric_rows() returns). Long table: the `by` column(s), metric, then the describe columns.
+describe_metrics <- function(rep_rows, metrics = NULL, by = "sample", level = 0.95) {
+  empty <- cbind(stats::setNames(data.frame(matrix(character(0), 0, length(by))), by),
+                 metric = character(0), describe_column(numeric(0), level)[0, , drop = FALSE])
+  if (is.null(rep_rows) || !is.data.frame(rep_rows) || nrow(rep_rows) == 0 || !all(by %in% names(rep_rows))) return(empty)
+  if (is.null(metrics)) {
+    metrics <- names(rep_rows)[vapply(rep_rows, is.numeric, logical(1))]
+    metrics <- setdiff(metrics, c("replicate", by))
+  }
+  metrics <- intersect(metrics, names(rep_rows))
+  if (length(metrics) == 0) return(empty)
+  key <- do.call(paste, c(lapply(by, function(b) as.character(rep_rows[[b]])), sep = "\r"))
+  rows <- list()
+  for (k in unique(key)) {
+    g <- rep_rows[key == k, , drop = FALSE]
+    for (mt in metrics) {
+      r <- describe_column(g[[mt]], level)
+      lead <- g[1, by, drop = FALSE]; rownames(lead) <- NULL
+      lead[] <- lapply(lead, function(z) if (is.factor(z)) as.character(z) else z)
+      rows[[length(rows) + 1L]] <- cbind(lead, metric = mt, r, stringsAsFactors = FALSE)
+    }
+  }
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# ── 2. Normality ──────────────────────────────────────────────────────────────
+# Q-Q plot frame: theoretical normal quantiles (ppoints) against the sorted sample.
+qq_frame <- function(x) {
+  x <- sort(.s22_fin(x)); n <- length(x)
+  if (n == 0) return(data.frame(theoretical = numeric(0), sample = numeric(0)))
+  data.frame(theoretical = stats::qnorm(stats::ppoints(n)), sample = x)
+}
+
+# Shapiro-Wilk per sample x metric, plus one "(pooled residuals)" row per metric (residuals from the sample means).
+# n = 3 per sample gives Shapiro almost no power: the note says so.
+normality_table <- function(rep_rows, metrics = NULL) {
+  empty <- data.frame(sample = character(0), metric = character(0), n = integer(0), W = numeric(0),
+                      shapiro_p = numeric(0), note = character(0), stringsAsFactors = FALSE)
+  if (is.null(rep_rows) || !is.data.frame(rep_rows) || nrow(rep_rows) == 0 || !"sample" %in% names(rep_rows)) return(empty)
+  if (is.null(metrics)) metrics <- setdiff(names(rep_rows)[vapply(rep_rows, is.numeric, logical(1))], "replicate")
+  metrics <- intersect(metrics, names(rep_rows))
+  smp <- as.character(rep_rows$sample); rows <- list()
+  for (mt in metrics) {
+    v <- .s22_num(rep_rows[[mt]]); resid_all <- numeric(0)
+    for (s in unique(smp)) {
+      x <- v[smp == s]; x <- x[is.finite(x)]; sw <- .s22_shapiro(x)
+      rows[[length(rows) + 1L]] <- data.frame(sample = s, metric = mt, n = length(x), W = sw$W,
+                                              shapiro_p = sw$p, note = sw$note, stringsAsFactors = FALSE)
+      if (length(x) >= 2) resid_all <- c(resid_all, x - mean(x))
+    }
+    sw <- .s22_shapiro(resid_all)
+    rows[[length(rows) + 1L]] <- data.frame(sample = "(pooled residuals)", metric = mt, n = length(resid_all),
+                                            W = sw$W, shapiro_p = sw$p, note = sw$note, stringsAsFactors = FALSE)
+  }
+  if (length(rows) == 0) empty else do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# ── 3. Equal-variance checks ──────────────────────────────────────────────────
+# Brown-Forsythe (Levene with the median as centre, hand-coded as anova(lm(|x - group median| ~ group))) and
+# Bartlett. Groups with fewer than 2 finite values are excluded. Both tests are unreliable at n = 3 per group.
+variance_check <- function(values, groups) {
+  mk <- function(test, stat, df1, df2, p, note)
+    data.frame(test = test, statistic = stat, df1 = df1, df2 = df2, p = p, note = note, stringsAsFactors = FALSE)
+  P <- .s22_prep(values, groups)
+  bad <- function(why) rbind(mk("Brown-Forsythe (Levene, median)", NA_real_, NA_real_, NA_real_, NA_real_, why),
+                             mk("Bartlett", NA_real_, NA_real_, NA_real_, NA_real_, why))
+  if (length(P$lev) < 2) return(bad(paste0("need at least two groups with 2+ finite values", P$note_sfx)))
+  if (P$const) return(bad("all values identical: variance tests undefined"))
+  note0 <- paste0("n per group is small: low power; a non-significant result does not show equal variances", P$note_sfx)
+  bf <- tryCatch({
+    dev <- abs(P$x - stats::ave(P$x, P$g, FUN = stats::median))
+    a <- stats::anova(stats::lm(dev ~ P$g))
+    f <- a[["F value"]][1]
+    if (!is.finite(f)) stop("degenerate")
+    mk("Brown-Forsythe (Levene, median)", f, a$Df[1], a$Df[2], a[["Pr(>F)"]][1], note0)
+  }, error = function(e) mk("Brown-Forsythe (Levene, median)", NA_real_, NA_real_, NA_real_, NA_real_,
+                            "undefined (identical absolute deviations or too few values)"))
+  bt <- tryCatch({
+    if (any(tapply(P$x, P$g, stats::var) == 0)) stop("zero variance")
+    b <- stats::bartlett.test(P$x, P$g)
+    if (!is.finite(b$p.value)) stop("degenerate")
+    mk("Bartlett", unname(b$statistic), unname(b$parameter), NA_real_, b$p.value,
+       paste0(note0, "; Bartlett assumes normality and is sensitive to departures from it"))
+  }, error = function(e) mk("Bartlett", NA_real_, NA_real_, NA_real_, NA_real_, "undefined (a group has zero variance)"))
+  rbind(bf, bt)
+}
+
+# Shared prep: finite values, groups in order of appearance (or the factor's level order), groups with fewer than
+# `min_n` finite values dropped. Returns list(x, g, lev, n, note_sfx).
+.s22_prep <- function(values, groups, min_n = 2L) {
+  v <- .s22_num(values)
+  g <- if (is.factor(groups)) as.character(groups) else as.character(groups)
+  lev0 <- if (is.factor(groups)) levels(droplevels(groups)) else unique(g[!is.na(g)])
+  ok <- is.finite(v) & !is.na(g) & seq_along(v) <= length(g)
+  v <- v[ok]; g <- g[ok]
+  n_all <- table(factor(g, levels = lev0))
+  keep <- names(n_all)[n_all >= min_n]
+  dropped <- setdiff(lev0[n_all[lev0] > 0], keep)
+  sfx <- if (length(dropped)) paste0(" (excluded, fewer than ", min_n, " values: ", paste(dropped, collapse = ", "), ")") else ""
+  s <- g %in% keep
+  list(x = v[s], g = factor(g[s], levels = keep), lev = keep, n = n_all[keep], note_sfx = sfx,
+       const = length(v[s]) > 0 && diff(range(v[s])) == 0)
+}
+
+# ── 4. Omnibus and post-hoc ───────────────────────────────────────────────────
+# One-way ANOVA (F, eta^2), Welch ANOVA (oneway.test) and Kruskal-Wallis (H, epsilon^2 = H / (N - 1)).
+omnibus_table <- function(values, groups) {
+  mk <- function(test, stat, df1, df2, p, eta, eps, note)
+    data.frame(test = test, statistic = stat, df1 = df1, df2 = df2, p = p, eta_sq = eta, epsilon_sq = eps,
+               note = note, stringsAsFactors = FALSE)
+  na <- NA_real_; P <- .s22_prep(values, groups)
+  tests <- c("One-way ANOVA", "Welch ANOVA", "Kruskal-Wallis")
+  bad <- function(why) do.call(rbind, lapply(tests, function(t) mk(t, na, na, na, na, na, na, why)))
+  if (length(P$lev) < 2) return(bad(paste0("need at least two groups with 2+ finite values", P$note_sfx)))
+  if (P$const) return(bad("all values identical: no test"))
+  N <- length(P$x); k <- length(P$lev)
+  lowp <- if (any(P$n < 3)) "; some groups have n < 3: low power" else ""
+  r1 <- tryCatch({
+    a <- suppressWarnings(stats::anova(stats::lm(P$x ~ P$g))); f <- a[["F value"]][1]
+    if (!is.finite(f)) stop("degenerate")
+    mk(tests[1], f, a$Df[1], a$Df[2], a[["Pr(>F)"]][1], a[["Sum Sq"]][1] / sum(a[["Sum Sq"]]), na,
+       paste0("assumes equal variances and normal residuals", lowp, P$note_sfx))
+  }, error = function(e) mk(tests[1], na, na, na, na, na, na, "undefined (constant values or no residual df)"))
+  r2 <- tryCatch({
+    o <- stats::oneway.test(P$x ~ P$g, var.equal = FALSE)
+    if (!is.finite(o$p.value)) stop("degenerate")
+    mk(tests[2], unname(o$statistic), unname(o$parameter[1]), unname(o$parameter[2]), o$p.value, na, na,
+       paste0("does not assume equal variances", lowp, P$note_sfx))
+  }, error = function(e) mk(tests[2], na, na, na, na, na, na, "undefined (a group has zero variance)"))
+  r3 <- tryCatch({
+    kw <- stats::kruskal.test(P$x ~ P$g)
+    if (!is.finite(kw$p.value)) stop("degenerate")
+    mk(tests[3], unname(kw$statistic), unname(kw$parameter), na, kw$p.value, na, unname(kw$statistic) / (N - 1),
+       paste0("rank-based; with n = 3 per group the smallest attainable p is large", lowp, P$note_sfx))
+  }, error = function(e) mk(tests[3], na, na, na, na, na, na, "undefined (all values identical)"))
+  rbind(r1, r2, r3)
+}
+
+# One row per pair. group1 - group2 = estimate (group1 is the LATER level, or the other sample when `reference`
+# is given, group2 the earlier level / the reference; this matches TukeyHSD's "b-a" labelling).
+#   tukey         pooled-variance Tukey-Kramer from TukeyHSD(aov()); p_raw NA (single-step); all-pairs family
+#   holm_welch    Welch t per pair, Holm-adjusted across the family; CI unadjusted
+#   bonferroni    Welch t per pair, Bonferroni p; CI widened to 1 - (1 - level) / m
+#   sidak         Welch t per pair, Sidak p;      CI at 1 - (1 - level)^(1 / m)
+#   games_howell  Welch df per pair, studentised-range (ptukey) p; estimate CI uses qtukey; p_raw NA
+#   dunn          Kruskal rank sums, tie-corrected z, Holm (or Bonferroni via `dunn_adjust`) p; estimate = mean-rank difference
+#   dunnett       each sample vs the reference, pooled-variance multivariate-t (needs mvtnorm); otherwise it falls back to
+#                 holm_welch against the reference and the `method` column says so
+# Groups with fewer than 2 finite values are excluded. Columns: group1, group2, estimate, ci_lo, ci_hi, statistic,
+# p_raw, p_adj, method, stars, note. Attribute "n": n per group used.
+posthoc_table <- function(values, groups,
+                          method = c("tukey", "holm_welch", "games_howell", "dunn", "dunnett", "bonferroni", "sidak"),
+                          reference = NULL, level = 0.95, dunn_adjust = c("holm", "bonferroni")) {
+  method <- match.arg(method); dunn_adjust <- match.arg(dunn_adjust); level <- .s22_level(level); na <- NA_real_
+  row1 <- function(g1, g2, est, lo, hi, stat, praw, padj, meth, note)
+    data.frame(group1 = g1, group2 = g2, estimate = est, ci_lo = lo, ci_hi = hi, statistic = stat,
+               p_raw = praw, p_adj = padj, method = meth, stars = sig_stars(padj), note = note, stringsAsFactors = FALSE)
+  na_row <- function(why, meth = method) row1(NA_character_, NA_character_, na, na, na, na, na, na, meth, why)
+  P <- .s22_prep(values, groups)
+  if (length(P$lev) < 2) return(na_row(paste0("need at least two groups with 2+ finite values", P$note_sfx)))
+  if (P$const) return(na_row("all values identical: no test"))
+  lev <- P$lev; k <- length(lev); n <- stats::setNames(as.integer(P$n), lev)
+  mu <- vapply(lev, function(l) mean(P$x[P$g == l]), numeric(1)); sdv <- vapply(lev, function(l) stats::sd(P$x[P$g == l]), numeric(1))
+  note_ref <- ""; ref <- NULL
+  if (!is.null(reference) && length(reference) == 1 && !is.na(reference) && nzchar(as.character(reference))) {
+    if (as.character(reference) %in% lev) ref <- as.character(reference)
+    else note_ref <- paste0("reference '", reference, "' has no usable values: all pairs compared instead")
+  }
+  if (method == "dunnett" && is.null(ref)) {
+    ref <- lev[1]; note_ref <- paste0(if (nzchar(note_ref)) paste0(note_ref, "; ") else "", "no reference given: first group '", ref, "' used")
+  }
+  # pair list: (g1, g2) -> estimate g1 - g2
+  pairs <- if (!is.null(ref)) lapply(setdiff(lev, ref), function(l) c(l, ref))
+           else lapply(utils::combn(k, 2, simplify = FALSE), function(ij) c(lev[ij[2]], lev[ij[1]]))
+  m <- length(pairs); notes0 <- paste0(note_ref, P$note_sfx)
+  fin <- function(...) paste(c(...)[nzchar(c(...))], collapse = "; ")
+  low <- if (any(n < 3)) "some groups have n < 3: low power" else ""
+  welch <- function(a, b, lv) {                      # list(est, se, t, df, p, lo, hi) or NULL
+    na_ <- length(a); nb_ <- length(b); va <- stats::var(a) / na_; vb <- stats::var(b) / nb_
+    se <- sqrt(va + vb); if (!is.finite(se) || se == 0) return(NULL)
+    df <- (va + vb)^2 / (va^2 / (na_ - 1) + vb^2 / (nb_ - 1)); est <- mean(a) - mean(b); tt <- est / se
+    tq <- stats::qt(1 - (1 - lv) / 2, df)
+    list(est = est, se = se, t = tt, df = df, p = 2 * stats::pt(-abs(tt), df), lo = est - tq * se, hi = est + tq * se)
+  }
+  ok_out <- function(rows) { out <- do.call(rbind, c(rows, list(make.row.names = FALSE))); attr(out, "n") <- n; out }
+
+  if (method == "dunnett") {
+    if (requireNamespace("mvtnorm", quietly = TRUE)) {
+      res <- tryCatch({
+        N <- sum(n); dfe <- N - k; if (dfe < 1) stop("no residual df")
+        mse <- sum((P$x - mu[as.character(P$g)])^2) / dfe; if (!is.finite(mse) || mse <= 0) stop("zero residual variance")
+        oth <- setdiff(lev, ref); est <- mu[oth] - mu[ref]; se <- sqrt(mse * (1 / n[oth] + 1 / n[ref])); tt <- est / se
+        if (m == 1) { p <- 2 * stats::pt(-abs(tt), dfe); crit <- stats::qt(1 - (1 - level) / 2, dfe) }
+        else {
+          R <- outer(seq_along(oth), seq_along(oth), function(i, j) sqrt(n[oth][i] * n[oth][j] / ((n[oth][i] + n[ref]) * (n[oth][j] + n[ref]))))
+          diag(R) <- 1
+          p <- vapply(abs(tt), function(a) 1 - mvtnorm::pmvt(lower = rep(-a, m), upper = rep(a, m), corr = R, df = dfe)[1], numeric(1))
+          crit <- mvtnorm::qmvt(level, tail = "both.tails", corr = R, df = dfe)$quantile
+        }
+        lapply(seq_along(oth), function(i)
+          row1(oth[i], ref, unname(est[i]), unname(est[i] - crit * se[i]), unname(est[i] + crit * se[i]), unname(tt[i]),
+               na, min(1, max(0, unname(p[i]))), "Dunnett (pooled-variance multivariate t)",
+               fin(notes0, low, "CIs are simultaneous")))
+      }, error = function(e) NULL)
+      if (!is.null(res)) return(ok_out(res))
+    }
+    fb_reason <- if (requireNamespace("mvtnorm", quietly = TRUE)) "multivariate-t integral failed" else "mvtnorm not installed"
+    method <- "holm_welch"; fallback <- TRUE
+  } else { fallback <- FALSE; fb_reason <- "" }
+  meth_label <- switch(method, tukey = "Tukey HSD", holm_welch = "Holm-adjusted Welch t", games_howell = "Games-Howell",
+                       dunn = paste0("Dunn (", if (dunn_adjust == "holm") "Holm" else "Bonferroni", ")"),
+                       bonferroni = "Bonferroni-adjusted Welch t", sidak = "Sidak-adjusted Welch t")
+  if (fallback) meth_label <- paste0("Dunnett (fallback: Holm-adjusted Welch t vs reference; ", fb_reason, ")")
+
+  if (method == "tukey") {
+    N <- sum(n)
+    if (N - k < 1) return(na_row(fin("no residual df (every group has 1-2 values and there are too many groups)", notes0), meth_label))
+    code <- paste0("g", seq_len(k)); gc <- factor(code[match(as.character(P$g), lev)], levels = code)
+    tk <- tryCatch(stats::TukeyHSD(stats::aov(P$x ~ gc), conf.level = level)$gc, error = function(e) NULL)
+    if (is.null(tk) || !all(is.finite(tk[, "p adj"]))) return(na_row(fin("Tukey undefined (constant values or no residual variance)", notes0), meth_label))
+    mse <- sum((P$x - mu[as.character(P$g)])^2) / (N - k)
+    if (!is.finite(mse) || mse <= 0) return(na_row(fin("Tukey undefined: zero within-group variance", notes0), meth_label))
+    rn <- rownames(tk); i2 <- as.integer(sub("^g(\\d+)-g(\\d+)$", "\\1", rn)); i1 <- as.integer(sub("^g(\\d+)-g(\\d+)$", "\\2", rn))
+    rows <- lapply(seq_along(rn), function(r) {
+      g1 <- lev[i2[r]]; g2 <- lev[i1[r]]
+      if (!is.null(ref) && !(g1 == ref || g2 == ref)) return(NULL)
+      q <- tk[r, "diff"] / sqrt(mse / 2 * (1 / n[g1] + 1 / n[g2]))
+      row1(g1, g2, tk[r, "diff"], tk[r, "lwr"], tk[r, "upr"], unname(q), na, tk[r, "p adj"], meth_label,
+           fin(notes0, low, if (!is.null(ref)) "Tukey family is all pairs; only pairs with the reference are shown", "statistic is the studentised range q"))
+    })
+    rows <- Filter(Negate(is.null), rows)
+    return(ok_out(rows))
+  }
+
+  if (method == "games_howell") {
+    rows <- lapply(pairs, function(pr) {
+      a <- P$x[P$g == pr[1]]; b <- P$x[P$g == pr[2]]; w <- welch(a, b, level)
+      if (is.null(w)) return(row1(pr[1], pr[2], mean(a) - mean(b), na, na, na, na, na, meth_label, fin(notes0, "constant values in both groups")))
+      tt <- abs(w$t)
+      padj <- stats::ptukey(tt * sqrt(2), nmeans = k, df = w$df, lower.tail = FALSE)
+      half <- stats::qtukey(level, nmeans = k, df = w$df) / sqrt(2) * w$se
+      row1(pr[1], pr[2], w$est, w$est - half, w$est + half, w$t, na, padj, meth_label,
+           fin(notes0, low, "studentised-range p over all k groups; CIs are simultaneous"))
+    })
+    return(ok_out(rows))
+  }
+
+  if (method == "dunn") {
+    r <- rank(P$x); N <- length(P$x); tie <- table(P$x); tcorr <- sum(tie^3 - tie) / (12 * (N - 1))
+    A <- N * (N + 1) / 12 - tcorr
+    mr <- vapply(lev, function(l) mean(r[P$g == l]), numeric(1))
+    rows <- lapply(pairs, function(pr) {
+      est <- mr[pr[1]] - mr[pr[2]]; se <- sqrt(A * (1 / n[pr[1]] + 1 / n[pr[2]]))
+      if (!is.finite(se) || se <= 0) return(row1(pr[1], pr[2], unname(est), na, na, na, na, na, meth_label, fin(notes0, "all values tied")))
+      z <- unname(est / se)
+      row1(pr[1], pr[2], unname(est), na, na, z, 2 * stats::pnorm(-abs(z)), na, meth_label,
+           fin(notes0, low, "estimate is the mean-rank difference; normal approximation"))
+    })
+    out <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+    out$p_adj <- .s22_padj(out$p_raw, dunn_adjust); out$stars <- sig_stars(out$p_adj)
+    attr(out, "n") <- n
+    return(out)
+  }
+
+  # Welch-based families: holm_welch, bonferroni, sidak (and the Dunnett fallback)
+  lv <- switch(method, bonferroni = 1 - (1 - level) / m, sidak = 1 - (1 - level)^(1 / m), level)
+  ci_note <- if (method %in% c("bonferroni", "sidak")) "CIs widened for the family" else paste0("CIs unadjusted (", .s22_pct(level), "% for a single comparison)")
+  rows <- lapply(pairs, function(pr) {
+    a <- P$x[P$g == pr[1]]; b <- P$x[P$g == pr[2]]; w <- welch(a, b, lv)
+    if (is.null(w)) return(row1(pr[1], pr[2], mean(a) - mean(b), na, na, na, na, na, meth_label, fin(notes0, "constant values in both groups: no test")))
+    row1(pr[1], pr[2], w$est, w$lo, w$hi, w$t, w$p, na, meth_label, fin(notes0, low, ci_note, paste0("Welch df = ", signif(w$df, 3))))
+  })
+  out <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  adj <- switch(method, sidak = "sidak", bonferroni = "bonferroni", "holm")
+  out$p_adj <- .s22_padj(out$p_raw, adj); out$stars <- sig_stars(out$p_adj)
+  attr(out, "n") <- n
+  out
+}
+
+# ── 5. Time courses ───────────────────────────────────────────────────────────
+# Two-way ANOVA of (log) readings: sample x time, with replicate wells as the repeated-measures subject.
+#   1. rm = TRUE, nlme present: nlme::lme(y ~ sample * time, random = ~1 | well, correlation = corAR1) (REML)
+#   2. otherwise aov(y ~ sample * time + Error(well))
+#   3. otherwise (or rm = FALSE) plain two-way aov, which ignores the repeated measures (too liberal for the sample effect)
+# Time is a factor. Tests are sequential (type I). Returns list(anova = data.frame(term, df_num, df_den, F, p), method, note).
+two_way_time_anova <- function(long, response = "od", time = "time", sample = "sample", id = "well", log = TRUE, rm = TRUE) {
+  terms <- c("Sample", "Time", "Sample x Time"); na <- NA_real_
+  res <- function(an, method, note) list(anova = an, method = method, note = note)
+  empty <- function(why) res(data.frame(term = terms, df_num = na, df_den = na, F = na, p = na, stringsAsFactors = FALSE), NA_character_, why)
+  d <- .s22_as_long(long, response, time, sample, id)
+  if (is.null(d)) return(empty("no usable data (need sample, time, response columns)"))
+  notes <- character(0)
+  d <- d[is.finite(d$od), , drop = FALSE]
+  if (log) {
+    nbad <- sum(d$od <= 0); if (nbad) notes <- c(notes, paste0(nbad, " reading(s) <= 0 dropped before the log transform"))
+    d <- d[d$od > 0, , drop = FALSE]; d$y <- base::log(d$od)
+  } else d$y <- d$od
+  if (nrow(d) == 0 || length(unique(d$sample)) < 2) return(empty("need at least two samples with data"))
+  if (length(unique(d$time)) < 2) return(empty("need at least two time points"))
+  d$well <- paste(d$sample, d$well, sep = "::")
+  d <- d[order(d$sample, d$well, d$time), , drop = FALSE]
+  tv <- sort(unique(d$time)); d$tf <- factor(d$time, levels = tv); d$tidx <- as.integer(d$tf)
+  d$sample <- factor(d$sample, levels = unique(d$sample)); d$well <- factor(d$well, levels = unique(d$well))
+  reps <- table(d$sample, d$tf)
+  if (all(reps <= 1)) return(empty("one reading per sample and time: the interaction cannot be tested"))
+  if (all(table(d$well) <= 1)) rm <- FALSE
+  lowp <- "with n = 3 wells per sample the tests have limited power and the AR(1) / compound-symmetry assumptions cannot be checked"
+  ans <- function(a, rn, dfn, dfd, f, p) {
+    idx <- match(c("sample", "tf", "sample:tf"), rn)
+    data.frame(term = terms, df_num = a[[dfn]][idx], df_den = a[[dfd]][idx], F = a[[f]][idx], p = a[[p]][idx], stringsAsFactors = FALSE)
+  }
+  fin_ok <- function(an) !is.null(an) && nrow(an) == 3 && any(is.finite(an$F))
+  fail_note <- character(0)
+  if (rm && requireNamespace("nlme", quietly = TRUE)) {
+    an <- tryCatch({
+      fit <- suppressWarnings(nlme::lme(y ~ sample * tf, random = ~ 1 | well, correlation = nlme::corAR1(form = ~ tidx | well),
+                                        data = d, method = "REML", na.action = stats::na.omit,
+                                        control = nlme::lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200)))
+      a <- stats::anova(fit); a <- as.data.frame(a)
+      ans(a, rownames(a), "numDF", "denDF", "F-value", "p-value")
+    }, error = function(e) { fail_note <<- c(fail_note, paste0("mixed model failed (", conditionMessage(e), ")")); NULL })
+    if (fin_ok(an)) return(res(an, "two-way repeated-measures: mixed model, random intercept per well, AR(1) errors (nlme::lme, REML)",
+                               paste(c(notes, "sequential (type I) F tests", if (log) "on log readings", lowp), collapse = "; ")))
+  } else if (rm) fail_note <- c(fail_note, "nlme not installed")
+  if (rm) {
+    an <- tryCatch({
+      s <- summary(stats::aov(y ~ sample * tf + Error(well), data = d))
+      tab <- do.call(rbind, lapply(s, function(st) {
+        a <- as.data.frame(st[[1]]); rn <- trimws(rownames(a)); dfres <- a$Df[rn == "Residuals"]
+        data.frame(term = rn, Df = a$Df, F = a[["F value"]], p = a[["Pr(>F)"]], dfd = if (length(dfres)) dfres[1] else na, stringsAsFactors = FALSE)
+      }))
+      idx <- match(c("sample", "tf", "sample:tf"), tab$term)
+      data.frame(term = terms, df_num = tab$Df[idx], df_den = tab$dfd[idx], F = tab$F[idx], p = tab$p[idx], stringsAsFactors = FALSE)
+    }, error = function(e) { fail_note <<- c(fail_note, paste0("aov Error(well) failed (", conditionMessage(e), ")")); NULL })
+    if (fin_ok(an)) return(res(an, "two-way repeated-measures ANOVA: aov(y ~ sample * time + Error(well))",
+                               paste(c(notes, fail_note, "compound symmetry assumed (no sphericity correction)", if (log) "on log readings", lowp), collapse = "; ")))
+  }
+  an <- tryCatch({
+    a <- as.data.frame(stats::anova(stats::lm(y ~ sample * tf, data = d))); idx <- match(c("sample", "tf", "sample:tf"), rownames(a))
+    data.frame(term = terms, df_num = a$Df[idx], df_den = a$Df[nrow(a)], F = a[["F value"]][idx], p = a[["Pr(>F)"]][idx], stringsAsFactors = FALSE)
+  }, error = function(e) NULL)
+  if (is.null(an)) return(empty(paste(c(notes, fail_note, "two-way ANOVA failed"), collapse = "; ")))
+  res(an, "two-way ANOVA (ignores the repeated measures on each well)",
+      paste(c(notes, fail_note, "p-values for Sample and Sample x Time are too liberal when readings in one well are correlated", if (log) "on log readings", lowp), collapse = "; "))
+}
+
+# At every time point each non-reference sample is compared with the reference by Welch t; p-values are adjusted
+# across the time points of that sample (Prism's "multiple comparisons at each time"; family = the sample's time
+# points). CIs are unadjusted at `level`. One row per time x non-reference sample, NA row + note when untestable.
+per_time_comparisons <- function(long, reference, adjust = c("sidak", "holm", "bonferroni"), level = 0.95,
+                                 response = "od", time = "time", sample = "sample", id = "well") {
+  adjust <- match.arg(adjust); level <- .s22_level(level); na <- NA_real_
+  cols <- c("time", "sample", "diff", "ci_lo", "ci_hi", "t", "df", "p_raw", "p_adj", "stars", "n", "n_ref", "note")
+  mk <- function(tm, s, diff, lo, hi, t, df, p, n, nr, note)
+    data.frame(time = tm, sample = s, diff = diff, ci_lo = lo, ci_hi = hi, t = t, df = df, p_raw = p, p_adj = na,
+               stars = "", n = n, n_ref = nr, note = note, stringsAsFactors = FALSE)[, cols]
+  d <- .s22_as_long(long, response, time, sample, id)
+  if (is.null(d)) return(mk(na, NA_character_, na, na, na, na, na, na, NA_integer_, NA_integer_, "no usable data"))
+  d <- d[is.finite(d$od), , drop = FALSE]
+  if (is.null(reference) || length(reference) != 1 || !as.character(reference) %in% d$sample)
+    return(mk(na, NA_character_, na, na, na, na, na, na, NA_integer_, NA_integer_, "reference sample not found in the data"))
+  reference <- as.character(reference)
+  tms <- sort(unique(d$time)); others <- setdiff(unique(d$sample), reference); out <- list()
+  for (s in others) {
+    rows <- lapply(tms, function(tm) {
+      a <- d$od[d$sample == s & d$time == tm]; b <- d$od[d$sample == reference & d$time == tm]
+      if (length(a) < 2 || length(b) < 2) return(mk(tm, s, if (length(a) && length(b)) mean(a) - mean(b) else na, na, na, na, na, na, length(a), length(b), "n < 2 in a group: no test"))
+      va <- stats::var(a) / length(a); vb <- stats::var(b) / length(b); se <- sqrt(va + vb)
+      est <- mean(a) - mean(b)
+      if (!is.finite(se) || se == 0) return(mk(tm, s, est, na, na, na, na, na, length(a), length(b), "constant values in both groups: no test"))
+      df <- (va + vb)^2 / (va^2 / (length(a) - 1) + vb^2 / (length(b) - 1)); tt <- est / se; tq <- stats::qt(1 - (1 - level) / 2, df)
+      mk(tm, s, est, est - tq * se, est + tq * se, tt, df, 2 * stats::pt(-abs(tt), df), length(a), length(b), "")
+    })
+    r <- do.call(rbind, rows); r$p_adj <- .s22_padj(r$p_raw, adjust); r$stars <- sig_stars(r$p_adj)
+    r$note <- ifelse(nzchar(r$note), r$note, paste0(adjust, " across ", sum(is.finite(r$p_raw)), " time points; CIs unadjusted"))
+    out[[length(out) + 1L]] <- r
+  }
+  if (length(out) == 0) return(mk(na, NA_character_, na, na, na, na, na, na, NA_integer_, NA_integer_, "no sample other than the reference"))
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# ── 6. Outliers ───────────────────────────────────────────────────────────────
+# One row per value of x (index = position in x; non-finite values are returned with flagged = FALSE and a note).
+#   grubbs  two-sided Grubbs test of the single most extreme value (n >= 3, assumes normality): G = max|x - mean| / sd,
+#           t = sqrt(n (n - 2) G^2 / ((n - 1)^2 - n G^2)), p = min(1, 2 n pt(t, n - 2, lower = FALSE)). statistic / p
+#           are filled on that row only; flagged when p < alpha.
+#   mad     |x - median| / (1.4826 MAD) > 3 (statistic = that robust z; p NA)
+#   iqr     outside the Tukey fences q1 - 1.5 IQR, q3 + 1.5 IQR (statistic = distance outside the fence in IQR units; > 0 flags)
+# Do not remove a value because a test flags it: with n = 3 every outlier test has almost no power or too much.
+outlier_tests <- function(x, method = c("grubbs", "mad", "iqr"), alpha = 0.05) {
+  method <- match.arg(method); na <- NA_real_
+  xv <- .s22_num(x); n_all <- length(xv); ok <- is.finite(xv); v <- xv[ok]; n <- length(v)
+  if (n_all == 0) return(data.frame(index = integer(0), value = numeric(0), flagged = logical(0), method = character(0),
+                                    statistic = numeric(0), p = numeric(0), note = character(0), stringsAsFactors = FALSE))
+  out <- data.frame(index = seq_len(n_all), value = xv, flagged = FALSE, method = method, statistic = na, p = na,
+                    note = ifelse(ok, "", "non-finite value ignored"), stringsAsFactors = FALSE)
+  if (n_all == 0) return(out)
+  setnote <- function(msg) { out$note[ok] <<- ifelse(nzchar(out$note[ok]), paste(out$note[ok], msg, sep = "; "), msg) }
+  if (method == "grubbs") {
+    if (n < 3) { setnote("n < 3: Grubbs test not defined"); return(out) }
+    s <- stats::sd(v); if (!is.finite(s) || s == 0) { setnote("constant values: no outlier"); return(out) }
+    G <- abs(v - mean(v)) / s; i <- which.max(G); g <- G[i]
+    p <- grubbs_p(g, n)
+    j <- which(ok)[i]; out$statistic[j] <- g; out$p[j] <- p; out$flagged[j] <- is.finite(p) && p < alpha
+    if (n < 6) setnote(paste0("n = ", n, ": Grubbs has very low power; it can only flag a value when n >= 3 and G exceeds ", signif(grubbs_critical(n, alpha), 4)))
+  } else if (method == "mad") {
+    med <- stats::median(v); mad0 <- 1.4826 * stats::median(abs(v - med))
+    if (!is.finite(mad0) || mad0 == 0) { setnote("MAD = 0: robust z undefined"); return(out) }
+    z <- abs(xv - med) / mad0; out$statistic[ok] <- z[ok]; out$flagged[ok] <- z[ok] > 3
+    if (n < 6) setnote(paste0("n = ", n, ": the MAD rule is unreliable with so few values"))
+  } else {
+    if (n < 4) { setnote("n < 4: quartile fences not meaningful"); return(out) }
+    q <- unname(stats::quantile(v, c(0.25, 0.75), type = 7)); iq <- q[2] - q[1]
+    if (iq == 0) { setnote("IQR = 0: fences undefined"); return(out) }
+    dist <- pmax(q[1] - xv, xv - q[2]) / iq - 1.5
+    out$statistic[ok] <- dist[ok]; out$flagged[ok] <- dist[ok] > 0
+  }
+  out
+}
+
+# Two-sided Grubbs p-value for an observed G at sample size n, and the critical G at `alpha` (the NIST handbook formula).
+grubbs_p <- function(G, n) {
+  if (!is.finite(G) || n < 3) return(NA_real_)
+  den <- (n - 1)^2 - n * G^2
+  if (den <= 0) return(0)
+  tt <- sqrt(n * (n - 2) * G^2 / den)
+  min(1, 2 * n * stats::pt(tt, n - 2, lower.tail = FALSE))
+}
+grubbs_critical <- function(n, alpha = 0.05) {
+  if (n < 3) return(NA_real_)
+  tc <- stats::qt(1 - alpha / (2 * n), n - 2)
+  (n - 1) / sqrt(n) * sqrt(tc^2 / (n - 2 + tc^2))
+}
+
+# Replicate-curve outliers: for each sample, the mean absolute deviation (over time) of every replicate curve from the
+# per-time MEDIAN curve of that sample, scaled by the median of those deviations; scaled distance > 3 is flagged.
+# Needs >= 3 replicates per sample. Columns: sample, replicate, well, abs_dev, distance (the scaled value), flagged, note.
+replicate_outlier_flags <- function(long, response = "od", time = "time", sample = "sample", id = "well") {
+  na <- NA_real_
+  empty <- data.frame(sample = character(0), replicate = character(0), well = character(0), abs_dev = numeric(0),
+                      distance = numeric(0), flagged = logical(0), note = character(0), stringsAsFactors = FALSE)
+  d <- .s22_as_long(long, response, time, sample, id)
+  if (is.null(d)) return(empty)
+  d <- d[is.finite(d$od), , drop = FALSE]
+  if (nrow(d) == 0) return(empty)
+  rows <- list()
+  for (s in unique(d$sample)) {
+    g <- d[d$sample == s, , drop = FALSE]; wells <- unique(g$well)
+    medc <- tapply(g$od, g$time, stats::median)
+    ad <- vapply(wells, function(w) { h <- g[g$well == w, , drop = FALSE]; mean(abs(h$od - medc[as.character(h$time)]), na.rm = TRUE) }, numeric(1))
+    md <- stats::median(ad)
+    note <- if (length(wells) < 3) "fewer than 3 replicates: no outlier call possible" else if (!is.finite(md) || md == 0) "median deviation is 0: scaled distance undefined" else ""
+    dist <- if (nzchar(note)) rep(na, length(wells)) else ad / md
+    rows[[length(rows) + 1L]] <- data.frame(sample = s, replicate = g$replicate[match(wells, g$well)], well = wells,
+                                            abs_dev = unname(ad), distance = unname(dist),
+                                            flagged = is.finite(dist) & dist > 3, note = note, stringsAsFactors = FALSE)
+  }
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+
+# ── 7. Area under the curve ───────────────────────────────────────────────────
+# Per-replicate trapezoid AUC of pmax(od - baseline, 0) over [t_from, t_to] (window edges by linear interpolation; where the
+# curve crosses the baseline the crossing point is inserted, so the area above the baseline is exact for a piecewise-linear curve). baseline: "none" (0), "first" (the replicate's first reading), "value" (baseline_value), "min"
+# (the replicate's minimum). Returns list(replicates = data.frame(sample, replicate, well, auc, baseline, note),
+# summary = per sample n, mean, sd, sem, ci_lo, ci_hi [, rel_auc, rel_lo, rel_hi]).
+# relative_to = reference sample: rel_auc = mean AUC / reference mean AUC, with a log-delta (Katz) CI:
+# SE(log R) = sqrt(CV_a^2 / n_a + CV_r^2 / n_r), Welch-Satterthwaite df on the two SEMs, CI = R * exp(+-t * SE).
+# Chosen over Fieller because it is always defined and simple to report; it needs positive means and is approximate at n = 3.
+auc_table <- function(long, baseline = c("none", "first", "value", "min"), baseline_value = 0, t_from = NULL, t_to = NULL,
+                      relative_to = NULL, level = 0.95, response = "od", time = "time", sample = "sample", id = "well") {
+  baseline <- match.arg(baseline); level <- .s22_level(level); na <- NA_real_
+  er <- data.frame(sample = character(0), replicate = character(0), well = character(0), auc = numeric(0), baseline = numeric(0), note = character(0), stringsAsFactors = FALSE)
+  es <- data.frame(sample = character(0), n = integer(0), mean = numeric(0), sd = numeric(0), sem = numeric(0), ci_lo = numeric(0), ci_hi = numeric(0), stringsAsFactors = FALSE)
+  d <- .s22_as_long(long, response, time, sample, id)
+  if (is.null(d)) return(list(replicates = er, summary = es))
+  d <- d[is.finite(d$od), , drop = FALSE]
+  if (nrow(d) == 0) return(list(replicates = er, summary = es))
+  lo <- if (is.null(t_from)) min(d$time) else .s22_num(t_from)[1]
+  hi <- if (is.null(t_to))   max(d$time) else .s22_num(t_to)[1]
+  bv <- .s22_num(baseline_value)[1]; if (!is.finite(bv)) bv <- 0
+  rows <- list()
+  for (w in unique(d$well)) {
+    g <- d[d$well == w, , drop = FALSE]; g <- g[order(g$time), , drop = FALSE]
+    b <- switch(baseline, none = 0, first = g$od[1], value = bv, min = min(g$od))
+    note <- ""; auc <- na
+    if (!is.finite(lo) || !is.finite(hi) || hi <= lo) note <- "empty or invalid time window"
+    else if (nrow(g) < 2) note <- "fewer than 2 readings"
+    else {
+      lo2 <- max(lo, min(g$time)); hi2 <- min(hi, max(g$time))
+      if (hi2 <= lo2) note <- "window outside the readings"
+      else {
+        tt <- sort(unique(c(lo2, g$time[g$time > lo2 & g$time < hi2], hi2)))
+        yy <- stats::approx(g$time, g$od - b, xout = tt, ties = "ordered")$y      # curve minus baseline, edges interpolated
+        cr <- which(yy[-length(yy)] * yy[-1] < 0)                                 # segments crossing the baseline: add the crossing point
+        if (length(cr)) {
+          tx <- tt[cr] + (tt[cr + 1] - tt[cr]) * yy[cr] / (yy[cr] - yy[cr + 1])
+          tt <- c(tt, tx); yy <- c(yy, rep(0, length(tx))); o <- order(tt); tt <- tt[o]; yy <- yy[o]
+        }
+        yy <- pmax(yy, 0)
+        auc <- sum(diff(tt) * (yy[-1] + yy[-length(yy)]) / 2)
+        if (lo < min(g$time) || hi > max(g$time)) note <- "window extends beyond the readings: clipped to the data range"
+      }
+    }
+    rows[[length(rows) + 1L]] <- data.frame(sample = g$sample[1], replicate = g$replicate[1], well = w, auc = auc, baseline = b, note = note, stringsAsFactors = FALSE)
+  }
+  rep_df <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  smp <- do.call(rbind, lapply(unique(rep_df$sample), function(s) {
+    v <- rep_df$auc[rep_df$sample == s]; v <- v[is.finite(v)]; n <- length(v)
+    sd_ <- if (n >= 2) stats::sd(v) else na; sem <- sd_ / sqrt(n); tq <- if (n >= 2) stats::qt(1 - (1 - level) / 2, n - 1) else na
+    data.frame(sample = s, n = n, mean = if (n) mean(v) else na, sd = sd_, sem = sem,
+               ci_lo = if (n >= 2) mean(v) - tq * sem else na, ci_hi = if (n >= 2) mean(v) + tq * sem else na, stringsAsFactors = FALSE)
+  }))
+  if (!is.null(relative_to) && length(relative_to) == 1 && nzchar(as.character(relative_to))) {
+    smp$rel_auc <- na; smp$rel_lo <- na; smp$rel_hi <- na; smp$rel_note <- ""
+    ri <- match(as.character(relative_to), smp$sample)
+    if (is.na(ri) || !is.finite(smp$mean[ri]) || smp$mean[ri] <= 0) smp$rel_note <- "reference has no positive mean AUC"
+    else {
+      for (i in seq_len(nrow(smp))) {
+        if (!is.finite(smp$mean[i])) next
+        r <- smp$mean[i] / smp$mean[ri]; smp$rel_auc[i] <- r
+        if (i == ri) { smp$rel_note[i] <- "reference"; next }
+        if (smp$n[i] < 2 || smp$n[ri] < 2 || smp$mean[i] <= 0 || !is.finite(smp$sem[i]) || !is.finite(smp$sem[ri])) { smp$rel_note[i] <- "CI needs n >= 2 and a positive mean"; next }
+        se_log <- sqrt((smp$sem[i] / smp$mean[i])^2 + (smp$sem[ri] / smp$mean[ri])^2)
+        va <- smp$sem[i]^2; vb <- smp$sem[ri]^2
+        df <- if (va + vb > 0) (va + vb)^2 / (va^2 / (smp$n[i] - 1) + vb^2 / (smp$n[ri] - 1)) else na
+        if (!is.finite(se_log) || !is.finite(df) || se_log == 0) { smp$rel_note[i] <- "CI undefined (no spread)"; next }
+        tq <- stats::qt(1 - (1 - level) / 2, df)
+        smp$rel_lo[i] <- r * exp(-tq * se_log); smp$rel_hi[i] <- r * exp(tq * se_log); smp$rel_note[i] <- "log-delta CI"
+      }
+    }
+  }
+  list(replicates = rep_df, summary = smp)
+}
+
+# Compare per-replicate AUCs with posthoc_table(): auc_rows is auc_table()'s `replicates` frame (or the whole list).
+auc_compare <- function(auc_rows, reference, method = "holm_welch", level = 0.95) {
+  if (is.list(auc_rows) && !is.data.frame(auc_rows) && "replicates" %in% names(auc_rows)) auc_rows <- auc_rows$replicates
+  if (is.null(auc_rows) || !all(c("sample", "auc") %in% names(auc_rows)) || nrow(auc_rows) == 0)
+    return(posthoc_table(numeric(0), character(0), method = "holm_welch"))
+  posthoc_table(auc_rows$auc, auc_rows$sample, method = match.arg(method, c("tukey", "holm_welch", "games_howell", "dunn", "dunnett", "bonferroni", "sidak")),
+                reference = reference, level = level)
+}
+
+# ── 8. One-sample tests ───────────────────────────────────────────────────────
+# t test (CI of the mean) and Wilcoxon signed-rank test of x against the hypothetical value mu. With n = 3 the smallest
+# two-sided Wilcoxon p is 0.25 (n = 4: 0.125, n = 5: 0.0625), so it cannot reach 0.05 below n = 6.
+one_sample_tests <- function(x, mu = 0, level = 0.95) {
+  level <- .s22_level(level); x <- .s22_fin(x); n <- length(x); na <- NA_real_
+  mu <- .s22_num(mu)[1]; if (!is.finite(mu)) mu <- 0
+  mk <- function(test, est, stat, df, p, lo, hi, note)
+    data.frame(test = test, n = n, mu = mu, estimate = est, statistic = stat, df = df, p = p, ci_lo = lo, ci_hi = hi, note = note, stringsAsFactors = FALSE)
+  t1 <- if (n < 2) mk("One-sample t", if (n) mean(x) else na, na, na, na, na, na, "n < 2: not defined")
+  else tryCatch({
+    tt <- stats::t.test(x, mu = mu, conf.level = level)
+    mk("One-sample t", unname(tt$estimate), unname(tt$statistic), unname(tt$parameter), tt$p.value, tt$conf.int[1], tt$conf.int[2],
+       paste0("CI is the ", .s22_pct(level), "% CI of the mean", if (n < 3) "; n < 3: low power" else ""))
+  }, error = function(e) mk("One-sample t", mean(x), na, na, na, na, na, "constant values: t test undefined"))
+  w1 <- if (n < 2) mk("Wilcoxon signed-rank", if (n) stats::median(x) else na, na, na, na, na, na, "n < 2: not defined")
+  else tryCatch({
+    nz <- sum(x != mu); ex <- nz == n && length(unique(round(abs(x - mu), 10))) == n
+    ww <- suppressWarnings(stats::wilcox.test(x, mu = mu, exact = ex))
+    pmin_ <- 2 / 2^n
+    mk("Wilcoxon signed-rank", stats::median(x), unname(ww$statistic), na, ww$p.value, na, na,
+       paste0(if (ex) "exact p" else "normal approximation (ties or zeros)", "; smallest attainable two-sided p at n = ", n, " is ", signif(pmin_, 3),
+              if (pmin_ >= 0.05) " (cannot reach 0.05)" else ""))
+  }, error = function(e) mk("Wilcoxon signed-rank", stats::median(x), na, na, na, na, na, "Wilcoxon test failed"))
+  rbind(t1, w1)
+}
+
+# ── 9. Correlation and linear fit (metric explorer) ───────────────────────────
+# Pearson (Fisher-z CI) or Spearman (Fisher-z CI with the Bonett-Wright SE sqrt((1 + r^2 / 2) / (n - 3))). One row.
+correlation_table <- function(x, y, method = c("pearson", "spearman"), level = 0.95) {
+  method <- match.arg(method); level <- .s22_level(level); na <- NA_real_
+  xn <- .s22_num(x); yn <- .s22_num(y); k <- min(length(xn), length(yn)); xn <- xn[seq_len(k)]; yn <- yn[seq_len(k)]
+  ok <- is.finite(xn) & is.finite(yn); xv <- xn[ok]; yv <- yn[ok]; n <- length(xv)
+  out <- data.frame(method = method, n = n, r = na, r2 = na, ci_lo = na, ci_hi = na, statistic = na, df = na, p = na, note = "", stringsAsFactors = FALSE)
+  if (n < 3) { out$note <- "n < 3: correlation not testable"; return(out) }
+  if (stats::sd(xv) == 0 || stats::sd(yv) == 0) { out$note <- "x or y is constant: correlation undefined"; return(out) }
+  ct <- tryCatch(suppressWarnings(stats::cor.test(xv, yv, method = method, conf.level = level, exact = if (method == "spearman") (length(unique(xv)) == n && length(unique(yv)) == n && n < 1290) else NULL)),
+                 error = function(e) NULL)
+  if (is.null(ct)) { out$note <- "cor.test failed"; return(out) }
+  r <- unname(ct$estimate); out$r <- r; out$r2 <- r^2; out$p <- ct$p.value
+  out$statistic <- unname(ct$statistic); out$df <- if (method == "pearson") unname(ct$parameter) else na
+  if (method == "pearson" && !is.null(ct$conf.int)) { out$ci_lo <- ct$conf.int[1]; out$ci_hi <- ct$conf.int[2] }
+  else if (method == "spearman" && n >= 4 && abs(r) < 1) {
+    se <- sqrt((1 + r^2 / 2) / (n - 3)); zc <- stats::qnorm(1 - (1 - level) / 2)
+    out$ci_lo <- tanh(atanh(r) - zc * se); out$ci_hi <- tanh(atanh(r) + zc * se)
+  }
+  out$note <- paste0(if (n < 5) paste0("n = ", n, ": r is very unstable; ") else "", if (method == "pearson") "Pearson assumes a linear relation and bivariate normality" else "Spearman rank correlation", if (is.na(out$ci_lo)) "; CI needs n >= 4" else "")
+  out
+}
+
+# Ordinary least squares y ~ x: two rows (intercept, slope) with se, CI, t, p; r2, adj_r2 and n repeated on both.
+linear_fit_table <- function(x, y, level = 0.95) {
+  level <- .s22_level(level); na <- NA_real_
+  xn <- .s22_num(x); yn <- .s22_num(y); k <- min(length(xn), length(yn)); xn <- xn[seq_len(k)]; yn <- yn[seq_len(k)]
+  ok <- is.finite(xn) & is.finite(yn); xv <- xn[ok]; yv <- yn[ok]; n <- length(xv)
+  out <- data.frame(term = c("intercept", "slope"), estimate = na, se = na, ci_lo = na, ci_hi = na, t = na, df = na, p = na,
+                    r2 = na, adj_r2 = na, n = n, note = "", stringsAsFactors = FALSE)
+  if (n < 3) { out$note <- "n < 3: no residual df"; return(out) }
+  if (stats::sd(xv) == 0) { out$note <- "x is constant: slope undefined"; return(out) }
+  fit <- stats::lm(yv ~ xv); sm <- suppressWarnings(summary(fit)); co <- sm$coefficients; ci <- stats::confint(fit, level = level)
+  out$estimate <- co[, 1]; out$se <- co[, 2]; out$t <- co[, 3]; out$p <- co[, 4]; out$df <- fit$df.residual
+  out$ci_lo <- ci[, 1]; out$ci_hi <- ci[, 2]
+  out$r2 <- if (stats::sd(yv) == 0) na else sm$r.squared; out$adj_r2 <- if (stats::sd(yv) == 0) na else sm$adj.r.squared
+  out$note <- if (stats::sd(yv) == 0) "y is constant: slope 0, r2 undefined" else if (n < 5) paste0("n = ", n, ": the fit has ", n - 2, " residual df; treat as descriptive") else ""
+  out
+}
+
+# Confidence (or prediction) band of the regression line at newx. Columns x, fit, lo, hi (NA rows when the fit is impossible).
+linear_band <- function(x, y, newx = NULL, level = 0.95, type = c("confidence", "prediction")) {
+  type <- match.arg(type); level <- .s22_level(level)
+  xn <- .s22_num(x); yn <- .s22_num(y); k <- min(length(xn), length(yn)); xn <- xn[seq_len(k)]; yn <- yn[seq_len(k)]
+  ok <- is.finite(xn) & is.finite(yn); xv <- xn[ok]; yv <- yn[ok]
+  if (is.null(newx)) newx <- if (length(xv)) seq(min(xv), max(xv), length.out = 50) else numeric(0)
+  newx <- .s22_num(newx)
+  bad <- data.frame(x = newx, fit = NA_real_, lo = NA_real_, hi = NA_real_)
+  if (length(xv) < 3 || stats::sd(xv) == 0) return(bad)
+  pr <- tryCatch(suppressWarnings(stats::predict(stats::lm(yv ~ xv), newdata = data.frame(xv = newx), interval = type, level = level)), error = function(e) NULL)
+  if (is.null(pr)) return(bad)
+  data.frame(x = newx, fit = unname(pr[, "fit"]), lo = unname(pr[, "lwr"]), hi = unname(pr[, "upr"]))
+}
+
+# ── 10. Extra error measures ──────────────────────────────────────────────────
+# For the UI's error_half_width(): range, IQR, 90 % CI and 99 % CI (t-based) of the replicate values, drawn around the MEAN.
+# Returns list(lower, upper, ymin, ymax, center): lower = mean - (bar bottom) and upper = (bar top) - mean are
+# non-negative offsets (the whisker lengths below / above the mean, unequal for range and IQR); ymin / ymax are the absolute
+# bar ends. "range" = min .. max; "iqr" = q1 .. q3 (type 7); "ci90"/"ci99" are symmetric. n < 2 gives NA.
+# Wiring: for these types, use the offsets as geom_errorbar(ymin = mean - lower, ymax = mean + upper) instead of mean +- half-width.
+error_half_width_extra <- function(values, type = c("range", "iqr", "ci90", "ci99")) {
+  type <- match.arg(type); v <- .s22_fin(values); n <- length(v); na <- NA_real_
+  nan <- list(lower = na, upper = na, ymin = na, ymax = na, center = if (n) mean(v) else na)
+  if (n < 2) return(nan)
+  m <- mean(v)
+  ends <- switch(type, range = c(min(v), max(v)), iqr = unname(stats::quantile(v, c(0.25, 0.75), type = 7)),
+                 { lv <- if (type == "ci90") 0.90 else 0.99; h <- stats::qt(1 - (1 - lv) / 2, n - 1) * stats::sd(v) / sqrt(n); c(m - h, m + h) })
+  list(lower = m - ends[1], upper = ends[2] - m, ymin = ends[1], ymax = ends[2], center = m)
+}
+
+# ── 11. Methods text ──────────────────────────────────────────────────────────
+# One sentence for the editable methods text. `result` is the output of the matching function; `kind` is one of
+# describe, normality, variance, omnibus, posthoc, two_way, per_time, outlier, auc, one_sample, correlation, linear.
+# `what` names the quantity ("Lysis onset"), `n` overrides the n shown (else read from attr(result, "n")).
+stats_method_sentence <- function(result, kind = c("posthoc", "describe", "normality", "variance", "omnibus", "two_way", "per_time",
+                                                  "outlier", "auc", "one_sample", "correlation", "linear"),
+                                  what = "The measured quantity", n = NULL, level = 0.95) {
+  kind <- match.arg(kind); level <- .s22_level(level); pct <- paste0(.s22_pct(level), "%")
+  n <- if (!is.null(n)) n else attr(result, "n")
+  ntxt <- if (is.null(n) || !length(n) || all(!is.finite(.s22_num(n)))) "" else {
+    nn <- .s22_num(n); nn <- nn[is.finite(nn)]
+    paste0(" (n = ", if (min(nn) == max(nn)) min(nn) else paste0(min(nn), "–", max(nn)), " biological replicates per sample)")
+  }
+  meth <- if (is.data.frame(result) && "method" %in% names(result)) as.character(result$method[1])
+          else if (is.list(result) && !is.data.frame(result) && !is.null(result$method)) as.character(result$method[1]) else NA_character_
+  if (is.na(meth)) meth <- ""
+  has <- function(p) grepl(p, meth, ignore.case = TRUE)
+  fallback_dunnett <- has("fallback")
+  post_name <- if (has("dunnett") && !fallback_dunnett) "Dunnett's multiple-comparison tests against the reference"
+               else if (fallback_dunnett) "Holm-adjusted Welch t tests against the reference (Dunnett's test was not available)"
+               else if (has("tukey")) "Tukey's HSD post-hoc tests"
+               else if (has("games")) "Games–Howell post-hoc tests"
+               else if (has("dunn")) paste0("Dunn's post-hoc tests (", if (has("bonf")) "Bonferroni" else "Holm", "-adjusted)")
+               else if (has("sidak")) "pairwise Welch t tests with Šidák correction"
+               else if (has("bonferroni")) "pairwise Welch t tests with Bonferroni correction"
+               else "pairwise Welch t tests with Holm correction"
+  omni <- if (has("tukey") || has("dunnett") && !fallback_dunnett) "one-way ANOVA"
+          else if (has("games")) "one-way Welch ANOVA"
+          else if (has("dunn")) "the Kruskal–Wallis test" else NA_character_
+  switch(kind,
+    describe = paste0(what, " is summarised as mean ± SD (with ", pct, " t-based confidence intervals of the mean) per sample", ntxt, "."),
+    normality = paste0("Normality of ", tolower(substr(what, 1, 1)), substr(what, 2, nchar(what)), " was assessed per sample and on pooled residuals by the Shapiro–Wilk test and Q–Q plots", ntxt, "; with so few replicates these checks have low power."),
+    variance = paste0("Homogeneity of variance was checked by the Brown–Forsythe (median-centred Levene) and Bartlett tests", ntxt, "."),
+    omnibus = paste0(what, " was compared between samples by one-way ANOVA, one-way Welch ANOVA and the Kruskal–Wallis test", ntxt, "."),
+    posthoc = if (is.na(omni)) paste0(what, " was compared between samples by ", post_name, ntxt, ".")
+              else paste0(what, " was compared between samples by ", omni, " followed by ", post_name, ntxt, "."),
+    two_way = paste0(what, " was analysed by two-way ", if (grepl("repeated", meth)) "repeated-measures " else "", "ANOVA with sample and time as factors",
+                     if (grepl("mixed model", meth)) " (linear mixed model with a random intercept per well and AR(1) residual correlation)" else "",
+                     if (grepl("log", paste(result$note, collapse = " "))) " on log-transformed readings" else "", ntxt, "."),
+    per_time = paste0(what, " was compared with the reference at each time point by Welch t tests, with ",
+                      { nt <- if (is.data.frame(result) && "note" %in% names(result)) paste(result$note, collapse = " ") else ""
+                        if (grepl("sidak", nt)) "\u0160id\u00e1k" else if (grepl("bonferroni", nt)) "Bonferroni" else if (grepl("holm", nt)) "Holm" else "multiplicity" },
+                      "-adjusted p-values across time points within each sample", ntxt, "."),
+    outlier = paste0("Outliers were screened by ", if (is.data.frame(result) && "method" %in% names(result)) c(grubbs = "the two-sided Grubbs test", mad = "the median-absolute-deviation rule (|robust z| > 3)", iqr = "Tukey's 1.5 × IQR fences")[as.character(result$method[1])] else "an outlier test",
+                     "; flagged values were not removed automatically."),
+    auc = paste0("Area under the curve was computed per replicate by the trapezoidal rule", ntxt, " and summarised as mean with ", pct, " confidence interval."),
+    one_sample = paste0(what, " was compared with the hypothetical value by a one-sample t test and a Wilcoxon signed-rank test", ntxt, "."),
+    correlation = paste0("The association was quantified by the ", if (is.data.frame(result) && "method" %in% names(result)) c(pearson = "Pearson", spearman = "Spearman")[as.character(result$method[1])] else "Pearson", " correlation coefficient with a ", pct, " confidence interval."),
+    linear = paste0("A straight line was fitted by ordinary least squares, with ", pct, " confidence intervals for slope and intercept and a ", pct, " confidence band."))
+}
+
+STATS_V222_DEFINITIONS <- data.frame(
+  name = c("describe_column", "skewness", "kurtosis", "geo_mean", "shapiro_p", "variance_check", "omnibus: one-way ANOVA", "omnibus: Welch ANOVA",
+           "omnibus: Kruskal-Wallis", "eta_sq", "epsilon_sq", "post-hoc: Tukey HSD", "post-hoc: Holm-adjusted Welch t", "post-hoc: Games-Howell",
+           "post-hoc: Dunn", "post-hoc: Dunnett", "post-hoc: Bonferroni / Sidak", "two_way_time_anova", "per_time_comparisons", "outlier: Grubbs",
+           "outlier: MAD", "outlier: IQR fences", "replicate_outlier_flags", "auc_table", "relative AUC CI", "one_sample_tests", "correlation_table",
+           "linear_fit_table", "error_half_width_extra"),
+  definition = c(
+    "n, mean, SD, SEM = SD / sqrt(n), CV % = 100 SD / |mean|, t-based CI of the mean, median and quartiles (type 7), IQR, range, shape and Shapiro p for one column of values.",
+    "Bias-corrected sample skewness G1 = sqrt(n (n - 1)) / (n - 2) * m3 / m2^1.5 (needs n >= 3).",
+    "Bias-corrected excess kurtosis G2 = (n - 1) / ((n - 2)(n - 3)) * ((n + 1) g2 + 6), g2 = m4 / m2^2 - 3 (needs n >= 4).",
+    "exp(mean(log x)); undefined when any value is <= 0.",
+    "Shapiro-Wilk normality test p; almost no power at n = 3-5, so p > 0.05 is not evidence of normality.",
+    "Brown-Forsythe test (Levene with the median as centre: ANOVA of |x - group median|) and Bartlett's test for equal variances.",
+    "F = MS between / MS within; assumes equal variances and normal residuals.",
+    "Welch's heteroscedastic one-way ANOVA (oneway.test, var.equal = FALSE).",
+    "H from rank sums with tie correction; chi-squared reference distribution; rank-based, distribution-free.",
+    "SS between / SS total: share of variance explained by the grouping (one-way ANOVA).",
+    "H / (N - 1): rank-based effect size for Kruskal-Wallis.",
+    "All-pairs Tukey-Kramer test on the pooled variance, p from the studentised range.",
+    "Welch t per pair (Welch-Satterthwaite df), Holm step-down adjustment across the family; CI unadjusted.",
+    "Welch t per pair with p from the studentised range over k groups (df Welch-Satterthwaite); CI = diff +- qtukey / sqrt(2) * SE.",
+    "Rank-sum z with tie correction after a Kruskal-Wallis layout, Holm- or Bonferroni-adjusted; estimate is the mean-rank difference.",
+    "Each sample against one reference with the multivariate-t (pooled variance) family-wise p; needs mvtnorm, else Holm-adjusted Welch t vs the reference.",
+    "Welch t per pair with p x m (Bonferroni) or 1 - (1 - p)^m (Sidak) and CIs widened to the family level.",
+    "Two-way ANOVA of log(OD): sample x time with well as repeated-measures subject (mixed model with AR(1) errors; Error(well) aov; plain aov).",
+    "At each time point each sample vs the reference by Welch t; p adjusted across the time points of that sample (Sidak / Holm / Bonferroni).",
+    "Two-sided Grubbs test of the single most extreme value: G = max |x - mean| / SD, p from t with n - 2 df; assumes normality, needs n >= 3.",
+    "Robust z = |x - median| / (1.4826 MAD); flagged above 3.",
+    "Tukey fences: below q1 - 1.5 IQR or above q3 + 1.5 IQR.",
+    "Per replicate curve: mean absolute deviation (over time) from the per-sample median curve, divided by the median of those deviations; > 3 flagged.",
+    "Trapezoid area of max(OD - baseline, 0) over a time window (edges interpolated), per replicate, then per-sample mean, SD, SEM and CI.",
+    "Ratio of mean AUC to the reference mean AUC with a log-delta CI: SE(log R) = sqrt(CV_a^2 / n_a + CV_r^2 / n_r), Welch-Satterthwaite df.",
+    "t test and Wilcoxon signed-rank test of the sample against a hypothetical value; CI of the mean.",
+    "Pearson r (Fisher-z CI) or Spearman rho (Bonett-Wright Fisher-z CI) with p.",
+    "Ordinary least squares y ~ x with CI for slope and intercept, r2, p; linear_band() gives the confidence or prediction band.",
+    "Range, IQR, 90 % and 99 % CI as asymmetric lower / upper offsets around the mean."),
+  reference = c("Prism: Column statistics", "Joanes & Gill 1998, Statistician 47:183", "Joanes & Gill 1998, Statistician 47:183", "Prism: Column statistics",
+                "Shapiro & Wilk 1965, Biometrika 52:591", "Brown & Forsythe 1974, JASA 69:364; Bartlett 1937", "Prism: One-way ANOVA", "Welch 1951, Biometrika 38:330",
+                "Kruskal & Wallis 1952, JASA 47:583", "Cohen 1988", "Tomczak & Tomczak 2014, Trends Sport Sci 21:19", "Tukey 1949; Kramer 1956", "Holm 1979, Scand J Stat 6:65",
+                "Games & Howell 1976, J Educ Stat 1:113", "Dunn 1964, Technometrics 6:241", "Dunnett 1955, JASA 50:1096", "Sidak 1967, JASA 62:626",
+                "Prism: Two-way ANOVA (repeated measures); Pinheiro & Bates 2000", "Prism: Multiple comparisons at each time", "Grubbs 1969, Technometrics 11:1; NIST e-Handbook 1.3.5.17",
+                "Leys et al. 2013, J Exp Soc Psychol 49:764", "Tukey 1977, Exploratory Data Analysis", "this app", "Prism: Area under curve", "Katz et al. 1978, Biometrics 34:469",
+                "Prism: One sample t test and Wilcoxon test", "Prism: Correlation; Bonett & Wright 2000", "Prism: Simple linear regression", "Prism: Error bars (range, IQR, CI)"),
+  stringsAsFactors = FALSE)
+# ── end v2.22 stats engine ──
+
 # ── v2.21 figure helpers ──
 # Pure functions (no Shiny state) behind the v2.21 analysis figures: the metric summary's styles and significance
 # brackets, the replicate small multiples and the fraction-lysed curves. Tested by tests/test_v221_figures.R.
