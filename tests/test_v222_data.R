@@ -27,7 +27,9 @@ cat("\n--- defaults, UI ids, tab order ---\n")
 nm <- names(env$APP_DEFAULTS)
 new_keys <- c("use_od_filter", "od_min", "od_max", "blank_mode", "blank_sample", "blank_k", "transform_mode",
               "transform_control", "extinction_threshold", "t_stat_override")
-check("the new defaults are the LAST entries of APP_DEFAULTS", identical(tail(nm, length(new_keys)), new_keys))
+# (later releases append their own defaults after these, so the check is: a contiguous run, in this order, at the end of the v2.22 block)
+check("the new defaults are a contiguous block at the END of APP_DEFAULTS (later additions follow them)",
+      { pos <- match(new_keys, nm); !anyNA(pos) && all(diff(pos) == 1) })
 check("defaults reproduce the old behaviour (nothing excluded, constant blank, no transform)",
       isFALSE(env$APP_DEFAULTS$use_od_filter) && env$APP_DEFAULTS$blank_mode == "constant" &&
       env$APP_DEFAULTS$transform_mode == "none" && env$APP_DEFAULTS$extinction_threshold == 0.05 &&
