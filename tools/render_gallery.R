@@ -2,7 +2,8 @@
 # Render every figure the app can make, from the built-in demo data, with the
 # journal preset (Nature single column, 89 x 60 mm, Arial 6-8 pt, SD error
 # bars with replicate points) -- through the REAL app code, not a re-draw.
-# Writes one SVG + PNG per figure and a two-column gallery (183 mm wide), for
+# Writes one SVG + PNG per figure and a gallery (183 mm wide; two columns, three when
+# there are more than 8 panels), for
 # each of the five demo scenarios, into <out_dir>/<scenario>/. The "lysis"
 # scenario's gallery.png is also copied to docs/gallery/gallery.png, which the
 # README links to.
@@ -40,10 +41,14 @@ for (sc in strsplit(Sys.getenv("KC_SCENARIOS", "lysis,moi_series,resistance,hour
     session$setInputs(analysis_metrics = c("lysis_time", "od_drop", "mu_max", "infection_strength"),
                       analysis_dose_metric = "lysis_time")   # MOI parses from the sample names; no override box
     sz <- export_size_in()
+    # v2.20: the lysis-scenario ordering; a panel that is not available for a scenario (e.g. a dose-response
+    # with one MOI) appears as the app's own "Figure not available" placeholder
     figs <- c(main = "Lysis curve (mean ± SD, replicates)", landmarks = "Curve landmarks",
-              replicate_overlay = "Replicate overlay", growth_rate = "Specific growth rate",
-              normalized = "Normalized OD", metric_summary = "Metric summary + stats",
-              dose_response = "MOI dose-response", heatmap = "OD heatmap")
+              phases = "Curve phases", replicate_overlay = "Replicate overlay",
+              growth_rate = "Specific growth rate", normalized = "Normalized OD",
+              difference = "Separation from the reference", metric_summary = "Metric summary + stats",
+              dose_response = "MOI dose-response", fit_overlay = "Fitted growth curves",
+              phenotype_heatmap = "Phenotype heatmap", heatmap = "OD heatmap")
     plots <- list()
     for (nm in names(figs)) {
       p <- if (nm == "main") generate_plot() else generate_analysis_plot(nm)
@@ -58,11 +63,15 @@ for (sc in strsplit(Sys.getenv("KC_SCENARIOS", "lysis,moi_series,resistance,hour
     # their native 89 mm size, which is exactly how they would be assembled
     # the app's own composer (compose_figure(): free() panels, a-h tags), so the gallery and the
     # in-app "Compose figure" tab are the same code
-    g <- compose_figure(plots, ncol = 2, tag_size = 8, font = input$font_family)
+    # v2.20: more than 8 panels: three columns at the same 183 mm (cells of 61 mm), 55 mm per panel row;
+    # up to 8 panels: two columns as before
+    ncol_g <- if (length(plots) > 8) 3L else 2L
+    h_g    <- if (ncol_g == 3L) ceiling(length(plots) / ncol_g) * 55 else 245
+    g <- compose_figure(plots, ncol = ncol_g, tag_size = 8, font = input$font_family)
     quiet(ggsave(file.path(sc_out, "gallery.png"), g, device = env$export_device("png"),
-                 width = 183, height = 245, units = "mm", dpi = 300, bg = "white"))
+                 width = 183, height = h_g, units = "mm", dpi = 300, bg = "white"))
     quiet(ggsave(file.path(sc_out, "gallery.svg"), g, device = env$export_device("svg"),
-                 width = 183, height = 245, units = "mm", bg = "white"))
+                 width = 183, height = h_g, units = "mm", bg = "white"))
     writeLines(c("Figure legend (drafted by the app):", output$figure_legend_text, "",
                  "Replicate statistics (first metric):", capture.output(print(analysis_stats_current()$pairwise))),
                file.path(sc_out, "legend_and_stats.txt"))

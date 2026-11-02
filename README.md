@@ -355,7 +355,10 @@ without rescaling. Pick a figure, set its panel label (empty by default; the fil
   μmax, AUC, infection strength, ...); open circles are individual replicates,
   the bar is the mean, whiskers ± SD. With a reference sample set (Stats &
   Reports) and *Mark significance* ticked, Holm-adjusted stars appear above
-  each sample.
+  each sample. **Whiskers** (v2.20) can instead be the *Bootstrap 95 % CI of the
+  mean-curve metric*: the bar is then the metric of the mean curve and the whiskers
+  the percentile interval from the Statistics tab's *Bootstrap intervals* (run it
+  first; a metric it does not hold keeps the replicate spread, with a notice).
 - **Specific growth rate vs time** — μ(t) = d ln(OD)/dt per replicate by the
   same rolling regression as μmax, shown as mean ± SD band. Lysis is a
   negative rate, so onset and lysis rate are visible rather than inferred.
@@ -371,6 +374,17 @@ without rescaling. Pick a figure, set its panel label (empty by default; the fil
 - **Curve landmarks** — lag end, μmax window centre, peak, lysis onset, half
   of peak and trough drawn on each mean curve, so every number in the Curve
   Metrics CSV can be checked by eye before it is reported.
+- **Curve phases** (v2.20) — the mean curves with each sample's phases (lag,
+  exponential, deceleration, stationary, lysis, recovery or post-lysis) shaded
+  in a fixed colour-blind-safe palette, every edge read back from the curve
+  metrics so it can be checked on the landmarks figure. One sample: full-height
+  bands behind the curve; several: one thin labelled strip per sample at the top
+  of the panel. The table is in the Statistics tab (*Curve phases*).
+- **Separation from the reference** (v2.20) — each sample's mean curve minus the
+  reference's (or the log2 ratio) against time, a dashed zero line, and an
+  asterisk where the Holm-adjusted per-time Welch test is < 0.05; the first
+  separation time of each sample is listed under the figure. Needs a reference
+  sample; exploratory (one test per time point on a few readings).
 - **Metric explorer** (v2.18) — any curve metric against any other (default
   lysis onset against OD drop), one point per sample: the mean with error bars
   in both directions (the main figure's error measure), and with *Per
@@ -462,6 +476,16 @@ statistics method, with its warnings and a CSV; `p_adj_bh_across` is a Benjamini
 adjustment over the whole table and is exploratory: the metrics are correlated and three replicates
 give little power, so use it to rank metrics for follow-up, not as a confirmatory result). Typed
 times and a threshold also add the tables to the HTML / PDF reports and the figure bundle.
+Three more sections (v2.20): **Curve phases** (the phases table: sample, phase,
+start, end, duration, OD at the edges; CSV), **Bootstrap intervals** (choose the metrics,
+the number of draws and the seed, press **Run bootstrap**: a percentile interval of each
+metric of the mean curve from resampling the replicate curves with replacement; the result
+is cached and marked out of date when the data, filters or metric settings change; wide and
+coarse at n = 3; reference-relative metrics such as infection strength are not resampled; CSV)
+and, inside **Replicate comparison**, **First separation from reference** (the first time each
+sample's replicates differ from the reference's at p_adj_holm < 0.05). The phases table and a
+current bootstrap are also in the HTML / PDF reports and the figure bundle (`phases.csv`,
+`bootstrap.csv`); the report also shows the phases and separation figures.
 **Methods text (editable)** starts empty: **Draft from
 current settings** writes a methods paragraph (measurement, replicates and n,
 how the mean and error statistic were computed, the μmax window, peak mode,

@@ -137,8 +137,50 @@ reference distribution. A first-separation time is "the first sampled time at wh
 could tell the curves apart", not an estimate of when they truly diverge; with coarse sampling
 it is later than the true divergence by up to one interval and later still when power is low.
 
+## In the app (v2.20)
+
+None of the three changes the default main figure.
+
+* **Curve phases** (analysis type `phases`, in the Analysis figures select, the composer and
+  Download all figures). `curve_phases_by_sample()` runs on `prepare_plot_data()` with the metrics
+  smoothing window, `metrics_peak_mode` and the lysis threshold of Stats & Reports (the
+  peak-detection smoothing window is not used: `curve_phases()` has no such argument, so the phases
+  follow the Curve Metrics table exactly only while it is 1). The figure draws the mean curves (as in
+  the landmarks figure; `y_scale_type` applies) with the phases as `geom_rect` shading in a fixed
+  palette: lag grey, exponential green, deceleration yellow-green, stationary blue, lysis vermillion,
+  recovery purple, post-lysis grey-blue. With **one sample** the bands run over the full height of the
+  panel behind the curve (alpha 0.12). With **several samples** full-height bands would overlap, so each
+  sample gets a thin strip (6 % of the panel height, one row per sample, stacked at the top in the
+  legend order, the sample's legend label on the left in its colour at the axis-text size) and the
+  curves occupy the rest of the panel; the strips use alpha 0.55 because 0.12 is unreadable on a
+  strip. The phase key is outside right. The **Statistics tab** has a *Curve phases* section (sample,
+  phase, start, end, duration, OD start, OD end at 3 significant digits; unformatted CSV), `phases.csv`
+  goes into the figure bundle, and the reports show the figure and the table right after the landmarks
+  figure.
+* **Bootstrap intervals** (Statistics tab). Inputs `boot_metrics`, `boot_n` (200-5000), `boot_seed`
+  and the **Run bootstrap** button, which calls `bootstrap_metrics()` on `prepare_replicate_data()`
+  with the metrics settings of Stats & Reports. The result is held in a cache together with a signature
+  (data source, sample selection, the replicate data after the filters / windows / blank, smoothing
+  windows, peak mode, lysis threshold); when the signature changes the cache is **out of date**: the
+  table stays on screen under a notice, but the metric summary, the reports, the bundle and the methods
+  draft ignore it until it is run again. Only the numeric columns of `compute_one_curve_metrics()` can be
+  bootstrapped: **reference-relative metrics (infection strength, relative growth, ...) are dropped**
+  with a note, because they are added later by `compute_curve_metrics()` from a reference sample, which
+  the engine does not resample. The metric summary's `metric_error_source = "bootstrap"` draws the
+  mean-curve estimate as the bar and the percentile interval as the whiskers for the metrics the cache
+  holds (the others keep the replicate spread, with a notification). The interval is a percentile
+  interval from replicate-level resampling and, at n = 3, wide, coarse and possibly degenerate (see
+  section 2).
+* **Separation from the reference** (analysis type `difference`, needs a reference sample).
+  `diff_mode` (`difference` / `log2_ratio`) selects the `curve_difference()` mode; the figure draws the
+  non-reference samples against time with a dashed zero line and, with `diff_mark`, an asterisk marker
+  above the curve where `p_adj_holm < 0.05`. `first_separation_time()` is listed per sample under the
+  figure and in the Statistics tab's Replicate comparison section; it follows `diff_mode`. Exploratory,
+  for the reasons in section 3.
+
 ## Tests
 
 ```bash
-Rscript tests/test_v220_engine.R
+Rscript tests/test_v220_engine.R        # the engine functions
+Rscript tests/test_v220_integration.R   # the app integration (testServer)
 ```

@@ -1,6 +1,21 @@
 # Lysis Curve OD Visualization App  v2.11
 # Michael Baffour Awuah / Ramsey Lab
 #
+# v2.20.0 -- Curve phases figure, bootstrap intervals, separation from the reference:
+#   CURVE PHASES    -- Analysis type "phases": the mean curves with each sample's phases (lag, exponential,
+#                      deceleration, stationary, lysis, recovery / post-lysis; curve_phases_by_sample()) as shaded
+#                      bands: full-height for one sample, thin labelled strips stacked at the top of the panel for
+#                      several. Statistics tab section "Curve phases" (table + CSV; phases.csv in the figure bundle).
+#   BOOTSTRAP       -- Statistics tab section "Bootstrap intervals": boot_metrics, boot_n, boot_seed and a
+#                      "Run bootstrap" button (percentile intervals from replicate resampling, cached until the data,
+#                      filters or metric settings change). The metric summary gets metric_error_source: replicate
+#                      spread (default) or the bootstrap 95 % CI of the mean-curve metric.
+#   SEPARATION      -- Analysis type "difference": mean curve minus (or log2 ratio to) the reference over time, '*'
+#                      where the Holm-adjusted per-time Welch test is < 0.05 (diff_mode, diff_mark), and the first
+#                      separation time per sample (also in the Statistics tab's Replicate comparison section).
+#   REPORTS         -- Curve phases (figure + table), Separation (figure + table, with a reference) and the cached
+#                      bootstrap table; the gallery gains the four v2.19 / v2.20 figures (3 columns when > 8 panels).
+#
 # v2.19.0 -- Curve fitting tab, phenotype heatmap, extraction tables, all-metrics comparison:
 #   CURVE FITTING   -- New main-panel tab after Statistics: fit_models, fit_until, fit_log, fit_level, fit_show.
 #                      One reactive (fit_results) feeds the figure (analysis type "fit_overlay": mean curve + fitted
@@ -270,7 +285,7 @@ has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: search
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.19.0"
+APP_VERSION <- "2.20.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1414,7 +1429,8 @@ report_analysis_html <- function(analysis) {
              "' alt='", html_escape(f$title), "'/>")
     else paste0("<p><em>Figure not available: ", html_escape(f$error %||% "unknown reason"), "</em></p>")
     paste0("<h3>", html_escape(f$title), "</h3>", body,
-           if (nzchar(f$caption %||% "")) paste0("<p style='", cap_style, "'>", html_escape(f$caption), "</p>") else "")
+           if (nzchar(f$caption %||% "")) paste0("<p style='", cap_style, "'>", html_escape(f$caption), "</p>") else "",
+           if (!is.null(f$table)) paste0("<h4>", html_escape(f$table_title %||% f$title), "</h4>", html_table(f$table)) else "")   # v2.20
   }, character(1))
   st <- analysis$stats
   warn_html <- paste0(vapply(st$warnings %||% character(0), function(w)
@@ -1435,7 +1451,14 @@ report_analysis_html <- function(analysis) {
     tbl(st$omnibus,  "Omnibus test"),
     tbl(st$posthoc,  "Post-hoc comparisons (Tukey HSD)"),
     "<h3>Definitions</h3>\n<p style='font-size:0.9em;'>", html_escape(STATS_DEFINITIONS), "</p>\n",
-    report_extraction_html(analysis$extraction))
+    report_extraction_html(analysis$extraction),
+    report_bootstrap_html(analysis$bootstrap))
+}
+
+# v2.20: the "Bootstrap intervals" section of the HTML report; "" when no current bootstrap is cached.
+report_bootstrap_html <- function(b) {
+  if (is.null(b)) return("")
+  paste0("\n<h2>", html_escape(b$title), "</h2>\n<p style='font-size:0.9em;'>", html_escape(b$desc), "</p>", html_table(b$table))
 }
 
 # v2.19: the "Curve fits" section of the HTML report (figure, parameter table, notes); "" without fits.
@@ -1699,6 +1722,31 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
     kc  <- which(vapply(figs_pdf, function(f) identical(f$type, "composed"), logical(1)))
     figs_pdf <- append(figs_pdf, list(analysis$fits$figure), after = if (length(kc)) kc[1] - 1L else length(figs_pdf))
   }
+  # ── Stats table pages (chunked) ──
+  fmt_df <- function(df) {
+    df2 <- df
+    for (j in seq_along(df2)) if (is.numeric(df2[[j]])) df2[[j]] <- fmt_sig(df2[[j]])
+    df2
+  }
+  page_table <- function(df, title, rows_per_page = 28) {
+    df <- fmt_df(df)
+    n  <- nrow(df)
+    starts <- seq(1, n, by = rows_per_page)
+    for (s in starts) {
+      chunk <- df[s:min(s + rows_per_page - 1, n), , drop = FALSE]
+      grid::grid.newpage()
+      grid::grid.text(paste0(title,
+                             if (length(starts) > 1)
+                               paste0("  (rows ", s, "–", min(s + rows_per_page - 1, n),
+                                      " of ", n, ")") else ""),
+                      y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
+      g <- gridExtra::tableGrob(chunk, rows = NULL, theme = tt)
+      # scale down if wider than page
+      gw <- grid::convertWidth(sum(g$widths), "npc", valueOnly = TRUE)
+      vp <- if (gw > 0.98) grid::viewport(y = 0.5, width = 0.98 / gw) else grid::viewport(y = 0.5)
+      grid::pushViewport(vp); grid::grid.draw(g); grid::popViewport()
+    }
+  }
   for (f in figs_pdf) {
     drawn <- FALSE
     if (!is.null(f$plot)) {
@@ -1725,33 +1773,9 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
       }, error = function(e) { f$error <<- conditionMessage(e); FALSE })
     }
     if (!drawn) text_page(f$title, paste0("Figure not available: ", f$error %||% "unknown reason"))
+    if (drawn && !is.null(f$table)) page_table(f$table, f$table_title %||% f$title)   # v2.20: the phases / separation table after its figure
   }
 
-  # ── Stats table pages (chunked) ──
-  fmt_df <- function(df) {
-    df2 <- df
-    for (j in seq_along(df2)) if (is.numeric(df2[[j]])) df2[[j]] <- fmt_sig(df2[[j]])
-    df2
-  }
-  page_table <- function(df, title, rows_per_page = 28) {
-    df <- fmt_df(df)
-    n  <- nrow(df)
-    starts <- seq(1, n, by = rows_per_page)
-    for (s in starts) {
-      chunk <- df[s:min(s + rows_per_page - 1, n), , drop = FALSE]
-      grid::grid.newpage()
-      grid::grid.text(paste0(title,
-                             if (length(starts) > 1)
-                               paste0("  (rows ", s, "–", min(s + rows_per_page - 1, n),
-                                      " of ", n, ")") else ""),
-                      y = 0.97, gp = grid::gpar(fontsize = 13 * fscale, fontface = "bold"))
-      g <- gridExtra::tableGrob(chunk, rows = NULL, theme = tt)
-      # scale down if wider than page
-      gw <- grid::convertWidth(sum(g$widths), "npc", valueOnly = TRUE)
-      vp <- if (gw > 0.98) grid::viewport(y = 0.5, width = 0.98 / gw) else grid::viewport(y = 0.5)
-      grid::pushViewport(vp); grid::grid.draw(g); grid::popViewport()
-    }
-  }
   # ── Replicate statistics pages (v2.11.1): same place as in the HTML report,
   #    between the figures and the summary-statistics table ──
   # v2.19: the Curve fits section (parameter table; the figure page is with the analysis figures above) and the
@@ -1768,6 +1792,10 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
   for (ex in analysis$extraction %||% list()) {
     text_page(ex$title, ex$desc)
     page_table(ex$table, ex$title)
+  }
+  if (!is.null(analysis$bootstrap)) {          # v2.20
+    text_page(analysis$bootstrap$title, analysis$bootstrap$desc)
+    page_table(analysis$bootstrap$table, analysis$bootstrap$title)
   }
   if (!is.null(analysis)) {
     st <- analysis$stats
@@ -2205,8 +2233,10 @@ ANALYSIS_METRIC_LABELS <- c(
 ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
                              "Specific growth rate vs time"              = "growth_rate",
                              "Normalized OD vs time"                     = "normalized",
+                             "Separation from the reference (difference vs time)" = "difference",   # v2.20
                              "Replicate overlay"                         = "replicate_overlay",
                              "Curve landmarks (metrics drawn on the curves)" = "landmarks",
+                             "Curve phases (lag, growth, lysis ...)"     = "phases",               # v2.20
                              "MOI dose-response"                         = "dose_response",
                              "OD heatmap (samples \u00d7 time)"           = "heatmap",
                              "Metric explorer (one metric against another)" = "metric_explorer",   # v2.18
@@ -2538,6 +2568,9 @@ LEGACY_BASE <- list(
   pheno_scale = "z", pheno_values = TRUE,
   extract_times = "", extract_method = "interpolate",
   extract_threshold = 0.5, extract_direction = "up", extract_after = "start",
+  # v2.20: bootstrap intervals, the metric summary's error source, the separation figure (the phases figure has no input)
+  boot_metrics = c("lysis_time", "od_drop", "mu_max", "auc", "infection_strength"), boot_n = 1000, boot_seed = 1,
+  metric_error_source = "replicates", diff_mode = "difference", diff_mark = TRUE,
   # v2.11 analysis / dashboard inputs
   analysis_type = "metric_summary", analysis_metrics = c("lysis_time", "od_drop"),
   analysis_dose_metric = "lysis_time", analysis_norm_mode = "reference",
@@ -3310,6 +3343,80 @@ first_separation_time <- function(x, alpha = 0.05) {
              stringsAsFactors = FALSE)
 }
 # ── end v2.20 engine ──
+
+# ── v2.20: helpers behind the phases figure and the phases / bootstrap / separation tables ──
+# Pure functions (no Shiny state), tested in tests/test_v220_integration.R. See docs/PHASES_AND_BOOTSTRAP.md.
+
+# Phase order and a fixed, colour-blind-safe, muted palette (Okabe-Ito based): lag grey, exponential green,
+# deceleration yellow-green, stationary blue, lysis vermillion, recovery purple, post-lysis grey-blue.
+PHASE_LEVELS <- c("lag", "exponential", "deceleration", "stationary", "lysis", "recovery", "post-lysis")
+PHASE_COLORS <- c(lag = "#9A9A9A", exponential = "#009E73", deceleration = "#B5C227", stationary = "#0072B2",
+                  lysis = "#D55E00", recovery = "#CC79A7", `post-lysis` = "#6F8FAF")
+PHASE_BAND_ALPHA  <- 0.12     # full-height bands behind a single curve
+PHASE_STRIP_ALPHA <- 0.55     # thin strips (several samples): too small to read at 0.12
+PHASE_STRIP_FRAC  <- 0.06     # height of one strip, as a fraction of the panel height
+
+# Where the phase shading goes, in plotted units. `lo`, `hi`: the range of the curves (linear OD, or log10 OD
+# for a log axis); k: number of samples. One sample: bands over the whole panel (5 % padding either side of the
+# curve). Several: k strips of 6 % of the panel each at the top, the curves below them with a 3 % gap and 4 %
+# padding underneath. Returns the panel limits and, per sample (first = top strip), the strip's lower / upper edge.
+phase_layout <- function(lo, hi, k) {
+  span <- if (is.finite(hi - lo) && hi > lo) hi - lo else max(abs(hi), 1) * 0.1
+  if (k <= 1) {
+    pad <- 0.05
+    P   <- span / (1 - 2 * pad)
+    lim <- c(lo - pad * P, hi + pad * P)
+    return(list(limits = lim, strips = NULL, full = lim))
+  }
+  strips_f <- PHASE_STRIP_FRAC * k
+  bot <- 0.04; gap <- 0.03
+  P   <- span / (1 - bot - gap - strips_f)
+  y0  <- lo - bot * P
+  lim <- c(y0, y0 + P)
+  top <- lim[2] - (seq_len(k) - 1) * PHASE_STRIP_FRAC * P
+  list(limits = lim, strips = data.frame(ymin = top - PHASE_STRIP_FRAC * P, ymax = top), full = lim)
+}
+
+# The phases table as shown (Statistics tab, reports): 3 significant digits, an em dash for a non-finite number.
+phases_display_table <- function(ph) {
+  if (is.null(ph) || nrow(ph) == 0) return(NULL)
+  d <- data.frame(Sample = ph$sample, Phase = ph$phase, Start = ph$t_start, End = ph$t_end,
+                  Duration = ph$duration, `OD start` = ph$od_start, `OD end` = ph$od_end,
+                  check.names = FALSE, stringsAsFactors = FALSE)
+  fmt_stats_df(d)
+}
+
+# bootstrap_metrics() output as shown: metric labels, 3 significant digits, counts as plain integers.
+bootstrap_display_table <- function(bt) {
+  if (is.null(bt) || nrow(bt) == 0) return(NULL)
+  d <- data.frame(Sample = bt$sample, Metric = metric_label(bt$metric), Estimate = bt$estimate,
+                  `CI low` = bt$ci_low, `CI high` = bt$ci_high,
+                  `n replicates` = as.character(bt$n_replicates), `n ok draws` = as.character(bt$n_boot_ok),
+                  check.names = FALSE, stringsAsFactors = FALSE)
+  fmt_stats_df(d)
+}
+
+# The metrics bootstrap_metrics() can resample: the numeric columns compute_one_curve_metrics() returns. The
+# reference-relative ones (infection_strength, relative_*, centroid_index, local_virulence, lysis_onset_delta) are
+# added later by compute_curve_metrics() from a reference sample, so the engine does not resample them.
+BOOT_METRIC_NAMES <- local({
+  probe <- compute_one_curve_metrics(c(0, 1, 2, 3, 4, 5), c(1, 2, 3, 4, 5, 6), "probe")
+  names(probe)[vapply(probe, is.numeric, logical(1))]
+})
+BOOT_N_MIN <- 200L; BOOT_N_MAX <- 5000L
+
+# first_separation_time() for the table under the separation figure: the reference is left out (its own
+# time is NA by definition); times are 3 significant digits, "none" when the test never reaches p < alpha.
+separation_display_table <- function(fs, ref = "", tunit = "min") {
+  if (is.null(fs) || nrow(fs) == 0) return(NULL)
+  fs <- fs[as.character(fs$sample) != ref, , drop = FALSE]
+  if (nrow(fs) == 0) return(NULL)
+  d <- data.frame(Sample = as.character(fs$sample),
+                  x = ifelse(is.finite(fs$first_separation_time), formatC(signif(fs$first_separation_time, 3), format = "g"), "none"),
+                  stringsAsFactors = FALSE)
+  names(d)[2] <- paste0("First separation (", tunit, ")")
+  d
+}
 
 # ── v2.19: helpers for the Curve fitting tab, the phenotype heatmap and the extraction tables ──
 # Pure functions (no Shiny state), tested in tests/test_v219_integration.R. See docs/FITS_AND_EXTRACTION.md.
@@ -4305,8 +4412,14 @@ ui <- fluidPage(
                   selectInput("analysis_metrics", "Metrics (one facet each):",
                               choices  = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
                               selected = c("lysis_time", "od_drop"), multiple = TRUE),
+                  radioButtons("metric_error_source", "Whiskers:",
+                               choices = c("Replicate spread (SD/SEM/CI as in Error Bars)" = "replicates",
+                                           "Bootstrap 95 % CI of the mean-curve metric" = "bootstrap"),
+                               selected = APP_DEFAULTS$metric_error_source),
                   p(style = "font-size:.78em;color:#777;margin-top:-6px;",
-                    "Open circles: one per replicate; bar: mean; whiskers: \u00b1 SD. ",
+                    "Open circles: one per replicate; bar: mean; whiskers: replicate spread (the main figure's error measure). ",
+                    "With the bootstrap the bar is the mean-curve value and the whiskers its percentile interval from the ",
+                    "Statistics tab (Run bootstrap first; a metric it does not hold keeps the replicate spread). ",
                     "Relative metrics need a reference sample (Stats & Reports).")),
                 conditionalPanel("input.analysis_type == 'dose_response'",
                   selectInput("analysis_dose_metric", "Metric vs MOI:",
@@ -4338,6 +4451,20 @@ ui <- fluidPage(
                     "Every number in the Curve Metrics CSV, placed where it was measured: lag end, ",
                     "\u03bcmax window centre, peak, lysis onset, half of peak, trough. Use it to check ",
                     "the metrics (and the smoothing windows) before you report them.")),
+                conditionalPanel("input.analysis_type == 'phases'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "Each sample's growth and lysis phases (lag, exponential, deceleration, stationary, lysis, recovery / ",
+                    "post-lysis) as shaded bands, with every edge read back from the curve metrics (so it can be checked ",
+                    "against the landmarks figure). One sample: full-height bands behind its curve; several: one thin strip ",
+                    "per sample at the top of the panel. The table is on the Statistics tab (Curve phases).")),
+                conditionalPanel("input.analysis_type == 'difference'",
+                  radioButtons("diff_mode", "Show:",
+                               choices = c("Difference (OD)" = "difference", "log2 ratio" = "log2_ratio"),
+                               selected = APP_DEFAULTS$diff_mode, inline = TRUE),
+                  checkboxInput("diff_mark", "Mark times with p (Holm) < 0.05 with *", APP_DEFAULTS$diff_mark),
+                  p(style = "font-size:.78em;color:#777;",
+                    "Each sample's mean curve minus the reference's (or log2 of their ratio) at every time; the dashed line is no ",
+                    "difference. Needs a reference sample (Stats & Reports). Exploratory: a Welch test per time point.")),
                 conditionalPanel("input.analysis_type == 'heatmap'",
                   p(style = "font-size:.78em;color:#777;",
                     "Mean OD per sample and time point; for screens with many samples.")),
@@ -4391,6 +4518,10 @@ ui <- fluidPage(
             )
           ),
           uiOutput("analysis_container"),
+          conditionalPanel("input.analysis_type == 'difference'",
+            h5("First separation from the reference", style = "margin-top:10px;"),
+            uiOutput("analysis_separation_note"),
+            tableOutput("analysis_separation_table")),
           h4("Replicate statistics", style = "margin-top:18px;"),
           uiOutput("analysis_stats_notes"),
           tableOutput("analysis_stats_table"),
@@ -4484,6 +4615,15 @@ ui <- fluidPage(
               div(style = "overflow-x:auto;", tableOutput("stats_tab_repmetrics")),
               downloadButton("downloadReplicateMetricsCSV_tab", "Per-replicate metrics (CSV)"))),
           tags$details(class = "stats-section",
+            tags$summary(tags$b("Curve phases")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "The mean curve of each sample split into lag, exponential, deceleration, stationary, lysis and ",
+                "recovery / post-lysis phases (the figure is 'Curve phases' under Analysis figures and the composer)."),
+              uiOutput("phases_note"),
+              div(style = "overflow-x:auto;", tableOutput("phases_table")),
+              downloadButton("downloadPhasesCSV", "Curve phases (CSV)"))),
+          tags$details(class = "stats-section",
             tags$summary(tags$b("Replicate comparison")),
             div(class = "panel-section",
               p(style = "font-size:.78em;color:#777;",
@@ -4493,7 +4633,10 @@ ui <- fluidPage(
               tableOutput("stats_tab_pairwise"),
               tableOutput("stats_tab_omnibus"),
               tableOutput("stats_tab_posthoc"),
-              downloadButton("downloadAnalysisStatsCSV_tab", "Replicate statistics (CSV)"))),
+              downloadButton("downloadAnalysisStatsCSV_tab", "Replicate statistics (CSV)"),
+              h5("First separation from reference", style = "margin-top:14px;"),
+              uiOutput("stats_tab_separation_note"),
+              tableOutput("stats_tab_separation_table"))),
           tags$details(class = "stats-section",
             tags$summary(tags$b("OD at chosen times")),
             div(class = "panel-section",
@@ -4544,6 +4687,25 @@ ui <- fluidPage(
               uiOutput("allmetrics_notes"),
               div(style = "overflow-x:auto;", tableOutput("allmetrics_table")),
               downloadButton("downloadAllMetricsCSV", "All-metrics comparison (CSV)"))),
+          tags$details(class = "stats-section",
+            tags$summary(tags$b("Bootstrap intervals")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "A percentile interval for the metric of the mean curve, from replicate-level resampling: each draw resamples the ",
+                "replicate curves of a sample with replacement, averages them and recomputes the metric; the interval is the 2.5th ",
+                "and 97.5th percentile of the finite draws. It is not recomputed when inputs change: press Run bootstrap."),
+              p(class = "stats-note",
+                "With n = 3 replicates there are only 10 distinct resamples, so the interval is wide, coarse and can be degenerate ",
+                "(zero width when every resample crosses between the same two readings): a rough indication, not a precise interval."),
+              fluidRow(
+                column(5, selectInput("boot_metrics", "Metrics:", choices = PHENO_METRIC_CHOICES,
+                                      selected = APP_DEFAULTS$boot_metrics, multiple = TRUE)),
+                column(2, numericInput("boot_n", "Draws:", APP_DEFAULTS$boot_n, BOOT_N_MIN, BOOT_N_MAX, 100)),
+                column(2, numericInput("boot_seed", "Seed:", APP_DEFAULTS$boot_seed, step = 1)),
+                column(3, br(), actionButton("boot_run", "Run bootstrap", class = "btn-primary"))),
+              uiOutput("boot_note"),
+              div(style = "overflow-x:auto;", tableOutput("boot_table")),
+              downloadButton("downloadBootCSV", "Bootstrap intervals (CSV)"))),
           tags$details(class = "stats-section",
             tags$summary(tags$b("Methods text (editable)")),
             div(class = "panel-section",
@@ -4929,7 +5091,7 @@ server <- function(input, output, session) {
       data_inputs     <- c("file", "loadSettings", "selected_samples",
                            "time_filter_range", "exclude_timepoints",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                           "main_panel_width")
+                           "main_panel_width", "boot_run")
       # Per-sample dynamic input prefixes — handled separately below
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
@@ -5013,7 +5175,7 @@ server <- function(input, output, session) {
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                         "main_panel_width")
+                         "main_panel_width", "boot_run")
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
                          "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_",
@@ -5037,7 +5199,7 @@ server <- function(input, output, session) {
       if (!(nm %in% names(input)))                  next
       tryCatch({
         val <- global[[nm]]
-        if (identical(nm, "pheno_metrics")) {
+        if (nm %in% c("pheno_metrics", "boot_metrics")) {
           updateSelectInput(session, nm, selected = val)            # v2.19: a multi-select, not a checkbox group
         } else if (is.character(val) && (length(val) > 1 || nm %in% c("compose_panels", "fit_models"))) {
           updateCheckboxGroupInput(session, nm, selected = val)     # v2.13: checkbox groups
@@ -5049,7 +5211,8 @@ server <- function(input, output, session) {
           updateSelectInput(session, nm, selected = val)
           updateTextInput(session,   nm, value    = val)
           if (startsWith(nm, "compose_") || nm %in% c("explorer_level", "fit_until", "fit_level", "fit_show", "pheno_scale",
-                                                       "extract_method", "extract_direction", "extract_after"))
+                                                       "extract_method", "extract_direction", "extract_after",
+                                                       "metric_error_source", "diff_mode"))
             updateRadioButtons(session, nm, selected = val)
         }
         n_global <- n_global + 1L
@@ -6314,7 +6477,7 @@ server <- function(input, output, session) {
   # ── Fixed panel size (v2.15) ────────────────────────────────────────────────
   fixed_mode <- function() identical(input$panel_size_mode, "fixed")
   CURVE_KINDS <- c("main", "main_by_group", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response",
-                   "metric_explorer", "fit_overlay")   # v2.19: the fit figure is square; the phenotype heatmap (like the OD heatmap) is not
+                   "metric_explorer", "fit_overlay", "phases", "difference")   # v2.19: the fit figure is square, v2.20: so are the phases and separation figures; the phenotype heatmap (like the OD heatmap) is not
   # Panel (plotting area) size in mm for a figure kind: curve figures are square when
   # panel_square is on; the metric summary and heatmap use width x height as given.
   panel_dims_mm <- function(kind = "main") {
@@ -6385,7 +6548,7 @@ server <- function(input, output, session) {
       tryCatch({
         if (is.logical(val))      updateCheckboxInput(session, nm, value = val)
         else if (is.numeric(val)) updateNumericInput( session, nm, value = val)
-        else if (identical(nm, "pheno_metrics")) updateSelectInput(session, nm, selected = val)   # v2.19: a multi-select
+        else if (nm %in% c("pheno_metrics", "boot_metrics")) updateSelectInput(session, nm, selected = val)   # v2.19 / v2.20: multi-selects
         else if (is.character(val) && length(val) > 1) updateCheckboxGroupInput(session, nm, selected = val)
         else { updateSelectInput(session,   nm, selected = val)
                updateRadioButtons(session, nm, selected = val)
@@ -6784,12 +6947,37 @@ server <- function(input, output, session) {
           else waiver()
         summ <- long %>% group_by(metric, sample) %>%
           summarise(mean = mean(value), sd = ehw(value), n = n(), .groups = "drop")
+        summ$lo <- summ$mean - summ$sd; summ$hi <- summ$mean + summ$sd
+        # v2.20: the whiskers can be the bootstrap 95 % CI of the mean-curve metric (Statistics tab, "Run bootstrap")
+        # instead of the replicate spread: the bar is then the mean-curve estimate. A metric the cached bootstrap
+        # does not hold keeps the replicate spread, with a notification.
+        if (identical(input$metric_error_source %||% "replicates", "bootstrap")) {
+          bt <- boot_valid()
+          have <- if (is.null(bt)) character(0) else intersect(mets, unique(as.character(bt$metric)))
+          miss <- setdiff(mets, have)
+          if (length(miss))
+            guard_notify("boot_fallback", paste0(
+              if (is.null(bt)) paste0("No bootstrap result yet (or it is out of date): run it on the Statistics tab. ")
+              else "The cached bootstrap does not hold: ",
+              if (!is.null(bt)) paste0(paste(metric_label(miss), collapse = ", "), ". "),
+              "Those metrics show the replicate spread."))
+          lab_of <- function(m) metric_axis_label(m, tunit = tunit, ylab = input$y_axis_label %||% "OD")
+          smp_of <- unname(labs_v[sample_levels(samps)]); names(smp_of) <- sample_levels(samps)
+          for (m in have) {
+            bm <- bt[bt$metric == m, , drop = FALSE]
+            rr <- which(as.character(summ$metric) == lab_of(m))
+            bi <- match(as.character(summ$sample[rr]), unname(smp_of[bm$sample]))
+            est <- bm$estimate[bi]; ok <- !is.na(bi)
+            summ$lo[rr[ok]]   <- bm$ci_low[bi[ok]];  summ$hi[rr[ok]] <- bm$ci_high[bi[ok]]
+            summ$mean[rr[ok & is.finite(est)]] <- est[ok & is.finite(est)]
+          }
+        }
         g <- ggplot(long, aes(x = sample, y = value))
         if (eb_col == "sample")
-          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = mean - sd, ymax = mean + sd, color = sample),
+          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi, color = sample),
                                  width = 0.3, linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)
         else
-          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = mean - sd, ymax = mean + sd),
+          g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi),
                                  color = eb_col, width = 0.3, linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)
         g <- g +
           geom_crossbar(data = summ, aes(x = sample, y = mean, ymin = mean, ymax = mean, color = sample),
@@ -6808,6 +6996,10 @@ server <- function(input, output, session) {
             lab_m <- metric_axis_label(m, tunit = tunit, ylab = input$y_axis_label %||% "OD")
             top <- long[long$metric == lab_m, , drop = FALSE] %>% group_by(sample) %>%
               summarise(y = max(value), .groups = "drop")
+            if (identical(input$metric_error_source %||% "replicates", "bootstrap")) {   # a bootstrap whisker can reach above the points
+              sm_m <- summ[as.character(summ$metric) == lab_m, , drop = FALSE]
+              top$y <- pmax(top$y, sm_m$hi[match(as.character(top$sample), as.character(sm_m$sample))], na.rm = TRUE)
+            }
             pwd <- st$pairwise[st$pairwise$versus == ref, , drop = FALSE]   # never show all-pairs results as "vs reference"
             if (nrow(pwd) == 0) return(NULL)
             pwd$sample <- factor(unname(labs_v[pwd$sample]), levels = levels(long$sample))
@@ -6962,6 +7154,100 @@ server <- function(input, output, session) {
                  shape = guide_legend(order = 2, override.aes = list(color = "black", fill = "grey60"))) +
           labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
         if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
+      },
+      phases = {
+        # v2.20: the mean curves with each sample's phases (curve_phases_by_sample(): lag, exponential, deceleration,
+        # stationary, lysis, recovery / post-lysis, every boundary read back from the curve metrics) as translucent
+        # shaded bands behind the curve. With several samples full-height bands would overlap, so each sample gets a
+        # thin strip at the top of the panel (one row per sample, labelled on the left) and the curves sit below.
+        pd <- prepare_plot_data(); ph <- phases_current()
+        if (is.null(ph) || nrow(ph) == 0) stop("No phases could be computed: a curve needs at least two readings.")
+        logy <- identical(input$y_scale_type, "log")
+        if (logy) pd <- pd[pd$mean_value > 0, , drop = FALSE]
+        if (nrow(pd) == 0) stop("No data to draw.")
+        smp <- sample_levels(samps); smp <- smp[smp %in% unique(as.character(pd$variable))]
+        pd$variable <- factor(as.character(pd$variable), levels = sample_levels(samps))
+        ph  <- ph[ph$sample %in% smp, , drop = FALSE]
+        k   <- length(smp)
+        tr  <- function(v) if (logy) log10(v) else v
+        inv <- function(v) if (logy) 10^v else v
+        rng <- range(tr(pd$mean_value), na.rm = TRUE)
+        lay <- phase_layout(rng[1], rng[2], k)
+        ph$phase <- factor(ph$phase, levels = PHASE_LEVELS)
+        strips <- k > 1
+        if (strips) {
+          si <- match(ph$sample, smp)
+          ph$ymin <- inv(lay$strips$ymin[si]); ph$ymax <- inv(lay$strips$ymax[si])
+        } else { ph$ymin <- inv(lay$full[1]); ph$ymax <- inv(lay$full[2]) }
+        # y breaks only over the curves (the strips above them carry no values)
+        y_lim <- inv(lay$limits); y_top <- inv(rng[2])
+        y_brk <- function(lim) {
+          b <- if (logy) scales::log_breaks()(range(pd$mean_value)) else scales::extended_breaks()(range(pd$mean_value))
+          b <- b[is.finite(b) & b >= y_lim[1] & b <= y_top * (1 + 1e-9)]
+          if (length(b) >= 2) b else waiver()
+        }
+        t_rng <- range(pd$time, na.rm = TRUE)
+        g <- ggplot() +
+          geom_rect(data = ph, aes(xmin = t_start, xmax = t_end, ymin = ymin, ymax = ymax, fill = phase),
+                    alpha = if (strips) PHASE_STRIP_ALPHA else PHASE_BAND_ALPHA,
+                    colour = if (strips) "white" else NA, linewidth = if (strips) pt2lw(0.25) else 0,
+                    inherit.aes = FALSE)
+        if (strips) {
+          lab <- data.frame(variable = factor(smp, levels = sample_levels(samps)), label = unname(labs_v[smp]),
+                            x = t_rng[1] + 0.012 * (t_rng[2] - t_rng[1]),
+                            y = inv((lay$strips$ymin + lay$strips$ymax) / 2), stringsAsFactors = FALSE)
+          g <- g + geom_text(data = lab, aes(x = x, y = y, label = label, colour = variable), hjust = 0, vjust = 0.5,
+                             size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                             family = if (nzchar(input$font_family %||% "")) input$font_family else "",
+                             show.legend = FALSE, inherit.aes = FALSE)
+        }
+        g <- g +
+          geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable, group = variable),
+                    linewidth = lw) +
+          scale_color_manual(   values = cols, labels = labs_v, name = NULL) +
+          scale_linetype_manual(values = lts,  labels = labs_v, name = NULL) +
+          scale_fill_manual(values = PHASE_COLORS, breaks = intersect(PHASE_LEVELS, as.character(ph$phase)),
+                            drop = TRUE, name = "Phase") +
+          guides(color = guide_legend(order = 1), linetype = guide_legend(order = 1),
+                 fill = guide_legend(order = 2, override.aes = list(alpha = 0.6, colour = NA))) +
+          scale_x_continuous(expand = c(0, 0)) +
+          (if (logy) scale_y_log10(limits = y_lim, expand = c(0, 0), breaks = y_brk, labels = y_tick_labels(), oob = y_oob_fn())
+           else scale_y_continuous(limits = y_lim, expand = c(0, 0), breaks = y_brk)) +
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        g
+      },
+      difference = {
+        # v2.20: curve_difference(): each sample's mean curve minus (or log2 ratio to) the reference's, at every
+        # time; '*' above the curve where the Holm-adjusted per-time Welch test is < 0.05. The reference itself is
+        # the dashed zero line. Exploratory (one test per time point on a handful of readings).
+        if (!nzchar(ref) || !ref %in% samps)
+          stop("Pick the uninfected reference sample under Stats & Reports first.")
+        mode <- if (identical(input$diff_mode %||% "difference", "log2_ratio")) "log2_ratio" else "difference"
+        cd   <- difference_current()
+        if (is.null(cd)) stop("No data for the reference sample.")
+        d <- cd[as.character(cd$sample) != ref & is.finite(cd$diff), , drop = FALSE]
+        if (nrow(d) == 0) stop(if (identical(mode, "log2_ratio")) "No sample has a positive mean OD to compare with the reference (log2 ratio)."
+                               else "No other sample to compare with the reference.")
+        d$variable <- factor(as.character(d$sample), levels = sample_levels(samps))
+        ref_lab <- unname(labs_v[ref])
+        yr   <- range(c(0, d$diff)); span <- if (yr[2] > yr[1]) yr[2] - yr[1] else 1
+        leg_xy <- list(x = d$time, y = d$diff, g = d$variable)
+        g <- ggplot(d, aes(x = time, y = diff, color = variable, linetype = variable, shape = variable, group = variable)) +
+          geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
+          geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7)
+        if (isTRUE(input$diff_mark %||% TRUE) && "p_adj_holm" %in% names(d)) {
+          mk <- d[is.finite(d$p_adj_holm) & d$p_adj_holm < 0.05, , drop = FALSE]
+          if (nrow(mk)) {
+            mk$ymark <- mk$diff + 0.04 * span
+            g <- g + geom_point(data = mk, aes(x = time, y = ymark, color = variable), shape = 8, size = ptsz * 0.5,
+                                stroke = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)   # an asterisk marker, readable at any font size
+          }
+        }
+        g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          scale_y_continuous(expand = expansion(mult = c(0.06, 0.14))) +
+          labs(x = input$x_axis_label,
+               y = axis_y_label(if (identical(mode, "log2_ratio")) paste0("log2 (", input$y_axis_label, " / ", ref_lab, ")")
+                                else paste0(input$y_axis_label, " minus ", ref_lab)))
       },
       metric_explorer = {
         # v2.18: one curve metric against another, a point per sample: the mean of the replicates with error
@@ -7133,6 +7419,8 @@ server <- function(input, output, session) {
     if (type == "dose_response" && isTRUE(dose_no_legend))
       p <- p + theme(legend.position = "none")   # x axis already says it; the key would hide points
     if (type == "landmarks")   # nine legend entries: outside, never over the curves
+      p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
+    if (type == "phases")      # v2.20: the phase key sits outside the panel, never over the strips
       p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
     if (isTRUE(input$custom_aspect_ratio)) p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
     p + coord_cartesian(clip = "off") + labs(tag = if (nzchar(tag)) tag else NULL)
@@ -7877,6 +8165,163 @@ server <- function(input, output, session) {
     filename = function() paste0("all_metrics_comparison_", extract_stamp(), ".csv"),
     content  = function(file) { req(rv$data, input$selected_samples); res <- all_metrics_current(); req(res$table); utils::write.csv(res$table, file, row.names = FALSE) })
 
+  # ── Curve phases, bootstrap intervals and separation from the reference (v2.20) ───────────────────────────
+  # Engine: curve_phases_by_sample(), bootstrap_metrics(), curve_difference(), first_separation_time(); see
+  # docs/PHASES_AND_BOOTSTRAP.md. Every table / figure below reads the same reactive or the same cache.
+  phases_current <- reactive({
+    req(rv$data, input$selected_samples)
+    ph <- curve_phases_by_sample(prepare_plot_data(),
+                                 smooth_window   = input$metrics_smooth_window %||% 5,
+                                 peak_mode       = input$metrics_peak_mode %||% "global",
+                                 lysis_threshold = lysis_threshold_current())
+    if (is.null(ph)) return(NULL)
+    ph[order(match(ph$sample, sample_levels(input$selected_samples)), seq_len(nrow(ph))), , drop = FALSE]   # sample order, phases in time order
+  })
+  output$phases_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    ph <- phases_current()
+    miss <- setdiff(input$selected_samples, if (is.null(ph)) character(0) else unique(ph$sample))
+    div(div(class = "stats-note", paste0(
+          "Times in ", time_unit_from_label(input$x_axis_label), ". Each phase edge is read back from the curve metrics of the mean curve ",
+          "(the metrics smoothing window, peak mode and lysis threshold under Stats & Reports; the peak-detection smoothing window is not used), ",
+          "so it can be checked against the Curve landmarks figure. Phases that do not apply, or have zero length, are left out. ",
+          "OD start / end are the curve values at the edges.")),
+        if (length(miss)) div(class = "stats-note", paste0("No phases for: ", paste(miss, collapse = ", "), " (fewer than two readings).")))
+  })
+  output$phases_table <- renderTable({
+    req(rv$data, input$selected_samples)
+    d <- phases_display_table(phases_current()); req(d); d
+  }, striped = TRUE, spacing = "xs")
+  output$downloadPhasesCSV <- downloadHandler(
+    filename = function() paste0("curve_phases_", extract_stamp(), ".csv"),
+    content  = function(file) { req(rv$data, input$selected_samples); ph <- phases_current(); req(ph); utils::write.csv(ph, file, row.names = FALSE) })
+
+  # separation from the reference: the per-time difference (with Welch p) and the first time it is significant
+  difference_current <- reactive({
+    req(rv$data, input$selected_samples)
+    ref <- input$metrics_ref_sample %||% ""
+    pd  <- prepare_plot_data()
+    if (!nzchar(ref) || !ref %in% as.character(pd$variable)) return(NULL)
+    curve_difference(pd, ref, rep_pd = prepare_replicate_data(),
+                     mode = if (identical(input$diff_mode %||% "difference", "log2_ratio")) "log2_ratio" else "difference")
+  })
+  separation_current <- function() {
+    cd <- difference_current()
+    if (is.null(cd) || !"p_adj_holm" %in% names(cd)) return(NULL)
+    first_separation_time(cd)
+  }
+  separation_table_build <- function() {
+    req(rv$data, input$selected_samples)
+    d <- separation_display_table(separation_current(), input$metrics_ref_sample %||% "",
+                                  time_unit_from_label(input$x_axis_label))
+    req(d); d
+  }
+  separation_note_build <- function() {
+    req(rv$data, input$selected_samples)
+    ref <- input$metrics_ref_sample %||% ""
+    if (!nzchar(ref) || !ref %in% input$selected_samples)
+      return(div(class = "stats-note", "Pick the uninfected reference sample under Stats & Reports to see when each sample separates from it."))
+    div(class = "stats-note", paste0(
+      "First sampled time at which the Welch test of the sample's replicates against the reference's (",
+      if (identical(input$diff_mode %||% "difference", "log2_ratio")) "on log2 readings, i.e. a ratio different from 1" else "on the OD readings",
+      "), Holm-adjusted across that sample's time points, gives p < 0.05. Exploratory: one test per time point on a few readings, ",
+      "so with n = 3 the test has little power and the time is later than the true divergence ('none' = never reached)."))
+  }
+  output$analysis_separation_note  <- renderUI(separation_note_build())
+  output$analysis_separation_table <- renderTable(separation_table_build(), striped = TRUE, spacing = "xs")
+  output$stats_tab_separation_note  <- renderUI(separation_note_build())
+  output$stats_tab_separation_table <- renderTable(separation_table_build(), striped = TRUE, spacing = "xs")
+
+  # bootstrap intervals: computed only when "Run bootstrap" is pressed, cached with a signature of the data and
+  # metric settings it was run on. A change to the data, the time filters / windows / blank, the sample selection or
+  # the metric settings makes the cache out of date: the table stays visible with a notice, but the metric summary,
+  # the reports and the bundle ignore it until it is run again.
+  boot_cache <- reactiveVal(NULL)
+  boot_signature <- function() {
+    rp <- prepare_replicate_data()
+    list(source = rv$data_source %||% "", samples = sort(as.character(input$selected_samples)),
+         smooth = input$metrics_smooth_window %||% 5, peak_smooth = input$metrics_peak_smooth_window %||% 1,
+         peak_mode = input$metrics_peak_mode %||% "global", thr = lysis_threshold_current(),
+         n = nrow(rp), sum_value = signif(sum(rp$value), 10), sum_time = signif(sum(rp$time), 10),
+         sum_rep = sum(as.numeric(rp$replicate)), sum_var = sum(match(as.character(rp$variable), as.character(input$selected_samples))))
+  }
+  boot_state <- function() {          # list(cache, valid): the cached run and whether it still matches the data
+    b <- boot_cache()
+    if (is.null(b)) return(list(cache = NULL, valid = FALSE))
+    sig <- tryCatch(boot_signature(), error = function(e) NULL)
+    list(cache = b, valid = !is.null(sig) && identical(sig, b$signature))
+  }
+  boot_valid <- function() {          # the cached table, or NULL when there is none / it is out of date
+    st <- boot_state()
+    if (st$valid && !is.null(st$cache$table) && nrow(st$cache$table) > 0) st$cache$table else NULL
+  }
+  run_bootstrap_now <- function() {
+    if (is.null(rv$data) || !length(input$selected_samples)) {
+      guard_notify("boot_run", "Load data and select samples first: the bootstrap resamples their replicates.")
+      return(invisible(NULL))
+    }
+    sel <- as.character(input$boot_metrics %||% character(0))
+    mets <- sel[sel %in% BOOT_METRIC_NAMES]
+    dropped <- setdiff(sel, mets)
+    if (!length(mets)) {
+      guard_notify("boot_run", if (length(sel)) "None of the chosen metrics can be bootstrapped (reference-relative metrics are not resampled): choose at least one other."
+                               else "Choose at least one metric to bootstrap.")
+      return(invisible(NULL))
+    }
+    nb <- suppressWarnings(as.integer(round(as.numeric(input$boot_n %||% 1000))))
+    if (!length(nb) || is.na(nb)) nb <- 1000L
+    nb <- min(max(nb, BOOT_N_MIN), BOOT_N_MAX)
+    sd <- suppressWarnings(as.integer(round(as.numeric(input$boot_seed %||% 1))))
+    if (!length(sd) || is.na(sd)) sd <- 1L
+    bt <- tryCatch(
+      bootstrap_metrics(prepare_replicate_data(), mets, n_boot = nb, seed = sd,
+                        smooth_window = input$metrics_smooth_window %||% 5,
+                        peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
+                        peak_mode = input$metrics_peak_mode %||% "global", lysis_threshold = lysis_threshold_current()),
+      error = function(e) { guard_notify("boot_run", paste("Bootstrap failed:", friendly_error_message(e)), "error"); NULL })
+    if (is.null(bt)) return(invisible(NULL))
+    boot_cache(list(table = bt, metrics = mets, dropped = dropped, n_boot = nb, seed = sd,
+                    signature = boot_signature(), time = format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
+    guard_notify("boot_run", sprintf("Bootstrap done: %d draws per sample for %d metric%s.", nb, length(mets),
+                                     if (length(mets) == 1) "" else "s"), "message")
+    invisible(bt)
+  }
+  observeEvent(input$boot_run, run_bootstrap_now())
+  output$boot_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    st <- boot_state(); b <- st$cache
+    if (is.null(b)) return(div(class = "stats-note", "No bootstrap has been run yet: choose the metrics and press Run bootstrap."))
+    few <- !is.null(b$table) && any(b$table$n_replicates < 3, na.rm = TRUE)
+    div(
+      if (!st$valid)
+        div(style = "background:#fff3cd;border:1px solid #ffe69c;border-radius:4px;padding:6px 8px;margin:6px 0;font-size:.82em;color:#664d03;",
+            tags$b("Out of date: "), "the data, the filters, the samples or the metric settings changed since this bootstrap was run (",
+            b$time, "). Run it again; until then the metric summary, the reports and the figure bundle do not use it."),
+      div(class = "stats-note", sprintf("Run %s: %d draws per sample, seed %d, metrics: %s.", b$time, b$n_boot, b$seed,
+                                        paste(metric_label(b$metrics), collapse = ", "))),
+      if (length(b$dropped))
+        div(class = "stats-note", paste0("Not bootstrapped: ", paste(metric_label(b$dropped), collapse = ", "),
+                                         " (relative to the reference sample, so not a property of one curve; the engine does not resample them).")),
+      if (few) div(class = "stats-note", "A sample with fewer than two replicates has no interval (NA)."))
+  })
+  output$boot_table <- renderTable({
+    req(rv$data, input$selected_samples)
+    b <- boot_cache(); req(b)
+    d <- bootstrap_display_table(b$table); req(d); d
+  }, striped = TRUE, spacing = "xs")
+  output$downloadBootCSV <- downloadHandler(
+    filename = function() paste0("bootstrap_intervals_", extract_stamp(), ".csv"),
+    content  = function(file) { b <- boot_cache(); req(b, b$table); utils::write.csv(b$table, file, row.names = FALSE) })
+  # the sentence the methods draft gains once a (current) bootstrap exists
+  boot_methods_sentence <- function() {
+    st <- tryCatch(boot_state(), error = function(e) NULL)
+    if (is.null(st) || !st$valid || is.null(st$cache$table) || nrow(st$cache$table) == 0) return(character(0))
+    b <- st$cache
+    paste0("Percentile bootstrap 95% confidence intervals of the mean-curve metrics (", paste(metric_label(b$metrics), collapse = ", "),
+           ") were obtained by resampling the replicate curves of each sample with replacement (", b$n_boot,
+           " draws, seed ", b$seed, "), averaging the drawn curves and recomputing each metric on the resampled mean curve.")
+  }
+
   # Methods paragraph drafted from the current settings: what was measured, how the mean and the
   # error statistic were computed, how the metrics were defined and which tests were run. Plain text
   # (the y label keeps its "A550"); the user edits it and the reports include what is in the box.
@@ -7947,7 +8392,7 @@ server <- function(input, output, session) {
         else ""))
     s5 <- paste0("Analysis and figures were produced with the Lysis Curve OD Visualization App v", APP_VERSION,
                  " (R ", R.version$major, ".", R.version$minor, ").")
-    paste(c(s1, s2, s3, fit_methods_sentence(), s4, s5), collapse = " ")   # v2.19: + the fits, once the tab was used
+    paste(c(s1, s2, s3, fit_methods_sentence(), boot_methods_sentence(), s4, s5), collapse = " ")   # v2.19: + the fits, once the tab was used; v2.20: + the bootstrap, once run
   }
   observeEvent(input$methods_draft, {
     if (is.null(rv$data) || !length(input$selected_samples)) {
@@ -8078,6 +8523,16 @@ server <- function(input, output, session) {
       ft <- tryCatch(fit_table_current(), error = function(e) NULL)
       if (!is.null(ft) && nrow(ft) > 0) {
         utils::write.csv(ft, file.path(dir, "fits.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "fits.csv")
+      }
+      # v2.20: the curve phases (every sample, phase, edges, duration, OD at the edges) and, when a current one is cached,
+      # the bootstrap intervals
+      ph <- tryCatch(phases_current(), error = function(e) NULL)
+      if (!is.null(ph) && nrow(ph) > 0) {
+        utils::write.csv(ph, file.path(dir, "phases.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "phases.csv")
+      }
+      bt <- tryCatch(boot_valid(), error = function(e) NULL)
+      if (!is.null(bt)) {
+        utils::write.csv(bt, file.path(dir, "bootstrap.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "bootstrap.csv")
       }
       for (nm in names(ex_tabs <- tryCatch(extraction_tables_current(), error = function(e) list()))) {
         utils::write.csv(ex_tabs[[nm]], file.path(dir, nm), row.names = FALSE); extra_csv <- c(extra_csv, nm)
@@ -8336,6 +8791,18 @@ server <- function(input, output, session) {
     if (length(out)) out else NULL
   }
 
+  # v2.20: the cached bootstrap table (only when it still matches the data), with a description of the run
+  report_bootstrap_payload <- function() {
+    st <- tryCatch(boot_state(), error = function(e) NULL)
+    if (is.null(st) || !st$valid || is.null(st$cache$table) || nrow(st$cache$table) == 0) return(NULL)
+    b <- st$cache
+    list(title = "Bootstrap intervals", table = bootstrap_display_table(b$table),
+         desc = paste0("Percentile bootstrap intervals of the mean-curve metrics: replicate curves resampled with replacement (",
+                       b$n_boot, " draws per sample, seed ", b$seed, "), averaged, metric recomputed; estimate = the Curve Metrics value, CI = ",
+                       "2.5th and 97.5th percentile of the finite draws, n ok draws = draws with a finite metric. ",
+                       "With n = 3 replicates there are at most 10 distinct resamples, so the intervals are wide and coarse (zero-width is possible)."))
+  }
+
   report_analysis_payload <- function(render_png = FALSE) {
     if (!isTRUE(input$report_include_analysis %||% TRUE)) return(NULL)
     samps <- input$selected_samples
@@ -8349,6 +8816,8 @@ server <- function(input, output, session) {
     types <- c("metric_summary", "growth_rate",
                if (nzchar(ref)) "normalized" else "replicate_overlay",
                "landmarks",
+               "phases",                                                    # v2.20: figure + table after the landmarks
+               if (nzchar(ref) && ref %in% samps) "difference",             # v2.20: needs a reference sample
                # dose-response only with >= 2 distinct positive MOI levels (v2.12.4); a
                # single level would only produce the "Figure not available" message
                if (length(unique(moi[is.finite(moi) & moi > 0])) >= 2) "dose_response",
@@ -8358,11 +8827,15 @@ server <- function(input, output, session) {
                 normalized        = "Normalized OD vs time",
                 replicate_overlay = "Replicate overlay",
                 landmarks         = "Curve landmarks",
+                phases            = "Curve phases",
+                difference        = "Separation from the reference",
                 dose_response     = "MOI dose-response",
                 phenotype_heatmap = "Phenotype heatmap")
     captions <- c(
       metric_summary = paste0(
-        "Per-replicate values (open circles), mean (bar) ± SD (whiskers) for ",
+        if (identical(input$metric_error_source %||% "replicates", "bootstrap"))
+          "Per-replicate values (open circles), mean-curve value (bar) and bootstrap 95% percentile interval of the mean-curve metric (whiskers; replicate-level resampling, see Bootstrap intervals; a metric without a current bootstrap shows the replicate spread) for "
+        else "Per-replicate values (open circles), mean (bar) ± SD (whiskers) for ",
         paste(vapply(mets, metric_axis_label, "", tunit = tunit, ylab = ylab), collapse = ", "), ".",
         if (isTRUE(input$stats_mark) && nzchar(ref))
           paste0(" Marks: significance vs reference '", ref, "' (",
@@ -8379,6 +8852,21 @@ server <- function(input, output, session) {
       replicate_overlay = "Individual replicate curves (thin lines) with the mean curve (thick line) per sample.",
       landmarks = paste0("Mean curves with the computed landmarks drawn where they come from: lag end, centre of the μmax window, ",
                          "peak, lysis onset (> ", lysis_threshold_current() * 100, " % decline from the peak), half of the peak and the trough."),
+      phases = paste0(
+        "Mean curves with each sample's phases shaded: lag, exponential, deceleration, stationary, lysis and recovery / post-lysis. ",
+        "Every edge is read back from the curve metrics of the mean curve (smoothing window ", win, " points, ",
+        if (identical(input$metrics_peak_mode %||% "global", "first_local")) "first-peak mode" else "global peak",
+        ", lysis onset at a > ", lysis_threshold_current() * 100, " % decline from the peak), so it can be checked on the landmarks figure. ",
+        "Phases that do not apply are omitted. ",
+        if (length(samps) > 1) "Each sample's phases are the thin strip at the top of the panel, in the order of the legend; the curves are below them."
+        else "The bands run over the full height of the panel behind the curve."),
+      difference = if (nzchar(ref)) paste0(
+        if (identical(input$diff_mode %||% "difference", "log2_ratio"))
+          paste0("log2 of the mean ", ylab, " of each sample over that of the reference '", ref, "' at each time point")
+        else paste0("Mean ", ylab, " of each sample minus that of the reference '", ref, "' at each time point"),
+        "; the dashed line marks no difference (the reference itself). ",
+        if (isTRUE(input$diff_mark %||% TRUE)) "* : Welch test of the replicates against the reference at that time, Holm-adjusted across the sample's time points, p < 0.05. " else "",
+        "Exploratory: one test per time point on a few replicate readings. First separation times are in the table below.") else "",
       dose_response = paste0(
         metric_axis_label(input$analysis_dose_metric %||% "lysis_time", tunit = tunit, ylab = ylab),
         " per replicate (open circles) and mean ± SD (filled symbols) against MOI (log scale)."),
@@ -8392,6 +8880,18 @@ server <- function(input, output, session) {
       }, error = function(e) "Samples by curve metrics of the mean curves."))
     figs <- lapply(types, function(ty) report_figure_entry(ty, unname(titles[ty]), unname(captions[ty]), render_png))
     figs <- Filter(Negate(is.null), figs)
+    # v2.20: a table follows the phases and the separation figure (the phases table, the first separation times)
+    figs <- lapply(figs, function(f) {
+      if (!is.null(f$error)) return(f)
+      if (identical(f$type, "phases")) {
+        f$table <- tryCatch(phases_display_table(phases_current()), error = function(e) NULL)
+        f$table_title <- paste0("Curve phases (times in ", tunit, "; 3 significant digits)")
+      } else if (identical(f$type, "difference")) {
+        f$table <- tryCatch(separation_display_table(separation_current(), ref, tunit), error = function(e) NULL)
+        f$table_title <- "First separation from the reference"
+      }
+      f
+    })
     # v2.13: the composed figure closes the list, when at least two panels are selected
     comp <- if (has_patchwork) tryCatch(compose_info(), error = function(e) NULL) else NULL
     if (!is.null(comp) && comp$n >= 2) {
@@ -8408,7 +8908,8 @@ server <- function(input, output, session) {
     st <- analysis_stats_current()
     list(figures = figs, stats = st, metric_label = metric_label(st$metric),
          ref_sample = ref, method = input$stats_method %||% "welch",
-         fits = report_fits_payload(render_png), extraction = report_extraction_payload())   # v2.19
+         fits = report_fits_payload(render_png), extraction = report_extraction_payload(),   # v2.19
+         bootstrap = report_bootstrap_payload())   # v2.20: NULL unless a current bootstrap is cached
   }
 
   # The report bodies live outside the download handlers so the test suites

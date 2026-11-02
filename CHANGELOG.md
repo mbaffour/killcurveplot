@@ -1,5 +1,58 @@
 # Changelog
 
+## v2.20.0 — 2026-10-20
+
+**Curve phases figure, bootstrap intervals, separation from the reference, gallery update.**
+The v2.20 engine functions (`curve_phases_by_sample`, `bootstrap_metrics`, `curve_difference`,
+`first_separation_time`) now have a user interface. The default main figure is unchanged (the v2.9
+byte-identical check is unchanged); every new input has an `APP_DEFAULTS` entry and is saved with
+the settings (the Run bootstrap button is not).
+
+- **Curve phases** (analysis type `phases`; also in the Analysis figures select, the composer and
+  Download all figures). The mean curves of the landmarks figure (same colours, `y_scale_type` for the
+  y axis) with each sample's phases shaded: lag grey, exponential green, deceleration yellow-green,
+  stationary blue, lysis vermillion, recovery purple, post-lysis grey-blue (a fixed, muted,
+  colour-blind-safe palette; phase key outside right). One sample: full-height translucent bands
+  (alpha 0.12) behind its curve. Several samples: bands would overlap, so each sample gets a thin
+  strip (6 % of the panel height, one row per sample, stacked at the top, labelled on the left in the
+  sample's colour at the axis-text size) and the curves sit below; strips are drawn at alpha 0.55
+  because 0.12 is unreadable on a strip. The phases follow the metrics smoothing window, peak mode and
+  lysis threshold (not the peak-detection smoothing window, which `curve_phases()` does not take).
+  - **Statistics tab, "Curve phases"**: the phases table (sample, phase, start, end, duration, OD
+    start, OD end; 3 significant digits) and a CSV (unformatted). `phases.csv` goes into the figure
+    bundle; the HTML and PDF reports show the figure and the table right after the landmarks figure.
+- **Bootstrap intervals** (Statistics tab section). `boot_metrics` (multi-select, default lysis onset,
+  OD drop, μmax, AUC, infection strength), `boot_n` (200-5000, default 1000), `boot_seed` (default 1) and
+  a **Run bootstrap** button. The bootstrap is computed only when the button is pressed and cached
+  (with a signature of the replicate data and the metric settings); a change to the data, the filters or
+  windows, the blank, the sample selection or the metrics settings marks it **out of date** with a notice
+  (the table stays visible; the metric summary, the reports and the bundle ignore it until it is run
+  again). The table: sample, metric, estimate, CI low, CI high, n replicates, n ok draws; CSV; a note
+  that it is a percentile interval from replicate-level resampling and is wide / degenerate at n = 3.
+  `infection_strength` (and the other reference-relative metrics) are not bootstrapped: they are not
+  produced by `compute_one_curve_metrics()`, which `bootstrap_metrics()` resamples, so a run drops them
+  and says so in the note.
+  - **Metric summary error source**: `metric_error_source` = "Replicate spread (SD/SEM/CI as in Error
+    Bars)" (default) or "Bootstrap 95 % CI of the mean-curve metric": the bar is then the mean-curve
+    estimate and the whiskers the bootstrap interval. A metric missing from the cached bootstrap (or no
+    current cache) keeps the replicate spread, with a notification. The report caption follows.
+  - Reports and bundle: a **Bootstrap intervals** section and `bootstrap.csv` when a current bootstrap is
+    cached; the drafted methods text gains a sentence.
+- **Separation from the reference** (analysis type `difference`, needs a reference sample; the
+  placeholder says so without one). `diff_mode` ("Difference (OD)" or "log2 ratio") and `diff_mark`
+  (default on). Each non-reference sample's `curve_difference()` against time, a dashed zero line, the
+  figure's colours, shapes and theme, and an asterisk marker above the curve where
+  `p_adj_holm < 0.05`. Under the figure (Analysis tab) and in the Statistics tab's Replicate comparison
+  section ("First separation from reference"): `first_separation_time()` per sample (the reference is
+  left out; "none" when never reached). Reports: the figure and the table when a reference is set.
+- **Gallery**: `tools/render_gallery.R` draws phases, difference, fit_overlay and phenotype_heatmap too
+  (order: main, landmarks, phases, replicate_overlay, growth_rate, normalized, difference,
+  metric_summary, dose_response, fit_overlay, phenotype_heatmap, heatmap) and, with more than 8 panels,
+  composes three columns at 183 mm with 55 mm per panel row (two columns as before up to 8).
+  `docs/gallery/gallery.png` is regenerated.
+- Tests: `tests/test_v220_integration.R`; the report image counts in `tests/test_v219_integration.R`
+  rose by two (the phases and the separation figure).
+
 ## v2.19.0 — 2026-10-20
 
 **Curve fitting tab, phenotype heatmap, extraction tables and the all-metrics comparison.**
