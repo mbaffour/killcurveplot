@@ -588,6 +588,331 @@ parse_excluded_timepoints <- function(text, all_timepoints) {
   unique(matched[!is.na(matched)])
 }
 
+# ── v2.22: data handling (detection, Excel / pasted data, exclusions, blanks and transforms) ──────────────
+# Pure functions (no Shiny state) so the rules can be tested and documented on their own; the server wires them in.
+
+# Long-format group columns (the first one present, in this order, is the sample column). v2.22: strain / Strain
+# (an audited omission of the old N4 app, item N4-4).
+LONG_GROUP_NAMES <- c("variable", "Variable", "condition", "Condition", "treatment", "Treatment",
+                      "sample", "Sample", "group", "Group", "strain", "Strain")
+
+# A wide-format column whose name says it is a temperature trace (Gen5 "T° 600", "Temp", "37 °C"): never a sample.
+TEMP_COL_REGEX <- "^T°|temp|°C"
+
+# Wide format: EVERY non-time numeric column is a sample (by position, so replicate columns that share a name all
+# count), except a column whose name matches TEMP_COL_REGEX. Replaces the old "keep only columns named OD / value /
+# absorbance" rule, which silently dropped samples called e.g. "Mod" or "Product" (audit N4-3). Returns
+# list(idx = integer column positions, used = names, dropped = data.frame(name, reason)).
+wide_sample_columns <- function(data, time_col) {
+  cn   <- colnames(data)
+  cand <- setdiff(seq_along(cn), which(cn == time_col))
+  is_temp <- grepl(TEMP_COL_REGEX, cn[cand], ignore.case = TRUE, perl = TRUE)
+  is_num  <- vapply(cand, function(i) is.numeric(data[[i]]), logical(1))
+  keep    <- is_num & !is_temp
+  dropped <- data.frame(name   = cn[cand][!keep],
+                        reason = ifelse(is_temp[!keep], "temperature column", "not numeric"),
+                        stringsAsFactors = FALSE)
+  list(idx = cand[keep], used = cn[cand][keep], dropped = dropped)
+}
+
+# ── Reading a file / pasted text ──────────────────────────────────────────────────────────────────────
+is_excel_file <- function(name) tolower(tools::file_ext(name)) %in% c("xlsx", "xls")
+
+# Sheet names of a workbook ("" when readxl is missing or the file cannot be opened).
+excel_sheet_names <- function(path) {
+  if (!requireNamespace("readxl", quietly = TRUE)) return(character(0))
+  tryCatch(readxl::excel_sheets(path), error = function(e) character(0))
+}
+
+# One sheet of a workbook as a plain data frame; duplicate headers are kept (replicate columns share a name).
+read_excel_sheet <- function(path, sheet = 1) {
+  if (!requireNamespace("readxl", quietly = TRUE))
+    stop("Reading Excel files needs the 'readxl' package: install.packages(\"readxl\"), or save the sheet as CSV.", call. = FALSE)
+  x <- readxl::read_excel(path, sheet = sheet, .name_repair = "minimal")
+  x <- as.data.frame(x, stringsAsFactors = FALSE, check.names = FALSE)
+  nm <- colnames(x); blank_nm <- is.na(nm) | !nzchar(nm)
+  all_na <- vapply(x, function(v) all(is.na(v)), logical(1))
+  keep <- !(blank_nm & all_na)
+  x <- x[, keep, drop = FALSE]
+  colnames(x) <- nm[keep]        # `[.data.frame` renames duplicate headers (WT, WT -> WT, WT.1): put them back
+  x
+}
+
+# The app's file loader: CSV / text through the locale-aware reader, Excel through readxl (first sheet unless asked).
+read_data_file <- function(path, name = path, sheet = 1, locale = "auto") {
+  if (is_excel_file(name)) read_excel_sheet(path, sheet) else read_csv_locale_aware(path, locale)
+}
+
+# Text pasted from Excel / a text editor -> data frame. sep: "auto" (tab / comma / semicolon, decided by the
+# same sniffer that reads files), "tab", "comma" or "semicolon". Rows and columns that are entirely empty are
+# dropped; NULL when nothing could be parsed.
+parse_pasted_text <- function(text, sep = "auto") {
+  text <- gsub("\r\n?", "\n", text %||% "")
+  if (!nzchar(trimws(text))) return(NULL)
+  tmp <- tempfile(fileext = ".txt"); on.exit(unlink(tmp), add = TRUE)
+  writeLines(enc2utf8(text), tmp, useBytes = TRUE)
+  d <- if (identical(sep, "auto")) {
+    r <- tryCatch(read_csv_smart(tmp)$data, error = function(e) NULL)
+    if (is.null(r)) {                                   # a one-column paste is not a table the sniffer accepts
+      tryCatch(utils::read.csv(tmp, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE), error = function(e) NULL)
+    } else r
+  } else {
+    s <- switch(sep, tab = "\t", comma = ",", semicolon = ";", "\t")
+    dec <- if (identical(s, ";") && length(grep("[0-9],[0-9]", text))) "," else "."
+    tryCatch(utils::read.csv(tmp, sep = s, dec = dec, stringsAsFactors = FALSE, check.names = FALSE),
+             error = function(e) NULL)
+  }
+  if (is.null(d) || ncol(d) < 1 || nrow(d) < 1) return(NULL)
+  empty_col <- vapply(d, function(v) all(is.na(v) | !nzchar(trimws(as.character(v)))), logical(1)) &
+               (is.na(colnames(d)) | !nzchar(colnames(d)) | grepl("^X(\\.[0-9]+)?$", colnames(d)))
+  nm0 <- colnames(d)
+  d <- d[, !empty_col, drop = FALSE]
+  colnames(d) <- nm0[!empty_col]   # (duplicate headers are replicate columns: `[.data.frame` would rename them)
+  empty_row <- apply(d, 1, function(r) all(is.na(r) | !nzchar(trimws(as.character(r)))))
+  d <- d[!empty_row, , drop = FALSE]
+  if (nrow(d) < 1 || ncol(d) < 1) return(NULL)
+  rownames(d) <- NULL
+  d
+}
+
+# ── Replicate identities (the exclusion list) ─────────────────────────────────────────────────────────
+# Every replicate of every sample as the app numbers them in prepare_replicate_data(): wide format = the sample's
+# columns in file order, repeated per stacked time block as (block - 1) * ncols + column; long format = the dense
+# rank of the replicate / well column within the sample, else the nth row at each (sample, time). key = "Sample #id",
+# the value of the exclusion checkboxes. Returns data.frame(sample, id, key, label).
+replicate_catalog <- function(data, is_long, time_col = NULL, group_col = NULL, rep_col = NULL,
+                              col_map = NULL, n_blocks = NULL) {
+  empty <- data.frame(sample = character(0), id = integer(0), key = character(0), label = character(0),
+                      stringsAsFactors = FALSE)
+  if (is.null(data) || nrow(data) == 0) return(empty)
+  rows <- list()
+  add <- function(s, id, lab) rows[[length(rows) + 1L]] <<- data.frame(sample = s, id = as.integer(id),
+                         key = paste0(s, " #", id), label = lab, stringsAsFactors = FALSE)
+  if (isTRUE(is_long)) {
+    if (is.null(group_col) || !group_col %in% colnames(data)) return(empty)
+    g <- as.character(data[[group_col]])
+    for (s in unique(g)) {
+      ix <- which(g == s)
+      if (!is.null(rep_col) && rep_col %in% colnames(data)) {
+        rc <- data[[rep_col]][ix]; u <- sort(unique(rc))
+        for (k in seq_along(u)) add(s, k, sprintf("rep %d (%s %s)", k, rep_col, u[k]))
+      } else {
+        tt <- data[[time_col]][ix]
+        k  <- max(1L, as.integer(max(table(tt))))
+        for (j in seq_len(k)) add(s, j, if (k == 1L) "rep 1" else sprintf("rep %d (row %d at each time)", j, j))
+      }
+    }
+  } else {
+    nb <- max(1L, as.integer(n_blocks %||% 1L))
+    for (s in names(col_map)) {
+      idxs <- col_map[[s]]; nc <- length(idxs)
+      for (b in seq_len(nb)) for (r in seq_len(nc)) {
+        id  <- (b - 1L) * nc + r
+        lab <- if (nb > 1L) sprintf("rep %d (block %d, column %d)", id, b, idxs[r])
+               else if (nc > 1L) sprintf("rep %d (column %d)", id, idxs[r]) else "rep 1"
+        add(s, id, lab)
+      }
+    }
+  }
+  if (length(rows)) do.call(rbind, rows) else empty
+}
+
+# "A #2" -> data.frame(sample = "A", id = 2L); keys that do not parse are ignored.
+parse_replicate_keys <- function(keys) {
+  keys <- as.character(keys %||% character(0))
+  ok <- grepl("^.* #[0-9]+$", keys)
+  data.frame(sample = sub(" #[0-9]+$", "", keys[ok]), id = as.integer(sub("^.* #", "", keys[ok])),
+             stringsAsFactors = FALSE)
+}
+
+# TRUE for the rows of a replicate frame (time, variable, replicate, value) that belong to an excluded replicate.
+replicate_row_excluded <- function(df, keys) {
+  if (is.null(df) || nrow(df) == 0 || !length(keys)) return(rep(FALSE, if (is.null(df)) 0L else nrow(df)))
+  paste0(as.character(df$variable), " #", df$replicate) %in% keys
+}
+
+# ── Blank / baseline and transforms ───────────────────────────────────────────────────────────────────
+TRANSFORM_CHOICES <- c("None (as measured)" = "none", "Normalise to the first time point (t0)" = "t0",
+                       "Normalise to a control sample's curve" = "control",
+                       "0–100 % of each sample's own maximum" = "pct_max", "ln(OD)" = "ln")
+BLANK_CHOICES <- c("A constant (media OD)" = "constant", "A blank sample / column (its mean curve)" = "sample",
+                   "Mean of the first k points of each replicate" = "first_k")
+
+# The mean curve of one sample over the rows flagged `rows`, as a function of time: linear interpolation between its
+# time points (NA outside them); NULL when the sample has no finite reading.
+sample_mean_curve <- function(df, sample, rows = rep(TRUE, nrow(df))) {
+  d <- df[rows & df$variable == sample & is.finite(df$value) & is.finite(df$time), , drop = FALSE]
+  if (nrow(d) == 0) return(NULL)
+  tt <- sort(unique(d$time))
+  mm <- vapply(tt, function(x) mean(d$value[d$time == x]), numeric(1))
+  function(at) {
+    if (length(tt) == 1L) ifelse(abs(at - tt) < 1e-9, mm, NA_real_)
+    else stats::approx(tt, mm, xout = at, rule = 1)$y
+  }
+}
+
+# Blank correction (a blank sample or the first k points) and the transform, on a replicate frame
+# (time, variable, replicate, value). The one place both are done, so figures, statistics, metrics, fits and exports
+# all see the same numbers. `kept` flags the rows that define the curves the others are corrected against (a blank
+# curve, a control curve, a sample maximum): replicates the user excluded still get corrected but do not shape them.
+# The constant blank (blank_od) is subtracted by the caller, as before. The blank sample's own rows are dropped.
+# Returns the frame with attr "curation_notes" (problems the user should hear about) and "kept" (flags of the rows left).
+transform_frame <- function(df, blank_mode = "constant", blank_sample = "", blank_k = 3,
+                            transform = "none", control = "", kept = rep(TRUE, nrow(df))) {
+  notes <- character(0)
+  if (is.null(df) || nrow(df) == 0) { attr(df, "curation_notes") <- notes; attr(df, "kept") <- kept; return(df) }
+  n_by_rep <- function(f) {   # f(rows ordered by time) per (variable, replicate) -> a value per row
+    out <- rep(NA_real_, nrow(df))
+    for (ix in split(seq_len(nrow(df)), list(df$variable, df$replicate), drop = TRUE)) {
+      o <- ix[order(df$time[ix])]
+      out[ix] <- f(df$value[o])
+    }
+    out
+  }
+  if (identical(blank_mode, "sample")) {
+    bc <- if (nzchar(blank_sample %||% "")) sample_mean_curve(df, blank_sample, kept) else NULL
+    if (is.null(bc)) {
+      notes <- c(notes, if (nzchar(blank_sample %||% "")) sprintf("The blank sample '%s' has no readings: no blank was subtracted.", blank_sample)
+                        else "No blank sample is chosen: no blank was subtracted.")
+    } else {
+      df$value <- df$value - bc(df$time)
+      keep_rows <- df$variable != blank_sample
+      df <- df[keep_rows, , drop = FALSE]; kept <- kept[keep_rows]
+    }
+  } else if (identical(blank_mode, "first_k")) {
+    k <- suppressWarnings(as.integer(blank_k)); if (!is.finite(k) || k < 1L) k <- 1L
+    df$value <- df$value - n_by_rep(function(v) { f <- v[is.finite(v)]; if (length(f)) mean(utils::head(f, k)) else NA_real_ })
+  }
+  tr <- transform %||% "none"
+  if (identical(tr, "t0")) {
+    v0 <- n_by_rep(function(v) { f <- v[is.finite(v)]; if (length(f)) f[1] else NA_real_ })
+    bad <- !is.finite(v0) | v0 <= 0
+    if (any(bad & is.finite(df$value)))
+      notes <- c(notes, sprintf("%d reading(s) were left out of the t0 normalisation: their replicate starts at 0 or below.",
+                                sum(bad & is.finite(df$value))))
+    df$value <- ifelse(bad, NA_real_, df$value / v0)
+  } else if (identical(tr, "control")) {
+    cc <- if (nzchar(control %||% "")) sample_mean_curve(df, control, kept) else NULL
+    if (is.null(cc)) {
+      notes <- c(notes, if (nzchar(control %||% "")) sprintf("The control sample '%s' has no readings (or is the blank): the data were not normalised.", control)
+                        else "No control sample is chosen: the data were not normalised.")
+    } else {
+      cv  <- cc(df$time)
+      bad <- !is.finite(cv) | cv <= 0
+      if (any(bad & is.finite(df$value)))
+        notes <- c(notes, sprintf("%d reading(s) were left out of the control normalisation: the control curve is 0 or below (or missing) at that time.",
+                                  sum(bad & is.finite(df$value))))
+      df$value <- ifelse(bad, NA_real_, df$value / cv)
+    }
+  } else if (identical(tr, "pct_max")) {
+    mx <- vapply(unique(as.character(df$variable)), function(s) {
+      f <- sample_mean_curve(df, s, kept)
+      if (is.null(f)) return(NA_real_)
+      d <- df[kept & df$variable == s & is.finite(df$value), , drop = FALSE]
+      max(vapply(sort(unique(d$time)), function(x) mean(d$value[d$time == x]), numeric(1)))
+    }, numeric(1))
+    m <- mx[as.character(df$variable)]
+    bad <- !is.finite(m) | m <= 0
+    if (any(bad & is.finite(df$value)))
+      notes <- c(notes, "Some samples have a maximum at or below 0: they were left out of the 0-100 % scaling.")
+    df$value <- ifelse(bad, NA_real_, 100 * df$value / m)
+  } else if (identical(tr, "ln")) {
+    bad <- is.finite(df$value) & df$value <= 0
+    if (any(bad))
+      notes <- c(notes, sprintf("%d reading(s) at or below 0 have no logarithm and were left out of the ln transform.", sum(bad)))
+    df$value <- ifelse(is.finite(df$value) & df$value > 0, suppressWarnings(log(df$value)), NA_real_)
+  }
+  attr(df, "curation_notes") <- notes
+  attr(df, "kept") <- kept
+  df
+}
+
+# One line per active data-handling step, for the data summary, the provenance table, the legend and the methods
+# text. `s` is a list: od (c(lo, hi) or NULL), n_excluded, excluded_text, blank_mode, blank_od, blank_sample, blank_k,
+# transform, control. "" when nothing is active.
+curation_description <- function(s) {
+  out <- character(0)
+  if (!is.null(s$od)) out <- c(out, sprintf("readings outside OD %s to %s were excluded before averaging", format(s$od[1]), format(s$od[2])))
+  if ((s$n_excluded %||% 0) > 0)
+    out <- c(out, sprintf("%d replicate%s excluded (%s)", s$n_excluded, if (s$n_excluded == 1) "" else "s", s$excluded_text))
+  bm <- s$blank_mode %||% "constant"
+  if (identical(bm, "sample") && nzchar(s$blank_sample %||% ""))
+    out <- c(out, sprintf("the mean curve of '%s' was subtracted row-wise as the blank (and left out of the samples)", s$blank_sample))
+  else if (identical(bm, "first_k"))
+    out <- c(out, sprintf("the mean of the first %s point(s) of each replicate was subtracted as its baseline", s$blank_k %||% 3))
+  else if (is.numeric(s$blank_od) && is.finite(s$blank_od) && s$blank_od != 0)
+    out <- c(out, sprintf("a constant blank of %s was subtracted", format(s$blank_od)))
+  out <- c(out, switch(s$transform %||% "none",
+    t0      = "each replicate was divided by its own first reading (t0)",
+    control = sprintf("each reading was divided by the mean curve of the control sample '%s'", s$control %||% ""),
+    pct_max = "each sample was scaled to 0-100 % of the maximum of its own mean curve",
+    ln      = "readings were transformed to ln(OD)",
+    character(0)))
+  paste(out, collapse = "; ")
+}
+
+# ── Replicate QC (v2.22) ──────────────────────────────────────────────────────────────────────────────
+# rep_pd: a replicate frame (time, variable, replicate, value[, excluded]). Returns
+#   $samples:    sample, n_replicates, n_timepoints (time points with n >= 2), median_cv_pct, max_cv_pct, time_of_max_cv,
+#                n_over_flag (time points above the flag), high_cv (median CV above flag_pct)
+#   $replicates: sample, replicate, n_points, distance_from_median (mean absolute difference from the sample's median
+#                curve), distance_pct (that, as % of the median curve's mean level), most_distant (the farthest replicate
+#                of a sample that has three or more), excluded
+# CV at a time point = sd / |mean| of the replicates there (>= 2 readings, mean not 0), in %.
+replicate_cv_table <- function(rep_pd, flag_pct = 20) {
+  es <- data.frame(sample = character(0), n_replicates = integer(0), n_timepoints = integer(0),
+                   median_cv_pct = numeric(0), max_cv_pct = numeric(0), time_of_max_cv = numeric(0),
+                   n_over_flag = integer(0), high_cv = logical(0), stringsAsFactors = FALSE)
+  er <- data.frame(sample = character(0), replicate = integer(0), n_points = integer(0),
+                   distance_from_median = numeric(0), distance_pct = numeric(0),
+                   most_distant = logical(0), excluded = logical(0), stringsAsFactors = FALSE)
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(list(samples = es, replicates = er))
+  rep_pd <- rep_pd[is.finite(rep_pd$value) & is.finite(rep_pd$time), , drop = FALSE]
+  if (nrow(rep_pd) == 0) return(list(samples = es, replicates = er))
+  if (!"excluded" %in% names(rep_pd)) rep_pd$excluded <- FALSE
+  s_rows <- list(); r_rows <- list()
+  for (s in unique(as.character(rep_pd$variable))) {
+    d  <- rep_pd[as.character(rep_pd$variable) == s, , drop = FALSE]
+    tt <- sort(unique(d$time))
+    st <- do.call(rbind, lapply(tt, function(x) {
+      v <- d$value[d$time == x]
+      data.frame(time = x, n = length(v), mean = mean(v), sd = if (length(v) > 1) stats::sd(v) else NA_real_,
+                 median = stats::median(v))
+    }))
+    st$cv <- ifelse(st$n >= 2 & is.finite(st$mean) & st$mean != 0, 100 * st$sd / abs(st$mean), NA_real_)
+    okc <- is.finite(st$cv)
+    s_rows[[length(s_rows) + 1L]] <- data.frame(
+      sample = s, n_replicates = length(unique(d$replicate)), n_timepoints = sum(okc),
+      median_cv_pct  = if (any(okc)) stats::median(st$cv[okc]) else NA_real_,
+      max_cv_pct     = if (any(okc)) max(st$cv[okc]) else NA_real_,
+      time_of_max_cv = if (any(okc)) st$time[okc][which.max(st$cv[okc])] else NA_real_,
+      n_over_flag    = sum(st$cv[okc] > flag_pct),
+      high_cv        = any(okc) && stats::median(st$cv[okc]) > flag_pct,
+      stringsAsFactors = FALSE)
+    lvl <- mean(abs(st$median), na.rm = TRUE)
+    reps <- sort(unique(d$replicate))
+    rr <- do.call(rbind, lapply(reps, function(r) {
+      g  <- d[d$replicate == r, , drop = FALSE]
+      md <- st$median[match(g$time, st$time)]
+      dist <- mean(abs(g$value - md))
+      data.frame(sample = s, replicate = as.integer(r), n_points = nrow(g), distance_from_median = dist,
+                 distance_pct = if (is.finite(lvl) && lvl > 0) 100 * dist / lvl else NA_real_,
+                 most_distant = FALSE, excluded = any(g$excluded), stringsAsFactors = FALSE)
+    }))
+    if (nrow(rr) >= 3 && any(is.finite(rr$distance_from_median)))
+      rr$most_distant[which.max(rr$distance_from_median)] <- TRUE
+    r_rows[[length(r_rows) + 1L]] <- rr
+  }
+  list(samples = do.call(rbind, s_rows), replicates = do.call(rbind, r_rows))
+}
+
+# The replicate table with the sample-level columns joined on (one CSV: one row per replicate).
+replicate_qc_csv_frame <- function(tab) {
+  if (is.null(tab) || nrow(tab$replicates) == 0) return(tab$replicates)
+  merge(tab$replicates, tab$samples[c("sample", "median_cv_pct", "max_cv_pct", "time_of_max_cv", "n_over_flag", "high_cv")],
+        by = "sample", all.x = TRUE, sort = FALSE)
+}
+
 # ── Curve metrics ─────────────────────────────────────────────────────────────
 # All metrics are computed from the per-sample MEAN curve exactly as plotted
 # (i.e. after time filtering / point exclusion), sorted by time.
@@ -1030,7 +1355,8 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
 # present in the data) the five reference-normalised infection metrics are added.
 compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
                                   peak_smooth_window = 1, peak_mode = "global",
-                                  lysis_threshold = 0.05, extinction_threshold = 0.05) {
+                                  lysis_threshold = 0.05, extinction_threshold = 0.05,
+                                  t_stat_override = NULL) {   # v2.22: t_stat_override = the Storms integration limit typed by the user
   if (is.null(pd) || nrow(pd) == 0) return(NULL)
   pd <- pd[order(pd$variable, pd$time), , drop = FALSE]
   out <- lapply(split(pd, pd$variable, drop = TRUE), function(g) {
@@ -1056,7 +1382,7 @@ compute_curve_metrics <- function(pd, smooth_window = 5, ref_sample = NULL,
       m$max_od / ref_max_od else NA_real_
     m$lysis_onset_delta  <- m$lysis_time - m$lag_phase
     m$centroid_index     <- centroid_index_vs_ref(m$centroid_x, m$centroid_y, ref$centroid_x, ref$centroid_y)
-    lv <- calculate_local_virulence(pd, ref_sample, smooth_window)
+    lv <- calculate_local_virulence(pd, ref_sample, smooth_window, t_stat_override)
     m$local_virulence    <- if (is.null(lv)) NA_real_ else lv$local_virulence[match(m$sample, lv$sample)]
   }
   m
@@ -1185,7 +1511,8 @@ calculate_local_virulence <- function(pd, ref_sample, smooth_window = 5,
 # (same definitions as compute_curve_metrics).
 compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth_window = 1,
                                           ref_sample = NULL, peak_mode = "global",
-                                          lysis_threshold = 0.05) {
+                                          lysis_threshold = 0.05, extinction_threshold = 0.05,
+                                          t_stat_override = NULL) {   # v2.22: both typed by the user (Stats & Reports)
   if (is.null(rep_pd) || nrow(rep_pd) == 0) return(NULL)
   rep_pd <- rep_pd[is.finite(rep_pd$value), , drop = FALSE]
   if (nrow(rep_pd) == 0) return(NULL)
@@ -1194,7 +1521,8 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
 
   per_rep <- lapply(split(rep_pd, rep_key, drop = TRUE), function(g) {
     row <- compute_one_curve_metrics(g$time, g$value, g$variable[1],
-                                     smooth_window, peak_smooth_window, peak_mode, lysis_threshold)
+                                     smooth_window, peak_smooth_window, peak_mode, lysis_threshold,
+                                     extinction_threshold)
     row$replicate <- g$replicate[1]
     row
   })
@@ -1214,7 +1542,7 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
     lv <- calculate_local_virulence(
       data.frame(time = rep_pd$time, variable = rep_pd$variable, replicate = rep_pd$replicate,
                  mean_value = rep_pd$value, stringsAsFactors = FALSE),
-      ref_sample, smooth_window)
+      ref_sample, smooth_window, t_stat_override)
     rm$local_virulence    <- if (is.null(lv)) NA_real_ else
       lv$local_virulence[match(paste(rm$sample, rm$replicate), paste(lv$sample, lv$replicate))]
   }
@@ -1222,9 +1550,11 @@ compute_replicate_metric_rows <- function(rep_pd, smooth_window = 5, peak_smooth
 }
 
 compute_replicate_metrics <- function(rep_pd, smooth_window = 5, peak_smooth_window = 1,
-                                      peak_mode = "global", lysis_threshold = 0.05) {
+                                      peak_mode = "global", lysis_threshold = 0.05,
+                                      extinction_threshold = 0.05, t_stat_override = NULL) {
   rm <- compute_replicate_metric_rows(rep_pd, smooth_window, peak_smooth_window,
-                                      peak_mode = peak_mode, lysis_threshold = lysis_threshold)
+                                      peak_mode = peak_mode, lysis_threshold = lysis_threshold,
+                                      extinction_threshold = extinction_threshold, t_stat_override = t_stat_override)
   if (is.null(rm)) return(NULL)
 
   safe_mean <- function(x) if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
@@ -2610,7 +2940,13 @@ LEGACY_BASE <- list(
   # v2.21: metric summary styles and brackets, extraction figures, fraction lysed (none touches the main figure)
   metric_style = "dot", metric_brackets = FALSE,
   extract_style = "bar", extract_points = TRUE,
-  lysed_mode = "relative", lysed_threshold = 0.5
+  lysed_mode = "relative", lysed_threshold = 0.5,
+  # v2.22: data handling (OD range, blank / baseline, transform) and the metrics' extinction floor / Storms limit.
+  # All off / automatic: a session that does not touch them is exactly what it was.
+  use_od_filter = FALSE, od_min = 0, od_max = 3,
+  blank_mode = "constant", blank_sample = "", blank_k = 3,
+  transform_mode = "none", transform_control = "",
+  extinction_threshold = 0.05, t_stat_override = NA_real_
 )
 
 # The inputs the journal preset sets, at their legacy values.
@@ -4137,19 +4473,42 @@ ui <- fluidPage(
                                      choices = c("Jump to a section..." = "", SIDEBAR_SECTIONS), selected = ""),
                          tags$button(type = "button", class = "btn btn-link btn-xs kc-collapse-all", "Collapse all"))),
                  
-                 fileInput("file", "Choose CSV File", accept = c("text/csv", ".csv")),
+                 fileInput("file", "Choose CSV or Excel file", accept = c("text/csv", ".csv", ".xlsx", ".xls")),
+                 uiOutput("sheet_ui"),
+                 # v2.22: override the detected time column (re-runs the detection on the loaded data, no re-read)
+                 selectInput("time_col_choice", "Time column:", choices = character(0), width = "100%"),
                  selectInput("csv_locale", "CSV format:",
                              choices = c("Auto-detect"                              = "auto",
                                         "US/UK (comma-separated, . decimal)"        = "us",
                                         "European (semicolon-separated, , decimal)" = "eu"),
                              selected = "auto"),
-                 numericInput("blank_od", "Subtract blank/media OD (optional):", 0, step = 0.001),
-                 p(style = "font-size:.78em;color:#777;margin-top:-8px;",
-                   "0 = off (default). This app assumes pre-blanked input; if your CSV still has ",
-                   "a media/blank OD baked in, enter it here — it's subtracted from every ",
-                   "reading before plotting, statistics, and curve metrics, and noted in the ",
-                   "report provenance. Small negative values after subtraction are expected and ",
-                   "handled correctly (see the μmax non-positive-OD note above)."),
+                 # v2.22: blank / baseline mode and transform: applied once, in prepare_replicate_data(), so the figures,
+                 # statistics, metrics, fits and exports all see the same numbers
+                 selectInput("blank_mode", "Blank / baseline:", choices = BLANK_CHOICES, selected = APP_DEFAULTS$blank_mode),
+                 conditionalPanel("input.blank_mode == 'constant'",
+                   numericInput("blank_od", "Subtract blank/media OD (optional):", 0, step = 0.001),
+                   p(style = "font-size:.78em;color:#777;margin-top:-8px;",
+                     "0 = off (default). This app assumes pre-blanked input; if your CSV still has ",
+                     "a media/blank OD baked in, enter it here — it's subtracted from every ",
+                     "reading before plotting, statistics, and curve metrics, and noted in the ",
+                     "report provenance. Small negative values after subtraction are expected and ",
+                     "handled correctly (see the μmax non-positive-OD note above).")),
+                 conditionalPanel("input.blank_mode == 'sample'",
+                   selectInput("blank_sample", "Blank sample:", choices = c("Choose..." = ""), width = "100%"),
+                   p(style = "font-size:.78em;color:#777;margin-top:-8px;",
+                     "The mean curve of this sample (e.g. a media-only column) is subtracted from every other sample at ",
+                     "each time point, then the blank is left out of the samples.")),
+                 conditionalPanel("input.blank_mode == 'first_k'",
+                   numericInput("blank_k", "First k points per replicate:", APP_DEFAULTS$blank_k, min = 1, step = 1),
+                   p(style = "font-size:.78em;color:#777;margin-top:-8px;",
+                     "Each replicate curve has the mean of its own first k readings subtracted (a per-replicate baseline).")),
+                 selectInput("transform_mode", "Transform:", choices = TRANSFORM_CHOICES, selected = APP_DEFAULTS$transform_mode, width = "100%"),
+                 conditionalPanel("input.transform_mode == 'control'",
+                   selectInput("transform_control", "Control sample:", choices = c("Choose..." = ""), width = "100%")),
+                 conditionalPanel("input.transform_mode != 'none'",
+                   p(style = "font-size:.78em;color:#777;margin-top:-8px;",
+                     "The transform changes every number downstream (figures, statistics, curve metrics, fits, exports). ",
+                     "Growth-rate and lysis metrics are defined on the OD scale: keep the transform off for those.")),
                  div(style = "display:flex;gap:6px;align-items:flex-start;margin:-8px 0 10px 0;",
                      div(class = "demo-pick", style = "flex:1 1 55%;min-width:0;font-size:.85em;",
                          selectInput("demo_scenario", NULL, width = "100%",
@@ -4379,6 +4738,25 @@ ui <- fluidPage(
                          "Keep only the readings of a sample between its \u2018from\u2019 and \u2018to\u2019 times; a blank box is no limit. ",
                          "Applied after the filter above (and also when it is off), to the figures, statistics and exports; saved with the settings."),
                        uiOutput("time_windows_ui")
+                   ),
+                   # v2.22: exclusions that really filter what is plotted, computed and exported
+                   div(class = "panel-section",
+                       h4("Exclude by Value (OD range)", class = "panel-title"),
+                       p(style = "font-size:.82em;color:#666;",
+                         "Readings outside the range are dropped from the raw data before averaging (n shrinks accordingly). ",
+                         "To remove one reading, set its cell to empty in the Data tab."),
+                       checkboxInput("use_od_filter", "Exclude readings outside an OD range", APP_DEFAULTS$use_od_filter),
+                       conditionalPanel("input.use_od_filter == true",
+                         fluidRow(column(6, numericInput("od_min", "Min OD:", APP_DEFAULTS$od_min, step = 0.01)),
+                                  column(6, numericInput("od_max", "Max OD:", APP_DEFAULTS$od_max, step = 0.01))))
+                   ),
+                   div(class = "panel-section",
+                       h4("Exclude Replicates (wells)", class = "panel-title"),
+                       p(style = "font-size:.82em;color:#666;",
+                         "Tick a replicate to leave it out of every mean, statistic, metric, fit and export. It stays visible as a ",
+                         "hollow grey circle when the replicate points are shown, and is named in the data summary, the legend and the report."),
+                       uiOutput("excluded_reps_ui"),
+                       actionButton("excluded_reps_clear", "Restore all replicates", class = "btn-xs")
                    )
                  ),
                  
@@ -4777,6 +5155,13 @@ ui <- fluidPage(
                          "Default 5 % (the paper's definition). A larger value ignores small dips ",
                          "after the peak; it changes lysis onset, lysis rate, OD drop, residual OD, ",
                          "lysis efficiency and recovery slope."),
+                       numericInput("extinction_threshold", "Extinction floor (OD):", APP_DEFAULTS$extinction_threshold,
+                                    min = 0, step = 0.01),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Extinction time = first time the curve falls below this OD (default 0.05, as in the reference app)."),
+                       numericInput("t_stat_override", "Storms integration limit t_stat (blank = automatic):", APP_DEFAULTS$t_stat_override,
+                                    min = 0, step = 1),
+                       uiOutput("storms_window_readout"),
                        selectInput("metrics_ref_sample",
                                    "Reference sample (infection metrics):",
                                    choices = c("None" = "")),
@@ -4815,6 +5200,9 @@ ui <- fluidPage(
                        h4("Sample Selection", class = "panel-title"),
                        selectInput("selected_samples", "Select Samples:",
                                    choices = character(0), multiple = TRUE),
+                       div(style = "margin:-8px 0 8px 0;",
+                           actionButton("samples_all",  "All",  class = "btn-xs"),
+                           actionButton("samples_none", "None", class = "btn-xs")),
                        checkboxInput("facet_by_group", "One panel per group (main figure)", APP_DEFAULTS$facet_by_group),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
                          "Type a Group for each sample below. With two or more different groups the lysis curve is split into ",
@@ -4830,6 +5218,35 @@ ui <- fluidPage(
       uiOutput("figure_standard_bar"),
       tabsetPanel(id = "main_tabs",
         tabPanel("Lysis curve", br(), uiOutput("plot_container"), quick_edit_ui),
+        # ── Data (v2.22): view and edit the working data, or enter it by hand ──
+        tabPanel("Data", br(),
+          tabsetPanel(id = "data_subtabs",
+            tabPanel("View & edit", br(),
+              p(style = "font-size:.85em;color:#555;",
+                if (has_DT) "Double-click a cell to edit it. An edit goes through the same loading step as a file, so the samples, replicates, figures, statistics and metrics refresh. Empty a cell to exclude that single reading."
+                else "Cells can be changed with the box below the table (install the DT package for in-table editing). A change goes through the same loading step as a file. Empty a cell to exclude that single reading."),
+              uiOutput("data_edit_status"),
+              if (has_DT) DT::DTOutput("data_view_table")
+              else tagList(div(style = "overflow:auto;max-height:520px;", tableOutput("data_view_table")),
+                           fluidRow(column(2, numericInput("data_cell_row", "Row:", 1, min = 1, step = 1)),
+                                    column(4, selectInput("data_cell_col", "Column:", choices = character(0))),
+                                    column(3, textInput("data_cell_value", "New value:", "")),
+                                    column(3, br(), actionButton("data_cell_set", "Set cell")))),
+              div(style = "margin-top:10px;",
+                  actionButton("data_edit_reset", "Revert to loaded", icon = icon("undo")),
+                  downloadButton("download_current_data_csv", "Download current data (CSV)"))),
+            tabPanel("Enter data", br(),
+              p(style = "font-size:.85em;color:#555;",
+                "Paste a table copied from Excel or a text file: a header row (Time, then one column per sample; repeat a name for replicates) and one row per time point. ",
+                "The separator (tab, comma or semicolon) is detected automatically."),
+              textAreaInput("data_entry_text", NULL, value = "", rows = 10, width = "100%",
+                            placeholder = "Time\tWT\tMutant\n0\t0.05\t0.05\n15\t0.08\t0.07"),
+              fluidRow(column(4, selectInput("data_entry_sep", "Separator:", choices = c("Auto-detect" = "auto", "Tab" = "tab", "Comma" = "comma", "Semicolon" = "semicolon"))),
+                       column(8, br(), actionButton("data_entry_apply", "Apply", class = "btn-primary"),
+                              actionButton("data_entry_clear", "Clear"))),
+              uiOutput("data_entry_status"),
+              tableOutput("data_entry_preview"))
+          )),
         # ── Analysis figures (v2.11) ──────────────────────────────────────────
         tabPanel("Analysis figures", br(),
           div(class = "analysis-controls",
@@ -5174,6 +5591,22 @@ ui <- fluidPage(
               div(style = "overflow-x:auto;", tableOutput("boot_table")),
               downloadButton("downloadBootCSV", "Bootstrap intervals (CSV)"))),
           tags$details(class = "stats-section",
+            tags$summary(tags$b("Replicate QC")),
+            div(class = "panel-section",
+              p(style = "font-size:.78em;color:#777;",
+                "How well the replicates of each sample agree. CV % = sd / mean of the replicates at each time point; a sample is flagged ",
+                "when its median CV exceeds the limit. The second table gives each replicate's mean absolute distance from its sample's median curve ",
+                "(the most distant of three or more is marked): a candidate for the replicate exclusion box in Time Point Filtering. ",
+                "Excluded replicates are included here, so you can judge them."),
+              numericInput("rep_qc_flag", "High-CV flag above (%):", 20, min = 1, step = 1),
+              uiOutput("rep_qc_note"),
+              h5("Per sample"),
+              div(style = "overflow-x:auto;", tableOutput("rep_qc_samples")),
+              h5("Per replicate"),
+              div(style = "overflow-x:auto;", tableOutput("rep_qc_replicates")),
+              downloadButton("downloadRepQCCSV", "Per-replicate QC (CSV)"),
+              downloadButton("downloadRepQCSamplesCSV", "Per-sample CV (CSV)"))),
+          tags$details(class = "stats-section",
             tags$summary(tags$b("Methods text (editable)")),
             div(class = "panel-section",
               p(style = "font-size:.78em;color:#777;",
@@ -5262,8 +5695,15 @@ server <- function(input, output, session) {
     # legends, tables, CSV files and reports (the raw name stays the key everywhere else); qe_colors: raw name -> the
     # colour picked in the strip (while the sidebar has not overridden it)
     display_names     = NULL,
-    qe_colors         = list()
+    qe_colors         = list(),
+    # v2.22: data handling. data_loaded: the data as loaded (Revert); dropped_cols: wide columns not used as samples;
+    # xlsx_*: the uploaded workbook (sheet selector); data_version counts fresh loads (the Data tab table and the
+    # replicate exclusion list start afresh on it; a cell edit or a time-column change keeps them)
+    data_loaded = NULL, data_loaded_source = NULL, data_loaded_tc = NULL, dropped_cols = NULL,
+    xlsx_path = NULL, xlsx_name = NULL, xlsx_sheets = NULL, data_version = 0L
   )
+  # v2.22: the "every sample has n = 1" warning is shown once per loaded file (see build_plot)
+  n1_state <- new.env(); n1_state$shown <- FALSE; n1_state$notes_shown <- character(0)
   
   # v2.21: display-name helpers (the pure versions are at the top of the file)
   dname   <- function(x) display_name_of(x, rv$display_names)
@@ -5339,8 +5779,7 @@ server <- function(input, output, session) {
   # ── Data loading ─────────────────────────────────────────────────────────────
   is_long_format_detect <- function(data) {
     if (nrow(data) == 0) return(FALSE)
-    potential <- c("variable","Variable","condition","Condition","treatment","Treatment",
-                   "sample","Sample","group","Group")
+    potential <- LONG_GROUP_NAMES      # v2.22: + strain / Strain
     if (any(potential %in% colnames(data))) return(TRUE)
     if (ncol(data) <= 4) {
       # Only NON-NUMERIC columns can be grouping candidates: a numeric OD
@@ -5377,24 +5816,39 @@ server <- function(input, output, session) {
   # Wide format: detect OD columns BY POSITION so replicate columns that share
   # a name (the documented replicate workflow) are all kept. Returns integer
   # indices into colnames(data).
-  detect_od_column_idx <- function(data, time_col) {
-    cn       <- colnames(data)
-    time_idx <- which(cn == time_col)
-    cand     <- setdiff(seq_along(cn), time_idx)
-    hits     <- cand[grepl("od|absorbance|value", cn[cand], ignore.case = TRUE)]
-    if (length(hits)) return(hits)
-    cand[vapply(cand, function(i) is.numeric(data[[i]]), logical(1))]
+  # v2.22: EVERY non-time numeric column is a sample, except a temperature column (wide_sample_columns(), top of the
+  # file). The old "only columns named OD / value / absorbance" rule dropped samples such as "Mod" or "Product".
+  detect_od_column_idx <- function(data, time_col) wide_sample_columns(data, time_col)$idx
+
+  # Shared ingestion for both file upload and demo data.
+  # v2.22: split in two. ingest_data() is the file-level part (the loaded copy kept for "Revert", the per-file state
+  # that starts afresh); apply_time_col() is everything that follows from the chosen time column (format and sample
+  # detection, ranges, the sample list), so the Time column box and the Data tab re-run it without re-reading the file.
+  # keep_state = TRUE (a cell edit, a different time column, Revert) keeps the display names, the sample selection,
+  # the typed time-point exclusions and the replicate exclusions instead of starting from scratch.
+  ingest_data <- function(data, source_name, keep_state = FALSE, time_col = NULL) {
+    if (!keep_state) {
+      rv$display_names  <- NULL    # v2.21: names and colours typed in the quick-edit strip belong to the old data
+      rv$qe_colors      <- list()
+      rv$data_loaded    <- data    # v2.22: the data as it was loaded (Data tab: Revert)
+      rv$data_loaded_source <- source_name
+      n1_state$shown    <- FALSE
+      n1_state$notes_shown <- character(0)
+    }
+    tc <- time_col %||% detect_time_column(data)
+    apply_time_col(data, tc, source_name, keep_state = keep_state)
+    if (!keep_state) { rv$data_loaded_tc <- rv$time_col; rv$data_version <- rv$data_version + 1L }   # a new load re-draws the Data tab table
+    invisible(NULL)
   }
 
-  # Shared ingestion for both file upload and demo data
-  ingest_data <- function(data, source_name) {
-    rv$display_names  <- NULL    # v2.21: names and colours typed in the quick-edit strip belong to the old data
-    rv$qe_colors      <- list()
-    rv$time_col       <- detect_time_column(data)
+  apply_time_col <- function(data, tc, source_name = rv$data_source, keep_state = FALSE) {
+    prev_time_col     <- rv$time_col
+    rv$time_col       <- tc
     rv$col_map        <- NULL
     rv$replicate_col  <- NULL    # long format: replicate / well column, when the file has one
     rv$n_blocks       <- NULL    # wide format: stacked time blocks (replicates), when > 1
     rv$block_id       <- NULL
+    rv$dropped_cols   <- NULL    # v2.22: wide format: columns that are not samples (temperature, text), with the reason
     notes <- character(0)
 
     # Elapsed time as 0:15:00 (Gen5 / i-control) or a full date-time: convert to minutes
@@ -5408,8 +5862,7 @@ server <- function(input, output, session) {
     # A well that went out of range (OVER / OVRFLW / #SAT) makes read.csv type the whole
     # column as text: keep the column, turn just those cells into NA. The time column and
     # any group / replicate column are left alone.
-    group_names <- c("variable","Variable","condition","Condition","treatment","Treatment",
-                     "sample","Sample","group","Group")
+    group_names <- LONG_GROUP_NAMES
     rep_names   <- colnames(data)[tolower(colnames(data)) %in%
                      c("replicate","rep","rep_id","replicate_id","well","well_id","wellid",
                        "technical_replicate","biological_replicate","repeat")]
@@ -5448,12 +5901,17 @@ server <- function(input, output, session) {
     } else {
       # Index-based detection keeps ALL replicate columns, including
       # duplicates of the same name (v2.8 REPLICATE FIX).
-      idx <- detect_od_column_idx(data, rv$time_col)
+      ws  <- wide_sample_columns(data, rv$time_col)
+      idx <- ws$idx
       cn  <- colnames(data)
       oc  <- unique(cn[idx])
       rv$col_map     <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
       rv$od_vars     <- oc
       rv$od_vars_raw <- oc
+      rv$dropped_cols <- if (nrow(ws$dropped)) ws$dropped else NULL
+      if (nrow(ws$dropped))
+        notes <- c(notes, paste0("Not used as samples: ",
+                                 paste0(ws$dropped$name, " (", ws$dropped$reason, ")", collapse = ", "), "."))
       # Stacked replicate blocks (the time counter restarts for each block): every block is
       # one more replicate of every sample at each time point. prepare_plot_data() already
       # pools rows that share a time stamp; the block id lets prepare_replicate_data() keep
@@ -5472,17 +5930,30 @@ server <- function(input, output, session) {
     for (nt in notes)
       tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)
 
-    tr <- range(suppressWarnings(as.numeric(as.character(data[[rv$time_col]]))), na.rm = TRUE)
-    updateNumericInput(session, "x_min", value = tr[1])
-    updateNumericInput(session, "x_max", value = tr[2])
-    updateSelectInput(session, "selected_samples", choices = rv$od_vars, selected = rv$od_vars)
+    # the time-column box lists every column, with the chosen one selected (the box's own echo of this value is ignored)
+    updateSelectInput(session, "time_col_choice", choices = unique(colnames(data)), selected = rv$time_col)
+
+    if (!keep_state || !identical(prev_time_col, rv$time_col)) {
+      tr <- range(suppressWarnings(as.numeric(as.character(data[[rv$time_col]]))), na.rm = TRUE)
+      updateNumericInput(session, "x_min", value = tr[1])
+      updateNumericInput(session, "x_max", value = tr[2])
+    }
+    keep_sel <- if (keep_state) intersect(isolate(input$selected_samples) %||% character(0), rv$od_vars) else character(0)
+    if (!length(keep_sel)) keep_sel <- rv$od_vars
+    updateSelectInput(session, "selected_samples", choices = rv$od_vars, selected = keep_sel)
+    keep_ref <- if (keep_state && isolate(input$metrics_ref_sample %||% "") %in% rv$od_vars) isolate(input$metrics_ref_sample) else ""
     updateSelectInput(session, "metrics_ref_sample",
                       choices = c("None" = "", setNames(rv$od_vars, rv$od_vars)),
-                      selected = "")
+                      selected = keep_ref)
+    # v2.22: the blank-sample and control choices list the samples of the new data
+    updateSelectInput(session, "blank_sample", choices = c("Choose..." = "", setNames(rv$od_vars, rv$od_vars)),
+                      selected = if (keep_state && isolate(input$blank_sample %||% "") %in% rv$od_vars) isolate(input$blank_sample) else "")
+    updateSelectInput(session, "transform_control", choices = c("Choose..." = "", setNames(rv$od_vars, rv$od_vars)),
+                      selected = if (keep_state && isolate(input$transform_control %||% "") %in% rv$od_vars) isolate(input$transform_control) else "")
 
     all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[rv$time_col]])))))
     rv$all_timepoints <- all_t[is.finite(all_t)]
-    updateTextInput(session, "exclude_timepoints", value = "")
+    if (!keep_state) updateTextInput(session, "exclude_timepoints", value = "")
 
     if (!is.null(input$color_palette) && input$color_palette != "custom")
       rv$palette_colors <- get_palette_colors(input$color_palette, length(rv$od_vars))
@@ -5493,9 +5964,52 @@ server <- function(input, output, session) {
 
   observeEvent(input$file, {
     req(input$file)
-    data <- read_csv_locale_aware(input$file$datapath, input$csv_locale %||% "auto")
-    ingest_data(data, input$file$name)
+    # v2.22: Excel workbooks (.xlsx / .xls) are read with readxl (first sheet; a sheet selector appears for more)
+    if (is_excel_file(input$file$name)) {
+      rv$xlsx_path <- input$file$datapath; rv$xlsx_name <- input$file$name
+      sheets <- excel_sheet_names(input$file$datapath)
+      rv$xlsx_sheets <- sheets
+      data <- tryCatch(read_data_file(input$file$datapath, input$file$name, sheet = 1),
+                       error = function(e) { guard_notify("file_read", conditionMessage(e), "error"); NULL })
+      if (is.null(data)) return(invisible(NULL))
+      ingest_data(data, if (length(sheets) > 1) paste0(input$file$name, " [", sheets[1], "]") else input$file$name)
+    } else {
+      rv$xlsx_path <- NULL; rv$xlsx_sheets <- NULL
+      data <- read_csv_locale_aware(input$file$datapath, input$csv_locale %||% "auto")
+      ingest_data(data, input$file$name)
+    }
   })
+
+  # v2.22: another sheet of the uploaded workbook (re-reads that sheet of the same upload; a new load otherwise)
+  output$sheet_ui <- renderUI({
+    sh <- rv$xlsx_sheets
+    if (length(sh) < 2) return(NULL)
+    selectInput("sheet_choice", "Excel sheet:", choices = sh, selected = sh[1])
+  })
+  observeEvent(input$sheet_choice, {
+    req(rv$xlsx_path, input$sheet_choice)
+    sh <- input$sheet_choice
+    if (identical(paste0(rv$xlsx_name, " [", sh, "]"), rv$data_source)) return(invisible(NULL))
+    data <- tryCatch(read_data_file(rv$xlsx_path, rv$xlsx_name, sheet = sh),
+                     error = function(e) { guard_notify("file_read", conditionMessage(e), "error"); NULL })
+    if (is.null(data)) return(invisible(NULL))
+    ingest_data(data, paste0(rv$xlsx_name, " [", sh, "]"))
+  }, ignoreInit = TRUE)
+
+  # v2.22: the Time column box (under the file picker): re-runs the detection that follows from the time column on the
+  # data already in memory (no re-read of the file). The echo of the value ingest_data() just set is ignored.
+  observeEvent(input$time_col_choice, {
+    req(rv$data, input$time_col_choice)
+    tc <- input$time_col_choice
+    if (identical(tc, rv$time_col) || !tc %in% colnames(rv$data)) return(invisible(NULL))
+    pt <- parse_time_column(rv$data[[tc]])
+    if (sum(is.finite(pt$values)) < 2) {
+      guard_notify("time_col", sprintf("'%s' has no usable numbers to serve as the time column; keeping '%s'.", tc, rv$time_col))
+      updateSelectInput(session, "time_col_choice", selected = rv$time_col)
+      return(invisible(NULL))
+    }
+    ingest_data(rv$data, rv$data_source, keep_state = TRUE, time_col = tc)
+  }, ignoreInit = TRUE)
 
   observeEvent(input$load_demo, {
     sc <- input$demo_scenario %||% "lysis"
@@ -5512,6 +6026,193 @@ server <- function(input, output, session) {
                       choices = c("None" = "", setNames(unique(smp), unique(smp))),
                       selected = if (length(ref)) ref[1] else "")
   })
+
+  # ── v2.22: Data tab, replicate exclusion list, sample All / None, blank sample, replicate QC ──────────────
+  # The table as shown: replicate columns that share a name get their position appended, so the headers are unique
+  # (DT needs that; the data itself keeps its names).
+  data_table_display <- function() {
+    d <- rv$data; cn <- colnames(d)
+    dup <- duplicated(cn) | duplicated(cn, fromLast = TRUE)
+    colnames(d) <- ifelse(dup, paste0(cn, " (col ", seq_along(cn), ")"), cn)
+    d
+  }
+  set_data_status <- function(msg, type = "ok") {
+    output$data_edit_status <- renderUI(div(class = paste("settings-status", if (identical(type, "ok")) "ok" else "warn"), msg))
+  }
+  refresh_data_table <- function() {      # push the working data into the open table without re-rendering it
+    if (has_DT && !is.null(rv$data))
+      tryCatch(DT::replaceData(DT::dataTableProxy("data_view_table"), data_table_display(), resetPaging = FALSE, rownames = FALSE),
+               error = function(e) invisible(NULL))
+  }
+  if (has_DT) {
+    output$data_view_table <- DT::renderDT({
+      req(rv$data)
+      rv$data_version                     # a new load re-draws the table; a cell edit only replaces its data
+      DT::datatable(isolate(data_table_display()), editable = "cell", rownames = FALSE, selection = "none",
+                    options = list(scrollX = TRUE, scrollY = "480px", pageLength = 50, stateSave = TRUE),
+                    class = "compact stripe hover")
+    })
+  } else {
+    output$data_view_table <- renderTable({ req(rv$data); utils::head(data_table_display(), 500) }, striped = TRUE, spacing = "xs", na = "")
+  }
+  observe({                               # the column box of the no-DT editing form
+    req(rv$data); rv$data_version
+    cn <- colnames(isolate(rv$data))
+    updateSelectInput(session, "data_cell_col", choices = setNames(seq_along(cn), cn))
+  })
+
+  # One edited cell -> the same loading step as a file (columns, replicates, samples, ranges, QC, figures all refresh).
+  # row / col are positions in rv$data. An empty value is a missing reading (the documented way to drop one point).
+  apply_cell_edit <- function(row, col, value) {
+    d <- rv$data
+    row <- suppressWarnings(as.integer(row)); col <- suppressWarnings(as.integer(col))
+    if (is.null(d) || !is.finite(row) || !is.finite(col) || row < 1 || row > nrow(d) || col < 1 || col > ncol(d)) {
+      set_data_status("That cell does not exist.", "warn"); return(invisible(FALSE))
+    }
+    txt <- trimws(as.character(value %||% ""))
+    old <- d[[col]]
+    newval <- if (is.numeric(old)) { if (nzchar(txt)) suppressWarnings(as.numeric(gsub(",", ".", txt, fixed = TRUE))) else NA_real_ }
+              else if (nzchar(txt)) txt else NA_character_
+    if (is.numeric(old) && nzchar(txt) && is.na(newval))
+      guard_notify("cell_edit", "Not a number: the cell was set to empty (a missing reading).")
+    d[[col]][row] <- newval
+    ingest_data(d, rv$data_source, keep_state = TRUE, time_col = rv$time_col)
+    set_data_status(sprintf("Row %d, column '%s' set to %s. Everything downstream was recomputed.", row, colnames(d)[col],
+                            if (is.na(newval)) "empty" else as.character(newval)))
+    refresh_data_table()
+    invisible(TRUE)
+  }
+  observeEvent(input$data_view_table_cell_edit, {
+    info <- input$data_view_table_cell_edit
+    apply_cell_edit(info$row, as.integer(info$col) + 1L, info$value)     # rownames = FALSE: DT counts columns from 0
+  })
+  observeEvent(input$data_cell_set, apply_cell_edit(input$data_cell_row, input$data_cell_col, input$data_cell_value))
+  observeEvent(input$data_edit_reset, {
+    req(rv$data_loaded)
+    ingest_data(rv$data_loaded, rv$data_loaded_source, keep_state = TRUE, time_col = rv$data_loaded_tc)
+    set_data_status("Data reverted to the loaded version.")
+    refresh_data_table()
+  })
+  output$download_current_data_csv <- downloadHandler(
+    filename = function() paste0("data_current_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) { req(rv$data); utils::write.csv(rv$data, file, row.names = FALSE, na = "") })
+
+  # Enter data: pasted text -> the same ingest as a file
+  entry_msg <- reactiveVal(NULL)
+  entry_parsed <- reactive(parse_pasted_text(input$data_entry_text, input$data_entry_sep %||% "auto"))
+  output$data_entry_preview <- renderTable({ d <- entry_parsed(); req(d); utils::head(d, 10) }, striped = TRUE, spacing = "xs", na = "")
+  output$data_entry_status <- renderUI({
+    m <- entry_msg()
+    d <- if (is.null(m)) entry_parsed() else NULL
+    if (!is.null(m)) div(class = paste("settings-status", m$type), m$text)
+    else if (!is.null(d)) div(class = "settings-status ok", sprintf("Parsed %d rows x %d columns; first rows below. Press Apply to use them.", nrow(d), ncol(d)))
+    else if (nzchar(trimws(input$data_entry_text %||% ""))) div(class = "settings-status warn", "Could not read a table from the pasted text: check the separator.")
+  })
+  observeEvent(input$data_entry_text, entry_msg(NULL), ignoreInit = TRUE)
+  observeEvent(input$data_entry_apply, {
+    d <- entry_parsed()
+    if (is.null(d) || ncol(d) < 2 || nrow(d) < 2) {
+      entry_msg(list(type = "warn", text = "Nothing to apply: paste a header row and at least two data rows with a time column and one sample column."))
+      return(invisible(NULL))
+    }
+    ok <- tryCatch({ ingest_data(d, "Pasted data"); TRUE },
+                   error = function(e) { entry_msg(list(type = "warn", text = paste("Could not use the pasted data:", conditionMessage(e)))); FALSE })
+    if (ok) {
+      entry_msg(list(type = "ok", text = sprintf("Applied: %d rows x %d columns (%d sample%s).", nrow(d), ncol(d), length(rv$od_vars), if (length(rv$od_vars) == 1) "" else "s")))
+      updateTabsetPanel(session, "main_tabs", selected = "Lysis curve")
+    }
+  })
+  observeEvent(input$data_entry_clear, {
+    updateTextAreaInput(session, "data_entry_text", value = "")
+    entry_msg(NULL)
+  })
+
+  # Replicate exclusion list: one checkbox per replicate of every sample, labelled as the app numbers them
+  output$excluded_reps_ui <- renderUI({
+    req(rv$data)
+    ver <- rv$data_version
+    ct  <- replicate_catalog_current()
+    if (!nrow(ct)) return(p(style = "color:#999;font-size:.85em;", "Load data to list its replicates."))
+    fresh <- !identical(n1_state$excl_ver, ver)          # a new load starts with nothing excluded; an edit keeps the ticks
+    n1_state$excl_ver <- ver
+    sel <- if (fresh) character(0) else intersect(isolate(input$excluded_reps) %||% character(0), ct$key)
+    ch  <- setNames(ct$key, paste0(dname(ct$sample), ": ", ct$label))
+    tagList(
+      if (all(table(ct$sample) < 2)) p(style = "font-size:.8em;color:#856404;", "Every sample has a single replicate: excluding it removes the sample."),
+      div(style = "max-height:240px;overflow-y:auto;border:1px solid #eee;padding:4px 8px;margin-bottom:6px;",
+          checkboxGroupInput("excluded_reps", NULL, choices = ch, selected = sel)))
+  })
+  observeEvent(input$excluded_reps_clear, updateCheckboxGroupInput(session, "excluded_reps", selected = character(0)))
+
+  # Samples: All / None
+  select_samples <- function(which = c("all", "none")) {
+    which <- match.arg(which)
+    sel <- if (which == "all") as.character(rv$od_vars %||% character(0)) else character(0)
+    updateSelectInput(session, "selected_samples", selected = sel)
+    invisible(sel)
+  }
+  observeEvent(input$samples_all,  select_samples("all"))
+  observeEvent(input$samples_none, select_samples("none"))
+
+  # A blank sample is not a sample to plot: take it out of the selection (and say so)
+  observeEvent(list(input$blank_mode, input$blank_sample, input$selected_samples), {
+    b <- blank_sample_current()
+    cur <- input$selected_samples
+    if (nzchar(b) && b %in% cur) {
+      updateSelectInput(session, "selected_samples", selected = setdiff(cur, b))
+      guard_notify("blank_sample", sprintf("'%s' is the blank: its mean curve is subtracted and it is left out of the samples.", b), "message")
+    }
+  }, ignoreInit = TRUE)
+
+  # Storms integration window readout (the t_stat the local-virulence metric integrates to)
+  extinction_current <- function() curation_num(input$extinction_threshold, 0.05)
+  t_stat_override_current <- function() { v <- curation_num(input$t_stat_override, NA_real_); if (is.finite(v)) v else NULL }
+  output$storms_window_readout <- renderUI({
+    ov  <- t_stat_override_current()
+    ref <- input$metrics_ref_sample %||% ""
+    auto <- if (is.null(ov) && nzchar(ref) && !is.null(rv$data))
+      tryCatch({ lv <- calculate_local_virulence(prepare_plot_data(), ref, input$metrics_smooth_window %||% 5, NULL)
+                 if (is.null(lv)) NA_real_ else lv$t_stat_used[1] }, error = function(e) NA_real_) else NA_real_
+    val <- if (!is.null(ov)) ov else auto
+    p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+      sprintf("Storms integration window: 0 to t_stat (%s)%s", if (!is.null(ov)) "override" else "auto",
+              if (is.finite(val)) paste0(" = ", signif(val, 4)) else ""),
+      " Local virulence integrates from time 0 to t_stat; leave the box blank to use the end of the reference's exponential phase.")
+  })
+
+  # Replicate QC (Statistics tab): CV % per sample and each replicate's distance from the sample's median curve.
+  # Built from ALL replicates, the excluded ones included, so an exclusion can be judged.
+  rep_qc_current <- function() {
+    req(rv$data, input$selected_samples)
+    rp  <- prepare_replicate_data(which = "all")
+    tab <- replicate_cv_table(rp, curation_num(input$rep_qc_flag, 20))
+    ct  <- replicate_catalog_current()
+    if (nrow(tab$replicates)) tab$replicates$label <- ct$label[match(paste0(tab$replicates$sample, " #", tab$replicates$replicate), ct$key)]
+    tab
+  }
+  rep_qc_show <- function(df) {
+    if (is.null(df) || !nrow(df)) return(df)
+    df <- present(df, "sample")
+    for (j in names(df)[vapply(df, is.numeric, logical(1))]) if (!j %in% c("replicate", "n_points", "n_replicates", "n_timepoints", "n_over_flag")) df[[j]] <- round(df[[j]], 2)
+    df
+  }
+  output$rep_qc_samples    <- renderTable(rep_qc_show(rep_qc_current()$samples), striped = TRUE, spacing = "xs", na = "")
+  output$rep_qc_replicates <- renderTable(rep_qc_show(rep_qc_current()$replicates), striped = TRUE, spacing = "xs", na = "")
+  output$rep_qc_note <- renderUI({
+    tab <- tryCatch(rep_qc_current(), error = function(e) NULL)
+    if (is.null(tab) || !nrow(tab$samples)) return(p(style = "font-size:.82em;color:#999;", "Load data and select samples to see the replicate QC."))
+    hi <- tab$samples$sample[tab$samples$high_cv %in% TRUE]
+    if (all(tab$samples$n_replicates < 2))
+      return(p(style = "font-size:.82em;color:#856404;", "Every sample has a single replicate: CV and distances need two or more."))
+    p(style = "font-size:.82em;", if (length(hi)) paste0("High CV (median above ", curation_num(input$rep_qc_flag, 20), " %): ", paste(dname(hi), collapse = ", "), ".")
+                                  else paste0("No sample has a median CV above ", curation_num(input$rep_qc_flag, 20), " %."))
+  })
+  output$downloadRepQCCSV <- downloadHandler(
+    filename = function() paste0("replicate_qc_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) utils::write.csv(present(replicate_qc_csv_frame(rep_qc_current()), "sample"), file, row.names = FALSE))
+  output$downloadRepQCSamplesCSV <- downloadHandler(
+    filename = function() paste0("replicate_cv_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) utils::write.csv(present(rep_qc_current()$samples, "sample"), file, row.names = FALSE))
 
   # ── Data summary (what the app detected) ─────────────────────────────────────
   # v2.14.1: how big the loaded data is (time points, samples, replicates per sample)
@@ -5550,6 +6251,16 @@ server <- function(input, output, session) {
     big <- if (di$ntp > DATA_WARN_TIMEPOINTS || di$ns > DATA_WARN_SAMPLES)
       div(class = "settings-status warn", style = "margin-top:6px;",
           sprintf("Large data set (%s time points, %s samples): analysis figures and statistics may be slow.", di$ntp, di$ns))
+    # v2.22: the columns used as samples and the ones dropped (wide format), the replicates and readings
+    # excluded, the blank / baseline and the transform: what the numbers are made of is never hidden.
+    dropped_txt <- if (!is.null(rv$dropped_cols) && nrow(rv$dropped_cols))
+      paste0("<br/>Not used as samples: ", html_escape(paste0(rv$dropped_cols$name, " (", rv$dropped_cols$reason, ")", collapse = ", "))) else ""
+    used_txt <- if (!rv$is_long_format && length(rv$od_vars) && nzchar(dropped_txt))
+      paste0("<br/>Columns used as samples: ", html_escape(paste(rv$od_vars, collapse = ", "))) else ""
+    nex <- length(excluded_rep_keys())
+    excl_txt <- if (nex > 0) paste0("<br/><b>", nex, " replicate", if (nex == 1) "" else "s", " excluded</b> (", html_escape(excluded_reps_text()), ")") else ""
+    cur_txt  <- curation_description(modifyList(curation_state(), list(n_excluded = 0)))   # (the exclusions have their own line)
+    cur_txt  <- if (nzchar(cur_txt)) paste0("<br/>Data handling: ", html_escape(cur_txt)) else ""
     div(style = "margin-bottom:10px;",
         div(class = "settings-status ok",
             HTML(paste0(
@@ -5557,7 +6268,7 @@ server <- function(input, output, session) {
               "Format: <b>", if (rv$is_long_format) "long" else "wide", "</b> &middot; ",
               "Time column: <b>", html_escape(rv$time_col), "</b> &middot; ",
               length(rv$all_timepoints), " time points<br/>",
-              "Samples: ", html_escape(rep_txt)))),
+              "Samples: ", html_escape(rep_txt), used_txt, dropped_txt, excl_txt, cur_txt))),
         big)
   })
   
@@ -5573,7 +6284,11 @@ server <- function(input, output, session) {
       data_inputs     <- c("file", "loadSettings", "selected_samples",
                            "time_filter_range", "exclude_timepoints",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                           "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump")
+                           "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump",
+                           # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
+                           "time_col_choice", "sheet_choice", "excluded_reps", "excluded_reps_clear", "samples_all", "samples_none",
+                           "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
+                           "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag")
       # Per-sample dynamic input prefixes — handled separately below
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
@@ -5589,7 +6304,7 @@ server <- function(input, output, session) {
       
       # Global visual settings: everything that isn't data-specific or per-sample
       global_settings <- all_inputs[vapply(names(all_inputs), function(nm)
-        !(nm %in% data_inputs) && !is_sample_inp(nm), logical(1))]
+        !(nm %in% data_inputs) && !is_sample_inp(nm) && !startsWith(nm, "data_view_table_"), logical(1))]
       
       # Per-sample aesthetics keyed by sample name
       sample_aesthetics <- list()
@@ -5659,7 +6374,11 @@ server <- function(input, output, session) {
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                         "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump")
+                         "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump",
+                           # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
+                           "time_col_choice", "sheet_choice", "excluded_reps", "excluded_reps_clear", "samples_all", "samples_none",
+                           "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
+                           "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag")
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
                          "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_",
@@ -5680,7 +6399,7 @@ server <- function(input, output, session) {
     }
     n_global <- 0L
     for (nm in names(global)) {
-      if (nm %in% data_inputs || is_sample_inp(nm)) next
+      if (nm %in% data_inputs || is_sample_inp(nm) || startsWith(nm, "data_view_table_")) next
       if (!(nm %in% names(input)))                  next
       tryCatch({
         val <- global[[nm]]
@@ -6298,9 +7017,105 @@ server <- function(input, output, session) {
   empty_replicate_data <- function()
     data.frame(time = numeric(0), variable = character(0), replicate = integer(0), value = numeric(0),
                stringsAsFactors = FALSE)
+  # ── v2.22: data curation (OD range, replicate exclusion, blank sample / baseline, transform) ────────────
+  # Everything downstream (figures, statistics, metrics, fits, extraction, exports) reads prepare_plot_data() /
+  # prepare_replicate_data(), so the steps live there and nowhere else. With every control at its default
+  # (nothing excluded, constant blank, no transform) none of this runs and the numbers are exactly what they were.
+  curation_num <- function(v, default) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1 && is.finite(v)) v else default }
+  blank_mode_current <- function() { m <- input$blank_mode %||% "constant"; if (m %in% c("constant", "sample", "first_k")) m else "constant" }
+  blank_sample_current <- function() if (identical(blank_mode_current(), "sample")) as.character(input$blank_sample %||% "") else ""
+  # the constant blank (blank_od) counts only in its own mode
+  blank_od_effective <- function() if (identical(blank_mode_current(), "constant")) curation_num(input$blank_od, 0) else 0
+  transform_mode_current <- function() { m <- input$transform_mode %||% "none"; if (m %in% c("none", "t0", "control", "pct_max", "ln")) m else "none" }
+  transform_control_current <- function() if (identical(transform_mode_current(), "control")) as.character(input$transform_control %||% "") else ""
+  od_filter_range <- function() {
+    if (!isTRUE(input$use_od_filter)) return(NULL)
+    lo <- curation_num(input$od_min, -Inf); hi <- curation_num(input$od_max, Inf)
+    if (lo > hi) { tmp <- lo; lo <- hi; hi <- tmp }
+    c(lo, hi)
+  }
+  replicate_catalog_current <- function() {
+    if (is.null(rv$data)) return(replicate_catalog(NULL, FALSE))
+    replicate_catalog(rv$data, isTRUE(rv$is_long_format), rv$time_col, rv$group_col, rv$replicate_col, rv$col_map, rv$n_blocks)
+  }
+  # the excluded replicates ("Sample #id" keys) that exist in the loaded data
+  excluded_rep_keys <- function() {
+    k <- input$excluded_reps
+    if (!length(k)) return(character(0))
+    intersect(as.character(k), replicate_catalog_current()$key)
+  }
+  data_curation_active <- function()
+    !is.null(od_filter_range()) || length(excluded_rep_keys()) > 0 ||
+      !identical(blank_mode_current(), "constant") || !identical(transform_mode_current(), "none")
+  # samples whose readings are needed only to correct the others (the blank, the control)
+  curation_aux_samples <- function() {
+    a <- c(blank_sample_current(), transform_control_current())
+    unique(intersect(a[nzchar(a)], rv$od_vars_raw))
+  }
+  # the replicates excluded, as text: "WT: rep 2; Mod: rep 1" (display names)
+  excluded_reps_text <- function() {
+    k <- excluded_rep_keys(); if (!length(k)) return("")
+    ct <- replicate_catalog_current(); ct <- ct[match(k, ct$key), , drop = FALSE]
+    paste0(dname(ct$sample), ": ", sub(" \\(.*$", "", ct$label), collapse = "; ")
+  }
+  # state for the data summary, provenance, legend and methods draft
+  curation_state <- function() list(
+    od = od_filter_range(), n_excluded = length(excluded_rep_keys()), excluded_text = excluded_reps_text(),
+    blank_mode = blank_mode_current(), blank_sample = dname(blank_sample_current()),   # (the constant blank is reported on its own line)
+    blank_k = input$blank_k %||% 3, transform = transform_mode_current(), control = dname(transform_control_current()))
+  curation_text <- function() curation_description(curation_state())
+  # problems met while correcting / transforming: said once per distinct message
+  curation_notify <- function(notes) {
+    notes <- as.character(notes %||% character(0))
+    if (!length(notes)) return(invisible(NULL))
+    new <- setdiff(notes, n1_state$notes_shown)     # a plain environment, not rv: this runs inside reactives
+    n1_state$notes_shown <- unique(c(n1_state$notes_shown, notes))
+    for (nt in new) guard_notify(paste0("curation_", abs(sum(utf8ToInt(substr(nt, 1, 40))))), nt)
+    invisible(NULL)
+  }
+  # step 1 (raw readings): readings outside the OD range become missing; rows of an excluded replicate are flagged
+  curate_replicates_pre <- function(out) {
+    if (!data_curation_active()) return(out)
+    rng <- od_filter_range()
+    if (!is.null(rng)) out$value[is.finite(out$value) & (out$value < rng[1] | out$value > rng[2])] <- NA_real_
+    out$.excl <- replicate_row_excluded(out, excluded_rep_keys())
+    out
+  }
+  # step 2 (after the constant blank): blank sample / baseline, then the transform; keeps only the wanted samples and
+  # the wanted rows: which = "kept" (default), "excluded" (the excluded replicates, drawn hollow grey) or "all" (QC).
+  curate_replicates_post <- function(out, samps, which = "kept") {
+    if (!data_curation_active()) {
+      if (identical(which, "excluded")) return(out[0, , drop = FALSE])
+      if (identical(which, "all")) out$excluded <- FALSE
+      return(out)
+    }
+    res <- transform_frame(out, blank_mode_current(), blank_sample_current(), input$blank_k %||% 3,
+                           transform_mode_current(), transform_control_current(), kept = !out$.excl)
+    curation_notify(attr(res, "curation_notes"))
+    res <- res[res$variable %in% samps, , drop = FALSE]
+    res <- switch(which, excluded = res[res$.excl, , drop = FALSE], all = { res$excluded <- res$.excl; res },
+                  res[!res$.excl, , drop = FALSE])
+    res$.excl <- NULL
+    res
+  }
+  # the mean / sd / n / sem / ci95 frame from a replicate frame (the plot data when the curation is active)
+  plot_data_from_replicates <- function(rp) {
+    if (is.null(rp) || nrow(rp) == 0) return(empty_plot_data())
+    rp %>%
+      group_by(time, variable) %>%
+      summarise(mean_value = mean(value, na.rm = TRUE),
+                sd_value   = sd(  value, na.rm = TRUE),
+                n          = sum(!is.na(value)), .groups = "drop") %>%
+      mutate(sem_value  = ifelse(n >= 2, sd_value / sqrt(n), NA_real_),
+             ci95_value = ifelse(n >= 2, qt(0.975, df = pmax(n - 1, 1)) * sem_value, NA_real_)) %>%
+      filter(is.finite(time) & is.finite(mean_value))
+  }
   prepare_plot_data <- function(samples = NULL) {
     req(rv$data, rv$time_col, input$selected_samples)
     samps <- if (!is.null(samples)) samples else input$selected_samples
+    # v2.22: with an OD range, excluded replicates, a blank sample / baseline or a transform active, the means come
+    # from the curated replicate frame (the same numbers the replicate statistics and metrics use)
+    if (data_curation_active()) return(plot_data_from_replicates(prepare_replicate_data(samples = samps)))
     if (rv$is_long_format) {
       req(rv$group_col, rv$value_col)
       d  <- apply_time_filters(rv$data, rv$time_col)
@@ -6354,7 +7169,7 @@ server <- function(input, output, session) {
     # here (once, from the already-aggregated mean) is exactly equivalent
     # to subtracting it from every raw value before averaging -- sd/n are
     # unaffected either way (SD is shift-invariant).
-    blank <- input$blank_od %||% 0
+    blank <- blank_od_effective()
     if (is.numeric(blank) && !is.na(blank) && blank != 0) pd$mean_value <- pd$mean_value - blank
     pd %>% filter(is.finite(time) & is.finite(mean_value))
   }
@@ -6364,13 +7179,16 @@ server <- function(input, output, session) {
   # compute_replicate_metrics() so per-replicate metrics can be computed
   # with mean +/- SD reported across replicates, alongside (not instead of)
   # the mean-curve metrics prepare_plot_data()/compute_curve_metrics() give.
-  prepare_replicate_data <- function(samples = NULL) {
+  prepare_replicate_data <- function(samples = NULL, which = "kept") {
     req(rv$data, rv$time_col, input$selected_samples)
     samps <- if (!is.null(samples)) samples else input$selected_samples
+    # v2.22: a blank sample is not a sample any more; the blank / control readings are loaded as helpers
+    samps <- setdiff(samps, blank_sample_current())
+    build_samps <- unique(c(samps, curation_aux_samples()))
     if (rv$is_long_format) {
       req(rv$group_col, rv$value_col)
       d <- apply_time_filters(rv$data, rv$time_col)
-      d <- d[d[[rv$group_col]] %in% samps, , drop = FALSE]
+      d <- d[d[[rv$group_col]] %in% build_samps, , drop = FALSE]
       if (nrow(d) == 0) return(empty_replicate_data())
       d <- d[order(d[[rv$group_col]], d[[rv$time_col]]), , drop = FALSE]
       # Long files have no explicit replicate-ID column: the nth row within
@@ -6394,7 +7212,7 @@ server <- function(input, output, session) {
                         stringsAsFactors = FALSE)
     } else {
       d    <- apply_time_filters(rv$data, rv$time_col)
-      meas <- intersect(rv$od_vars_raw, samps)
+      meas <- intersect(rv$od_vars_raw, build_samps)
       if (length(meas) == 0) return(empty_replicate_data())
       t_vec <- d[[rv$time_col]]
       # Stacked time blocks (rv$block_id, set at ingest) are replicates too: the replicate
@@ -6419,8 +7237,10 @@ server <- function(input, output, session) {
     # KC-7: see prepare_plot_data() above -- same constant blank offset,
     # applied per replicate value here since this frame is un-averaged.
     out <- apply_time_windows_inputs(out)   # v2.18: per-sample windows, after the global filter
-    blank <- input$blank_od %||% 0
+    out <- curate_replicates_pre(out)       # v2.22: OD range on the raw readings; flag excluded replicates
+    blank <- blank_od_effective()
     if (is.numeric(blank) && !is.na(blank) && blank != 0) out$value <- out$value - blank
+    out <- curate_replicates_post(out, samps, which)   # v2.22: blank sample / baseline, transform, restrict
     out %>% filter(is.finite(time) & is.finite(value))
   }
 
@@ -6677,6 +7497,20 @@ server <- function(input, output, session) {
       # from a subset that excludes those rows, rather than drawing a false
       # zero-height bar for a single replicate.
       err_vals <- plot_data[[ec]]
+      # v2.22 (old audit item N4-8): error bars asked for but every sample has a single replicate at every time
+      # point: nothing can be drawn, so say why (once per loaded file) instead of leaving the user to guess.
+      if (all(plot_data$n < 2, na.rm = TRUE)) {
+        if (!isTRUE(n1_state$shown)) {
+          n1_state$shown <- TRUE
+          guard_notify("n1_warning", paste0(
+            "Error bars requested (", input$error_type, ") but every group has n = 1 replicate -- no error bars can be drawn. ",
+            "Replicates must be supplied as columns that share a sample name, as stacked time blocks, or (long format) as ",
+            "additional rows sharing the same time value."))
+        }
+      } else {
+        n1_state$shown <- FALSE
+        tryCatch(removeNotification(id = "n1_warning"), error = function(e) invisible(NULL))
+      }
 
       # v2.12: on a log axis a lower bound <= 0 cannot be drawn. The old code
       # clamped it to 1e-9, which the scale limits then censored, so the whole
@@ -6745,6 +7579,17 @@ server <- function(input, output, session) {
                             stroke = max(0.2, input$point_stroke * 0.8),
                             position = position_jitter(width = jit, height = 0, seed = 1),
                             inherit.aes = FALSE, show.legend = FALSE)
+      }
+      # v2.22: replicates the user excluded stay visible as hollow grey circles (they no longer enter any mean)
+      rx <- tryCatch(prepare_replicate_data(samples = samples, which = "excluded"), error = function(e) NULL)
+      if (!is.null(rx) && nrow(rx) > 0) {
+        if (input$y_scale_type == "log") rx <- rx[rx$value > 0, , drop = FALSE]
+        if (!is.null(grp_map)) rx$group <- factor(unname(grp_map[as.character(rx$variable)]), levels = attr(grp_map, "levels"))
+        if (nrow(rx) > 0)
+          p <- p + geom_point(data = rx, aes(x = time, y = value), shape = 1, colour = "grey55",
+                              size = input$shape_size * 0.5, alpha = 0.8,
+                              stroke = max(0.2, input$point_stroke * 0.8),
+                              inherit.aes = FALSE, show.legend = FALSE)
       }
     }
     
@@ -7469,9 +8314,14 @@ server <- function(input, output, session) {
     s3 <- paste0(sub("\\.$", "", s3), ".")   # "s.e.m." already ends with a period
     if (isTRUE(input$show_replicate_points)) s3 <- paste(s3, "Open circles show the individual replicate values.")
     s4 <- if (identical(input$y_scale_type, "log")) "The y axis is log10-scaled." else NULL
-    blank <- input$blank_od %||% 0
+    blank <- blank_od_effective()
     s5 <- if (is.numeric(blank) && is.finite(blank) && blank != 0)
       sprintf("Readings are blank-corrected (−%s).", blank) else NULL
+    # v2.22: OD range, excluded replicates, blank sample / baseline, transform: never silent
+    cur_txt <- curation_text()
+    if (nzchar(cur_txt)) s5 <- paste(c(s5, paste0("Data handling: ", cur_txt, ".")), collapse = " ")
+    if (length(excluded_rep_keys()) > 0 && isTRUE(input$show_replicate_points))
+      s5 <- paste(s5, "Hollow grey circles mark the excluded replicates.")
     tw_txt <- time_windows_text()
     s6 <- if (isTRUE(input$enable_time_filter) || nzchar(tw_txt)) "Only the displayed time window was analysed." else NULL
     if (nzchar(tw_txt)) s6 <- paste0(s6, " Per-sample time windows: ", tw_txt, ".")
@@ -7495,7 +8345,8 @@ server <- function(input, output, session) {
                                   peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
                                   ref_sample         = input$metrics_ref_sample,
                                   peak_mode          = input$metrics_peak_mode %||% "global",
-                                  lysis_threshold    = lysis_threshold_current())
+                                  lysis_threshold    = lysis_threshold_current(),
+                                  extinction_threshold = extinction_current(), t_stat_override = t_stat_override_current())   # v2.22
   }
   analysis_stat_metric <- function() {
     if (identical(input$analysis_type, "dose_response")) input$analysis_dose_metric %||% "lysis_time"
@@ -8615,7 +9466,9 @@ server <- function(input, output, session) {
                           ref_sample          = input$metrics_ref_sample,
                           peak_smooth_window  = input$metrics_peak_smooth_window %||% 1,
                           peak_mode           = input$metrics_peak_mode %||% "global",
-                          lysis_threshold     = lysis_threshold_current())
+                          lysis_threshold     = lysis_threshold_current(),
+                          extinction_threshold = extinction_current(),            # v2.22: Stats & Reports boxes
+                          t_stat_override     = t_stat_override_current())
     # only while a sample is renamed, so an untouched session returns exactly the engine's table
     if (is.data.frame(m) && "sample" %in% names(m) && !"sample_display" %in% names(m) && any(dname(m$sample) != m$sample)) {
       nms <- names(m); pos <- match("sample", nms)
@@ -8679,7 +9532,8 @@ server <- function(input, output, session) {
                               smooth_window      = input$metrics_smooth_window %||% 5,
                               peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
                               peak_mode          = input$metrics_peak_mode %||% "global",
-                              lysis_threshold    = lysis_threshold_current())
+                              lysis_threshold    = lysis_threshold_current(),
+                              extinction_threshold = extinction_current(), t_stat_override = t_stat_override_current())   # v2.22
   }
 
   repmetrics_csv_name <- function() paste0("replicate_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
@@ -9245,9 +10099,12 @@ server <- function(input, output, session) {
       " ", length(samps), " sample", if (length(samps) == 1) "" else "s",
       " (", if (length(samps) <= 8) paste(dsamps, collapse = ", ") else paste0(paste(dsamps[1:8], collapse = ", "), ", ..."),
       ") were measured in ", n_txt, " each.")
-    blank <- input$blank_od %||% 0
+    blank <- blank_od_effective()
+    cur_txt <- curation_text()
     s2 <- paste0(
       if (is.numeric(blank) && is.finite(blank) && blank != 0) paste0("Readings were blank-corrected by subtracting ", blank, ". ") else "",
+      # v2.22: the other data-handling steps, in the order they are applied
+      if (nzchar(cur_txt)) paste0("Data handling: ", cur_txt, ". ") else "",
       if (isTRUE(input$enable_time_filter) || nzchar(time_windows_text())) "Only the displayed time window was analysed. " else "",
       if (nzchar(time_windows_text())) paste0("Per-sample time windows: ", time_windows_text(), ". ") else "",
       "At each time point the mean of the replicates was plotted. ", err)
@@ -9539,6 +10396,7 @@ server <- function(input, output, session) {
                   "Line thickness", "Points shown", "Point size",
                   "Export size", "Export DPI",
                   "Blank/media OD subtracted",
+                  "Data handling (OD range, excluded replicates, blank, transform)",
                   "μmax smoothing window", "Peak-detection smoothing window",
                   "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Reference sample",
                   "R vector memory limit", "Figure raster size"),
@@ -9547,7 +10405,8 @@ server <- function(input, output, session) {
                 input$line_thickness, input$show_points, input$shape_size,
                 paste0(input$export_width, " × ", input$export_height, " ", input$export_units %||% "in"),
                 input$export_dpi,
-                { b <- input$blank_od %||% 0; if (is.na(b) || b == 0) "none (off)" else b },
+                { b <- blank_od_effective(); if (is.na(b) || b == 0) "none (off)" else b },
+                { ct <- curation_text(); if (nzchar(ct)) ct else "none" },
                 input$metrics_smooth_window %||% 5,
                 paste0(input$metrics_peak_smooth_window %||% 1,
                        if (identical(input$metrics_peak_smooth_window %||% 1, 1)) " (off)" else ""),

@@ -5,7 +5,7 @@ This guide is for finishing phage lysis-curve figures and their statistics for a
 ## 1. What a session looks like
 
 1. **Start the app** with `Run Lysis Curve Plotter.command` (macOS), `Run Lysis Curve Plotter.bat` (Windows) or `./run.sh` (Linux).
-2. **Load data.** Click **Browse...** next to **Choose CSV File**, or pick a scenario beside **Load Demo Data** (for example Lysis curve (3 samples) or MOI series (dose-response)). A scenario also sets the x-axis label and the reference sample.
+2. **Load data.** Click **Browse...** next to **Choose CSV or Excel file** (`.xlsx` / `.xls` need the readxl package), paste a table in the **Data** tab, or pick a scenario beside **Load Demo Data** (for example Lysis curve (3 samples) or MOI series (dose-response)). A scenario also sets the x-axis label and the reference sample.
 3. **Check the data.** The green data summary box under the file picker states how many replicate columns were found for each sample. Below it, the QC flag list shows any of CEILING, NEGATIVE, GAP or FLAT_REFERENCE. Clean data shows nothing.
 4. **Check the figure.** The app starts in the journal standard: a fixed 65 x 65 mm square panel, Arial with 7 pt axis titles and 6 pt tick and legend text, 0.75 pt data lines, Okabe-Ito colours, no panel letter and SVG export.
 5. **Adjust.** The **Quick edit** strip under the figure holds a name, a colour and a **show** box for each sample (the name you type there is used in the legend, every table, the CSV files and the reports; the CSV files keep the file's own column name in `sample_raw`), plus **X-axis label**, **Y-axis label** and **Legend position**. The figure stays pinned to the top of the window while you scroll the sidebar, the sections open one at a time, and the **Jump to a section...** menu above them goes straight to one. Set colours for a whole palette in **Color Palettes** or per sample in **Variable Styling**, and error display in **Error Bars / Shadow**.
@@ -23,7 +23,7 @@ The layout is detected automatically. Check the data summary box after every loa
 - **OVER, OVRFLW and #SAT cells.** A saturation marker in a numeric column becomes a missing value for that cell only. The column is kept, and a notification reports how many cells changed. A missing reading in a regular series is then flagged GAP.
 - **Decimal commas.** Set **CSV format:** to **European (semicolon-separated, , decimal)**. Auto-detect, the default, handles most files.
 - **Blank subtraction.** The app assumes the data are already blank-subtracted. If a media OD remains, enter it in **Subtract blank/media OD (optional):**. It is subtracted before plotting, statistics and metrics, and recorded in the report. Readings at or below zero are flagged NEGATIVE.
-- **Known limitation.** A Gen5 temperature column (`T° 600`) is still read as a sample. Remove it from the CSV before loading.
+- **Which columns are samples.** In wide format every numeric column except the time column is a sample; a temperature column (`T° 600`, `Temp`, `37 °C`) and text columns are left out and listed in the data summary. If the wrong column is taken as time, choose the right one in **Time column:**. Excluding readings or replicates, blank sample / baseline, transforms, the **Data** tab and the replicate QC table are described in [DATA_TAB_AND_TRANSFORMS.md](DATA_TAB_AND_TRANSFORMS.md).
 
 ## 3. One figure for a paper
 
