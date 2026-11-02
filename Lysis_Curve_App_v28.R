@@ -2254,7 +2254,11 @@ ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "me
                              "OD heatmap (samples \u00d7 time)"           = "heatmap",
                              "Metric explorer (one metric against another)" = "metric_explorer",   # v2.18
                              "Fitted growth curves (Curve fitting tab)"  = "fit_overlay",          # v2.19
-                             "Phenotype heatmap (samples \u00d7 metrics)" = "phenotype_heatmap")   # v2.19
+                             "Phenotype heatmap (samples \u00d7 metrics)" = "phenotype_heatmap",   # v2.19
+                             "OD at chosen times (grouped bars or dots)" = "od_at_times",          # v2.21
+                             "Time to an OD threshold (per sample)"      = "time_to_threshold",    # v2.21
+                             "Replicate small multiples (one panel per sample)" = "replicate_facets",   # v2.21
+                             "Fraction of replicates lysed vs time"      = "lysed_fraction")       # v2.21
 COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main",
                            "Lysis curve, one panel per group" = "main_by_group",   # v2.18
                            ANALYSIS_FIGURE_CHOICES)
@@ -2602,7 +2606,11 @@ LEGACY_BASE <- list(
   nb_next_steps = "", nb_tags = "",
   nb_passage = "", nb_inducer_conc = "", nb_other_condition = "",   # v2.17
   nb_custom_key1 = "", nb_custom_val1 = "", nb_custom_key2 = "", nb_custom_val2 = "",
-  nb_custom_key3 = "", nb_custom_val3 = ""
+  nb_custom_key3 = "", nb_custom_val3 = "",
+  # v2.21: metric summary styles and brackets, extraction figures, fraction lysed (none touches the main figure)
+  metric_style = "dot", metric_brackets = FALSE,
+  extract_style = "bar", extract_points = TRUE,
+  lysed_mode = "relative", lysed_threshold = 0.5
 )
 
 # The inputs the journal preset sets, at their legacy values.
@@ -3357,6 +3365,184 @@ first_separation_time <- function(x, alpha = 0.05) {
              stringsAsFactors = FALSE)
 }
 # ── end v2.20 engine ──
+
+# ── v2.21 figure helpers ──
+# Pure functions (no Shiny state) behind the v2.21 analysis figures: the metric summary's styles and significance
+# brackets, the replicate small multiples and the fraction-lysed curves. Tested by tests/test_v221_figures.R.
+
+# Summary styles of the metric summary (input metric_style); "dot" is the v2.11 look and the default.
+METRIC_STYLE_CHOICES <- c("Dot plot (replicates, mean bar)"         = "dot",
+                          "Bar (mean ± error, replicates as points)" = "bar",
+                          "Box plot"                                 = "box",
+                          "Violin"                                   = "violin")
+
+# The metric summary drawn in a style other than "dot". `long` has sample (factor, display labels), metric
+# (factor, the facet titles) and value; `summ` has metric, sample, mean, lo, hi; `cols_by_label` maps a display
+# label to its colour. bar: columns at the mean, whiskers lo..hi (dark when the whiskers follow the sample colour,
+# which would vanish inside a same-coloured bar), replicates as open circles, the y axis starting at 0; box: one box
+# per sample (outliers as open circles) with the replicates; violin: untrimmed, equal-width densities with the
+# replicates and a mean bar. facet = FALSE draws one panel (used by the time-to-threshold figure).
+metric_summary_styled <- function(style = c("bar", "box", "violin", "dot"), long, summ, cols_by_label,
+                                  eb_col = "sample", ptsz = 3, x_guide = ggplot2::waiver(),
+                                  y_exp = c(0.08, 0.18), facet = TRUE, x_drop = TRUE) {
+  style <- match.arg(style)
+  err_col <- if (identical(eb_col, "sample")) "grey15" else eb_col
+  pt_col  <- if (identical(style, "bar")) "grey15" else NULL   # circles on a coloured bar are drawn dark
+  jit     <- position_jitter(width = 0.12, height = 0, seed = 1)
+  g <- ggplot(long, aes(x = sample, y = value))
+  if (style == "dot") {   # the v2.11 look (the metric summary itself draws it inline): used by the time-to-threshold figure
+    g <- g + (if (identical(eb_col, "sample"))
+        geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi, color = sample), width = 0.3,
+                      linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)
+      else geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi), color = eb_col, width = 0.3,
+                         linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE)) +
+      geom_crossbar(data = summ, aes(x = sample, y = mean, ymin = mean, ymax = mean, color = sample),
+                    width = 0.5, linewidth = pt2lw(0.75), inherit.aes = FALSE, na.rm = TRUE)
+  } else if (style == "bar") {
+    g <- g +
+      geom_col(data = summ, aes(x = sample, y = mean, fill = sample), width = 0.6, alpha = 0.85, inherit.aes = FALSE) +
+      geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi), color = err_col, width = 0.3,
+                    linewidth = pt2lw(0.5), inherit.aes = FALSE, na.rm = TRUE) +
+      expand_limits(y = 0)
+    y_exp[1] <- 0   # the columns sit on the axis; a facet that holds negative values gets its own room below via a blank layer
+    lowest <- suppressWarnings(tapply(c(long$value, summ$lo), c(as.character(long$metric), as.character(summ$metric)), min, na.rm = TRUE))
+    neg <- names(lowest)[is.finite(lowest) & lowest < 0]
+    if (length(neg)) {
+      span <- suppressWarnings(tapply(c(long$value, summ$hi), c(as.character(long$metric), as.character(summ$metric)), max, na.rm = TRUE))[neg] - lowest[neg]
+      g <- g + geom_blank(data = data.frame(metric = factor(neg, levels = levels(long$metric)), sample = long$sample[1],
+                                            value = unname(lowest[neg] - 0.08 * span)), aes(x = sample, y = value), inherit.aes = FALSE)
+    }
+  } else if (style == "box") {
+    g <- g + geom_boxplot(aes(color = sample, fill = sample), width = 0.6, alpha = 0.25, outlier.shape = 1,
+                          outlier.size = ptsz * 0.6, linewidth = pt2lw(0.5))
+  } else {
+    g <- g +
+      geom_violin(aes(color = sample, fill = sample), trim = FALSE, scale = "width", width = 0.8, alpha = 0.3,
+                  linewidth = pt2lw(0.5)) +
+      geom_crossbar(data = summ, aes(x = sample, y = mean, ymin = mean, ymax = mean, color = sample),
+                    width = 0.5, linewidth = pt2lw(0.75), inherit.aes = FALSE)
+  }
+  g <- g + if (is.null(pt_col))
+    geom_point(aes(color = sample), shape = 21, fill = "white", size = ptsz * 0.6, stroke = pt2lw(0.5), position = jit)
+  else
+    geom_point(color = pt_col, shape = 21, fill = "white", size = ptsz * 0.6, stroke = pt2lw(0.5), position = jit)
+  if (facet) g <- g + facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 18))
+  g + scale_color_manual(values = cols_by_label, guide = "none") +
+    scale_fill_manual(values = cols_by_label, guide = "none") +
+    scale_x_discrete(guide = x_guide, drop = x_drop) +
+    scale_y_continuous(expand = expansion(mult = y_exp)) +
+    labs(x = NULL, y = NULL)
+}
+
+# Significance brackets for ONE facet of the metric summary. `pw` is the pairwise table of
+# compare_replicate_metric() with its sample / versus columns already mapped to the labels used as x levels;
+# `x_pos` maps those labels to their x positions; y_top is the highest thing drawn in the facet and y_range the
+# facet's data range. Keeps the pairs with p_adj_holm < alpha, the `max_n` most significant of them, stacks them
+# above the data (the narrowest lowest, so a wide bracket never cuts through a narrow one) and returns the
+# segments (a bar and two short ticks per bracket), the star labels, how many pairs were significant / shown and
+# the y the facet must reach to hold the topmost label.
+metric_bracket_layout <- function(pw, x_pos, y_top, y_range, alpha = 0.05, max_n = 6L) {
+  none <- list(segments = NULL, labels = NULL, n_sig = 0L, n_shown = 0L, y_max = NA_real_)
+  if (is.null(pw) || !nrow(pw)) return(none)
+  ok <- is.finite(pw$p_adj_holm) & pw$p_adj_holm < alpha & pw$sample %in% names(x_pos) & pw$versus %in% names(x_pos)
+  pw <- pw[ok, , drop = FALSE]
+  n_sig <- nrow(pw)
+  if (!n_sig) return(none)
+  pw$x1 <- unname(pmin(x_pos[pw$sample], x_pos[pw$versus]))
+  pw$x2 <- unname(pmax(x_pos[pw$sample], x_pos[pw$versus]))
+  pw <- pw[order(pw$p_adj_holm, pw$x2 - pw$x1, pw$x1), , drop = FALSE]
+  pw <- utils::head(pw, max_n)                                          # the most significant
+  pw <- pw[order(pw$x2 - pw$x1, pw$x1, pw$p_adj_holm), , drop = FALSE]  # stacking order, lowest first
+  R <- if (is.finite(y_range) && y_range > 0) y_range else max(abs(y_top), 1, na.rm = TRUE)
+  y <- y_top + 0.06 * R + (seq_len(nrow(pw)) - 1L) * 0.09 * R
+  tick <- 0.025 * R
+  list(segments = data.frame(x = c(pw$x1, pw$x1, pw$x2), xend = c(pw$x2, pw$x1, pw$x2),
+                             y = c(y, y - tick, y - tick), yend = c(y, y, y), stringsAsFactors = FALSE),
+       labels = data.frame(x = (pw$x1 + pw$x2) / 2, y = y, label = pw$stars, p_adj_holm = pw$p_adj_holm,
+                           stringsAsFactors = FALSE),
+       n_sig = n_sig, n_shown = nrow(pw), y_max = max(y) + 0.07 * R)
+}
+
+# The highest value each facet of a built metric-summary plot holds (points, whiskers, box whiskers, violin tails),
+# read from the trained y scales; a named numeric vector over the facet titles, plus the range of each facet.
+facet_y_extent <- function(g, facet_col = "metric") {
+  b  <- ggplot2::ggplot_build(g)
+  ly <- b$layout$layout
+  rg <- lapply(b$layout$panel_scales_y, function(s) s$range$range)
+  titles <- as.character(ly[[facet_col]])
+  list(top = setNames(vapply(ly$PANEL, function(i) max(rg[[as.integer(i)]]), numeric(1)), titles),
+       range = setNames(vapply(ly$PANEL, function(i) diff(range(rg[[as.integer(i)]])), numeric(1)), titles))
+}
+
+# Tints of a colour for the replicate curves of one sample: the sample colour mixed with white at three
+# fixed amounts, so replicates differ in lightness (they stay distinguishable in greyscale) while the mean
+# keeps the full colour.
+REPLICATE_TINTS <- c(0.30, 0.55, 0.75)
+replicate_tint_colors <- function(col, tints = REPLICATE_TINTS) {
+  m <- grDevices::colorRamp(c(col, "#FFFFFF"))(tints)
+  grDevices::rgb(m[, 1], m[, 2], m[, 3], maxColorValue = 255)
+}
+# The colour of every replicate of one sample: replicate indices (any labels) are ranked and cycle through the
+# three tints.
+replicate_curve_colors <- function(col, replicate_ids) {
+  ids <- sort(unique(replicate_ids))
+  tc  <- replicate_tint_colors(col)
+  setNames(tc[((seq_along(ids) - 1L) %% length(tc)) + 1L], as.character(ids))
+}
+
+# Fraction of replicates lysed at each time, per sample. rep_pd has time, variable, replicate, value. A
+# replicate counts as lysed at a time when ALL of these hold: the time is after the sample's peak (the highest
+# per-time mean of its replicates), its OD is below the threshold, and it had reached the threshold earlier (so the
+# low readings of the lag and growth phase, or a threshold the curve never reached, are not "lysis"). mode
+# "relative": the threshold OD is `threshold` x the sample's peak OD (0.5 = half of the peak); "absolute":
+# `threshold` is an OD. The fraction at a time is over the replicates read at that time. Returns one row per
+# sample and time: sample, time, n, n_lysed, fraction, threshold_od, peak_od, t_peak.
+lysed_fraction_curves <- function(rep_pd, threshold, mode = c("relative", "absolute")) {
+  mode <- match.arg(mode)
+  if (!is.numeric(threshold) || length(threshold) != 1 || !is.finite(threshold) || threshold <= 0)
+    stop("The lysed threshold must be a positive number.")
+  empty <- data.frame(sample = character(0), time = numeric(0), n = integer(0), n_lysed = integer(0),
+                      fraction = numeric(0), threshold_od = numeric(0), peak_od = numeric(0),
+                      t_peak = numeric(0), stringsAsFactors = FALSE)
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(empty)
+  rep_pd <- rep_pd[is.finite(rep_pd$time) & is.finite(rep_pd$value), , drop = FALSE]
+  if (nrow(rep_pd) == 0) return(empty)
+  rep_pd$variable <- as.character(rep_pd$variable)
+  out <- lapply(unique(rep_pd$variable), function(s) {
+    d  <- rep_pd[rep_pd$variable == s, , drop = FALSE]
+    tm <- sort(unique(d$time))
+    mu <- vapply(tm, function(t) mean(d$value[d$time == t]), numeric(1))
+    pk <- max(mu); t_pk <- tm[which.max(mu)]
+    thr <- if (mode == "relative") threshold * pk else threshold
+    lysed <- list()
+    for (r in unique(d$replicate)) {
+      dr <- d[d$replicate == r, , drop = FALSE]; dr <- dr[order(dr$time), , drop = FALSE]
+      reached <- cummax(dr$value) >= thr
+      lys <- dr$time > t_pk & dr$value < thr & reached
+      lysed[[length(lysed) + 1L]] <- data.frame(time = dr$time, lysed = lys)
+    }
+    ly <- do.call(rbind, lysed)
+    n_t  <- as.integer(table(factor(ly$time, levels = tm)))
+    n_ly <- as.integer(tapply(ly$lysed, factor(ly$time, levels = tm), sum))
+    data.frame(sample = s, time = tm, n = n_t, n_lysed = n_ly, fraction = n_ly / n_t,
+               threshold_od = thr, peak_od = pk, t_peak = t_pk, stringsAsFactors = FALSE)
+  })
+  do.call(rbind, c(out, list(make.row.names = FALSE)))
+}
+
+# The first time the fraction lysed reaches `level` (0.5 = half the replicates), per sample, as its own row of
+# (sample, time, fraction); time is NA for a sample that never reaches it.
+lysed_fraction_t50 <- function(curves, level = 0.5) {
+  if (is.null(curves) || nrow(curves) == 0)
+    return(data.frame(sample = character(0), time = numeric(0), fraction = numeric(0), stringsAsFactors = FALSE))
+  do.call(rbind, c(lapply(unique(curves$sample), function(s) {
+    d <- curves[curves$sample == s, , drop = FALSE]; d <- d[order(d$time), , drop = FALSE]
+    i <- which(d$fraction >= level)[1]
+    data.frame(sample = s, time = if (is.na(i)) NA_real_ else d$time[i],
+               fraction = if (is.na(i)) NA_real_ else d$fraction[i], stringsAsFactors = FALSE)
+  }), list(make.row.names = FALSE)))
+}
+# ── end v2.21 figure helpers ──
 
 # ── v2.20: helpers behind the phases figure and the phases / bootstrap / separation tables ──
 # Pure functions (no Shiny state), tested in tests/test_v220_integration.R. See docs/PHASES_AND_BOOTSTRAP.md.
@@ -4742,7 +4928,41 @@ ui <- fluidPage(
                   uiOutput("pheno_note"),
                   p(style = "font-size:.78em;color:#777;",
                     "From the curve metrics of the mean curves. The z-score is across the samples shown, so adding or ",
-                    "removing a sample changes every cell of a column. Relative metrics need a reference sample."))
+                    "removing a sample changes every cell of a column. Relative metrics need a reference sample.")),
+                # ── v2.21 figures ──
+                conditionalPanel("input.analysis_type == 'metric_summary'",
+                  selectInput("metric_style", "Style:", choices = METRIC_STYLE_CHOICES, selected = APP_DEFAULTS$metric_style),
+                  checkboxInput("metric_brackets", "Significance brackets for every pair with p (Holm) < 0.05", APP_DEFAULTS$metric_brackets),
+                  p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                    "Bar: the mean with the whiskers above, replicates as open circles, y axis from 0. Box plot and violin: ",
+                    "one per sample, with the replicates. Brackets use the test chosen on the right, need 2 or more replicates ",
+                    "per sample, show at most 6 per panel and replace the stars against the reference.")),
+                conditionalPanel("input.analysis_type == 'od_at_times'",
+                  radioButtons("extract_style", "Show:", choices = c("Bars" = "bar", "Dots" = "dot"),
+                               selected = APP_DEFAULTS$extract_style, inline = TRUE),
+                  checkboxInput("extract_points", "Replicate points", APP_DEFAULTS$extract_points),
+                  p(style = "font-size:.78em;color:#777;",
+                    "The mean OD at the times typed under Statistics > OD at chosen times (empty: the first, middle and last time ",
+                    "points), the samples side by side, whiskers as in Error Bars. The y axis follows the main figure's scale.")),
+                conditionalPanel("input.analysis_type == 'time_to_threshold'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "The time each replicate crosses the threshold set under Statistics > Time to threshold (OD, up or down, ",
+                    "from the start or from the peak): replicates as open circles, a bar at the mean, whiskers as in Error Bars. ",
+                    "Samples that never cross are listed below.")),
+                conditionalPanel("input.analysis_type == 'replicate_facets'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "One panel per sample: the replicate curves thin (three shades of the sample colour) and the mean bold, ",
+                    "on a shared y axis (log when the main figure's y axis is log).")),
+                conditionalPanel("input.analysis_type == 'lysed_fraction'",
+                  radioButtons("lysed_mode", "Threshold:",
+                               choices = c("Fraction of the sample's peak OD" = "relative", "Absolute OD" = "absolute"),
+                               selected = APP_DEFAULTS$lysed_mode),
+                  numericInput("lysed_threshold", "Lysed below:", APP_DEFAULTS$lysed_threshold, min = 0, step = 0.05),
+                  p(style = "font-size:.78em;color:#777;",
+                    "A replicate counts as lysed after its sample's peak once its OD is below the threshold (0.5 = half of the ",
+                    "peak). The step curve is the fraction of replicates lysed at each time; the point marks when half are.")),
+                conditionalPanel("['metric_summary', 'od_at_times', 'time_to_threshold', 'replicate_facets', 'lysed_fraction'].indexOf(input.analysis_type) >= 0",
+                  uiOutput("analysis_figure_note"))
               ),
               column(3,
                 selectInput("stats_method", "Statistics:",
@@ -7320,7 +7540,8 @@ server <- function(input, output, session) {
   # figure_theme_layers(), so it matches the main figure exactly.
   build_analysis_plot <- function(type) {
     dose_no_legend <- FALSE
-    leg_xy <- NULL      # plotted x/y of this figure, for legend_position "inside-auto"
+    fig_notes <- character(0)   # v2.21: lines shown under the figure's controls (attr "figure_note"), never on the artwork
+    leg_xy <- NULL     # plotted x/y of this figure, for legend_position "inside-auto"
     leg_log_y <- FALSE
     ehw    <- error_half_width()
     eb_col <- input$error_bar_color %||% "sample"
@@ -7381,6 +7602,16 @@ server <- function(input, output, session) {
             summ$mean[rr[ok & is.finite(est)]] <- est[ok & is.finite(est)]
           }
         }
+        # v2.21: the summary style (dot = the v2.11 look, the default) and optional significance brackets
+        mstyle   <- input$metric_style %||% "dot"
+        if (!mstyle %in% c("bar", "box", "violin")) mstyle <- "dot"
+        brk      <- isTRUE(input$metric_brackets)
+        y_exp    <- if (brk) c(0.08, 0.04) else c(0.08, 0.18)      # brackets bring their own headroom
+        cols_lab <- setNames(unname(cols), unname(labs_v[names(cols)]))
+        if (mstyle != "dot") {
+          g <- metric_summary_styled(mstyle, long, summ, cols_lab, eb_col = eb_col, ptsz = ptsz,
+                                     x_guide = x_guide, y_exp = y_exp)
+        } else {
         g <- ggplot(long, aes(x = sample, y = value))
         if (eb_col == "sample")
           g <- g + geom_errorbar(data = summ, aes(x = sample, ymin = lo, ymax = hi, color = sample),
@@ -7396,9 +7627,54 @@ server <- function(input, output, session) {
           facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 18)) +
           scale_color_manual(values = setNames(unname(cols), unname(labs_v[names(cols)])), guide = "none") +
           scale_x_discrete(guide = x_guide) +
-          scale_y_continuous(expand = expansion(mult = c(0.08, 0.18))) +   # headroom for marks
+          scale_y_continuous(expand = expansion(mult = y_exp)) +   # headroom for marks
           labs(x = NULL, y = NULL)
-        if (isTRUE(input$stats_mark) && nzchar(ref) && ref %in% rm$sample) {
+        }
+        if (brk) {
+          # v2.21: brackets for ALL pairs with p_adj_holm < 0.05 (compare_replicate_metric with no reference), at most 6 per
+          # facet (the most significant), stacked above what the facet draws; plain geom_segment + geom_text
+          ext   <- tryCatch(facet_y_extent(g), error = function(e) NULL)
+          xlev  <- levels(droplevels(long$sample)); x_pos <- setNames(seq_along(xlev), xlev)
+          seg_l <- list(); lab_l <- list(); blank_l <- list(); warn_l <- character(0); low_n <- FALSE
+          for (m in mets) {
+            lab_m <- metric_axis_label(m, tunit = tunit, ylab = input$y_axis_label %||% "OD")
+            st <- compare_replicate_metric(rm, m, ref_sample = NULL, method = input$stats_method %||% "welch")
+            is_low <- grepl("n < 3", st$warnings, fixed = TRUE)
+            low_n  <- low_n || any(is_low)
+            if (any(!is_low)) warn_l <- c(warn_l, paste0(lab_m, ": ", st$warnings[!is_low]))
+            pw <- st$pairwise
+            if (is.null(pw) || nrow(pw) == 0) next
+            pw$sample <- unname(labs_v[pw$sample]); pw$versus <- unname(labs_v[pw$versus])
+            lv <- long[long$metric == lab_m, , drop = FALSE]
+            top <- if (!is.null(ext)) unname(ext$top[lab_m]) else max(lv$value, na.rm = TRUE)
+            rng <- if (!is.null(ext)) unname(ext$range[lab_m]) else diff(range(lv$value, na.rm = TRUE))
+            lay <- metric_bracket_layout(pw, x_pos, y_top = top, y_range = rng)
+            if (lay$n_sig == 0L) next
+            if (lay$n_sig > lay$n_shown)
+              warn_l <- c(warn_l, sprintf("%s: %d pairs have p < 0.05; the %d most significant are drawn.", lab_m, lay$n_sig, lay$n_shown))
+            lay$segments$metric <- lab_m; lay$labels$metric <- lab_m
+            seg_l[[length(seg_l) + 1L]]     <- lay$segments
+            lab_l[[length(lab_l) + 1L]]     <- lay$labels
+            blank_l[[length(blank_l) + 1L]] <- data.frame(metric = lab_m, x = 1, y = lay$y_max, stringsAsFactors = FALSE)
+          }
+          fig_notes <- c(fig_notes, paste0("Brackets: every pair of samples, ",
+                                           if (identical(input$stats_method %||% "welch", "welch")) "Welch t-test" else "Mann-Whitney test",
+                                           " on the per-replicate values, Holm-adjusted p < 0.05 (stars as in the statistics table); ",
+                                           "at most 6 per panel, the most significant first. A sample needs 2 or more replicate values."))
+          if (low_n) fig_notes <- c(fig_notes, "Some groups have n < 3: low power, so a missing bracket is not evidence of no difference.")
+          fig_notes <- c(fig_notes, warn_l)
+          if (length(seg_l)) {
+            as_facet <- function(d) { d$metric <- factor(d$metric, levels = levels(long$metric)); d }
+            segs <- as_facet(do.call(rbind, seg_l)); labl <- as_facet(do.call(rbind, lab_l)); blk <- as_facet(do.call(rbind, blank_l))
+            g <- g + geom_blank(data = blk, aes(x = x, y = y), inherit.aes = FALSE) +
+              geom_segment(data = segs, aes(x = x, xend = xend, y = y, yend = yend), color = "black",
+                           linewidth = pt2lw(0.5), inherit.aes = FALSE) +
+              geom_text(data = labl, aes(x = x, y = y, label = label), vjust = 0.1, color = "black",
+                        size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                        family = if (nzchar(input$font_family %||% "")) input$font_family else "", inherit.aes = FALSE)
+          } else fig_notes <- c(fig_notes, "No pair of samples reaches p < 0.05 (Holm) for the selected metrics, so no bracket is drawn.")
+        }
+        if (isTRUE(input$stats_mark) && !brk && nzchar(ref) && ref %in% rm$sample) {
           marks <- do.call(rbind, lapply(mets, function(m) {
             st <- compare_replicate_metric(rm, m, ref_sample = ref, method = input$stats_method %||% "welch")
             if (is.null(st$pairwise)) return(NULL)
@@ -7810,6 +8086,173 @@ server <- function(input, output, session) {
                                      else if (n_met > 4) guide_axis(angle = 45) else waiver()) +
           scale_y_discrete(expand = c(0, 0)) + labs(x = NULL, y = NULL)
       },
+      od_at_times = {
+        # v2.21: the mean OD at the times typed under Statistics > OD at chosen times (extract_times, extract_method),
+        # one group of bars (or dots) per time with the samples side by side; whiskers = the main error measure; the
+        # replicates are optional open circles. The bars are drawn as rectangles from a base (0, or a floor on a log axis:
+        # geom_col anchors a log-axis bar at OD 1) at positions dodged by hand, so the whiskers and points line up with them.
+        rp  <- prepare_replicate_data()
+        pt  <- parse_extract_times(input$extract_times)
+        tms <- pt$times
+        if (length(pt$invalid)) fig_notes <- c(fig_notes, paste0("Not read as times: ", paste(pt$invalid, collapse = ", "), "."))
+        if (!length(tms)) {
+          ut <- sort(unique(rp$time))
+          if (!length(ut)) stop("No data.")
+          tms <- unique(ut[c(1, ceiling(length(ut) / 2), length(ut))])
+          fig_notes <- c(fig_notes, paste0("No times typed under Statistics > OD at chosen times: the figure shows the first, middle and last time points (",
+                                           paste(tms, collapse = ", "), " ", tunit, ")."))
+        }
+        x <- od_at_times(rp, tms, if (identical(input$extract_method, "nearest")) "nearest" else "interpolate")
+        n_na <- sum(!is.finite(x$value))
+        if (n_na > 0) fig_notes <- c(fig_notes, sprintf("%d of %d values are outside their curve's time range and left out (a time is never extrapolated).", n_na, nrow(x)))
+        x <- x[is.finite(x$value), , drop = FALSE]
+        logy <- identical(input$y_scale_type, "log")
+        if (logy) x <- x[x$value > 0, , drop = FALSE]
+        if (nrow(x) == 0) stop("No curve has a reading at the requested times.")
+        smp  <- sample_levels(samps); smp <- smp[smp %in% unique(x$sample)]
+        x$sample <- factor(x$sample, levels = smp)
+        K <- length(smp); slot <- 0.8 / K
+        x$xpos <- match(x$time_requested, tms) + (match(as.character(x$sample), smp) - (K + 1) / 2) * slot
+        summ <- x %>% group_by(time_requested, sample) %>%
+          summarise(mean = mean(value), err = ehw(value), n = n(), .groups = "drop") %>% as.data.frame()
+        summ$xpos <- match(summ$time_requested, tms) + (match(as.character(summ$sample), smp) - (K + 1) / 2) * slot
+        summ$lo <- summ$mean - summ$err; summ$hi <- summ$mean + summ$err
+        if (logy) summ$lo <- pmax(summ$lo, min(x$value) / 2)       # a whisker cannot reach 0 on a log axis
+        sty  <- if (identical(input$extract_style, "dot")) "dot" else "bar"
+        hw   <- slot * 0.42
+        base <- if (logy) 10^floor(log10(min(c(x$value, summ$lo), na.rm = TRUE) / 1.2)) else 0
+        pjit <- position_jitter(width = slot * 0.15, height = 0, seed = 1)
+        sg   <- summ[is.finite(summ$lo) & is.finite(summ$hi), , drop = FALSE]
+        g <- ggplot()
+        if (sty == "bar")
+          g <- g + geom_rect(data = summ, aes(xmin = xpos - hw, xmax = xpos + hw, ymin = base, ymax = mean, fill = sample),
+                             alpha = 0.85, inherit.aes = FALSE)
+        if (nrow(sg)) {
+          g <- g + if (sty == "dot" && eb_col == "sample")
+            geom_errorbar(data = sg, aes(x = xpos, ymin = lo, ymax = hi, color = sample), width = slot * 0.35,
+                          linewidth = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)
+          else
+            geom_errorbar(data = sg, aes(x = xpos, ymin = lo, ymax = hi), width = slot * 0.35,
+                          color = if (eb_col == "sample") "grey15" else eb_col,
+                          linewidth = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)
+        }
+        if (isTRUE(input$extract_points %||% TRUE))
+          g <- g + if (sty == "bar")
+            geom_point(data = x, aes(x = xpos, y = value), color = "grey15", shape = 21, fill = "white",
+                       size = ptsz * 0.6, stroke = pt2lw(0.5), position = pjit, show.legend = FALSE)
+          else
+            geom_point(data = x, aes(x = xpos, y = value, color = sample), shape = 21, fill = "white",
+                       size = ptsz * 0.6, stroke = pt2lw(0.5), position = pjit, show.legend = FALSE)
+        if (sty == "dot")
+          g <- g + geom_point(data = summ, aes(x = xpos, y = mean, color = sample, shape = sample), size = ptsz)
+        x_ang_ok <- as.numeric(input$axis_text_angle %||% "0") == 0
+        g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          scale_x_continuous(breaks = seq_along(tms), labels = as.character(tms), expand = expansion(add = 0.5),
+                             guide = if (x_ang_ok && length(tms) >= 6) guide_axis(angle = 45) else waiver()) +
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn())
+        else if (sty == "bar") g + expand_limits(y = 0) + scale_y_continuous(expand = expansion(mult = c(0, 0.08)))
+        else g
+      },
+      time_to_threshold = {
+        # v2.21: per sample, the time its replicates cross extract_threshold in extract_direction (searching from
+        # extract_after: the start or its peak), the same inputs as Statistics > Time to threshold. Dot-plot look of the
+        # metric summary: replicates as open circles, a bar at the mean, whiskers = the main error measure.
+        th <- suppressWarnings(as.numeric(input$extract_threshold))
+        if (length(th) != 1 || !is.finite(th)) {   # an emptied box: the default threshold, said in the note (every figure still renders for Download all figures)
+          th <- APP_DEFAULTS$extract_threshold
+          fig_notes <- c(fig_notes, paste0("No threshold typed under Statistics > Time to threshold: the figure uses the default, OD ", format(th, trim = TRUE), "."))
+        }
+        dirn <- if (identical(input$extract_direction, "down")) "down" else "up"
+        tt   <- time_to_od(prepare_replicate_data(), th, dirn, if (identical(input$extract_after, "peak")) "peak" else NULL)
+        if (nrow(tt) == 0) stop("No data.")
+        smp  <- sample_levels(samps); smp <- smp[smp %in% unique(tt$sample)]
+        n_cur <- table(factor(tt$sample, levels = smp)); n_hit <- tapply(is.finite(tt$time), factor(tt$sample, levels = smp), sum)
+        never <- smp[n_hit == 0]
+        if (all(n_hit == 0)) stop(sprintf("No replicate crosses %s %s%s.", format(th, trim = TRUE),
+                                          if (dirn == "down") "downwards" else "upwards",
+                                          if (identical(input$extract_after, "peak")) " after its peak" else ""))
+        phrase <- paste0(format(th, trim = TRUE), if (dirn == "down") " downwards" else " upwards",
+                         if (identical(input$extract_after, "peak")) ", searched from each curve's peak" else "")
+        if (length(never))
+          fig_notes <- c(fig_notes, paste0("Never crosses ", phrase, ": ", paste(unname(labs_v[never]), collapse = ", "),
+                                           " (no point; its slot is left empty)."))
+        part <- smp[n_hit > 0 & n_hit < n_cur]
+        if (length(part))
+          fig_notes <- c(fig_notes, paste0("Not every replicate crosses: ", paste(sprintf("%s (%d of %d)", unname(labs_v[part]), n_hit[part], n_cur[part]), collapse = ", "),
+                                           "; the mean and whiskers use the replicates that do."))
+        long <- data.frame(sample = factor(tt$sample, levels = smp, labels = unname(labs_v[smp])), metric = "t",
+                           value = tt$time, stringsAsFactors = FALSE)
+        long <- long[is.finite(long$value), , drop = FALSE]
+        summ <- do.call(rbind, lapply(levels(long$sample), function(s) {
+          v <- long$value[long$sample == s]
+          data.frame(metric = "t", sample = factor(s, levels = levels(long$sample)),
+                     mean = if (length(v)) mean(v) else NA_real_, sd = if (length(v)) ehw(v) else NA_real_, n = length(v),
+                     stringsAsFactors = FALSE) }))
+        summ$lo <- summ$mean - summ$sd; summ$hi <- summ$mean + summ$sd
+        x_guide <- if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+          else if (nlevels(long$sample) >= 5 || max(nchar(levels(long$sample))) > 16) guide_axis(angle = 45)
+          else if (max(nchar(levels(long$sample))) > 6) guide_axis(n.dodge = 2)
+          else waiver()
+        metric_summary_styled("dot", long, summ, setNames(unname(cols[smp]), unname(labs_v[smp])), eb_col = eb_col,
+                              ptsz = ptsz, x_guide = x_guide, facet = FALSE, x_drop = FALSE) +
+          labs(x = NULL, y = paste0("Time to ", format(th, trim = TRUE), " (", tunit, ")"))
+      },
+      replicate_facets = {
+        # v2.21: one panel per sample: its replicate curves thin, coloured by replicate index (the sample colour at three
+        # lightness levels, so they differ in greyscale too) and its mean bold in the sample colour; y axis shared.
+        rp <- prepare_replicate_data(); pd <- prepare_plot_data()
+        smp  <- sample_levels(samps); smp <- smp[smp %in% unique(as.character(rp$variable))]
+        if (!length(smp)) stop("No replicate curves for the selected samples.")
+        logy <- identical(input$y_scale_type, "log")
+        rp <- rp[as.character(rp$variable) %in% smp, , drop = FALSE]
+        pd <- pd[as.character(pd$variable) %in% smp, , drop = FALSE]
+        if (logy) { rp <- rp[rp$value > 0, , drop = FALSE]; pd <- pd[pd$mean_value > 0, , drop = FALSE] }
+        rp$col <- NA_character_
+        for (s in smp) { ix <- as.character(rp$variable) == s; rp$col[ix] <- replicate_curve_colors(cols[[s]], rp$replicate[ix])[as.character(rp$replicate[ix])] }
+        pd$col <- unname(cols[as.character(pd$variable)])
+        lab_of <- function(v) factor(as.character(v), levels = smp, labels = unname(labs_v[smp]))
+        rp$panel <- lab_of(rp$variable); pd$panel <- lab_of(pd$variable)
+        rp$curve <- paste(rp$variable, rp$replicate)
+        n_pan <- length(smp)
+        fig_notes <- c(fig_notes, "Thin lines: the replicates, darkest = replicate 1 and lighter for the next ones (three shades, repeated beyond three); bold: the mean. The y axis is shared by all panels.")
+        g <- ggplot() +
+          geom_line(data = rp, aes(x = time, y = value, group = curve, color = col), linewidth = lw * 0.5) +
+          geom_line(data = pd, aes(x = time, y = mean_value, group = panel, color = col), linewidth = lw * 1.3) +
+          scale_color_identity() +
+          facet_wrap(~ panel, ncol = if (n_pan <= 3) n_pan else ceiling(sqrt(n_pan)), labeller = label_wrap_gen(width = 18)) +
+          scale_x_continuous(breaks = scales::breaks_pretty(n = 3)) +
+          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+        if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
+      },
+      lysed_fraction = {
+        # v2.21: the fraction of a sample's replicates that are lysed at each time (lysed_fraction_curves()): after the
+        # sample's peak and below the threshold (lysed_mode "relative": lysed_threshold x its peak OD; "absolute": an OD),
+        # a step curve from 0 to 1, with the first time the fraction reaches 0.5 marked by a point.
+        lmode <- if (identical(input$lysed_mode, "absolute")) "absolute" else "relative"
+        lth   <- suppressWarnings(as.numeric(input$lysed_threshold))
+        if (length(lth) != 1 || !is.finite(lth) || lth <= 0) stop("Enter a positive lysed threshold.")
+        lf <- lysed_fraction_curves(prepare_replicate_data(), lth, lmode)
+        if (nrow(lf) == 0) stop("No data.")
+        lf$variable <- factor(lf$sample, levels = sample_levels(samps))
+        t50 <- lysed_fraction_t50(lf, 0.5); t50$variable <- factor(t50$sample, levels = sample_levels(samps))
+        thr <- lf[!duplicated(lf$sample), c("sample", "threshold_od")]
+        fig_notes <- c(fig_notes, paste0("A replicate counts as lysed after its sample's peak, once its OD is below ",
+          if (lmode == "relative") paste0(format(lth, trim = TRUE), " x the sample's peak OD (", paste(sprintf("%s: %s", unname(labs_v[thr$sample]), signif(thr$threshold_od, 3)), collapse = "; "), ")")
+          else paste0("OD ", format(lth, trim = TRUE)), ". Point: the first time half of the replicates are lysed."))
+        if (any(!is.finite(t50$time)))
+          fig_notes <- c(fig_notes, paste0("Never reaches half lysed: ", paste(unname(labs_v[t50$sample[!is.finite(t50$time)]]), collapse = ", "), "."))
+        leg_xy <- list(x = lf$time, y = lf$fraction, g = lf$variable)
+        g <- ggplot(lf, aes(x = time, y = fraction, color = variable, linetype = variable, group = variable)) +
+          geom_hline(yintercept = 0.5, linewidth = pt2lw(0.5), color = "grey70", linetype = "dashed") +
+          geom_step(linewidth = lw, direction = "hv")
+        t50f <- t50[is.finite(t50$time), , drop = FALSE]
+        t50f$y <- 0.5       # the point sits where the curve's rise crosses the dashed 0.5 line
+        if (nrow(t50f)) g <- g + geom_point(data = t50f, aes(x = time, y = y, color = variable, shape = variable), size = ptsz, inherit.aes = FALSE)
+        g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
+          scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = expansion(mult = 0.03)) +
+          labs(x = input$x_axis_label, y = "Fraction of replicates lysed")
+      },
       heatmap = {
         pd <- prepare_plot_data()
         pd$variable <- factor(pd$variable, levels = rev(sample_levels(samps)), labels = rev(unname(labs_v[sample_levels(samps)])))
@@ -7835,8 +8278,18 @@ server <- function(input, output, session) {
       p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
     if (type == "phases")      # v2.20: the phase key sits outside the panel, never over the strips
       p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
+    if (type == "time_to_threshold")   # v2.21: the x axis names the samples
+      p <- p + theme(legend.position = "none")
+    if (type == "replicate_facets")    # v2.21: strips name the samples (like the metric summary's facets)
+      p <- p + theme(legend.position = "none",
+                     strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
+                     strip.background = element_blank())
+    if (type == "od_at_times")         # v2.21: bars fill the panel, so the key sits outside
+      p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
     if (isTRUE(input$custom_aspect_ratio)) p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
-    p + coord_cartesian(clip = "off") + labs(tag = if (nzchar(tag)) tag else NULL)
+    p <- p + coord_cartesian(clip = "off") + labs(tag = if (nzchar(tag)) tag else NULL)
+    if (length(fig_notes)) attr(p, "figure_note") <- fig_notes   # v2.21: shown by output$analysis_figure_note
+    p
   }
   
   generate_analysis_plot <- function(type = input$analysis_type %||% "metric_summary") {
@@ -7849,6 +8302,12 @@ server <- function(input, output, session) {
         theme_void()
     })
   }
+  # ── v2.21 figure note ── (one output: the lines a v2.21 figure sets as attr "figure_note", shown under its controls)
+  output$analysis_figure_note <- renderUI({
+    req(rv$data, input$selected_samples)
+    nt <- attr(generate_analysis_plot(input$analysis_type %||% "metric_summary"), "figure_note")
+    if (length(nt)) div(lapply(nt, function(n) div(class = "stats-note", n)))
+  })
   output$analysis_container <- renderUI(preview_container("analysis_plot", "analysis_img", analysis_size_in))
   register_preview("analysis_plot", "analysis_img", analysis_plot_obj, analysis_size_in)
   
