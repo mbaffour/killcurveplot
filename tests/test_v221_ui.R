@@ -177,8 +177,8 @@ testServer(app, {
   rc <- csv_of(repmetrics_csv_content)
   check("per-replicate metrics CSV: sample + sample_raw", identical(names(rc)[1:2], c("sample", "sample_raw")) && "Wild type" %in% rc$sample)
   ac <- readLines({ tf <- tempfile(fileext = ".csv"); analysis_stats_csv_content(tf); tf })
-  check("replicate statistics CSV: the reference in both forms, versus_raw next to versus",
-        any(grepl(paste0("reference,Wild type ; reference_raw,", ref), ac, fixed = TRUE)))
+  check("replicate statistics CSV (one rectangular long table): the reference in both forms, in info rows",
+        any(grepl("reference: Wild type", ac, fixed = TRUE)) && any(grepl(paste0("reference_raw: ", ref), ac, fixed = TRUE)))
   ex <- extraction_tables_current()
   check("extraction tables: sample + sample_raw in the summary and the per-replicate table",
         length(ex) == 4 && all(vapply(ex, function(x) identical(names(x)[names(x) %in% c("sample", "sample_raw")], c("sample", "sample_raw")), logical(1))) &&

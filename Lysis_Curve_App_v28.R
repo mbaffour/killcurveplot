@@ -909,12 +909,25 @@ parse_excluded_timepoints <- function(text, all_timepoints) {
   vals  <- vals[!is.na(vals)]
   if (!is.null(all_timepoints)) all_timepoints <- all_timepoints[is.finite(all_timepoints)]   # finding 39: NA time points
   if (length(vals) == 0 || !length(all_timepoints)) return(numeric(0))
-  matched <- sapply(vals, function(v) {
-    diffs <- abs(all_timepoints - v)
-    tol   <- max(abs(all_timepoints)) * 0.001 + 0.001
-    if (min(diffs) <= tol) all_timepoints[which.min(diffs)] else NA_real_
-  })
-  unique(matched[!is.na(matched)])
+  # hardening (F27/F28): a typed value matches a time point when it is closer than HALF THE MINIMUM TIME STEP of the data
+  # (so at most one point can match, whatever the unit, and a min <-> h conversion's rounding cannot miss); a value that
+  # matches nothing is ignored and reported in attr(, "unmatched") ("Time point 105 is not in the data; nearest are 100 and 110").
+  tp   <- sort(unique(all_timepoints))
+  step <- if (length(tp) >= 2L) min(diff(tp)) else max(abs(tp), 1) * 1e-3
+  tol  <- step / 2 * (1 - 1e-9)
+  unmatched <- character(0)
+  matched <- vapply(vals, function(v) {
+    diffs <- abs(tp - v); i <- which.min(diffs)
+    if (diffs[i] < tol) return(tp[i])
+    lo <- suppressWarnings(max(tp[tp < v])); hi <- suppressWarnings(min(tp[tp > v]))
+    near <- unique(c(if (is.finite(lo)) lo, if (is.finite(hi)) hi))
+    unmatched <<- c(unmatched, sprintf("Time point %s is not in the data; nearest %s %s", format(v, digits = 10),
+                                       if (length(near) == 1L) "is" else "are", paste(format(near, digits = 10), collapse = " and ")))
+    NA_real_
+  }, numeric(1))
+  out <- unique(matched[!is.na(matched)])
+  if (length(unmatched)) attr(out, "unmatched") <- unmatched
+  out
 }
 
 # ── v2.22: data handling (detection, Excel / pasted data, exclusions, blanks and transforms) ──────────────
@@ -1762,7 +1775,10 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
     if (is.na(fp_idx)) fp_idx <- which.max(od_vec)
     first_peak_od <- od_vec[fp_idx]
     t_first_peak  <- t_vec[fp_idx]
-    extinction_time <- as.vector(curve_extinction_time(t_vec, od_vec, extinction_threshold))   # (drops the "reason" attribute)
+    ext_raw <- curve_extinction_time(t_vec, od_vec, extinction_threshold)
+    extinction_time <- as.vector(ext_raw)
+    # the reason an NA is not "never went extinct": the curve starts below the floor (hardening: surfaced, not dropped)
+    extinction_note <- if (identical(attr(ext_raw, "reason"), "starts_below_floor")) "starts below floor" else NA_character_
     cen <- curve_centroid(t_vec, od_vec)
 
     data.frame(
@@ -1801,6 +1817,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       first_peak_od   = first_peak_od,
       t_first_peak    = t_first_peak,
       extinction_time = extinction_time,
+      extinction_note = extinction_note,
       centroid_x      = unname(cen[["x"]]),
       centroid_y      = unname(cen[["y"]]),
       stringsAsFactors = FALSE
@@ -2956,6 +2973,60 @@ safe_raster_dpi <- function(width_in, height_in, dpi, max_pixels = 40e6) {
 RASTER_MAX_PIXELS <- 40e6
 SIZE_MAX_IN <- 60                       # each export dimension, inches (1524 mm)
 TICK_MAX_BREAKS <- 500                  # more breaks than this -> ggplot's default breaks
+
+# ── Hardening round 1 (server): one validation choke point for every device size, dpi and typed number ───
+# A width or height <= 0, NA, NaN or Inf reaching a graphics device kills the R process (ragg segfault, libjpeg exit),
+# so every export / preview size goes through safe_figure_size_in() and every ggsave() through safe_ggsave().
+EXPORT_MIN_IN <- 0.2                    # smallest figure side, inches (5.08 mm)
+EXPORT_MIN_MM <- EXPORT_MIN_IN * 25.4
+EXPORT_MAX_MM <- SIZE_MAX_IN * 25.4     # 1524 mm
+EXPORT_DPI_MIN <- 36; EXPORT_DPI_MAX <- 1200
+# (width, height) in inches clamped to [EXPORT_MIN_IN, SIZE_MAX_IN]; NA / NaN / Inf / <= 0 become `default`
+# (inches). attr(, "clamped") is TRUE when anything was changed. Valid sizes are returned bit-identical.
+safe_figure_size_in <- function(width, height, default = c(3.5, 2.56)) {
+  one <- function(x, d) {
+    x <- suppressWarnings(as.numeric(x)); if (length(x) != 1L) return(c(d, TRUE))
+    if (!is.finite(x) || x <= 0) return(c(d, TRUE))
+    if (x < EXPORT_MIN_IN) return(c(EXPORT_MIN_IN, TRUE))
+    if (x > SIZE_MAX_IN) return(c(SIZE_MAX_IN, TRUE))
+    c(x, FALSE)
+  }
+  w <- one(width, default[1]); h <- one(height, default[2])
+  out <- c(w[1], h[1]); attr(out, "clamped") <- as.logical(w[2] || h[2]); out
+}
+# millimetre version for the Compose tab (default in mm)
+safe_figure_size_mm <- function(width_mm, height_mm, default_mm = c(183, 60)) {
+  r <- safe_figure_size_in(width_mm / 25.4, height_mm / 25.4, default_mm / 25.4)
+  if (isTRUE(attr(r, "clamped"))) { out <- r * 25.4; attr(out, "clamped") <- TRUE; out }
+  else { out <- c(width_mm, height_mm); attr(out, "clamped") <- FALSE; out }   # unchanged: not rounded through inches
+}
+safe_dpi <- function(dpi, default = 300) {
+  d <- suppressWarnings(as.numeric(dpi)); if (length(d) != 1L || is.na(d)) return(default)
+  min(max(d, EXPORT_DPI_MIN), EXPORT_DPI_MAX)
+}
+# A typed number read safely: NULL / NA / non-numeric / below `min` -> `default`, above `max` (Inf included) -> `max`.
+# The numericInput min / max are UI-only: a typed -1 or a cleared box reaches the server as-is.
+num_or <- function(x, default, min = 0, max = Inf) {
+  x <- suppressWarnings(as.numeric(x))
+  if (length(x) != 1L || is.na(x)) return(default)
+  if (x > max) return(max)
+  if (x < min) return(default)
+  x
+}
+# ggplot2::ggsave() behind the size choke point: whatever the caller computed, a non-finite or tiny / huge size and an
+# absurd dpi never reach the device. Valid arguments are passed through untouched.
+ggsave <- function(filename, plot = ggplot2::last_plot(), device = NULL, path = NULL, scale = 1,
+                   width = NA, height = NA, units = c("in", "cm", "mm", "px"), dpi = 300, limitsize = TRUE, ...) {
+  units <- match.arg(units)
+  if (units != "px") {
+    f <- switch(units, "in" = 1, cm = 1 / 2.54, mm = 1 / 25.4)
+    s <- safe_figure_size_in(suppressWarnings(as.numeric(width)) * f, suppressWarnings(as.numeric(height)) * f)
+    if (isTRUE(attr(s, "clamped"))) { width <- s[1]; height <- s[2]; units <- "in" }   # valid sizes are passed through untouched
+    if (!is.character(dpi)) dpi <- safe_dpi(dpi)
+  }
+  ggplot2::ggsave(filename = filename, plot = plot, device = device, path = path, scale = scale, width = width,
+                  height = height, units = units, dpi = dpi, limitsize = limitsize, ...)
+}
 # A readable message for a failed render; memory errors get a hint.
 friendly_error_message <- function(e) {
   msg <- conditionMessage(e)
@@ -2963,6 +3034,36 @@ friendly_error_message <- function(e) {
     msg <- paste0(msg, " Reduce DPI, export size, zoom or the number of points.")
   msg
 }
+# Hardening (F33): the statistics CSVs hold ONE rectangular table (read.csv / Excel parse it): one row per comparison with the
+# columns metric, section (pairwise / omnibus / posthoc / info / note), group1, group2, estimate, ci_lo, ci_hi, p, p_adj, method, note.
+# `sections` is a named list of data frames in the shapes the engine returns (pairwise: sample / versus / difference / ci_low /
+# ci_high / p / p_adj_holm / test; omnibus: test / statistic / p; posthoc: group1 / group2 / estimate / ci_lo / ci_hi / p_raw / p_adj).
+STATS_LONG_COLUMNS <- c("metric", "section", "group1", "group2", "estimate", "ci_lo", "ci_hi", "p", "p_adj", "method", "note")
+stats_long_table <- function(metric, sections, notes = character(0), info = NULL, method = NA_character_) {
+  pick <- function(d, ...) { for (nm in c(...)) if (nm %in% names(d)) return(d[[nm]]); rep(NA, nrow(d)) }
+  txt  <- function(x) as.character(x); num <- function(x) suppressWarnings(as.numeric(x))
+  rows <- list()
+  for (sec in names(sections)) {
+    d <- sections[[sec]]; if (is.null(d) || !is.data.frame(d) || !nrow(d)) next
+    rows[[length(rows) + 1L]] <- data.frame(
+      metric = as.character(metric)[1], section = sec, group1 = txt(pick(d, "group1", "sample")), group2 = txt(pick(d, "group2", "versus")),
+      estimate = num(pick(d, "estimate", "difference", "statistic")), ci_lo = num(pick(d, "ci_lo", "ci_low")), ci_hi = num(pick(d, "ci_hi", "ci_high")),
+      p = num(pick(d, "p_raw", "p")), p_adj = num(pick(d, "p_adj", "p_adj_holm")), method = txt(pick(d, "method", "test")),
+      note = txt(pick(d, "note")), stringsAsFactors = FALSE)
+  }
+  extra <- c(if (!is.null(info)) setNames(info, rep("info", length(info))), setNames(notes, rep("note", length(notes))))
+  if (length(extra))
+    rows[[length(rows) + 1L]] <- data.frame(metric = as.character(metric)[1], section = names(extra), group1 = NA_character_, group2 = NA_character_,
+                                            estimate = NA_real_, ci_lo = NA_real_, ci_hi = NA_real_, p = NA_real_, p_adj = NA_real_,
+                                            method = as.character(method)[1], note = unname(as.character(extra)), stringsAsFactors = FALSE)
+  if (!length(rows)) return(stats_long_empty())
+  out <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  out[STATS_LONG_COLUMNS]
+}
+stats_long_empty <- function() data.frame(metric = character(0), section = character(0), group1 = character(0), group2 = character(0),
+                                          estimate = numeric(0), ci_lo = numeric(0), ci_hi = numeric(0), p = numeric(0), p_adj = numeric(0),
+                                          method = character(0), note = character(0), stringsAsFactors = FALSE)
+
 # The placeholder figure every failed plot render shows.
 plot_error_figure <- function(msg)
   ggplot() +
@@ -5068,9 +5169,11 @@ curve_phases_by_sample <- function(pd, ...) {
 # 30 samples x 6 replicates x 5000 draws is ~14 000 runs (4 minutes, synchronous). Above this budget the number of
 # draws is lowered (never below 20) so the run stays bounded, and the result says so (attr "note", "n_boot_used").
 BOOT_MAX_ENGINE_RUNS <- 4000L
+BOOT_BUDGET_S <- 240          # wall-clock budget of one bootstrap run (checked every 50 draws; setTimeLimit's interrupt is swallowed)
 bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.95,
                               smooth_window = 5, peak_smooth_window = 1,
-                              peak_mode = "global", lysis_threshold = 0.05) {
+                              peak_mode = "global", lysis_threshold = 0.05, budget_s = BOOT_BUDGET_S) {
+  t_start <- Sys.time(); stopped_early <- FALSE; draws_min <- Inf
   cols <- c("sample", "metric", "estimate", "boot_mean", "ci_low", "ci_high",
             "n_replicates", "n_boot_ok", "method")
   empty <- data.frame(sample = character(0), metric = character(0), estimate = numeric(0),
@@ -5148,9 +5251,16 @@ bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.
     # the engine once per distinct resample
     uk <- unique(key)
     first <- match(uk, key)
-    res <- vapply(first, function(b) metric_vec(times, curves[, b], v), numeric(length(metrics)))
-    res <- matrix(res, nrow = length(metrics))
+    # hardening: the wall-clock budget is checked every 50 distinct resamples; over it, the draws so far are what is reported
+    res <- matrix(NA_real_, nrow = length(metrics), ncol = length(first)); proc <- logical(length(first))
+    for (k in seq_along(first)) {
+      res[, k] <- metric_vec(times, curves[, first[k]], v); proc[k] <- TRUE
+      if (k %% 50L == 0L && k < length(first) && is.finite(budget_s) && as.numeric(difftime(Sys.time(), t_start, units = "secs")) > budget_s) {
+        stopped_early <<- TRUE; break
+      }
+    }
     draws <- res[, match(key, uk), drop = FALSE]                                   # metrics x n_boot
+    if (!all(proc)) draws_min <<- min(draws_min, sum(proc[match(key, uk)]))
 
     rows <- lapply(seq_along(metrics), function(i) {
       x <- draws[i, ]; x <- x[is.finite(x)]
@@ -5167,6 +5277,11 @@ bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.
   res <- do.call(rbind, c(out, list(make.row.names = FALSE)))
   res$n_boot_ok <- as.integer(res$n_boot_ok); res$n_replicates <- as.integer(res$n_replicates)
   res <- res[, cols, drop = FALSE]
+  if (stopped_early && is.finite(draws_min)) {
+    boot_note <- paste0(if (!is.na(boot_note)) paste0(boot_note, " ") else "",
+                        sprintf("The time budget (%s s) was reached: the bootstrap stopped early with %d of %d draws per sample.", format(budget_s), as.integer(draws_min), n_boot))
+    n_boot <- as.integer(draws_min)
+  }
   attr(res, "n_boot_used") <- n_boot
   if (!is.na(boot_note)) attr(res, "note") <- boot_note
   res
@@ -5640,7 +5755,9 @@ TWO_WAY_MAX_GROUPS <- 30L; TWO_WAY_MAX_READINGS <- 5000L
 TWO_WAY_NLME_MAX_GROUPS <- 12L; TWO_WAY_NLME_MAX_READINGS <- 1500L
 two_way_time_anova <- function(long, response = "od", time = "time", sample = "sample", id = "well", log = TRUE, rm = TRUE) {
   terms <- c("Sample", "Time", "Sample x Time"); na <- NA_real_
-  res <- function(an, method, note) list(anova = an, method = method, note = note)
+  # model_used names the model that was actually fitted: "lme_ar1" (nlme mixed model, AR(1) errors), "aov_error_well"
+  # (repeated-measures aov with an Error(well) stratum), "lm_plain" (ignores the wells) or NA when nothing was fitted
+  res <- function(an, method, note, model_used = NA_character_) list(anova = an, method = method, note = note, model_used = model_used)
   empty <- function(why) res(data.frame(term = terms, df_num = na, df_den = na, F = na, p = na, stringsAsFactors = FALSE), NA_character_, why)
   d <- .s22_as_long(long, response, time, sample, id)
   if (is.null(d)) return(empty("no usable data (need sample, time, response columns)"))
@@ -5668,14 +5785,17 @@ two_way_time_anova <- function(long, response = "od", time = "time", sample = "s
   reps <- table(d$sample, d$tf)
   if (all(reps <= 1)) return(empty("one reading per sample and time: the interaction cannot be tested"))
   if (all(table(d$well) <= 1)) rm <- FALSE
-  lowp <- "with n = 3 wells per sample the tests have limited power and the AR(1) / compound-symmetry assumptions cannot be checked"
+  # the assumption named is the one of the model that ends up being fitted (never "AR(1)" for an aov fit)
+  lowp_for <- function(model) paste0("with n = 3 wells per sample the tests have limited power and the ",
+                                     if (identical(model, "lme_ar1")) "AR(1) / random-intercept" else if (identical(model, "aov_error_well")) "compound-symmetry" else "independence",
+                                     " assumptions cannot be checked")
   ans <- function(a, rn, dfn, dfd, f, p) {
     idx <- match(c("sample", "tf", "sample:tf"), rn)
     data.frame(term = terms, df_num = a[[dfn]][idx], df_den = a[[dfd]][idx], F = a[[f]][idx], p = a[[p]][idx], stringsAsFactors = FALSE)
   }
   fin_ok <- function(an) !is.null(an) && nrow(an) == 3 && any(is.finite(an$F))
   fail_note <- character(0)
-  if (rm && big) fail_note <- c(fail_note, paste0("the AR(1) mixed model was skipped (more than ", TWO_WAY_NLME_MAX_GROUPS,
+  if (rm && big) fail_note <- c(fail_note, paste0("the mixed model was skipped (more than ", TWO_WAY_NLME_MAX_GROUPS,
                                                   " samples or ", TWO_WAY_NLME_MAX_READINGS, " readings: it would take minutes)"))
   if (rm && !big && requireNamespace("nlme", quietly = TRUE)) {
     an <- tryCatch({
@@ -5684,9 +5804,14 @@ two_way_time_anova <- function(long, response = "od", time = "time", sample = "s
                                         control = nlme::lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200)))
       a <- stats::anova(fit); a <- as.data.frame(a)
       ans(a, rownames(a), "numDF", "denDF", "F-value", "p-value")
-    }, error = function(e) { reraise_time_limit(e); fail_note <<- c(fail_note, paste0("mixed model failed (", conditionMessage(e), ")")); NULL })
+    }, error = function(e) {
+      reraise_time_limit(e)
+      dup <- grepl("unique values|within groups", conditionMessage(e))
+      fail_note <<- c(fail_note, paste0("Mixed model could not be fitted (", if (dup) "duplicate time points within a well" else "the data do not support it",
+                                        "); the repeated-measures ANOVA used the simpler model instead"))
+      NULL })
     if (fin_ok(an)) return(res(an, "two-way repeated-measures: mixed model, random intercept per well, AR(1) errors (nlme::lme, REML)",
-                               paste(c(notes, "sequential (type I) F tests", if (log) "on log readings", lowp), collapse = "; ")))
+                               paste(c(notes, "sequential (type I) F tests", if (log) "on log readings", lowp_for("lme_ar1")), collapse = "; "), "lme_ar1"))
   } else if (rm && !big) fail_note <- c(fail_note, "nlme not installed")
   if (rm) {
     an <- tryCatch({
@@ -5699,7 +5824,8 @@ two_way_time_anova <- function(long, response = "od", time = "time", sample = "s
       data.frame(term = terms, df_num = tab$Df[idx], df_den = tab$dfd[idx], F = tab$F[idx], p = tab$p[idx], stringsAsFactors = FALSE)
     }, error = function(e) { reraise_time_limit(e); fail_note <<- c(fail_note, paste0("aov Error(well) failed (", conditionMessage(e), ")")); NULL })
     if (fin_ok(an)) return(res(an, "two-way repeated-measures ANOVA: aov(y ~ sample * time + Error(well))",
-                               paste(c(notes, fail_note, "compound symmetry assumed (no sphericity correction)", if (log) "on log readings", lowp), collapse = "; ")))
+                               paste(c(notes, fail_note, "compound symmetry assumed (no sphericity correction)", if (log) "on log readings", lowp_for("aov_error_well")), collapse = "; "),
+                               "aov_error_well"))
   }
   an <- tryCatch({
     a <- as.data.frame(stats::anova(stats::lm(y ~ sample * tf, data = d))); idx <- match(c("sample", "tf", "sample:tf"), rownames(a))
@@ -5707,7 +5833,8 @@ two_way_time_anova <- function(long, response = "od", time = "time", sample = "s
   }, error = function(e) NULL)
   if (is.null(an)) return(empty(paste(c(notes, fail_note, "two-way ANOVA failed"), collapse = "; ")))
   res(an, "two-way ANOVA (ignores the repeated measures on each well)",
-      paste(c(notes, fail_note, "p-values for Sample and Sample x Time are too liberal when readings in one well are correlated", if (log) "on log readings", lowp), collapse = "; "))
+      paste(c(notes, fail_note, "p-values for Sample and Sample x Time are too liberal when readings in one well are correlated", if (log) "on log readings", lowp_for("lm_plain")), collapse = "; "),
+      "lm_plain")
 }
 
 # At every time point each non-reference sample is compared with the reference by Welch t; p-values are adjusted
@@ -6045,7 +6172,9 @@ stats_method_sentence <- function(result, kind = c("posthoc", "describe", "norma
     posthoc = if (is.na(omni)) paste0(what, " was compared between samples by ", post_name, ntxt, ".")
               else paste0(what, " was compared between samples by ", omni, " followed by ", post_name, ntxt, "."),
     two_way = paste0(what, " was analysed by two-way ", if (grepl("repeated", meth)) "repeated-measures " else "", "ANOVA with sample and time as factors",
-                     if (grepl("mixed model", meth)) " (linear mixed model with a random intercept per well and AR(1) residual correlation)" else "",
+                     if (grepl("mixed model", meth)) " (linear mixed model with a random intercept per well and AR(1) within-well correlation)"
+                     else if (grepl("Error\\(well\\)", meth)) " (repeated-measures ANOVA: aov with an Error(well) stratum)"
+                     else "",
                      if (grepl("log", paste(result$note, collapse = " "))) " on log-transformed readings" else "", ntxt, "."),
     per_time = paste0(what, " was compared with the reference at each time point by Welch t tests, with ",
                       { nt <- if (is.data.frame(result) && "note" %in% names(result)) paste(result$note, collapse = " ") else ""
@@ -10398,13 +10527,60 @@ ui <- fluidPage(
 )
 
 # ── Server ────────────────────────────────────────────────────────────────────
+# Hardening: the typed-number inputs the figure builders read, with the value used for NA / negative and the ceiling
+# used for Inf / absurd values (the numericInput min / max are UI-only; a typed -1 reaches the server unchanged).
+INPUT_SANE <- list(
+  legend_font_size = c(APP_DEFAULTS$legend_font_size, 0, 100), axis_text_font_size = c(APP_DEFAULTS$axis_text_font_size, 0, 100),
+  axis_label_font_size = c(APP_DEFAULTS$axis_label_font_size, 0, 100), title_font_size = c(APP_DEFAULTS$title_font_size, 0, 100),
+  line_thickness = c(APP_DEFAULTS$line_thickness, 0, 10), error_bar_thickness = c(APP_DEFAULTS$error_bar_thickness, 0, 10),
+  axis_line_pt = c(APP_DEFAULTS$axis_line_pt, 0, 10), tick_length_mm = c(APP_DEFAULTS$tick_length_mm, 0, 50))
+
+# Declared min / max of every static numericInput, read off the UI tree: input id -> c(min, max) (NA = no bound).
+# A settings file can carry any number; the loader clamps it to these bounds before it reaches the box.
+collect_numeric_ranges <- function(node) {
+  out <- list()
+  walk <- function(x) {
+    if (inherits(x, "shiny.tag")) {
+      a <- x$attribs
+      if (identical(x$name, "input") && identical(a$type, "number") && !is.null(a$id)) {
+        num <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
+        out[[a$id]] <<- c(min = num(a$min), max = num(a$max))
+      }
+      for (ch in x$children) walk(ch)
+    } else if (is.list(x)) for (ch in x) walk(ch)
+  }
+  walk(node)
+  out
+}
+NUMERIC_INPUT_RANGES <- tryCatch(collect_numeric_ranges(ui), error = function(e) list())
+# `val` clamped to the bounds declared for input `id`; non-finite and non-numeric values come back NA (-> skipped).
+clamp_numeric_setting <- function(id, val) {
+  v <- suppressWarnings(as.numeric(val)); if (length(v) != 1L || is.na(v)) return(NA_real_)
+  r <- NUMERIC_INPUT_RANGES[[id]]
+  if (is.null(r)) return(v)
+  if (is.finite(r[["min"]]) && v < r[["min"]]) v <- r[["min"]]
+  if (is.finite(r[["max"]]) && v > r[["max"]]) v <- r[["max"]]
+  v
+}
+
 server <- function(input, output, session) {
+  # a count box: NULL stays NULL; cleared / negative -> 0, Inf / too many -> max; whole number
+  count_in <- function(id, max) {
+    v <- input[[id]]; if (is.null(v)) return(NULL)
+    as.integer(floor(num_or(v, 0, 0, max)))
+  }
+  # a typed size / thickness read through num_or(): NULL stays NULL (the caller's own fallback applies), NA / negative -> the
+  # journal default, Inf -> the ceiling
+  nin <- function(id, d = NULL) {
+    v <- input[[id]]; if (is.null(v)) return(d)
+    r <- INPUT_SANE[[id]]; num_or(v, r[1], r[2], r[3])
+  }
   
   # v2.14.1: every download in this server fails with a readable message (and a notification)
   # instead of an opaque error; memory errors get a hint. Shadows shiny::downloadHandler locally.
   guarded_content <- function(fn) function(file) {
     tryCatch(fn(file), error = function(e) {
-      if (inherits(e, "shiny.silent.error")) stop(e)
+      if (inherits(e, "shiny.silent.error") || inherits(e, "kc_refused")) stop(e)
       msg <- friendly_error_message(e)
       guard_notify("download_error", paste("Download failed:", msg), "error")
       stop(msg, call. = FALSE)
@@ -10513,6 +10689,8 @@ server <- function(input, output, session) {
     tp <- rv$all_timepoints
     if (is.null(tp) || length(tp) < 2)
       return(p(style = "color:#999;font-size:.85em;", "Load a data file to enable the range slider."))
+    k      <- time_conv_k()                      # hardening: the slider is in the displayed unit (min <-> h)
+    tp     <- tp * k
     t_min  <- min(tp); t_max <- max(tp)
     t_step <- max(min(diff(tp)), 0.001)
     sliderInput("time_filter_range", label = NULL,
@@ -10522,10 +10700,12 @@ server <- function(input, output, session) {
   
   output$excluded_timepoints_preview <- renderUI({
     if (is.null(rv$all_timepoints)) return(NULL)
-    excl <- parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints)
-    if (length(excl) == 0) return(NULL)
+    excl <- parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints * time_conv_k())   # displayed unit
+    um   <- attr(excl, "unmatched")
+    if (length(excl) == 0 && !length(um)) return(NULL)
     div(class = "excl-preview",
-        paste0("Will exclude ", length(excl), " point(s): ", paste(sort(excl), collapse = ", ")))
+        if (length(excl)) paste0("Will exclude ", length(excl), " point(s): ", paste(sort(as.numeric(excl)), collapse = ", ")),
+        if (length(um)) div(style = "color:#856404;", paste0(paste(um, collapse = ". "), ". Ignored.")))
   })
   
   # ── Data loading ─────────────────────────────────────────────────────────────
@@ -10716,6 +10896,22 @@ server <- function(input, output, session) {
                                        "each block is treated as one replicate."))
       }
     }
+    # hardening (F31): a sample whose readings are all missing is not loaded (it would sit in the legend and sample list but be
+    # absent from every table); the user is told
+    no_num <- function(v) !any(is.finite(suppressWarnings(as.numeric(as.character(v)))))
+    dead <- if (ds$is_long_format) {
+      g <- as.character(data[[ds$group_col]]); vv <- data[[ds$value_col]]
+      ds$od_vars[vapply(ds$od_vars, function(sn) no_num(vv[g %in% sn]), logical(1))]
+    } else if (length(ds$od_vars))
+      ds$od_vars[vapply(ds$od_vars, function(sn) all(vapply(ds$col_map[[sn]], function(j) no_num(data[[j]]), logical(1))), logical(1))]
+    else character(0)
+    if (length(dead) && length(dead) < length(ds$od_vars)) {
+      ds$od_vars <- setdiff(ds$od_vars, dead); ds$od_vars_raw <- ds$od_vars
+      if (!is.null(ds$col_map)) ds$col_map <- ds$col_map[ds$od_vars]
+      ds$notes <- c(ds$notes, paste0(paste(dead, collapse = ", "), if (length(dead) == 1L) " has" else " have", " no numeric readings and ",
+                                     if (length(dead) == 1L) "was" else "were", " not loaded."))
+    } else if (strict && length(dead) && length(dead) == length(ds$od_vars))
+      ingest_refused("Every sample column has no numeric readings, so there is no usable data")
     if (strict && !length(ds$od_vars)) ingest_refused("No samples were found in the file")
     all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[tc]])))))
     ds$all_timepoints <- all_t[is.finite(all_t)]
@@ -11274,7 +11470,7 @@ server <- function(input, output, session) {
       rv$units_seen <- "in"
       updateRadioButtons(session, "export_units", selected = "in")
     }
-    n_global <- 0L
+    n_global <- 0L; n_clamped <- 0L
     for (nm in names(global)) {
       if (nm %in% data_inputs || is_sample_inp(nm) || startsWith(nm, "data_view_table_")) next
       if (!(nm %in% names(input)))                  { ignored_unknown <- c(ignored_unknown, nm); next }
@@ -11289,7 +11485,10 @@ server <- function(input, output, session) {
         } else if (is.logical(val) && length(val) == 1) {
           updateCheckboxInput(session, nm, value = val)
         } else if (is.numeric(val) && length(val) == 1) {
-          updateNumericInput(session, nm, value = val)
+          cv <- clamp_numeric_setting(nm, val)          # hardening: out-of-range numbers are clamped to the box's min / max
+          if (is.na(cv) && !is.na(val)) cv <- NULL      # Inf / NaN: leave the box alone
+          if (!is.null(cv) && !is.na(val) && !isTRUE(all.equal(cv, val))) n_clamped <- n_clamped + 1L
+          if (!is.null(cv)) updateNumericInput(session, nm, value = cv)
         } else if (is.character(val) && length(val) == 1) {
           updateSelectInput(session, nm, selected = val)
           updateTextInput(session,   nm, value    = val)
@@ -11340,11 +11539,17 @@ server <- function(input, output, session) {
                              samples = names(conv$s$sample_aesthetics), message = legacy_msg)
       tryCatch(showNotification(legacy_msg, type = "message", duration = 10), error = function(e) invisible(NULL))
     }
+    if (n_clamped > 0L) {      # hardening: numbers outside a box's declared min / max were pulled back into range
+      clamp_msg <- sprintf("%d setting%s %s out of range and clamped.", n_clamped, if (n_clamped == 1L) "" else "s", if (n_clamped == 1L) "was" else "were")
+      tryCatch(showNotification(clamp_msg, type = "warning", duration = 10), error = function(e) invisible(NULL))
+      details_html <- paste0(details_html %||% "", "<ul class='match-list'><li style='color:#856404'>", clamp_msg, "</li></ul>")
+    }
     rv$settings_status <- list(
       type    = "ok",
       msg     = if (!is.null(legacy_msg)) legacy_msg else paste0(n_global, " global setting(s) applied. ", sample_msg),
       details = details_html
     )
+    rv$last_clamped <- n_clamped
     }, error = function(e) {
       reraise_time_limit(e)
       msg <- paste("The settings file could not be applied:", friendly_error_message(e))
@@ -11754,8 +11959,8 @@ server <- function(input, output, session) {
 
   # ── Dynamic UI: region / marker settings ────────────────────────────────────
   output$region_settings <- renderUI({
-    req(input$region_count, input$enable_highlighting)
-    do.call(tagList, lapply(seq_len(input$region_count), function(i) {
+    req(count_in("region_count", 5L), input$enable_highlighting)
+    do.call(tagList, lapply(seq_len(count_in("region_count", 5L)), function(i) {
       div(style = "border:1px solid #ddd;padding:10px;margin-bottom:8px;border-radius:5px;",
           h5(paste("Region", i)),
           fluidRow(
@@ -11781,8 +11986,8 @@ server <- function(input, output, session) {
   })
   
   output$time_marker_settings <- renderUI({
-    req(input$marker_count, input$enable_time_markers)
-    do.call(tagList, lapply(seq_len(input$marker_count), function(i) {
+    req(count_in("marker_count", 10L), input$enable_time_markers)
+    do.call(tagList, lapply(seq_len(count_in("marker_count", 10L)), function(i) {
       div(style = "border:1px solid #ddd;padding:10px;margin-bottom:8px;border-radius:5px;",
           h5(paste("Marker", i)),
           numericInput(paste0("marker_time_", i), "Time Point:", 30),
@@ -11817,21 +12022,39 @@ server <- function(input, output, session) {
   })
   
   # ── Time filtering ───────────────────────────────────────────────────────────
+  # Hardening (F29): the exclusion box and the range slider are in the DISPLAYED time unit (time_convert), like every axis and
+  # table; this gives the excluded time points in the FILE's unit, snapped to real points (half the minimum step). A typed value
+  # that matches no point is reported and ignored.
+  excluded_timepoints_file <- function() {
+    k <- time_conv_k(); tp <- rv$all_timepoints
+    if (is.null(tp)) return(numeric(0))
+    ex <- parse_excluded_timepoints(input$exclude_timepoints, tp * k)
+    um <- attr(ex, "unmatched")
+    if (length(um)) guard_notify("time_unmatched", paste(um, collapse = ". "), "message")
+    as.numeric(ex) / k
+  }
   apply_time_filters <- function(d, time_col) {
     d[[time_col]] <- suppressWarnings(as.numeric(as.character(d[[time_col]])))
     if (!isTRUE(input$enable_time_filter)) return(d)
     rng <- input$time_filter_range
     if (!is.null(rng) && length(rng) == 2) {
       t_vec <- d[[time_col]]
+      k <- time_conv_k()
+      if (!identical(k, 1)) {               # the slider is in the displayed unit: back to the file's, with a rounding margin
+        tp <- sort(unique(rv$all_timepoints[is.finite(rv$all_timepoints)])); mg <- (if (length(tp) >= 2L) min(diff(tp)) else 1) / 4
+        rng <- c(rng[1] / k - mg, rng[2] / k + mg)
+      }
       d <- d[!is.na(t_vec) & t_vec >= rng[1] & t_vec <= rng[2], , drop = FALSE]
     }
-    excl <- parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints)
+    excl <- excluded_timepoints_file()
     if (length(excl) > 0) {
       t_vec <- d[[time_col]]
-      tol   <- max(abs(rv$all_timepoints), na.rm = TRUE) * 0.001 + 0.001
-      # Vectorised: matrix of abs differences, any column within tol means exclude
-      hit   <- rowSums(abs(outer(t_vec, excl, "-")) <= tol) == 0L
-      d     <- d[hit, , drop = FALSE]
+      # the typed values were snapped to real time points (half the minimum step), so the match is by value with a
+      # tolerance far below the step: exactly the points typed go, never a neighbour
+      tp   <- sort(unique(rv$all_timepoints[is.finite(rv$all_timepoints)]))
+      tol  <- (if (length(tp) >= 2L) min(diff(tp)) else 1) / 4
+      hit  <- rowSums(abs(outer(t_vec, excl, "-")) <= tol) == 0L
+      d    <- d[hit, , drop = FALSE]
     }
     d
   }
@@ -11912,6 +12135,34 @@ server <- function(input, output, session) {
   empty_replicate_data <- function()
     data.frame(time = numeric(0), variable = character(0), replicate = integer(0), value = numeric(0),
                stringsAsFactors = FALSE)
+  # Hardening: every filter can leave nothing to draw (all time points excluded, an OD window that removes every reading,
+  # every replicate excluded). The figure builders then return a tidy placeholder with this message, never a raw R error.
+  # The validate() that shows / refuses it lives in the render wrappers and the download handlers only.
+  empty_state_message <- function() "No data left after the current filters. Relax the time filter / OD window / replicate exclusions."
+  plot_data_or_empty <- function(samples = NULL) {
+    pd <- prepare_plot_data(samples)      # (other errors are not "empty": they surface to the caller's own handler)
+    if (is.null(pd) || !is.data.frame(pd) || nrow(pd) == 0) {
+      pd <- empty_plot_data(); attr(pd, "empty_message") <- empty_state_message()
+    }
+    pd
+  }
+  plot_data_is_empty <- function(pd) !is.null(attr(pd, "empty_message"))
+  # the placeholder figure for "nothing to draw" (starts with "Figure not available" so the composer, the reports and the
+  # batch exporter recognise it as a placeholder)
+  unavailable_figure <- function(msg, width = 40)
+    ggplot() + annotate("text", x = 0.5, y = 0.5, label = paste(strwrap(paste("Figure not available:", msg), width = width), collapse = "\n"),
+                        color = "grey30", size = 3.2, hjust = 0.5) + theme_void()
+  empty_state_figure <- function() unavailable_figure(empty_state_message())
+  # download handlers call this first: a download of an empty state is refused with a notification, never written as a placeholder
+  refuse_if_empty <- function() {
+    pd <- tryCatch(plot_data_or_empty(), error = function(e) NULL)
+    if (!is.null(pd) && plot_data_is_empty(pd)) {
+      msg <- paste("Nothing to export.", empty_state_message())
+      guard_notify("download_refused", msg, "warning")
+      stop(structure(class = c("kc_refused", "error", "condition"), list(message = msg, call = NULL)))
+    }
+    invisible(TRUE)
+  }
   # ── v2.22: data curation (OD range, replicate exclusion, blank sample / baseline, transform) ────────────
   # Everything downstream (figures, statistics, metrics, fits, extraction, exports) reads prepare_plot_data() /
   # prepare_replicate_data(), so the steps live there and nowhere else. With every control at its default
@@ -12036,6 +12287,7 @@ server <- function(input, output, session) {
       pd <- apply_time_windows_inputs(pd)   # v2.18: per-sample windows, after the global filter
     } else {
       d    <- apply_time_filters(rv$data, rv$time_col)
+      if (nrow(d) == 0) return(empty_plot_data())      # hardening (F10): every time point filtered away
       meas <- intersect(rv$od_vars_raw, samps)
       if (length(meas) == 0) return(empty_plot_data())
       # v2.8 REPLICATE FIX: resolve sample columns BY POSITION via rv$col_map
@@ -12107,6 +12359,7 @@ server <- function(input, output, session) {
                         stringsAsFactors = FALSE)
     } else {
       d    <- apply_time_filters(rv$data, rv$time_col)
+      if (nrow(d) == 0) return(empty_replicate_data())   # hardening (F10): every time point filtered away
       meas <- intersect(rv$od_vars_raw, build_samps)
       if (length(meas) == 0) return(empty_replicate_data())
       t_vec <- d[[rv$time_col]]
@@ -12218,8 +12471,8 @@ server <- function(input, output, session) {
     
     # v2.10 figure-layout inputs. Defaults equal the previous hard-coded values
     # (1.07 pt == linewidth 0.5; 1.5 mm == 0.15 cm; legend right, grey border).
-    axis_lw  <- pt2lw(input$axis_line_pt %||% 1.07)
-    tick_cm  <- (input$tick_length_mm %||% 1.5) / 10
+    axis_lw  <- pt2lw(nin("axis_line_pt", 1.07))
+    tick_cm  <- (nin("tick_length_mm", 1.5)) / 10
     leg_pos  <- input$legend_position %||% "right"
     leg_bord <- if (isTRUE(input$legend_box_border %||% TRUE)) "gray80" else NA
     leg_key  <- input$legend_key_mm %||% 0
@@ -12230,12 +12483,12 @@ server <- function(input, output, session) {
 
     layers <- list(base_t, theme(
       text             = element_text(family = input$font_family),
-      plot.title       = element_text(size = input$title_font_size,       face = tf, hjust = 0.5),
-      plot.caption     = element_text(size = max(8, input$axis_text_font_size * 0.7),
+      plot.title       = element_text(size = nin("title_font_size"),       face = tf, hjust = 0.5),
+      plot.caption     = element_text(size = max(8, nin("axis_text_font_size") * 0.7),
                                       hjust = 1, color = "grey30"),
       plot.tag         = element_text(size = input$panel_label_size %||% 8, face = "bold"),
-      axis.title       = element_text(size = input$axis_label_font_size,  face = af),
-      axis.text        = element_text(size = input$axis_text_font_size),
+      axis.title       = element_text(size = nin("axis_label_font_size"),  face = af),
+      axis.text        = element_text(size = nin("axis_text_font_size")),
       axis.text.x      = element_text(angle = x_ang,
                                       hjust = if (x_ang > 0) 1 else 0.5,
                                       vjust = if (x_ang > 0) 1 else 0.5),
@@ -12245,8 +12498,8 @@ server <- function(input, output, session) {
         element_line(color = min_col, linewidth = input$minor_gridline_size) else element_blank(),
       axis.ticks        = element_line(color = "black", linewidth = axis_lw),
       axis.ticks.length = unit(tick_cm, "cm"),
-      legend.text       = element_text(size = input$legend_font_size %||% 14, face = leg_face),
-      legend.title      = element_text(size = input$legend_font_size %||% 14, face = leg_face),
+      legend.text       = element_text(size = nin("legend_font_size", 14), face = leg_face),
+      legend.title      = element_text(size = nin("legend_font_size", 14), face = leg_face),
       legend.background = element_rect(fill = "white", color = leg_bord),
       legend.key        = element_rect(fill = NA),
       panel.border      = element_rect(color = "black", fill = NA, linewidth = axis_lw)
@@ -12392,9 +12645,9 @@ server <- function(input, output, session) {
     num <- function(v, d) { x <- suppressWarnings(as.numeric(v %||% d)); if (length(x) == 1 && is.finite(x)) x else d }
     sh  <- unname(aes_vals$shapes); fl <- unname(aes_vals$filled_map)
     for (k in names(cells)) { rs <- resolve_point_shape(cells[[k]]$shape, cells[[k]]$filled, cells[[k]]$colour); cells[[k]]$shape <- rs$shape; cells[[k]]$filled <- identical(rs$fill, cells[[k]]$colour) }
-    fs <- num(input$legend_font_size, num(input$axis_text_font_size, 12))
+    fs <- num(nin("legend_font_size"), num(nin("axis_text_font_size"), 12))
     opts <- list(title = as.character(input$matrix_legend_title %||% "")[1],
-                 lwd = num(input$line_thickness, 1) * MATRIX_PT, show_points = isTRUE(input$show_points %||% TRUE) && isTRUE(input$matrix_swatch_points %||% TRUE),
+                 lwd = num(nin("line_thickness"), 1) * MATRIX_PT, show_points = isTRUE(input$show_points %||% TRUE) && isTRUE(input$matrix_swatch_points %||% TRUE),
                  hide_lines = isTRUE(input$hide_lines), point_size = num(input$shape_size, 3) * MATRIX_PT,
                  point_lwd = num(input$point_stroke, 0.5) * MATRIX_STROKE / 2, swatch_len = num(input$matrix_swatch_len, 34),
                  col_gap = num(input$matrix_col_gap, 10), row_gap = num(input$matrix_row_gap, 8), fontsize = fs,
@@ -12423,13 +12676,44 @@ server <- function(input, output, session) {
     if (isTRUE(input$use_advanced_ticks)) out$guide <- prism_guide_if_safe(ib$minor, yl[1], yl[2])
     out
   }
+  # Hardening: the custom axis limits as the figure may use them. NULL when custom limits are off. A cleared box takes
+  # the data range on that side; a reversed pair is swapped, an equal pair widened by 5 %; on a log axis a bound <= 0
+  # is the log floor; limits that miss the data completely are replaced by the data range (with a notification).
+  eff_limits <- function(axis, plot_data) {
+    if (!isTRUE(input[[paste0("custom_", axis, "_limits")]])) return(NULL)
+    log_ax <- identical(input[[paste0(axis, "_scale_type")]], "log")
+    vals <- if (identical(axis, "x")) plot_data$time else c(plot_data$mean_value, plot_data$err_lo, plot_data$err_hi)
+    vals <- suppressWarnings(as.numeric(vals)); vals <- vals[is.finite(vals)]
+    pos  <- vals[vals > 0]
+    rng  <- if (length(vals)) range(if (log_ax && length(pos)) pos else vals) else if (log_ax) c(0.01, 1) else c(0, 1)
+    num1 <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
+    lo <- num1(input[[paste0(axis, "_min")]]); hi <- num1(input[[paste0(axis, "_max")]])
+    if (log_ax) {
+      floor_v <- if (identical(axis, "y") && isTRUE(input$use_advanced_ticks) && is.finite(num1(input$y_log_min_exponent))) 10^num1(input$y_log_min_exponent)
+                 else if (length(pos)) min(pos) / 2 else 1e-9
+      if (!is.na(lo) && lo <= 0) lo <- floor_v
+      if (!is.na(hi) && hi <= 0) hi <- NA_real_
+    }
+    if (is.na(lo)) lo <- rng[1]
+    if (is.na(hi)) hi <- rng[2]
+    if (lo > hi) { t <- lo; lo <- hi; hi <- t }
+    if (lo == hi) { if (log_ax) { lo <- lo / 1.05; hi <- hi * 1.05 } else { w <- if (lo == 0) 0.05 else abs(lo) * 0.05; lo <- lo - w; hi <- hi + w } }
+    if (length(vals) && (hi < min(vals) || lo > max(vals))) {
+      guard_notify(paste0("limits_", axis), sprintf("The custom %s limits (%s to %s) do not overlap the data (%s to %s); the data range is used.",
+                                                    toupper(axis), format(lo, digits = 4), format(hi, digits = 4),
+                                                    format(min(vals), digits = 4), format(max(vals), digits = 4)))
+      lo <- rng[1]; hi <- rng[2]
+      if (lo == hi) { w <- if (lo == 0) 0.05 else abs(lo) * 0.05; lo <- lo - w; hi <- hi + w }
+    }
+    c(lo, hi)
+  }
   # The y limits the axis ends up with (custom limits, the log tick range, else the data range): the marker labels'
   # "by axis limits" placement and the linear / sqrt tick intervals read them.
   y_limits_now <- function(plot_data) {
-    if (isTRUE(input$custom_y_limits)) return(c(input$y_min, input$y_max))
+    if (isTRUE(input$custom_y_limits)) return(eff_limits("y", plot_data))
     yr <- suppressWarnings(range(c(plot_data$mean_value, plot_data$err_lo, plot_data$err_hi), na.rm = TRUE))
     if (identical(input$y_scale_type, "log") && isTRUE(input$use_advanced_ticks)) {
-      mn <- input$y_log_min_exponent; mx <- input$y_log_max_exponent
+      mn <- suppressWarnings(as.numeric(input$y_log_min_exponent))[1]; mx <- suppressWarnings(as.numeric(input$y_log_max_exponent))[1]
       if (is.finite(mn) && is.finite(mx)) return(c(10^mn, if (mx >= 0) 10^(mx + 1) else 10^mx))
     }
     yr
@@ -12462,8 +12746,8 @@ server <- function(input, output, session) {
                     color = variable, shape = variable, linetype = variable))
     
     # Region highlighting
-    if (isTRUE(input$enable_highlighting) && !is.null(input$region_count)) {
-      for (i in seq_len(input$region_count)) {
+    if (isTRUE(input$enable_highlighting) && !is.null(count_in("region_count", 5L))) {
+      for (i in seq_len(count_in("region_count", 5L))) {
         x1 <- input[[paste0("region_x_min_", i)]]; x2 <- input[[paste0("region_x_max_", i)]]
         y1 <- input[[paste0("region_y_min_", i)]]; y2 <- input[[paste0("region_y_max_", i)]]
         rc  <- input[[paste0("region_color_", i)]]
@@ -12475,10 +12759,10 @@ server <- function(input, output, session) {
     }
     
     # Time markers
-    if (isTRUE(input$enable_time_markers) && !is.null(input$marker_count)) {
+    if (isTRUE(input$enable_time_markers) && !is.null(count_in("marker_count", 10L))) {
       yr <- range(plot_data$mean_value, na.rm = TRUE)
       if (input$y_scale_type == "log") yr[1] <- max(1e-9, yr[1])
-      for (i in seq_len(input$marker_count)) {
+      for (i in seq_len(count_in("marker_count", 10L))) {
         tp <- input[[paste0("marker_time_", i)]]
         lt <- input[[paste0("marker_line_type_", i)]]
         mc <- input[[paste0("marker_color_", i)]]
@@ -12510,7 +12794,7 @@ server <- function(input, output, session) {
       thr_col <- input$threshold_color %||% "grey40"
       if (identical(thr_col, "custom")) thr_col <- tryCatch({ grDevices::col2rgb(input$threshold_color_custom); input$threshold_color_custom }, error = function(e) "grey40")   # v2.22
       thr_w <- suppressWarnings(as.numeric(input$threshold_width %||% NA))
-      thr_w <- if (length(thr_w) == 1 && is.finite(thr_w) && thr_w > 0) thr_w else (input$axis_line_pt %||% 0.5)       # v2.22: blank = the axis-line weight
+      thr_w <- if (length(thr_w) == 1 && is.finite(thr_w) && thr_w > 0) thr_w else (nin("axis_line_pt", 0.5))       # v2.22: blank = the axis-line weight
       p <- p + geom_hline(yintercept = thr, linetype = input$threshold_linetype %||% "dashed",
                           color = thr_col, linewidth = pt2lw(thr_w))
       thr_lbl <- trimws(input$threshold_label %||% "")
@@ -12518,7 +12802,7 @@ server <- function(input, output, session) {
         thr_parse <- any(markup_has(thr_lbl))                                                                          # v2.22: markup in the label
         p <- p + geom_text(data = data.frame(x = max(plot_data$time, na.rm = TRUE), y = thr, label = if (thr_parse) markup_to_plotmath(thr_lbl) else thr_lbl),
                            aes(x = x, y = y, label = label), inherit.aes = FALSE, hjust = 1, vjust = -0.4, parse = thr_parse,
-                           color = thr_col, size = (input$axis_text_font_size %||% 8) / 2.835,
+                           color = thr_col, size = (nin("axis_text_font_size", 8)) / 2.835,
                            family = if (nzchar(input$font_family %||% "")) input$font_family else "")
       }
     }
@@ -12573,8 +12857,8 @@ server <- function(input, output, session) {
       # so the bar visibly runs to the floor.
       lo_val <- if (input$y_scale_type == "log") {
         if (isTRUE(input$error_log_floor %||% TRUE)) {
-          y_floor <- if (isTRUE(input$custom_y_limits)) input$y_min
-                     else if (isTRUE(input$use_advanced_ticks)) 10^(input$y_log_min_exponent %||% -2)
+          y_floor <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1]
+                     else if (isTRUE(input$use_advanced_ticks)) 10^num_or(input$y_log_min_exponent, -2, -300, 300)
                      else min(plot_data$mean_value[plot_data$mean_value > 0], na.rm = TRUE) / 2
           pmax(plot_data$mean_value - err_vals * em, y_floor)
         } else pmax(plot_data$mean_value - err_vals * em, 1e-9)
@@ -12591,8 +12875,8 @@ server <- function(input, output, session) {
         lo_a <- ab$lo
         if (identical(input$y_scale_type, "log")) {
           y_fl <- if (!isTRUE(input$error_log_floor %||% TRUE)) 1e-9
-                  else if (isTRUE(input$custom_y_limits)) input$y_min
-                  else if (isTRUE(input$use_advanced_ticks)) 10^(input$y_log_min_exponent %||% -2)
+                  else if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1]
+                  else if (isTRUE(input$use_advanced_ticks)) 10^num_or(input$y_log_min_exponent, -2, -300, 300)
                   else min(plot_data$mean_value[plot_data$mean_value > 0], na.rm = TRUE) / 2
           lo_a <- pmax(lo_a, y_fl)
         } else if (isTRUE(input$asymmetric_error)) lo_a <- pmax(lo_a, 0)
@@ -12625,11 +12909,11 @@ server <- function(input, output, session) {
         eb_fixed <- if (eb_col == "sample") list() else list(color = eb_col)
         if (!is.null(input$error_bar_style) && input$error_bar_style == "T") {
           p <- p + do.call(geom_errorbar, c(list(data = eb_data, mapping = eb_aes,
-                                 width = cap_w, linewidth = input$error_bar_thickness,
+                                 width = cap_w, linewidth = nin("error_bar_thickness"),
                                  linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed, kg))
         } else {
           p <- p + do.call(geom_linerange, c(list(data = eb_data, mapping = eb_aes,
-                                  linewidth = input$error_bar_thickness,
+                                  linewidth = nin("error_bar_thickness"),
                                   linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed, kg))
         }
       }
@@ -12641,7 +12925,7 @@ server <- function(input, output, session) {
       rpt <- get_rp()
       if (nrow(rpt) > 0 && "replicate" %in% names(rpt))
         p <- p + geom_line(data = rpt, aes(x = time, y = value, group = interaction(variable, replicate), color = variable),
-                           alpha = input$spaghetti_alpha %||% 0.35, linewidth = input$line_thickness * (if (identical(dm0, "combo")) 0.45 else 0.55),
+                           alpha = input$spaghetti_alpha %||% 0.35, linewidth = nin("line_thickness") * (if (identical(dm0, "combo")) 0.45 else 0.55),
                            inherit.aes = FALSE, show.legend = FALSE)
     }
     if (identical(dm0, "quantile_bands")) {                 # v2.22: nested empirical bands, IQR inside 2.5-97.5 %
@@ -12649,7 +12933,7 @@ server <- function(input, output, session) {
       if (!is.null(qb) && nrow(qb) > 0) {
         if (!is.null(grp_map)) qb$group <- factor(unname(grp_map[qb$variable]), levels = attr(grp_map, "levels"))
         if (identical(input$y_scale_type, "log")) {
-          y_fq <- if (isTRUE(input$custom_y_limits)) input$y_min else if (isTRUE(input$use_advanced_ticks)) 10^(input$y_log_min_exponent %||% -2) else 1e-9
+          y_fq <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1] else if (isTRUE(input$use_advanced_ticks)) 10^num_or(input$y_log_min_exponent, -2, -300, 300) else 1e-9
           qb$q025 <- pmax(qb$q025, y_fq); qb$q975 <- pmax(qb$q975, y_fq); qb$q25 <- pmax(qb$q25, y_fq); qb$q75 <- pmax(qb$q75, y_fq)
         }
         using_shadow <- TRUE
@@ -12695,7 +12979,7 @@ server <- function(input, output, session) {
     }
     
     if (!isTRUE(input$hide_lines))                           # v2.22: "Hide lines" leaves points and error bars
-      p <- p + geom_line(aes(group = variable), linewidth = input$line_thickness)
+      p <- p + geom_line(aes(group = variable), linewidth = nin("line_thickness"))
 
     if (input$show_points) {
       # Build lookup tables of shape and fill per variable.
@@ -12795,8 +13079,8 @@ server <- function(input, output, session) {
     
     x_exp  <- expansion(mult = c(input$x_expand_left,   input$x_expand_right))
     y_exp  <- expansion(mult = c(input$y_expand_bottom, input$y_expand_top))
-    x_lims <- if (isTRUE(input$custom_x_limits)) c(input$x_min, input$x_max) else NULL
-    y_lims <- if (isTRUE(input$custom_y_limits)) c(input$y_min, input$y_max) else NULL
+    x_lims <- eff_limits("x", plot_data)
+    y_lims <- eff_limits("y", plot_data)
     
     if (input$x_scale_type == "log") {
       p <- p + scale_x_log10(limits = x_lims, expand = x_exp)
@@ -12804,11 +13088,12 @@ server <- function(input, output, session) {
       p <- p + scale_x_sqrt(limits = x_lims, expand = x_exp)
     } else if (input$x_scale_type == "reverse") {
       p <- p + scale_x_reverse(limits = x_lims, expand = x_exp)
-    } else if (isTRUE(input$use_advanced_ticks)) {
+    } else if (isTRUE(input$use_advanced_ticks) &&
+               !(is.null(x_lims) && length(unique(plot_data$time[is.finite(plot_data$time)])) < 2L)) {   # hardening: one time point has no ticks to guide
       # Determine the upper bound for tick generation
-      mt2 <- if (isTRUE(input$custom_x_limits)) input$x_max
+      mt2 <- if (!is.null(x_lims)) x_lims[2]
       else max(plot_data$time, na.rm = TRUE)
-      x0  <- if (isTRUE(input$custom_x_limits)) input$x_min else 0
+      x0  <- if (!is.null(x_lims)) x_lims[1] else 0
       
       # Parse any user-specified extra tick positions
       extra_ticks <- tryCatch({
@@ -12823,8 +13108,8 @@ server <- function(input, output, session) {
       # Determine major interval: manual if provided, otherwise auto
       manual_interval <- input$x_tick_interval
       use_manual <- !is.null(manual_interval) &&
-        !is.na(manual_interval) &&
-        is.numeric(manual_interval) &&
+        is.numeric(manual_interval) && length(manual_interval) == 1L &&
+        is.finite(manual_interval) &&       # hardening: an Inf / NA box is "auto"
         manual_interval > 0
       
       # v2.14.1: count the breaks BEFORE building them: an interval of 0.0001 over a 6-hour axis
@@ -12880,18 +13165,20 @@ server <- function(input, output, session) {
     y_oob <- y_oob_fn()   # v2.17: readings outside the axis limits are clipped to them ("squish") or dropped ("censor")
     if (input$y_scale_type == "log") {
       y_labs <- y_tick_labels()
-      if (isTRUE(input$use_advanced_ticks)) {
+      if (isTRUE(input$use_advanced_ticks) && is.finite(suppressWarnings(as.numeric(input$y_log_min_exponent))[1]) &&
+          is.finite(suppressWarnings(as.numeric(input$y_log_max_exponent))[1])) {   # hardening: a cleared exponent box = automatic ticks
         minE <- input$y_log_min_exponent; maxE <- input$y_log_max_exponent
         if (is.null(y_lims)) y_lims <- c(10^minE, if (maxE >= 0) 10^(maxE+1) else 10^maxE)
         if (!is.finite(maxE - minE) || maxE < minE || maxE - minE > 20) {
           # v2.14.1: a nonsensical or enormous exponent range: default minor breaks
           guard_notify("tick_guard", "The log axis exponent range is too wide (or reversed) for minor ticks; default breaks are used.")
-          p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs, guide = guide_prism_minor(), oob = y_oob)
+          p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs,
+                                 guide = if (isTRUE(diff(log10(y_lims)) >= 1)) guide_prism_minor() else ggplot2::waiver(), oob = y_oob)
         } else {
         ymn <- c(rep(1:9, maxE-minE+1) * 10^rep(minE:maxE, each=9))
         if (maxE >= 0) ymn <- c(ymn, 10^(maxE+1))
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, minor_breaks = ymn,
-                               labels = y_labs, guide = guide_prism_minor(), oob = y_oob)
+                               labels = y_labs, guide = prism_guide_if_safe(ymn, y_lims[1], y_lims[2]), oob = y_oob)   # hardening: no minor tick in a narrow range would crash the guide
         }
       } else {
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs, oob = y_oob)
@@ -12922,9 +13209,9 @@ server <- function(input, output, session) {
     if (!is.null(grp_map)) {
       # v2.18: facet strips read as plain text at the axis-title size, no box; one key for all panels,
       # outside (an inside key would sit in a corner of the whole panel block, over one facet's curves)
-      fsz <- suppressWarnings(as.numeric(input$facet_strip_size %||% NA)); if (!length(fsz) || !is.finite(fsz[1]) || fsz[1] <= 0) fsz <- input$axis_label_font_size
-      p <- p + facet_layers(attr(grp_map, "levels"), scales = input$facet_scales %||% "fixed", ncol = input$facet_ncol %||% NA,   # v2.22: columns, scales, strip style / size, parsed strips
-                            strip_style = input$facet_strip_style %||% "plain", strip_size = fsz[1], axis_lw = pt2lw(input$axis_line_pt %||% 1.07))
+      fsz <- suppressWarnings(as.numeric(input$facet_strip_size %||% NA)); if (!length(fsz) || !is.finite(fsz[1]) || fsz[1] <= 0) fsz <- nin("axis_label_font_size")
+      p <- p + facet_layers(attr(grp_map, "levels"), scales = input$facet_scales %||% "fixed", ncol = { fnc <- suppressWarnings(as.numeric(input$facet_ncol)); if (length(fnc) == 1L && is.finite(fnc) && fnc >= 1) fnc else NA },   # v2.22: columns, scales, strip style / size, parsed strips
+                            strip_style = input$facet_strip_style %||% "plain", strip_size = fsz[1], axis_lw = pt2lw(nin("axis_line_pt", 1.07)))
       if (startsWith(input$legend_position %||% "right", "inside-")) p <- p + theme(legend.position = "right")
     }
     if (isTRUE(input$custom_aspect_ratio))
@@ -12995,9 +13282,11 @@ server <- function(input, output, session) {
   
   generate_plot <- function() {
     req(rv$data, input$selected_samples)
-    tryCatch(
-      add_notes_caption(build_plot(prepare_plot_data(), input$selected_samples,
-                                   resolve_aesthetics(input$selected_samples))),   # v2.22: + the notes caption when ticked
+    tryCatch({
+      pd <- plot_data_or_empty()
+      if (plot_data_is_empty(pd)) return(empty_state_figure())    # hardening: all time points / readings / replicates filtered away
+      add_notes_caption(build_plot(pd, input$selected_samples,
+                                   resolve_aesthetics(input$selected_samples)))},   # v2.22: + the notes caption when ticked
       error = function(e) {
         # Return a blank ggplot with the error message rather than crashing the session
         plot_error_figure(friendly_error_message(e))
@@ -13013,7 +13302,7 @@ server <- function(input, output, session) {
       error_type          = input$error_type,
       error_display_mode  = input$error_display_mode,
       error_multiplier    = input$error_multiplier,
-      line_thickness      = input$line_thickness,
+      line_thickness      = nin("line_thickness"),
       show_points         = input$show_points,
       shape_size          = input$shape_size,
       x_scale_type        = input$x_scale_type,
@@ -13039,6 +13328,7 @@ server <- function(input, output, session) {
   # count would exceed 40 megapixels (with a notification saying so).
   raster_dpi <- function(width_in, height_in, dpi) {
     if (!is.numeric(dpi) || length(dpi) != 1 || !is.finite(dpi) || dpi <= 0) dpi <- 96
+    dpi <- safe_dpi(dpi)
     r <- safe_raster_dpi(width_in, height_in, dpi, RASTER_MAX_PIXELS)
     if (isTRUE(attr(r, "capped")))
       guard_notify("raster_cap", sprintf("Raster reduced to %s dpi to stay within memory (%s x %s px).",
@@ -13049,7 +13339,7 @@ server <- function(input, output, session) {
   export_dpi_for <- function(fmt, width_in, height_in) {
     d <- input$export_dpi
     if (fmt %in% c("png", "tiff", "jpeg")) raster_dpi(width_in, height_in, d)
-    else if (is.numeric(d) && length(d) == 1 && is.finite(d)) d else 300
+    else if (is.numeric(d) && length(d) == 1 && is.finite(d)) safe_dpi(d) else 300
   }
   # ── Fixed panel size (v2.15) ────────────────────────────────────────────────
   fixed_mode <- function() identical(input$panel_size_mode, "fixed")
@@ -13094,7 +13384,7 @@ server <- function(input, output, session) {
   size_from_grob <- function(g, kind) {
     sz <- tryCatch(attr(g, "size_mm"), error = function(e) NULL)
     if (is.null(sz)) { d <- panel_dims_mm(kind); sz <- d + c(13, 12) }
-    sz / 25.4
+    c(safe_figure_size_in(sz[1] / 25.4, sz[2] / 25.4))
   }
   # the figure size when a ggplot cannot be built yet (no data): the panel plus a typical margin
   fixed_fallback_in <- function(kind = "main") (panel_dims_mm(kind) + c(13, 12)) / 25.4
@@ -13109,7 +13399,7 @@ server <- function(input, output, session) {
                      error = function(e) { if (inherits(e, "shiny.silent.error")) fixed_fallback_in("main") else stop(e) })
       mx <- SIZE_MAX_IN
       if (any(sz > mx)) { guard_notify("size_clamp", sprintf("Figure size limited to %s in per side.", mx)); sz <- pmin(sz, mx) }
-      return(sz)
+      return(c(safe_figure_size_in(sz[1], sz[2])))     # hardening: never a non-finite or < 0.2 in side to a device
     }
     mm <- identical(input$export_units, "mm")
     w <- input$export_width  %||% 10
@@ -13123,7 +13413,7 @@ server <- function(input, output, session) {
                                          round(min(w, mx), 1), round(min(h, mx), 1), round(mx), if (mm) "mm" else "in"))
       w <- min(w, mx); h <- min(h, mx)
     }
-    if (mm) c(w, h) / 25.4 else c(w, h)
+    if (mm) c(safe_figure_size_in(w / 25.4, h / 25.4)) else c(safe_figure_size_in(w, h))
   }
   
   # Switching units converts the current numbers so the physical size is kept
@@ -13212,6 +13502,11 @@ server <- function(input, output, session) {
       min(max(z, 0.5), 4)
     }
   }
+  # hardening (F37): with data loaded but every sample deselected the figure area says so instead of staying blank
+  need_a_sample <- function() {
+    if (!is.null(rv$data)) shiny::validate(shiny::need(length(input$selected_samples) > 0, "Select at least one sample."))   # (shiny::, jsonlite also exports validate())
+    invisible(TRUE)
+  }
   preview_container <- function(plot_id, img_id, size_fun = export_size_in) {
     sz <- size_fun()
     if (identical(input$preview_mode, "wysiwyg")) {
@@ -13238,6 +13533,7 @@ server <- function(input, output, session) {
   register_preview <- function(plot_id, img_id, plot_fun, size_fun = export_size_in) {
     output[[plot_id]] <- renderPlot({
       plot_inputs_debounced()   # take debounced dependency
+      need_a_sample()
       # v2.14.1: a failing render shows the error figure instead of ending the session
       obj <- tryCatch(plot_fun(), error = function(e) {
         if (inherits(e, "shiny.silent.error")) stop(e)
@@ -13248,6 +13544,7 @@ server <- function(input, output, session) {
     }, res = 96)
     output[[img_id]] <- renderImage({
       plot_inputs_debounced()
+      need_a_sample()
       sz <- size_fun(); z <- preview_zoom_value(sz[1], if (identical(img_id, "od_plot_img")) sz[2])
       pr <- session$clientData$pixelratio %||% 1
       pr <- if (is.numeric(pr) && length(pr) == 1 && is.finite(pr)) min(max(pr, 1), 3) else 1
@@ -13331,8 +13628,8 @@ server <- function(input, output, session) {
     size_txt <- if (identical(u, "mm")) sprintf("%s \u00d7 %s mm", round(w), round(h))
                 else sprintf("%s \u00d7 %s in", round(w, 1), round(h, 1))
     fnt  <- input$font_family %||% "sans"
-    al   <- input$axis_label_font_size %||% 7; at <- input$axis_text_font_size %||% 6
-    dl   <- lw2pt(input$line_thickness %||% 0.35); xl <- input$axis_line_pt %||% 0.5
+    al   <- nin("axis_label_font_size", 7); at <- nin("axis_text_font_size", 6)
+    dl   <- lw2pt(nin("line_thickness", 0.35)); xl <- nin("axis_line_pt", 0.5)
     g    <- function(x) format(round(x, 2), nsmall = 0)
     fit <- NULL
     if (fx) {
@@ -13370,6 +13667,7 @@ server <- function(input, output, session) {
   # entries, axis titles and title clickable. Too big an SVG (many points) shows a note instead.
   output$od_plot_svg <- renderUI({
     plot_inputs_debounced()
+    need_a_sample()
     sz <- export_size_in(); z <- preview_zoom_value(sz[1], sz[2])
     W  <- round(sz[1] * 96 * z); H <- round(sz[2] * 96 * z)
     f  <- tempfile(fileext = ".svg"); on.exit(unlink(f), add = TRUE)
@@ -13392,6 +13690,7 @@ server <- function(input, output, session) {
   output$downloadPlot <- downloadHandler(
     filename = function() main_download_name(),
     content  = function(file) {
+      refuse_if_empty()
       sz   <- export_size_in()
       fmt  <- input$export_format
       args <- list(filename = file, plot = main_plot_obj(), device = export_device(fmt),
@@ -13589,7 +13888,7 @@ server <- function(input, output, session) {
     cols   <- setNames(aes_v$colors, samps); labs_v <- aes_v$leg_labels
     lts    <- aes_v$line_types;              shp    <- aes_v$shapes
     tunit  <- time_unit_from_label(xlab_now())
-    lw     <- input$line_thickness %||% 1
+    lw     <- nin("line_thickness", 1)
     ptsz   <- input$shape_size %||% 3
     tag    <- trimws(input$analysis_panel_label %||% "")
     ref    <- input$metrics_ref_sample %||% ""
@@ -13731,7 +14030,7 @@ server <- function(input, output, session) {
               geom_segment(data = segs, aes(x = x, xend = xend, y = y, yend = yend), color = "black",
                            linewidth = pt2lw(0.5), inherit.aes = FALSE) +
               geom_text(data = labl, aes(x = x, y = y, label = label), vjust = 0.1, color = "black",
-                        size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                        size = (nin("axis_text_font_size", 8)) / ggplot2::.pt,
                         family = if (nzchar(input$font_family %||% "")) input$font_family else "", inherit.aes = FALSE)
           } else fig_notes <- c(fig_notes, "No pair of samples reaches p < 0.05 (Holm) for the selected metrics, so no bracket is drawn.")
         }
@@ -13754,7 +14053,7 @@ server <- function(input, output, session) {
           }))
           if (!is.null(marks) && nrow(marks))
             g <- g + geom_text(data = marks, aes(x = sample, y = y, label = stars), vjust = -0.6,
-                               size = (input$legend_font_size %||% 14) / ggplot2::.pt, inherit.aes = FALSE)
+                               size = (nin("legend_font_size", 14)) / ggplot2::.pt, inherit.aes = FALSE)
         }
         g
       },
@@ -13798,6 +14097,8 @@ server <- function(input, output, session) {
         nd   <- compute_normalized_curves(prepare_plot_data(), ref, mode)
         if (is.null(nd)) stop(if (mode == "reference")
           "Pick the uninfected reference sample under Stats & Reports first." else "No data.")
+        if (nrow(nd) == 0) stop(if (mode == "reference") "The reference sample has no dynamic range (its readings are zero or missing), so nothing can be normalized to it."
+                                else "Every sample starts at zero or has no readings, so nothing can be normalized to t = 0.")
         nd$variable <- factor(nd$variable, levels = sample_levels(samps))
         ref_lab <- if (mode == "reference") unname(labs_v[ref]) else "t = 0"
         leg_xy <- list(x = nd$time, y = nd$ratio, g = nd$variable)
@@ -13857,7 +14158,7 @@ server <- function(input, output, session) {
           if (length(series_levels) > 1)   # end label: readable without a key
             g <- g + geom_text(data = ss[which.max(ss$moi), , drop = FALSE], aes(x = moi, y = mean),
                                label = paste0("  ", sr), colour = series_col[[sr]], hjust = 0,
-                               size = (input$legend_font_size %||% 14) / ggplot2::.pt, inherit.aes = FALSE)
+                               size = (nin("legend_font_size", 14)) / ggplot2::.pt, inherit.aes = FALSE)
         }
         g <- g +
           geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, color = sample),
@@ -14080,7 +14381,7 @@ server <- function(input, output, session) {
         if (isTRUE(input$explorer_labels))
           g <- g + geom_text(data = summ, aes(x = mx, y = my, label = unname(labs_v[as.character(sample)]), color = sample),
                              hjust = 0, vjust = -0.6, show.legend = FALSE, inherit.aes = FALSE,
-                             size = (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+                             size = (nin("axis_text_font_size", 8)) / ggplot2::.pt,
                              family = if (nzchar(input$font_family %||% "")) input$font_family else "")
         num_lab <- scales::label_number(drop0trailing = TRUE, big.mark = "")
         g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
@@ -14195,7 +14496,7 @@ server <- function(input, output, session) {
         # undefined cells carry no text; the columns use the short metric names (no units), wrapped at 12 characters,
         # horizontal for up to 4 columns, otherwise at 45 degrees
         if (isTRUE(input$pheno_values %||% TRUE) && n_met <= 8)
-          g <- g + geom_text(aes(label = label, color = dark), size = 0.8 * (input$axis_text_font_size %||% 8) / ggplot2::.pt,
+          g <- g + geom_text(aes(label = label, color = dark), size = 0.8 * (nin("axis_text_font_size", 8)) / ggplot2::.pt,
                              na.rm = TRUE,
                              family = if (nzchar(input$font_family %||% "")) input$font_family else "") +
             scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "black"), guide = "none")
@@ -14352,6 +14653,9 @@ server <- function(input, output, session) {
         if (length(lth) != 1 || !is.finite(lth) || lth <= 0) stop("Enter a positive lysed threshold.")
         lf <- lysed_fraction_curves(prepare_replicate_data(), lth, lmode)
         if (nrow(lf) == 0) stop("No data.")
+        # hardening: with fewer than 3 time points, or no replicate that ever crosses the lysis threshold, there is no curve to draw
+        if (length(unique(lf$time)) < 3L || !any(lf$n_lysed > 0, na.rm = TRUE))
+          stop("The lysed fraction needs at least 3 time points and at least one replicate that crosses the lysis threshold.")
         lf$variable <- factor(lf$sample, levels = sample_levels(samps))
         t50 <- lysed_fraction_t50(lf, 0.5); t50$variable <- factor(t50$sample, levels = sample_levels(samps))
         thr <- lf[!duplicated(lf$sample), c("sample", "threshold_od")]
@@ -14365,7 +14669,7 @@ server <- function(input, output, session) {
           geom_hline(yintercept = 0.5, linewidth = pt2lw(0.5), color = "grey70", linetype = "dashed") +
           geom_step(linewidth = lw, direction = "hv")
         t50f <- t50[is.finite(t50$time), , drop = FALSE]
-        t50f$y <- 0.5       # the point sits where the curve's rise crosses the dashed 0.5 line
+        t50f$y <- rep(0.5, nrow(t50f))       # (a zero-row frame: no sample reaches half lysed) the point sits where the curve's rise crosses the dashed 0.5 line
         if (nrow(t50f)) g <- g + geom_point(data = t50f, aes(x = time, y = y, color = variable, shape = variable), size = ptsz, inherit.aes = FALSE)
         g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
           scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = expansion(mult = 0.03)) +
@@ -14413,7 +14717,7 @@ server <- function(input, output, session) {
           g <- g + geom_text(data = st, aes(x = time, y = y, label = stars, color = variable), vjust = 0.45, size = ptsz * 1.5, fontface = "bold", show.legend = FALSE, inherit.aes = FALSE)
         g <- g + ggrepel::geom_text_repel(data = lab, aes(x = time, y = mean_value, label = name, color = variable), hjust = 0, direction = "y", min.segment.length = Inf,
                                           box.padding = 0.25, point.padding = 0, seed = 1, show.legend = FALSE, inherit.aes = FALSE,
-                                          size = (input$legend_font_size %||% 14) / ggplot2::.pt) +
+                                          size = (nin("legend_font_size", 14)) / ggplot2::.pt) +
           base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
           scale_x_continuous(expand = expansion(mult = c(0.02, 0.32))) +
           labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
@@ -14458,7 +14762,7 @@ server <- function(input, output, session) {
                                  label_chars = max(nchar(unname(labs_v)), 1))
     if (type == "metric_summary")   # facet strips: axis-title size, no grey box (theme default is 0.8 x base)
       p <- p + theme(legend.position = "none",
-                     strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
+                     strip.text = element_text(size = nin("axis_label_font_size"), face = "plain"),
                      strip.background = element_blank())
     if (type == "heatmap")        p <- p + theme(legend.position = "right")
     if (type == "phenotype_heatmap")   # v2.19: a tile figure: the colour key sits outside, no grid
@@ -14475,7 +14779,7 @@ server <- function(input, output, session) {
       p <- p + theme(legend.position = "none")
     if (type == "replicate_facets")    # v2.21: strips name the samples (like the metric summary's facets)
       p <- p + theme(legend.position = "none",
-                     strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
+                     strip.text = element_text(size = nin("axis_label_font_size"), face = "plain"),
                      strip.background = element_blank())
     if (type == "od_at_times")         # v2.21: bars fill the panel, so the key sits outside
       p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
@@ -14488,7 +14792,10 @@ server <- function(input, output, session) {
   
   generate_analysis_plot <- function(type = input$analysis_type %||% "metric_summary") {
     req(rv$data, input$selected_samples)
-    tryCatch(build_analysis_plot(type), error = function(e) {
+    tryCatch({
+      if (plot_data_is_empty(plot_data_or_empty())) return(empty_state_figure())    # hardening: nothing left after the filters
+      build_analysis_plot(type)
+    }, error = function(e) {
       ggplot() +
         annotate("text", x = 0.5, y = 0.5,
                  label = paste(strwrap(paste("Figure not available:", conditionMessage(e)), width = 40), collapse = "\n"),
@@ -14508,6 +14815,7 @@ server <- function(input, output, session) {
   output$downloadAnalysisPlot <- downloadHandler(
     filename = function() analysis_download_name(),
     content  = function(file) {
+      refuse_if_empty()
       sz   <- analysis_size_in(); fmt <- input$export_format
       args <- list(filename = file, plot = analysis_plot_obj(), device = export_device(fmt),
                    width = sz[1], height = sz[2], units = "in", dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
@@ -14538,7 +14846,8 @@ server <- function(input, output, session) {
     jp  <- JOURNAL_PRESETS[[input$journal_family %||% "nature"]]
     w   <- switch(input$compose_width %||% "double", double = jp$double, single = jp$single,
                   custom = input$compose_width_mm %||% 183)
-    if (!is.numeric(w) || !is.finite(w)) w <- input$compose_width_mm %||% 183
+    if (!is.numeric(w) || length(w) != 1L || !is.finite(w)) w <- input$compose_width_mm %||% 183
+    if (!is.numeric(w) || length(w) != 1L || !is.finite(w) || w <= 0) w <- 183   # a cleared / zero / negative custom box
     w
   }
   # Choice labels follow the journal family chosen under Journal Figure Preset.
@@ -14574,7 +14883,7 @@ server <- function(input, output, session) {
     ncol    <- min(as.integer(input$compose_ncol %||% "2"), max(n, 1L))
     rows    <- if (n) ceiling(n / ncol) else 0L
     w_mm    <- compose_width_mm_value()
-    h_mm    <- max(rows, 1L) * (input$compose_panel_height_mm %||% 60)
+    h_mm    <- max(rows, 1L) * num_or(input$compose_panel_height_mm, 60, 20, 250)
     fig <- if (n >= 1 && fixed_mode()) {
       # v2.15: every panel keeps its fixed panel size; the grid is as wide / tall as its cells need
       items <- lapply(names(plots), function(nm) fixed_figure(plots[[nm]] + labs(tag = NULL), sub(":.*$", "", nm)))
@@ -14588,10 +14897,12 @@ server <- function(input, output, session) {
                      font = input$font_family %||% "Arial", tag_case = input$compose_tag_case %||% "a",
                      tags_on = isTRUE(input$compose_tags %||% TRUE))
     else NULL
+    sz_mm <- safe_figure_size_mm(w_mm, h_mm)       # hardening: the one size the preview, the note and the download use
     list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
-         types = unique(sub(":.*$", "", names(plots))), width_mm = w_mm, height_mm = h_mm)
+         types = unique(sub(":.*$", "", names(plots))), width_mm = sz_mm[1], height_mm = sz_mm[2],
+         size_clamped = isTRUE(attr(sz_mm, "clamped")))
   })
-  compose_size_in <- function() { i <- compose_info(); c(i$width_mm, i$height_mm) / 25.4 }
+  compose_size_in <- function() { i <- compose_info(); c(safe_figure_size_in(i$width_mm / 25.4, i$height_mm / 25.4)) }
   compose_plot_current <- function() {
     i <- compose_info()
     if (is.null(i$plot))
@@ -14664,14 +14975,13 @@ server <- function(input, output, session) {
                                                format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
   analysis_stats_csv_content <- function(file) {
     st <- analysis_stats_display()
-    con <- file(file, open = "w", encoding = "UTF-8"); on.exit(close(con))
-    writeLines(paste0("# metric,", st$metric, " ; method,", input$stats_method %||% "welch",
-                      " ; reference,", dname(input$metrics_ref_sample %||% ""),
-                      " ; reference_raw,", input$metrics_ref_sample %||% ""), con)
-    for (w in st$warnings) writeLines(paste0("# ", w), con)
-    if (!is.null(st$pairwise)) { writeLines("# pairwise", con); write.csv(with_stats_caveat(st$pairwise), con, row.names = FALSE) }
-    if (!is.null(st$omnibus))  { writeLines("# omnibus",  con); write.csv(with_stats_caveat(st$omnibus),  con, row.names = FALSE) }
-    if (!is.null(st$posthoc))  { writeLines("# posthoc (Tukey HSD)", con); write.csv(with_stats_caveat(st$posthoc), con, row.names = FALSE) }
+    # one rectangular table (long format), not several tables with comment lines between them
+    out <- stats_long_table(st$metric, list(pairwise = st$pairwise, omnibus = st$omnibus, posthoc = st$posthoc),
+                            notes = c(as.character(st$warnings), as.character(technical_rep_caveat())),
+                            info = c(paste0("reference: ", dname(input$metrics_ref_sample %||% "")), paste0("reference_raw: ", input$metrics_ref_sample %||% ""),
+                                    paste0("method: ", input$stats_method %||% "welch")),
+                            method = input$stats_method %||% "welch")
+    utils::write.csv(out, file, row.names = FALSE, fileEncoding = "UTF-8")
   }
   output$downloadAnalysisStatsCSV     <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
   output$downloadAnalysisStatsCSV_tab <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
@@ -14701,7 +15011,7 @@ server <- function(input, output, session) {
         card("Reference", if (nzchar(input$metrics_ref_sample %||% "")) dname(input$metrics_ref_sample) else "none set",
              "for infection metrics and statistics"),
         card("Figure", sprintf("%s × %s mm", round(sz[1] * 25.4), round(sz[2] * 25.4)),
-             paste0(input$font_family, " ", input$axis_label_font_size, "/", input$axis_text_font_size,
+             paste0(input$font_family, " ", nin("axis_label_font_size"), "/", nin("axis_text_font_size"),
                     " pt, ", toupper(input$export_format %||% "pdf")))),
         list = tryCatch(s22_dash_cards(), error = function(e) list()))   # v2.22: + the AUC and the exponential-window doubling time
   })
@@ -15358,8 +15668,8 @@ server <- function(input, output, session) {
                                else "Choose at least one metric to bootstrap.")
       return(invisible(NULL))
     }
-    nb <- suppressWarnings(as.integer(round(as.numeric(input$boot_n %||% 1000))))
-    if (!length(nb) || is.na(nb)) nb <- 1000L
+    nb <- suppressWarnings(as.numeric(input$boot_n %||% 1000))
+    nb <- if (length(nb) != 1L || is.na(nb)) 1000L else as.integer(round(min(max(nb, -1), BOOT_N_MAX)))   # Inf -> the ceiling
     nb <- min(max(nb, BOOT_N_MIN), BOOT_N_MAX)
     sd <- suppressWarnings(as.integer(round(as.numeric(input$boot_seed %||% 1))))
     if (!length(sd) || is.na(sd)) sd <- 1L
@@ -15594,11 +15904,12 @@ server <- function(input, output, session) {
     filename = function() paste0("posthoc_", analysis_stat_metric(), "_", s22_posthoc_method(), "_", s22_stamp(), ".csv"),
     content = function(file) {
       req(rv$data, input$selected_samples); ph <- s22_posthoc_current()
-      con <- file(file, open = "w", encoding = "UTF-8"); on.exit(close(con))
-      writeLines(paste0("# metric,", ph$metric, " ; method,", ph$method, " ; reference,", dname(ph$reference), " ; reference_raw,", ph$reference), con)
-      for (w in ph$notes) writeLines(paste0("# ", w), con)
-      if (!is.null(ph$omnibus)) { writeLines("# omnibus", con); utils::write.csv(ph$omnibus, con, row.names = FALSE) }
-      if (!is.null(ph$posthoc)) { writeLines("# pairwise", con); utils::write.csv(s22_display(ph$posthoc, rv$display_names, c("group1", "group2"), keep_raw = TRUE), con, row.names = FALSE) }
+      # one rectangular table (long format), not an omnibus table and a pairwise table separated by comment lines
+      out <- stats_long_table(ph$metric, list(omnibus = ph$omnibus,
+                                              posthoc = if (!is.null(ph$posthoc)) s22_display(ph$posthoc, rv$display_names, c("group1", "group2"), keep_raw = TRUE)),
+                              notes = c(as.character(unlist(ph$notes)), as.character(technical_rep_caveat())),
+                              info = c(paste0("reference: ", dname(ph$reference)), paste0("reference_raw: ", ph$reference), paste0("method: ", ph$method)), method = ph$method)
+      utils::write.csv(out, file, row.names = FALSE, fileEncoding = "UTF-8")
     })
 
   # ── Time-course ANOVA ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -15912,7 +16223,7 @@ server <- function(input, output, session) {
   s22_fit_overlay_notes <- function() {
     if (!any(isTRUE(input$fit_bands_on), isTRUE(input$lysis_show), isTRUE(input$expwin_show))) return(character(0))
     fr <- tryCatch(fit_results(), error = function(e) NULL); if (is.null(fr) || is.null(fr$table)) return(character(0))
-    tryCatch(s22_fit_overlay(fr, identical(input$y_scale_type, "log"), input$line_thickness %||% 1)$notes, error = function(e) character(0))
+    tryCatch(s22_fit_overlay(fr, identical(input$y_scale_type, "log"), nin("line_thickness", 1))$notes, error = function(e) character(0))
   }
   output$fit_overlay_note <- renderUI({ req(rv$data, input$selected_samples); s22_note(s22_fit_overlay_notes()) })
 
@@ -16372,7 +16683,7 @@ server <- function(input, output, session) {
   output$downloadFigureBundle <- downloadHandler(
     filename = function() paste0(bundle_folder_name(), ".", bundle_archive_kind()),
     content  = function(file) {
-      req(rv$data, input$selected_samples)
+      req(rv$data, input$selected_samples); refuse_if_empty()
       sz   <- export_size_in()
       tmp  <- tempfile("bundle_"); dir.create(tmp)
       on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
@@ -16437,8 +16748,8 @@ server <- function(input, output, session) {
         paste0("Samples: ", display_mapping_text(input$selected_samples, rv$display_names)),   # v2.21: "column name -> display name" where renamed
         sprintf("Figure size: %d x %d mm (%.2f x %.2f in)", mm[1], mm[2], sz[1], sz[2]),
         sprintf("Fonts: %s; title %s pt, axis labels %s pt, axis text %s pt, legend %s pt",
-                input$font_family %||% "sans", input$title_font_size %||% "", input$axis_label_font_size %||% "",
-                input$axis_text_font_size %||% "", input$legend_font_size %||% ""),
+                input$font_family %||% "sans", nin("title_font_size") %||% "", nin("axis_label_font_size") %||% "",
+                nin("axis_text_font_size") %||% "", nin("legend_font_size") %||% ""),
         "",
         "Files:", paste0("  ", files),
         "",
@@ -16461,7 +16772,7 @@ server <- function(input, output, session) {
   output$downloadAllFigures <- downloadHandler(
     filename = function() paste0(all_figures_folder(), ".", bundle_archive_kind()),
     content  = function(file) {
-      req(rv$data, input$selected_samples)
+      req(rv$data, input$selected_samples); refuse_if_empty()
       tmp  <- tempfile("allfig_"); dir.create(tmp)
       on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
       fold <- all_figures_folder(); dir <- file.path(tmp, fold); dir.create(dir)
@@ -16522,7 +16833,7 @@ server <- function(input, output, session) {
     samps <- input$selected_samples
     filter_txt <- if (isTRUE(input$enable_time_filter)) {
       rng  <- input$time_filter_range
-      excl <- parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints)
+      excl <- as.numeric(parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints * time_conv_k()))
       paste0("range ", if (!is.null(rng)) paste0(rng[1], "–", rng[2]) else "full",
              if (length(excl)) paste0("; excluded points: ", paste(sort(excl), collapse = ", "))
              else "")
@@ -16548,7 +16859,7 @@ server <- function(input, output, session) {
                   "R vector memory limit", "Figure raster size"),
       value = c(input$x_scale_type, input$y_scale_type,
                 input$x_axis_label, input$y_axis_label, input$color_palette,
-                input$line_thickness, input$show_points, input$shape_size,
+                nin("line_thickness"), input$show_points, input$shape_size,
                 paste0(input$export_width, " × ", input$export_height, " ", input$export_units %||% "in"),
                 input$export_dpi,
                 { b <- blank_od_effective(); if (is.na(b) || b == 0) "none (off)" else b },
@@ -16836,7 +17147,7 @@ server <- function(input, output, session) {
     output$downloadHTMLReport <- downloadHandler(
       filename = function()
         paste0("lysis_report_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".html"),
-      content = function(file) writeLines(html_report_string(), file, useBytes = TRUE)
+      content = function(file) { refuse_if_empty(); writeLines(html_report_string(), file, useBytes = TRUE) }
     )
   }
 
@@ -16844,7 +17155,7 @@ server <- function(input, output, session) {
     output$downloadPDFReport <- downloadHandler(
       filename = function()
         paste0("lysis_report_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".pdf"),
-      content = function(file) pdf_report_file(file)
+      content = function(file) { refuse_if_empty(); pdf_report_file(file) }
     )
   }
   
@@ -16860,7 +17171,7 @@ server <- function(input, output, session) {
         paste0("od_plot_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".pptx"),
       content = function(file) {
         library(officer); library(rvg)
-        req(rv$data, input$selected_samples)
+        req(rv$data, input$selected_samples); refuse_if_empty()
         samps <- input$selected_samples
         prs   <- read_pptx()
         ss    <- tryCatch(officer::slide_size(prs), error = function(e) list(width = 10, height = 7.5))
@@ -16911,7 +17222,7 @@ server <- function(input, output, session) {
         paste0("od_anim_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".gif"),
       content = function(file) {
         library(gifski)
-        req(rv$data, input$selected_samples)
+        req(rv$data, input$selected_samples); refuse_if_empty()
         samps  <- input$selected_samples
         px_in  <- function(x, lo, def) { x <- suppressWarnings(as.integer(x)); if (!is.finite(x)) def else min(max(x, lo), 4000L) }
         w_px   <- px_in(input$gif_width,  200L, 800L)       # v2.14.1: bounded, NA-safe
@@ -17105,7 +17416,7 @@ server <- function(input, output, session) {
   # goes through exactly the code of the first (filters, blank subtraction, replicate pooling, SD / SEM / CI).
   compare_scope <- function(ds) {
     e <- new.env(parent = server_env); e$rv <- ds
-    for (nm in c("prepare_plot_data", "prepare_replicate_data", "apply_time_filters")) {
+    for (nm in c("prepare_plot_data", "prepare_replicate_data", "apply_time_filters", "excluded_timepoints_file")) {
       f <- get(nm, envir = server_env); environment(f) <- e; assign(nm, f, envir = e)
     }
     e
@@ -17164,6 +17475,8 @@ server <- function(input, output, session) {
       sc  <- compare_scope(ds)
       pdA <- prepare_plot_data(samples = ss$A)
       pdB <- sc$prepare_plot_data(samples = ss$B)
+      if (is.null(pdA) || nrow(pdA) == 0) return(compare_unavailable(empty_state_message()))
+      if (is.null(pdB) || nrow(pdB) == 0) return(compare_unavailable("the second dataset has no rows (or no data for the chosen samples)."))
       samples <- unique(c(ss$A, ss$B))
       aes_u <- resolve_aesthetics(samples)
       if (identical(input$compare_mode %||% "overlay", "facet")) {
@@ -17173,7 +17486,7 @@ server <- function(input, output, session) {
         aes_f <- lapply(aes_u[c("shapes", "colors", "line_types", "leg_labels", "filled_map")], function(x) x[used])
         p <- build_plot(pd, used, aes_f) +
           facet_wrap(~ dataset, nrow = 1, scales = "fixed", labeller = label_wrap_gen(width = 18)) +
-          theme(strip.text = element_text(size = input$axis_label_font_size, face = "plain"), strip.background = element_blank())
+          theme(strip.text = element_text(size = nin("axis_label_font_size"), face = "plain"), strip.background = element_blank())
         if (startsWith(input$legend_position %||% "right", "inside-")) p <- p + theme(legend.position = "right")
       } else {
         pdA$variable <- compare_key("A", pdA$variable); pdB$variable <- compare_key("B", pdB$variable)
@@ -17341,7 +17654,7 @@ server <- function(input, output, session) {
     if ("notes" %in% sel) attempt("Experiment notes", {
       write_notes_html(file.path(dir, "notes.html"), notes_current(), technical_rep_caveat())
       write_notes_json(file.path(dir, "notes.json"), notes_current())
-      written <<- c(written, "notes.html", "notes.json")
+      written <- c(written, "notes.html", "notes.json")    # (this expression runs in batch_export_build's frame: `<<-` would assign outside it)
     })
     if (length(skipped))
       writeLines(enc2utf8(c("Outputs that were not written:", "", skipped)), file.path(dir, "SKIPPED.txt"), useBytes = TRUE)
@@ -17360,6 +17673,7 @@ server <- function(input, output, session) {
       req(rv$data, input$selected_samples)
       outs <- input$batch_outputs
       if (is.null(outs) || !length(outs)) stop("Tick at least one output.")
+      if (!all(outs %in% "notes")) refuse_if_empty()      # a notes-only export does not depend on the data
       tmp <- tempfile("batch_"); dir.create(tmp); on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
       fold <- "lysis_export"; dir <- file.path(tmp, fold); dir.create(dir)
       fmt <- input$batch_format %||% "svg"

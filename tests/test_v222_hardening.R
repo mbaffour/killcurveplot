@@ -1,5 +1,5 @@
 # ============================================================================
-# Hardening round 1 (engine) regression suite -- one check per finding of the engine / supervisor break reports
+# Hardening round 1 (engine + server) regression suite -- one check per finding of the engine / supervisor break reports
 # (names F<n> = engine finding n, S<n> = supervisor finding n). Pure functions plus two testServer renders.
 # Run from the repository root:  Rscript tests/test_v222_hardening.R
 # ============================================================================
@@ -515,6 +515,269 @@ check("I13: rolling_slope (closed form) equals the lm() version to 1e-10 (window
       all(vapply(c(3, 5, 8), function(wn) isTRUE(all.equal(env$rolling_slope(tt, yy, wn), rs_lm(tt, yy, wn), tolerance = 1e-10)), logical(1))))
 check("I13: rolling_slope keeps its flat-window / short-input behaviour",
       identical(env$rolling_slope(1:5, rep(2, 5), 3), c(NA, 0, 0, 0, NA)) && all(is.na(env$rolling_slope(1:2, c(1, 2), 5))))
+
+# ── server hardening (round 1) ──────────────────────────────────────────────────────────────────────────────
+# One check (or more) per fixed finding of the server break report (ids F<n> as in that report). Process-death cases run in a
+# separate Rscript so that a crash is a failed check, not the end of this suite. Figure cases drive the real server with
+# shiny::testServer; a figure "works" when generate_plot() is not a red placeholder AND the preview render writes a PNG.
+cat("\n--- server hardening: size / dpi / number choke points (F03, F04, F32, F08, F18, F19) ---\n")
+sz_ok <- function(s) length(s) == 2L && all(is.finite(s)) && all(s >= 0.2 - 1e-9) && all(s <= env$SIZE_MAX_IN + 1e-9)
+check("F03/F32: safe_figure_size_in clamps -1, 0, NA, NaN, Inf, -Inf, 1e-9 and 1e9 to a finite size >= 0.2 in",
+      all(vapply(list(-1, 0, NA, NaN, Inf, -Inf, 1e-9, 1e9, "abc", NULL), function(v) sz_ok(c(env$safe_figure_size_in(v, v))), logical(1))))
+check("F03: a valid size is returned bit-identical (no change for valid figures)",
+      identical(c(env$safe_figure_size_in(3.5, 2.5625)), c(3.5, 2.5625)) && !isTRUE(attr(env$safe_figure_size_in(3.5, 2.5), "clamped")))
+check("F32: the millimetre version replaces -5 / NA / 0 by the default and flags it; a valid size is untouched",
+      { a <- env$safe_figure_size_mm(-5, 60); b <- env$safe_figure_size_mm(NA, NA); v <- env$safe_figure_size_mm(183, 60)
+        isTRUE(attr(a, "clamped")) && a[1] >= 5 && isTRUE(attr(b, "clamped")) && all(is.finite(b)) && identical(c(v), c(183, 60)) && !isTRUE(attr(v, "clamped")) })
+check("F04: safe_dpi clamps to [36, 1200] and replaces NA by the default",
+      env$safe_dpi(1) == 36 && env$safe_dpi(5000) == 1200 && env$safe_dpi(NA) == 300 && env$safe_dpi(600) == 600)
+check("F08: num_or: negative / NA / NULL -> default, Inf -> max, a valid value untouched",
+      env$num_or(-1, 7) == 7 && env$num_or(NA, 7) == 7 && env$num_or(NULL, 7) == 7 && env$num_or(Inf, 7, 0, 32) == 32 && env$num_or(9, 7, 0, 32) == 9 && env$num_or("abc", 7) == 7)
+check("F32: ggsave() through the app's choke point turns a width of 0 / NA / -3 mm into a file (no device error)",
+      { ok <- TRUE; pg <- ggplot2::ggplot(data.frame(x = 1:3, y = 1:3), ggplot2::aes(x, y)) + ggplot2::geom_point()
+        for (wd in list(0, NA, -3)) { f <- tempfile(fileext = ".png"); r <- tryCatch(suppressWarnings(env$ggsave(f, pg, device = env$export_device("png"), width = wd, height = 60, units = "mm", dpi = 50, limitsize = FALSE)), error = function(e) NULL)
+                                        ok <- ok && !is.null(r) && file.exists(f) && file.size(f) > 100 }
+        ok })
+
+run_r <- function(code) {          # a separate R process: a crash is a failed check here, not the end of the suite
+  scr <- tempfile(fileext = ".R")
+  writeLines(c("suppressPackageStartupMessages({ library(shiny); library(tidyverse); library(ggpubr); library(scales); library(ggrepel); library(ggprism); library(svglite); library(jsonlite) })",
+               sprintf("setwd(%s)", deparse(out_dir0)),
+               "env <- new.env(); app <- suppressWarnings(suppressMessages(source('Lysis_Curve_App_v28.R', local = env)$value))",
+               code), scr)
+  out <- suppressWarnings(system2(file.path(R.home("bin"), "Rscript"), scr, stdout = TRUE, stderr = TRUE))
+  list(status = attr(out, "status") %||% 0L, out = out)
+}
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+pg_code <- "pg <- ggplot2::ggplot(data.frame(x = 1:3, y = 1:3), ggplot2::aes(x, y)) + ggplot2::geom_point();"
+r4 <- run_r(paste(pg_code, "f <- tempfile(fileext = '.jpg'); env$ggsave(f, pg, device = env$export_device('jpeg'), width = 0, height = 60, units = 'mm', dpi = 100, limitsize = FALSE); cat('JPEG_SIZE', file.size(f), '\\n')"))
+check("F04: a JPEG export at width 0 mm writes a file > 1 KB without killing R (separate process)",
+      r4$status == 0 && any(grepl("JPEG_SIZE", r4$out)) && as.numeric(sub(".*JPEG_SIZE ([0-9]+).*", "\\1", grep("JPEG_SIZE", r4$out, value = TRUE)[1])) > 1000)
+r3 <- run_r(paste(pg_code, "f <- tempfile(fileext = '.png'); env$ggsave(f, pg, device = env$export_device('png'), width = -0.039, height = -0.039, units = 'in', dpi = 96, limitsize = FALSE); cat('PNG_SIZE', file.size(f), '\\n')"))
+check("F03: a PNG export at a negative size (-0.039 in) writes a file without a segfault (separate process)",
+      r3$status == 0 && any(grepl("PNG_SIZE", r3$out)))
+comp_code <- "d <- env$make_demo_data('lysis'); testServer(app, { S <- session$setInputs; ingest_data(d, 'Demo'); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1]);
+  S(panel_size_mode = 'fit', compose_panels = c('main', 'growth_rate'), compose_width = 'custom', compose_width_mm = -1, compose_panel_height_mm = -1);
+  cat('SIZE_IN', compose_size_in(), '\\n'); output$compose_img; cat('PREVIEW_OK\\n');
+  S(compose_width_mm = 0, export_format = 'jpeg'); f <- output$downloadComposedFigure; cat('JPEG_DL', file.size(f), '\\n') })"
+rc <- run_r(comp_code)
+check("F03: the Compose preview at width -1 / panel height -1 renders without killing R (separate process)", rc$status == 0 && any(grepl("PREVIEW_OK", rc$out)))
+check("F32: the Compose size under -1 / -1 is finite and >= 0.2 in",
+      { v <- suppressWarnings(as.numeric(strsplit(sub("^SIZE_IN ", "", grep("^SIZE_IN", rc$out, value = TRUE)[1]), " ")[[1]])); sz_ok(v) })
+check("F04: a Compose JPEG download at width 0 mm gives a file > 1 KB (separate process)",
+      any(grepl("JPEG_DL", rc$out)) && as.numeric(sub("JPEG_DL ", "", grep("JPEG_DL", rc$out, value = TRUE)[1])) > 1000)
+
+cat("\n--- server hardening: settings loader clamps (F03 via settings) ---\n")
+check("F03 (settings): NUMERIC_INPUT_RANGES is read off the UI (compose_width_mm 20-300, export_dpi 72-1200)",
+      identical(unname(env$NUMERIC_INPUT_RANGES$compose_width_mm), c(20, 300)) && identical(unname(env$NUMERIC_INPUT_RANGES$export_dpi), c(72, 1200)) && length(env$NUMERIC_INPUT_RANGES) > 40)
+check("F03 (settings): clamp_numeric_setting pulls -1 / 1e9 into the declared range and ignores Inf / text",
+      env$clamp_numeric_setting("compose_width_mm", -1) == 20 && env$clamp_numeric_setting("export_dpi", 1e9) == 1200 && is.na(env$clamp_numeric_setting("compose_width_mm", "abc")) && env$clamp_numeric_setting("not_an_input", -5) == -5)
+set_neg <- tempfile(fileext = ".json")
+writeLines(jsonlite::toJSON(list(global_settings = list(compose_width_mm = -1, compose_panel_height_mm = -1, export_dpi = -1, title_font_size = -1, axis_text_font_size = -1, legend_font_size = 9, export_width = -1)), auto_unbox = TRUE), set_neg)
+testServer(app, {
+  ingest_data(env$make_demo_data("lysis"), "Demo"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(compose_width_mm = 183, compose_panel_height_mm = 60)      # (the loader only touches inputs that exist)
+  session$setInputs(loadSettings = list(name = "neg.json", datapath = set_neg, size = 1, type = "application/json"))
+  check("F03 (settings): a file whose numbers are out of range is clamped and counted (6 of the 7 values were out of range)", isTRUE(rv$last_clamped == 6L))
+  check("F03 (settings): the status text says the settings were clamped", grepl("clamped", paste(rv$settings_status$details, rv$settings_status$msg)))
+})
+
+cat("\n--- server hardening: figure builders on hostile inputs (F10-F20, F08) ---\n")
+lysis_d <- env$make_demo_data("lysis")
+fig_works <- function(gp, mp) {   # not a red placeholder AND the preview render writes a PNG
+  p <- tryCatch(gp(), error = function(e) NULL); if (is.null(p)) return(FALSE)
+  lab <- tryCatch(p$layers[[1]]$aes_params$label, error = function(e) NULL)
+  if (is.character(lab) && grepl("^Plot error", lab)) return(FALSE)
+  tryCatch({ f <- tempfile(fileext = ".png"); suppressWarnings(ggsave(f, mp(), device = env$export_device("png"), width = 3, height = 2, dpi = 40)); file.exists(f) && file.size(f) > 500 }, error = function(e) FALSE)
+}
+case_works <- function(inp, data = lysis_d) { out <- NA
+  testServer(app, {
+    ingest_data(data, "Demo"); do.call(session$setInputs, modifyList(env$APP_DEFAULTS, inp))
+    session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+    out <<- fig_works(generate_plot, main_plot_obj) })
+  isTRUE(out) }
+label_of <- function(p) tryCatch(gsub("\\s+", " ", p$layers[[1]]$aes_params$label), error = function(e) NA_character_)
+
+all_t <- paste(seq(0, 180, 15), collapse = ",")
+testServer(app, {
+  ingest_data(lysis_d, "Demo"); do.call(session$setInputs, modifyList(env$APP_DEFAULTS, list(enable_time_filter = TRUE, exclude_timepoints = all_t)))
+  session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+  p <- generate_plot(); lab <- label_of(p)
+  check("F10: every time point excluded: the main figure is a tidy 'No data left' placeholder, not a raw R error",
+        is.character(lab) && grepl("No data left after the current filters", lab) && !grepl("differing number of rows", lab))
+  check("F10: empty_state_message() names the filters to relax", grepl("time filter / OD window / replicate exclusions", empty_state_message()))
+  check("F10: the placeholder is recognised as one (the composer and the batch exporter skip it)", is_placeholder_plot(p))
+  ap <- generate_analysis_plot("growth_rate"); al <- label_of(ap)
+  check("F10: an analysis figure says the same instead of 'arguments imply differing number of rows'", is.character(al) && grepl("No data left", al))
+  e1 <- tryCatch({ output$downloadPlot; NULL }, error = function(e) e)
+  check("F26: Download figure with nothing left is refused (kc_refused), no placeholder file", inherits(e1, "kc_refused"))
+  e2 <- tryCatch({ output$downloadPDFReport; NULL }, error = function(e) e)
+  e3 <- tryCatch({ output$downloadAnalysisPlot; NULL }, error = function(e) e)
+  check("F26: the PDF report and the analysis figure download are refused too (kc_refused)", inherits(e2, "kc_refused") && inherits(e3, "kc_refused"))
+  session$setInputs(batch_outputs = c("main", "csv_metrics"), batch_format = "svg")
+  e4 <- tryCatch({ output$downloadBatchExport; NULL }, error = function(e) e)
+  check("F26: a batch export with nothing left is refused (kc_refused)", inherits(e4, "kc_refused"))
+})
+check("F11: an OD window that removes every reading renders a placeholder, not '$ operator is invalid'",
+      { out <- NA; testServer(app, { ingest_data(lysis_d, "Demo"); do.call(session$setInputs, modifyList(env$APP_DEFAULTS, list(use_od_filter = TRUE, od_min = 100, od_max = 200)))
+          session$setInputs(selected_samples = rv$od_vars); out <<- label_of(generate_plot()) }); is.character(out) && grepl("No data left", out) })
+check("F12: every replicate excluded renders a placeholder, not '$ operator is invalid'",
+      { out <- NA; testServer(app, { ingest_data(lysis_d, "Demo"); do.call(session$setInputs, modifyList(env$APP_DEFAULTS, list(excluded_reps = c(paste0("Uninfected #", 1:3), paste0("Phage MOI 10 #", 1:3), paste0("Phage MOI 0.1 #", 1:3)))))
+          session$setInputs(selected_samples = rv$od_vars); out <<- label_of(generate_plot()) }); is.character(out) && grepl("No data left", out) })
+check("F13: a cleared marker count box (NA) with markers on still draws the figure", case_works(list(enable_time_markers = TRUE, marker_count = NA)))
+check("F13: a negative region count with highlighting on still draws the figure", case_works(list(enable_highlighting = TRUE, region_count = -1)))
+check("F14: both custom X limit boxes cleared: the data range is used and the figure draws", case_works(list(custom_x_limits = TRUE, x_min = NA, x_max = NA)))
+check("F15: both log exponent boxes cleared (log Y, advanced ticks): the figure draws with automatic ticks", case_works(list(y_scale_type = "log", use_advanced_ticks = TRUE, y_log_min_exponent = NA, y_log_max_exponent = NA)))
+check("F16: y_min above y_max is swapped and the figure renders", case_works(list(custom_y_limits = TRUE, y_min = 5, y_max = 0)))
+check("F16: log Y with y_min = 0 uses the log floor and the figure renders", case_works(list(y_scale_type = "log", custom_y_limits = TRUE, y_min = 0, y_max = 3)))
+check("F17: y_min == y_max is widened by 5 % and the figure renders", case_works(list(custom_y_limits = TRUE, y_min = 1, y_max = 1)))
+check("F17: Y limits entirely outside the data fall back to the data range and the figure renders", case_works(list(custom_y_limits = TRUE, y_min = 1000, y_max = 2000)))
+check("F17: a time filter that leaves a single time point still renders (no zero-length unit error)", case_works(list(enable_time_filter = TRUE, time_filter_range = c(30, 30))))
+check("F18: a cleared tick length box renders", case_works(list(tick_length_mm = NA)))
+check("F19: negative line / error-bar / axis-line widths render", case_works(list(line_thickness = -1, error_bar_thickness = -1, axis_line_pt = -1)))
+check("F20: an infinite x tick interval is 'automatic' and renders", case_works(list(use_advanced_ticks = TRUE, x_tick_interval = Inf)))
+tm_f8 <- NA
+testServer(app, {
+  ingest_data(lysis_d, "Demo"); do.call(session$setInputs, modifyList(env$APP_DEFAULTS, list(legend_font_size = -1, axis_text_font_size = -1, axis_label_font_size = -1, title_font_size = -1)))
+  session$setInputs(selected_samples = rv$od_vars)
+  check("F08: nin() turns -1 font sizes into the journal defaults, Inf into the ceiling",
+        nin("legend_font_size") == env$APP_DEFAULTS$legend_font_size && nin("axis_text_font_size") == env$APP_DEFAULTS$axis_text_font_size)
+  tm_f8 <<- system.time(fig_works(generate_plot, main_plot_obj))[["elapsed"]]
+  session$setInputs(legend_font_size = Inf)
+  check("F08: an Inf font size is the ceiling (100), not an infinite render", nin("legend_font_size") == 100)
+})
+check("F08: the figure with -1 font sizes renders in seconds, not minutes", is.finite(tm_f8) && tm_f8 < 20)
+
+cat("\n--- server hardening: placeholders with a specific sentence (F21, F22, F25, F37) ---\n")
+testServer(app, {
+  ingest_data(lysis_d[, 1:4], "one sample"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1], analysis_type = "lysed_fraction")
+  lb <- label_of(generate_analysis_plot("lysed_fraction"))
+  check("F21: the lysed fraction with one never-lysing sample says what it needs, not 'replacement has 1 row'",
+        is.character(lb) && grepl("at least 3 time points and at least one replicate that crosses the lysis threshold", gsub("\n", " ", lb)) && !grepl("replacement has", lb))
+})
+zero_ref <- lysis_d; zero_ref[, 2:4] <- 0
+testServer(app, {
+  ingest_data(zero_ref, "zero ref"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1], analysis_norm_mode = "reference")
+  lb <- label_of(generate_analysis_plot("normalized"))
+  check("F22: normalized OD with an all-zero reference says the reference has no dynamic range, not '$ operator'",
+        is.character(lb) && grepl("no dynamic range", gsub("\n", " ", lb)) && !grepl("operator", lb))
+})
+testServer(app, {
+  ingest_data(lysis_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars)
+  rv_cmp$ds <- ingest_frame(data.frame(Time = numeric(0), A = numeric(0)), "empty second", strict = FALSE)
+  lb <- label_of(generate_compare_plot())
+  check("F25: Compare with a zero-row second dataset says 'second dataset has no rows', not 'differing number of rows'",
+        is.character(lb) && grepl("second dataset has no rows", gsub("\n", " ", lb)))
+})
+testServer(app, {
+  ingest_data(lysis_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = character(0))
+  e <- tryCatch({ output$od_plot_img; NULL }, error = function(e) e)
+  check("F37: deselecting every sample shows 'Select at least one sample' in the figure area (validate), not a silent blank",
+        inherits(e, "shiny.silent.error") && inherits(e, "validation") && grepl("Select at least one sample", conditionMessage(e)))
+})
+
+cat("\n--- server hardening: wrong output (F27-F31, F33) ---\n")
+tt_long <- seq(0, 36000, by = 10)
+d_long <- data.frame(Time = tt_long, a = .1 + tt_long / 1e5, b = .11 + tt_long / 1e5, c = .12 + tt_long / 1e5); names(d_long) <- c("Time", "A", "A", "A")
+testServer(app, {
+  ingest_data(d_long, "long time"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, enable_time_filter = TRUE, time_filter_range = c(0, 36000), exclude_timepoints = "100")
+  check("F27: excluding the single time point 100 (0..36000 s) drops exactly that one point, not 7", identical(setdiff(tt_long, prepare_plot_data()$time), 100))
+  session$setInputs(exclude_timepoints = "105")
+  check("F28: a typed value that is not a time point (105) excludes nothing", length(setdiff(tt_long, prepare_plot_data()$time)) == 0)
+  um <- attr(env$parse_excluded_timepoints("105, 100", tt_long), "unmatched")
+  check("F28: ... and is reported with its nearest neighbours ('Time point 105 is not in the data; nearest are 100 and 110')",
+        length(um) == 1 && grepl("Time point 105 is not in the data; nearest are 100 and 110", um))
+})
+check("F27: parse_excluded_timepoints keeps its plain numeric result for a matching value (no attribute)",
+      identical(env$parse_excluded_timepoints("30", c(0, 30, 60)), 30) && identical(env$parse_excluded_timepoints("30.0000000001", c(0, 30, 60)), 30))
+testServer(app, {
+  ingest_data(lysis_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, enable_time_filter = TRUE, time_filter_range = c(0, 3), exclude_timepoints = "0.5", time_convert = "min_to_h")
+  tt <- prepare_plot_data()$time
+  check("F29: with the figures in hours, '0.5' in the exclusion box means 0.5 h (30 min): that point is gone", !any(abs(tt - 0.5) < 1e-9) && any(abs(tt - 0.25) < 1e-9))
+  check("F29: the time-filter range is read in the displayed unit too (0-3 h keeps 0-3 h of the 0-180 min data)", max(tt) <= 3 + 1e-9 && max(tt) > 2.9)
+})
+bt_dir <- tempfile(); dir.create(bt_dir)
+testServer(app, {
+  ingest_data(lysis_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars)
+  r <- batch_export_build(bt_dir, "notes", "svg", 72, NULL)
+  check("F30: a notes-only batch export lists both notes files (notes.html, notes.json)", setequal(r$files, c("notes.html", "notes.json")) && all(file.exists(file.path(bt_dir, r$files))))
+  session$setInputs(batch_outputs = "notes", batch_format = "svg")
+  f <- tryCatch(output$downloadBatchExport, error = function(e) NULL)
+  check("F30: a notes-only batch export produces an archive (not 'Nothing could be written')", !is.null(f) && file.exists(f) && file.size(f) > 200)
+})
+ghost <- lysis_d; ghost$Ghost <- NA_real_
+testServer(app, {
+  ingest_data(ghost, "ghost"); do.call(session$setInputs, env$APP_DEFAULTS)
+  check("F31: a sample whose readings are all NA is not loaded (sample list, legend and tables agree)", !("Ghost" %in% rv$od_vars) && length(rv$od_vars) == 3)
+  gf <- tryCatch(ingest_frame(ghost, "g", strict = TRUE), error = function(e) NULL)
+  check("F31: ... and the load says so ('Ghost has no numeric readings and was not loaded')", !is.null(gf) && any(grepl("Ghost has no numeric readings and was not loaded", gf$notes)))
+})
+testServer(app, {
+  ingest_data(lysis_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1], posthoc_method = "holm_welch")
+  f <- tryCatch(output$downloadPosthocCSV, error = function(e) NULL)
+  x <- tryCatch(utils::read.csv(f), error = function(e) NULL)
+  check("F33: the post-hoc CSV parses with read.csv as ONE rectangular table (metric, section, group1 ... note)",
+        is.data.frame(x) && nrow(x) > 0 && identical(names(x), env$STATS_LONG_COLUMNS))
+  check("F33: ... with no '# comment' lines left in the file", !any(grepl("^#", readLines(f, warn = FALSE))))
+  f2 <- tryCatch(output$downloadAnalysisStatsCSV, error = function(e) NULL)
+  x2 <- tryCatch(utils::read.csv(f2), error = function(e) NULL)
+  check("F33: the replicate-statistics CSV is rectangular too, with pairwise rows and the reference in an info row",
+        is.data.frame(x2) && identical(names(x2), env$STATS_LONG_COLUMNS) && "pairwise" %in% x2$section && any(x2$section == "info" & grepl("reference", x2$note)))
+})
+check("F33: stats_long_table maps the engine's pairwise / omnibus / posthoc columns onto the long columns",
+      { sl <- env$stats_long_table("lysis_time", list(pairwise = data.frame(sample = "A", versus = "B", difference = 2, ci_low = 1, ci_high = 3, test = "welch", p = .01, p_adj_holm = .02),
+                                                         omnibus = data.frame(test = "anova", statistic = 5, p = .03)), notes = "n < 3")
+        nrow(sl) == 3 && identical(names(sl), env$STATS_LONG_COLUMNS) && sl$estimate[1] == 2 && sl$p_adj[1] == .02 && sl$section[3] == "note" })
+
+cat("\n--- server hardening: bootstrap budget, ANOVA model naming, extinction note (F09, 16a, 16b, F34) ---\n")
+set.seed(3)
+rp6 <- do.call(rbind, lapply(c("A", "B"), function(s) do.call(rbind, lapply(1:6, function(r) data.frame(time = seq(0, 120, 10), variable = s, replicate = r,
+                              value = 0.05 + 1 / (1 + exp(-(seq(0, 120, 10) - 60) / 10)) * (1 + .1 * r) + rnorm(13, 0, .01))))))
+bt0 <- env$bootstrap_metrics(rp6, c("max_od", "mu_max"), n_boot = 500, seed = 1, budget_s = 0)
+check("F09: a bootstrap over its time budget stops early (checked every 50 draws), reports n_boot_used < requested and says so",
+      is.numeric(attr(bt0, "n_boot_used")) && attr(bt0, "n_boot_used") < 500 && attr(bt0, "n_boot_used") >= 50 && grepl("stopped early", attr(bt0, "note")))
+bt1 <- env$bootstrap_metrics(rp6, c("max_od"), n_boot = 200, seed = 1)
+check("F09: within the budget the result and n_boot_used are unchanged", identical(attr(bt1, "n_boot_used"), 200L) && is.null(attr(bt1, "note")))
+set.seed(5)
+tw_long <- do.call(rbind, lapply(1:3, function(s) do.call(rbind, lapply(1:3, function(r) data.frame(sample = paste0("S", s), well = paste0("w", r), time = seq(0, 100, 10),
+                       od = exp(-2 + .02 * seq(0, 100, 10) * s + rnorm(11, 0, .05)))))))
+tw <- env$two_way_time_anova(tw_long, rm = TRUE)
+check("16a: model_used = 'lme_ar1' when the mixed model was fitted, and only then do the method and note speak of AR(1)",
+      !requireNamespace("nlme", quietly = TRUE) || (identical(tw$model_used, "lme_ar1") && grepl("AR\\(1\\)", tw$method)))
+big_long <- do.call(rbind, lapply(1:14, function(s) do.call(rbind, lapply(1:3, function(r) data.frame(sample = paste0("S", s), well = paste0("w", r), time = seq(0, 100, 20),
+                       od = exp(-2 + .01 * seq(0, 100, 20) * (s %% 4) + rnorm(6, 0, .05)))))))
+twb <- env$two_way_time_anova(big_long, rm = TRUE)
+check("16a: above 12 samples the aov Error(well) model is used and named: model_used = 'aov_error_well'", identical(twb$model_used, "aov_error_well") && grepl("Error\\(well\\)", twb$method))
+check("16a: ... and neither the method nor the note says 'AR(1)' when aov was used",
+      !grepl("AR\\(1\\)", paste(twb$method, twb$note)) && grepl("mixed model was skipped", twb$note))
+check("16a: the methods sentence names the repeated-measures ANOVA (Error(well)) for the aov fit and never 'AR(1)'",
+      { s1 <- env$stats_method_sentence(twb, "two_way", what = "OD", n = 3); grepl("Error\\(well\\)", s1) && !grepl("AR\\(1\\)", s1) })
+check("16a: ... and the AR(1) mixed model wording for the lme fit",
+      !requireNamespace("nlme", quietly = TRUE) || grepl("AR\\(1\\) within-well correlation", env$stats_method_sentence(tw, "two_way", what = "OD", n = 3)))
+dupt <- rbind(tw_long, tw_long[tw_long$sample == "S1" & tw_long$well == "w1" & tw_long$time %in% c(10, 20), ])
+twd <- env$two_way_time_anova(dupt, rm = TRUE)
+check("F34: duplicate time points in a well: the nlme failure becomes a plain note and the aov fallback runs",
+      grepl("Mixed model could not be fitted \\(duplicate time points within a well\\)", twd$note) && !grepl("covariate must have unique values", twd$note) && identical(twd$model_used, "aov_error_well") && any(is.finite(twd$anova$F)))
+cm <- env$compute_curve_metrics(data.frame(time = rep(c(0, 10, 20, 30), 2), variable = rep(c("Low", "High"), each = 4), mean_value = c(.04, .03, .03, .02, .3, .5, .2, .02)))
+check("16b: a sample that starts below the extinction floor gets extinction_note = 'starts below floor' (NA time), others NA",
+      "extinction_note" %in% names(cm) && cm$extinction_note[cm$sample == "Low"] == "starts below floor" && is.na(cm$extinction_time[cm$sample == "Low"]) && is.na(cm$extinction_note[cm$sample == "High"]) && is.finite(cm$extinction_time[cm$sample == "High"]))
+testServer(app, {
+  d2 <- lysis_d; d2[[2]] <- d2[[2]] * 0.02
+  ingest_data(d2, "low"); do.call(session$setInputs, env$APP_DEFAULTS)
+  session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+  x <- tryCatch(utils::read.csv(output$downloadMetricsCSV), error = function(e) NULL)
+  check("16b: the metrics CSV export carries the extinction_note column ('starts below floor') and the table shows it",
+        is.data.frame(x) && "extinction_note" %in% names(x) && any(x$extinction_note == "starts below floor", na.rm = TRUE) &&
+          "extinction_note" %in% names(curve_metrics_current()))
+})
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (fail > 0) quit(status = 1)

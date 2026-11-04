@@ -474,10 +474,9 @@ testServer(app, {
   check("stats banner: the caveat is the first thing in the statistics notes", grepl("TECHNICAL", html, fixed = TRUE) && regexpr("TECHNICAL", html) < regexpr("No comparison possible", html))
   f <- of("stats.csv"); analysis_stats_csv_content(f)
   txt <- readLines(f, warn = FALSE)
-  hdr <- txt[grep("^\"sample\"", txt)[1]]
-  check("stats CSV export: a caveat column on every table (pairwise / omnibus / posthoc)", length(hdr) == 1 && grepl("caveat", hdr, fixed = TRUE) && any(grepl("TECHNICAL", txt, fixed = TRUE)))
+  check("stats CSV export (one rectangular long table): the caveat is a note row of the table", any(grepl("TECHNICAL", txt, fixed = TRUE)) && !any(grepl("^#", txt)))
   rv$replicate_col <- NULL
-  analysis_stats_csv_content(f); check("stats CSV export: no caveat column without a technical replicate column", !any(grepl("caveat", readLines(f, warn = FALSE), fixed = TRUE)))
+  analysis_stats_csv_content(f); check("stats CSV export: no caveat row without a technical replicate column", !any(grepl("TECHNICAL", readLines(f, warn = FALSE), fixed = TRUE)))
 })
 
 # ── Welch + Wilcoxon side by side ─────────────────────────────────────────

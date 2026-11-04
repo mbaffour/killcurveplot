@@ -238,8 +238,8 @@ for (mth in c("tukey", "holm_welch", "games_howell", "dunn", "dunnett", "bonferr
 # ── 5. Two-way time ANOVA and per-time comparisons ────────────────────────────
 cat("\n--- two_way_time_anova / per_time_comparisons ---\n")
 tw <- env$two_way_time_anova(rep_pd)
-check("two_way_time_anova: list(anova, method, note) with terms Sample / Time / Sample x Time",
-      is.list(tw) && identical(names(tw), c("anova", "method", "note")) && identical(tw$anova$term, c("Sample", "Time", "Sample x Time")) &&
+check("two_way_time_anova: list(anova, method, note, model_used) with terms Sample / Time / Sample x Time",
+      is.list(tw) && identical(names(tw), c("anova", "method", "note", "model_used")) && identical(tw$anova$term, c("Sample", "Time", "Sample x Time")) &&
       identical(names(tw$anova), c("term", "df_num", "df_den", "F", "p")))
 check("two_way_time_anova on the demo data: sample x time interaction p < 0.05", is.finite(tw$anova$p[3]) && tw$anova$p[3] < 0.05)
 check("two_way_time_anova: interaction df = (k - 1)(T - 1) = 2 x 12 = 24", tw$anova$df_num[3] == 24 && tw$anova$df_num[1] == 2 && tw$anova$df_num[2] == 12)
