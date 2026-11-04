@@ -165,7 +165,11 @@ The **figure stays in view** while you scroll the settings: the figure column (s
 
 ### Loading Data
 
-Click **"Browse..."** next to "Choose CSV File" and select your file. The plot will appear automatically on the right side.
+Click **"Browse..."** next to "Choose CSV or Excel file" and select your file. The plot will appear automatically on the right side.
+CSV / TSV / TXT and `.xlsx` / `.xls` (with a sheet selector) are accepted, and the **Data** tab has an *Enter data* box for text
+pasted from Excel. The reader copes with UTF-8 / UTF-16 / Latin-1 encodings, plate-reader preambles, quoted thousands and
+decimal commas, AM/PM and clock times, stacked replicate blocks and repeated header rows (v2.23). A file the app cannot use is
+refused with one sentence that ends "The file was not loaded." and the previous data stay in place.
 
 ### Selecting Samples
 
@@ -591,6 +595,16 @@ All of this is live: change the Y-axis label (Quick edit strip under the figure)
 
 **Error bars / shadow ribbon doesn't show.** — If you have only one replicate per sample per time point, the standard deviation is **undefined** (not zero — you cannot measure spread from a single value), so no bar is drawn at that point and the Summary Statistics CSV / report tables show `NA` for SD, SEM, and the 95% CI at that time point. This is expected behavior. You need at least two replicates for error bars — and for the exported statistics — to be meaningful.
 
+**"... The file was not loaded."** — The app refused the file and says why (empty, binary, no data rows, only one column,
+no readable time value, every reading OVER). Fix the file, or pick another sheet / time column, and load it again.
+
+**"Figure not available: No data left after the current filters."** — Every row was removed by the time filter, the OD window,
+the per-sample time windows or the replicate exclusions (Data tab). Relax one of them; downloads are refused until data are back.
+
+**"Could not read the settings file ..." / "This is not a settings file ..." / "N settings were out of range and clamped."** — A
+settings or theme file is checked key by key (v2.23): a value of the wrong type is ignored and a number outside its box's range is
+pulled into range, with one notification; a file that is not JSON or not a settings object is refused and nothing changes.
+
 **The app is slow or laggy.** — If you have a very large number of samples, the app may take a moment to update. The app debounces inputs (waits 400ms after you stop adjusting before redrawing), so slight delays are intentional.
 
 **"Run App" button doesn't appear.** — Make sure the `.R` file is open and is the active tab in the editor. Also confirm that the `shiny` package is installed.
@@ -621,4 +635,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.22.0 (2026-11-02) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.23.0 (2026-11-04) — Michael Baffour Awuah / Ramsey Lab*
