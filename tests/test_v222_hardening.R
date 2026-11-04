@@ -779,5 +779,41 @@ testServer(app, {
           "extinction_note" %in% names(curve_metrics_current()))
 })
 
+# ── round 2 ──────────────────────────────────────────────────────────────────
+# R2-REG01: the journal startup figure keeps the size it had at 8493b73 (stored golden numbers; no second app is sourced,
+# because a same-process old-vs-new diff cannot see device-dependent text measurement). The check runs once with the
+# default device option and once with options(device = "pdf") forced: both must give the same sizes.
+cat("\n--- R2-REG01: figure sizes are measured on an explicit pdf(NULL) device (golden sizes, any options(device)) ---\n")
+GOLD_SIZES <- c(main = "217.94x210.21", metric_summary = "221.26x216.46", growth_rate = "219.69x210.50", normalized = "219.08x210.50",
+                difference = "222.08x210.50", replicate_overlay = "218.24x210.50", landmarks = "288.22x210.50", phases = "303.19x210.50",
+                dose_response = "213.69x210.50", heatmap = "277.92x212.25", metric_explorer = "215.32x210.50", fit_overlay = "218.24x210.50",
+                phenotype_heatmap = "277.48x126.34", od_at_times = "288.22x210.50", time_to_threshold = "210.69x207.98",
+                replicate_facets = "225.21x218.98", lysed_fraction = "216.69x210.50", per_time = "218.24x210.50", auc = "212.32x207.98",
+                od_rate = "225.08x210.50")
+svg_size <- function(f) { l <- readLines(f, n = 3, warn = FALSE); m <- regmatches(l[2], regexec("width='([0-9.]+)pt' height='([0-9.]+)pt'", l[2]))[[1]]; paste0(m[2], "x", m[3]) }
+startup_sizes <- function() {
+  got <- character(0); warn_txt <- character(0)
+  withCallingHandlers(testServer(app, {
+    S <- session$setInputs; priv <- environment(S)$private
+    ingest_data(env$make_demo_data("lysis"), "Demo"); do.call(S, env$APP_DEFAULTS)
+    S(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1], export_format = "svg")
+    got["main"] <<- svg_size(output$downloadPlot)
+    for (a in unname(env$ANALYSIS_FIGURE_CHOICES)) { priv$.input$set("analysis_type", a)
+      f <- tryCatch(output$downloadAnalysisPlot, error = function(e) NULL)
+      if (!is.null(f) && file.exists(f)) got[a] <<- svg_size(f) }
+  }), warning = function(w) { warn_txt <<- c(warn_txt, conditionMessage(w)); invokeRestart("muffleWarning") })
+  list(got = got, warn = warn_txt)
+}
+had_rplots <- file.exists("Rplots.pdf")
+st_default <- startup_sizes()
+old_dev <- getOption("device"); options(device = "pdf"); st_pdf <- startup_sizes(); options(device = old_dev)
+for (nm in c("main", "metric_summary", "phases"))
+  check(sprintf("R2-REG01: the startup %s figure is %s pt (8493b73 size), default device option", nm, GOLD_SIZES[[nm]]), identical(unname(st_default$got[nm]), unname(GOLD_SIZES[nm])))
+bad <- setdiff(names(GOLD_SIZES), names(GOLD_SIZES)[vapply(names(GOLD_SIZES), function(k) identical(unname(st_default$got[k]), unname(GOLD_SIZES[k])), NA)])
+check(paste0("R2-REG01: all 19 analysis figures + main keep their 8493b73 sizes", if (length(bad)) paste0(" (differ: ", paste(bad, collapse = ", "), ")") else ""), length(bad) == 0)
+check("R2-REG01: the sizes are identical with options(device = 'pdf') forced", identical(st_default$got, st_pdf$got))
+check("R2-REG01: rendering the startup figures leaves no Rplots.pdf behind", had_rplots || !file.exists("Rplots.pdf"))
+check("R2-REG01: no 'font family Arial not found' (or any) warning while measuring", !any(grepl("Arial|font family|PostScript", c(st_default$warn, st_pdf$warn))))
+
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (fail > 0) quit(status = 1)

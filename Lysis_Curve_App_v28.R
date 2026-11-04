@@ -317,6 +317,17 @@ local({
     options(device = kc_null_device)
 })
 
+# Round 2 (R2-REG01): text measurement never depends on the current device. Every site that measures text (ggplotGrob's
+# font metrics, grobWidth / convertWidth of legends and tables) runs inside an explicit pdf(NULL) device, the device the
+# journal figure sizes were originally measured on, so the startup figure is the same size whether R was started with
+# ragg, RStudio, Rscript or options(device = ...). kc_null_device above still serves everything else (no Rplots.pdf).
+kc_with_measure_device <- function(expr) {
+  old <- grDevices::dev.cur()
+  suppressWarnings(grDevices::pdf(NULL))
+  on.exit({ grDevices::dev.off(); if (old > 1) tryCatch(grDevices::dev.set(old), error = function(e) NULL) }, add = TRUE)
+  suppressWarnings(expr)
+}
+
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
@@ -3099,7 +3110,7 @@ figure_size_mm <- function(g) {
 # panel columns / rows of a facet figure), with attr(, "size_mm") = the whole figure's size. Only
 # the panels' null units are replaced; every other null unit is zeroed so the size is absolute.
 fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
-  g   <- tryCatch(ggplot2::ggplotGrob(p), error = function(e) {
+  g   <- tryCatch(kc_with_measure_device(ggplot2::ggplotGrob(p)), error = function(e) {
     # v2.18: a figure with a plotmath colour-bar title (the heatmap) measures text while the grob is built; with no
     # device open that goes to R's default pdf() device, which cannot load Arial ("failed to find or load PDF CID
     # font"). Build it on a scratch svglite / ragg device instead.
@@ -13376,7 +13387,7 @@ server <- function(input, output, session) {
   drawable_figure   <- function(p) {
     ml <- attr(p, "matrix_legend")
     if (is.null(ml)) return(p)
-    tryCatch(attach_matrix_legend(ggplot2::ggplotGrob(p), ml$grob, ml$placement), error = function(e) p)
+    tryCatch(attach_matrix_legend(kc_with_measure_device(ggplot2::ggplotGrob(p)), ml$grob, ml$placement), error = function(e) p)
   }
   main_plot_obj     <- function() if (fixed_mode()) main_fixed_info() else drawable_figure(generate_plot())
   analysis_plot_obj <- function() if (fixed_mode()) analysis_fixed_info()
