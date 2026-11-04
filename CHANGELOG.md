@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.22.1 — 2026-11-03
+
+**A labelling tutorial and a Help tab.** Figures are unchanged.
+
+- **How to label a figure** (`docs/LABELLING_HOWTO.md`): a ten-minute walkthrough on the demo data, then one
+  section per kind of label: sample names and legend entries (and naming samples so the MOI is read), axis titles
+  and the time unit taken from the x label, title and subtitle, legend position, end-of-line labels, panel letters
+  (the four places that set one), marker / threshold / region labels, significance marks, point and dataset labels,
+  the Figure Legend Text, a checklist before export and a table of common mistakes. The README gains a "How to label
+  a figure" subsection under *Using the App*, and the user guide points to the tutorial. The two gallery renders it
+  embeds (`docs/gallery/main.png`, `metric_summary.png`) are now tracked next to `gallery.png`, so they are there in
+  a fresh clone (`tools/render_gallery.R` still regenerates them).
+- **Help tab** (last main tab): the labelling summary, then every guide of `docs/` (the tutorial open by default,
+  the user guide, figure standards, styling and markup, data tab, statistics and fitting, the references, phases
+  and bootstrap, compare and presets) plus the README and the changelog, each a collapsible section. The files are
+  read when a session first opens the tab (server output `help_guides`; `docs_dir_path()`: option
+  `killcurve.docs_dir`, else `APP_DIR`, else `docs/` in the working directory) and rendered with commonmark (a
+  plain `<pre>` without it), so no document text sits in the static page; images are served from the `kc_docs`
+  resource path and a link between guides jumps to the other guide's section. A guide whose file is missing is
+  skipped.
+- Tests: `tests/test_v221_ui.R` checks the tab, its contents, the rewritten links and images.
+
 ## v2.22.0 — 2026-11-02
 
 **Click-to-edit labels on the figure.** Renaming a legend entry or an axis title meant finding the box in the

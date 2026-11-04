@@ -45,6 +45,8 @@ The layout is detected automatically. Check the data summary box after every loa
 
 **Editing on the figure.** Click a legend entry in the preview to rename it, recolour it or hide it, and click an axis title, the title or the subtitle to edit its text; press Apply (or Enter) to keep the change, Esc to drop it. Everything else (sizes, fonts, legend position, axis limits) still lives in the Quick edit strip and the sidebar. Untick **Edit labels on the figure** in the strip to get the plain image preview back; the exported file is the same either way.
 
+**All the labels in one place.** Sample names, axis titles and units, the legend, end-of-line labels, panel letters, marker and threshold labels, significance marks and the legend text are walked through, with a demo-data tutorial and a checklist, in [How to label a figure](LABELLING_HOWTO.md).
+
 **Finishing in Inkscape**
 
 1. Apply the preset, check the size bar and preview, then download the figure as SVG.
@@ -152,6 +154,7 @@ Metrics that do not apply are reported as NA, never as an invented value.
 ## Where to look next
 
 - [README](../README.md): installation, quick start and the full control list.
+- [How to label a figure](LABELLING_HOWTO.md): a tutorial on sample names, axis titles, legends, end labels, panel letters, marker labels, significance marks and the legend text.
 - [Figure standards](FIGURE_STANDARDS.md): journal widths, sources and the Inkscape loop.
 - [Metrics reference](METRICS_REFERENCE.md): formulas and detection rules for each curve metric.
 - [Fits and extraction](FITS_AND_EXTRACTION.md): growth-model fits, time-to-OD and all-metrics statistics.

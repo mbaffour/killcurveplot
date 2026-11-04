@@ -1,6 +1,6 @@
 # Lysis Curve OD Visualization App — User Guide
 
-> **Docs:** [Metrics reference (formulas + sources)](docs/METRICS_REFERENCE.md) · [Changelog](CHANGELOG.md) · [Audit (2026-09)](AUDIT-2026-09.md) · Tests: `Rscript tests/test_v28.R` (101 checks), `Rscript tests/test_metrics_parity.R` (reference-free checks always run; reference-comparison checks need a compatible sibling clone of [lysis-curve-app](https://github.com/mbaffour/lysis-curve-app) — see [docs/METRICS_REFERENCE.md](docs/METRICS_REFERENCE.md#tests))
+> **Docs:** [How to label a figure (tutorial)](docs/LABELLING_HOWTO.md) · [Metrics reference (formulas + sources)](docs/METRICS_REFERENCE.md) · [Changelog](CHANGELOG.md) · [Audit (2026-09)](AUDIT-2026-09.md) · Tests: `Rscript tests/test_v28.R` (101 checks), `Rscript tests/test_metrics_parity.R` (reference-free checks always run; reference-comparison checks need a compatible sibling clone of [lysis-curve-app](https://github.com/mbaffour/lysis-curve-app) — see [docs/METRICS_REFERENCE.md](docs/METRICS_REFERENCE.md#tests))
 >
 > **Looking for the full analysis platform** (Analysis tab, 30+ metrics, statistics, heatmaps, curve fitting, virulence metrics)? That's the companion app: [mbaffour/lysis-curve-app](https://github.com/mbaffour/lysis-curve-app). This repo is the lightweight plotter.
 
@@ -188,6 +188,17 @@ All settings are in the left sidebar, organized into collapsible sections. Click
 **Line & Point Settings** — Control line thickness and point appearance. Toggle points on/off and adjust their size.
 
 **Label Options** — Add labels at the end of each line to identify samples without needing the legend.
+
+### How to label a figure
+
+Every label on a figure has one place to set it; the tutorial [docs/LABELLING_HOWTO.md](docs/LABELLING_HOWTO.md) walks through all of them on the demo data. In short:
+
+- **Sample names** (legend entries, tables, reports): the **name** box in the Quick edit strip, or click the legend entry on the figure. Name MOI samples `Phage MOI 10` so the dose-response can read the MOI.
+- **Axis titles**: **X-axis label** and **Y-axis label** in the strip, or click the axis title. The unit word in the x label (`min`, `h`) sets the time unit of every metric label; `A550` and `OD600` are typeset as subscripts.
+- **Legend**: **Legend position** in the strip (inside corners, automatic corner, outside, or **None** with **Show End-of-Line Labels** under *Label Options*).
+- **Panel letters**: **Panel label** under *Figure Layout* or in the *Journal Figure Preset*; the Analysis figures tab and the Compose figure tab have their own.
+- **Events and thresholds**: a labelled marker under *Time Point Markers*, and the threshold line's **Label**.
+- **Significance marks and the caption**: stars on the metric summary vs the reference sample, and the drafted **Figure Legend Text** for everything that belongs under the figure rather than on it.
 
 **Error Bars / Shadow** — Display variability as error bars (T-shaped or lines) or as a shaded ribbon around each line. Choose between SD, SEM, or 95% CI. If you only have one replicate per sample per time point, error bars will simply not appear (there's no variability to show).
 

@@ -289,5 +289,47 @@ testServer(app, {
   check("several boxes at once", identical(quick_edit_selection(), smp[3]))
 })
 
+cat("\n--- v2.22.1: Help tab (the docs/ guides rendered in the app) ---\n")
+tabs <- sub('data-value="(.*)"', "\\1", regmatches(ui_html, gregexpr('data-value="[^"]+"', ui_html))[[1]])
+check("the Help tab is the last main tab, after Curve fitting",
+      "Help" %in% tabs && match("Help", tabs) > match("Curve fitting", tabs))
+check("it opens with the labelling summary", grepl("How to label a figure", ui_html, fixed = TRUE) &&
+      grepl("Sample names", ui_html, fixed = TRUE) && grepl("Panel letters", ui_html, fixed = TRUE))
+check("the guides are a server output, so no document text sits in the static page",
+      grepl('id="help_guides"', ui_html, fixed = TRUE) && !grepl("kc-help-doc", ui_html, fixed = TRUE))
+hh <- gsub("[ \t\r\n]+", " ", htmltools::renderTags(env$help_guides_ui())$html)
+testServer(app, {
+  session$setInputs(main_tabs = "Help")
+  check("output help_guides renders the same sections", identical(gsub("[ \t\r\n]+", " ", output$help_guides$html), hh))
+})
+check("the labelling tutorial is rendered from docs/LABELLING_HOWTO.md and open by default",
+      grepl('<details class="kc-help-doc" id="help_LABELLING_HOWTO" open>', hh, fixed = TRUE) &&
+      grepl("ten-minute walkthrough", hh, fixed = TRUE) && grepl("Common mistakes", hh, fixed = TRUE))
+check("the user guide, figure standards, metrics reference, README and changelog are sections too (closed)",
+      all(vapply(c("help_USER_GUIDE", "help_FIGURE_STANDARDS", "help_METRICS_REFERENCE", "help_README", "help_CHANGELOG"),
+                 function(id) grepl(paste0('<details class="kc-help-doc" id="', id, '">'), hh, fixed = TRUE), logical(1))))
+check("tables of the tutorial are rendered as HTML tables (commonmark GitHub extension)",
+      !requireNamespace("commonmark", quietly = TRUE) || grepl("<th>Symptom</th>", hh, fixed = TRUE))
+check("images under docs/ are served from the kc_docs resource path",
+      grepl('src="kc_docs/gallery/main.png"', hh, fixed = TRUE) && !grepl('src="gallery/', hh, fixed = TRUE))
+check("a link from one guide to another jumps to that guide's section; the README link too",
+      grepl('href="#help_USER_GUIDE"', hh, fixed = TRUE) && grepl('href="#help_README"', hh, fixed = TRUE) &&
+      !grepl('href="kc_docs/USER_GUIDE.md"', hh, fixed = TRUE))
+check("the guide's own h1 is dropped (the section summary carries the title)",
+      !grepl("<h1>How to label a figure</h1>", hh, fixed = TRUE))
+check("a missing guide is skipped, not an error", !grepl("Could not read", hh, fixed = TRUE))
+old_opt <- options(killcurve.docs_dir = tempfile("nodocs_")); hh_none <- htmltools::renderTags(env$help_guides_ui())$html; options(old_opt)
+check("without a docs/ folder the tab says so instead of failing", grepl("was not found next to the app", hh_none, fixed = TRUE))
+old_opt <- options(killcurve.docs_dir = "/tmp/x"); dd_opt <- env$docs_dir_path(); options(old_opt)
+check("docs_dir_path(): the option wins, else docs/ under the working directory",
+      identical(dd_opt, "/tmp/x") && identical(env$docs_dir_path(), file.path(getwd(), "docs")))
+tmpd <- tempfile("help_"); dir.create(file.path(tmpd, "docs"), recursive = TRUE)
+writeLines(c("# T", "", "See [the guide](USER_GUIDE.md#x) and ![i](gallery/p.png).", "", "| a | b |", "|---|---|", "| 1 | 2 |"),
+           file.path(tmpd, "docs", "LABELLING_HOWTO.md"))
+h <- env$render_help_doc(file.path(tmpd, "docs", "LABELLING_HOWTO.md"), list("USER_GUIDE.md" = "help_USER_GUIDE"), "docs")
+check("render_help_doc: anchors (with a fragment) rewritten, images prefixed, h1 dropped",
+      grepl('href="#help_USER_GUIDE"', h, fixed = TRUE) && grepl('src="kc_docs/gallery/p.png"', h, fixed = TRUE) &&
+      !grepl("<h1>", h, fixed = TRUE))
+
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (fail > 0) quit(status = 1)

@@ -303,7 +303,7 @@ has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: search
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.22.0"
+APP_VERSION <- "2.22.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -7127,6 +7127,124 @@ pdf_report_ui <- if (has_gridExtra) {
     "Install 'gridExtra' to enable the PDF report.")
 }
 
+# ── v2.22.1: Help tab — the how-to guides from docs/ rendered inside the app ──────────────────────
+# The guides are read from the repository's docs/ folder when a session first opens the Help tab (so the tab never
+# goes stale and the static page carries no document text), turned into HTML with commonmark (GitHub tables on; a
+# <pre> of the text when commonmark is missing) and shown as one collapsible section each. Images under docs/ are served from the kc_docs resource path, and a link from one guide
+# to another becomes a jump to that guide's section. The folder: option killcurve.docs_dir (tests), else APP_DIR,
+# else docs/ in the working directory, as for themes/.
+docs_dir_path <- function() {
+  o <- getOption("killcurve.docs_dir")
+  if (is.character(o) && length(o) == 1 && nzchar(o)) return(o)
+  ad <- if (exists("APP_DIR", inherits = TRUE)) get("APP_DIR", inherits = TRUE) else NULL
+  file.path(if (is.character(ad) && length(ad) == 1 && nzchar(ad)) ad else getwd(), "docs")
+}
+# The guides, in the order shown; file paths are relative to the repository root. A file that is missing is skipped.
+HELP_GUIDES <- list(
+  list(file = "docs/LABELLING_HOWTO.md",           title = "How to label a figure (tutorial)", open = TRUE),
+  list(file = "docs/USER_GUIDE.md",                title = "User guide: a whole session, from data to reports"),
+  list(file = "docs/FIGURE_STANDARDS.md",          title = "Journal figure standards and the Inkscape workflow"),
+  list(file = "docs/STYLING_AND_MARKUP.md",        title = "Figure styling and text markup"),
+  list(file = "docs/DATA_TAB_AND_TRANSFORMS.md",   title = "Data tab, exclusions, blanks and transforms"),
+  list(file = "docs/STATISTICS_AND_FITTING_UI.md", title = "Statistics and curve fitting in the app"),
+  list(file = "docs/METRICS_REFERENCE.md",         title = "Metrics reference (formulas and sources)"),
+  list(file = "docs/STATISTICS_REFERENCE.md",      title = "Statistics reference"),
+  list(file = "docs/FITS_AND_EXTRACTION.md",       title = "Growth-model fits, phenotype matrix and extraction"),
+  list(file = "docs/PHASES_AND_BOOTSTRAP.md",      title = "Curve phases, bootstrap intervals and curve differences"),
+  list(file = "docs/COMPARE_PRESETS_EXPORTS.md",   title = "Compare, presets, themes, notes and batch export"),
+  list(file = "docs/PORTED_FROM_LYSIS_CURVE_APP.md", title = "Ported from the Lysis Curve App (engine and CSV reader)"),
+  list(file = "README.md",                         title = "README: installation and the full control list"),
+  list(file = "CHANGELOG.md",                      title = "Changelog")
+)
+help_anchor <- function(file) paste0("help_", gsub("[^A-Za-z0-9]+", "_", sub("\\.md$", "", basename(file))))
+
+# One guide as HTML. `anchors` maps a link target as written in that file (e.g. "USER_GUIDE.md", "../README.md" or,
+# for a root-level file, "docs/USER_GUIDE.md") to the section id it should jump to. `base` is "docs" or "root".
+render_help_doc <- function(path, anchors = list(), base = "docs") {
+  txt  <- paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+  html <- if (requireNamespace("commonmark", quietly = TRUE))
+    commonmark::markdown_html(txt, extensions = TRUE, smart = FALSE)
+  else paste0("<pre style='white-space:pre-wrap;'>", htmltools::htmlEscape(txt), "</pre>")
+  html <- sub("^\\s*<h1>.*?</h1>", "", html, perl = TRUE)   # the section's summary carries the title
+  for (target in names(anchors))
+    html <- gsub(paste0('href="', gsub("([.?*+^$()\\[\\]{}|\\\\])", "\\\\\\1", target, perl = TRUE), '(#[^"]*)?"'),
+                 paste0('href="#', anchors[[target]], '"'), html, perl = TRUE)
+  if (identical(base, "docs"))
+    html <- gsub('(src|href)="(?!(?:https?:|#|mailto:|kc_docs/))', '\\1="kc_docs/', html, perl = TRUE)
+  else
+    html <- gsub('(src|href)="docs/', '\\1="kc_docs/', html, perl = TRUE)
+  html
+}
+
+# The guide sections (server output help_guides, rendered when the Help tab is first shown, so the document text
+# is not part of the static page). The static tab holds the labelling summary and the placeholder.
+help_guides_ui <- function() {
+  docs_dir <- docs_dir_path(); root <- dirname(docs_dir)
+  guides <- Filter(function(g) file.exists(file.path(root, g$file)), HELP_GUIDES)
+  if (!length(guides))
+    return(p(style = "color:#999;", "The guides live in the docs/ folder of the repository, which was not found next to the app."))
+  if (dir.exists(docs_dir)) shiny::addResourcePath("kc_docs", docs_dir)
+  ids <- vapply(guides, function(g) help_anchor(g$file), "")
+  from_docs <- setNames(as.list(ids), vapply(guides, function(g)
+    if (startsWith(g$file, "docs/")) sub("^docs/", "", g$file) else paste0("../", g$file), ""))
+  from_root <- setNames(as.list(ids), vapply(guides, function(g) g$file, ""))
+  sections <- lapply(guides, function(g) {
+    base <- if (startsWith(g$file, "docs/")) "docs" else "root"
+    body <- tryCatch(render_help_doc(file.path(root, g$file), if (base == "docs") from_docs else from_root, base),
+                     error = function(e) paste0("<p><em>Could not read ", htmltools::htmlEscape(g$file), ": ",
+                                                htmltools::htmlEscape(conditionMessage(e)), "</em></p>"))
+    tags$details(class = "kc-help-doc", id = help_anchor(g$file), open = if (isTRUE(g$open)) NA else NULL,
+                 tags$summary(g$title, tags$span(class = "kc-help-file", g$file)),
+                 div(class = "kc-help-body", HTML(body)))
+  })
+  tagList(sections)
+}
+
+build_help_tab <- function() {
+  tabPanel("Help", br(),
+    div(class = "kc-help",
+      tags$style(HTML(
+        ".kc-help { max-width: 1000px; }
+         .kc-help summary { cursor:pointer; font-weight:bold; font-size:1.05em; padding:6px 0; }
+         .kc-help-file { color:#999; font-weight:normal; font-size:.8em; margin-left:8px; }
+         .kc-help-body { padding:4px 14px 12px; border-left:2px solid #e9ecef; margin-bottom:10px; }
+         .kc-help-body img { max-width:100%; height:auto; border:1px solid #dee2e6; margin:6px 0; }
+         .kc-help-body table { border-collapse:collapse; font-size:.9em; margin:8px 0; }
+         .kc-help-body th, .kc-help-body td { border:1px solid #dee2e6; padding:4px 8px; vertical-align:top; }
+         .kc-help-body th { background:#f1f3f5; }
+         .kc-help-body code { background:#f1f3f5; padding:1px 4px; border-radius:3px; }
+         .kc-help-body h2 { border-bottom:1px solid #dee2e6; padding-bottom:3px; margin-top:22px; }")),
+      h4("How to label a figure"),
+      p("Every label on a figure has one place to set it. In short:"),
+      tags$ul(
+        tags$li(strong("Sample names"), " (legend entries, tables, reports): the ", strong("name"),
+                " box in the Quick edit strip under the figure, or click the legend entry on the figure. ",
+                "Name MOI samples like ", code("Phage MOI 10"), " so the dose-response can read the MOI."),
+        tags$li(strong("Axis titles:"), " ", strong("X-axis label"), " and ", strong("Y-axis label"),
+                " in the strip, or click the axis title. The unit word in the x label (", code("min"), ", ", code("h"),
+                ") sets the time unit of every metric label; ", code("A550"), " and ", code("OD600"),
+                " are typeset as subscripts."),
+        tags$li(strong("Legend:"), " ", strong("Legend position"), " in the strip (inside corners, the automatic corner, ",
+                "outside, or ", strong("None"), " with ", strong("Show End-of-Line Labels"), " under Label Options)."),
+        tags$li(strong("Panel letters:"), " ", strong("Panel label"), " under Figure Layout or in the Journal Figure Preset; ",
+                "the Analysis figures tab and the Compose figure tab have their own."),
+        tags$li(strong("Events and thresholds:"), " a labelled marker under Time Point Markers, and the threshold line's ",
+                strong("Label"), "."),
+        tags$li(strong("Significance marks and the caption:"), " stars on the metric summary vs the reference sample, ",
+                "and the drafted ", strong("Figure Legend Text"), " for everything that belongs under the figure rather than on it.")),
+      p("The full tutorial, with a ten-minute walkthrough on the demo data, a checklist and the common mistakes, is the ",
+        "first guide below. Click a guide to open it; links between guides jump to the other guide's section."),
+      h4("Guides"),
+      uiOutput("help_guides"),
+      tags$script(HTML(
+        "jQuery(document).on('click', '.kc-help a[href^=\"#help_\"]', function() {
+           var el = document.getElementById(this.getAttribute('href').slice(1));
+           if (!el) return true;
+           el.open = true; el.scrollIntoView({behavior: 'smooth', block: 'start'}); return false;
+         });"))))
+}
+help_tab_ui <- build_help_tab()
+
 # v2.21: the quick-edit strip under the main figure. The rows (name, colour, show) are rendered by the server for
 # every loaded sample (output quick_edit_rows); the axis labels and the legend position live here (same input ids as
 # before, moved out of the sidebar so one edit and one look at the figure is all it takes).
@@ -8988,7 +9106,9 @@ ui <- fluidPage(
           div(style = "overflow-x:auto;", tableOutput("cmp_test_table")),
           h5("Parameters of the separate-curves model"),
           div(style = "overflow-x:auto;", tableOutput("cmp_params_table")),
-          downloadButton("downloadCompareFitsCSV", "Compare fits (CSV)"))
+          downloadButton("downloadCompareFitsCSV", "Compare fits (CSV)")),
+        # ── Help (v2.22.1): the how-to guides from docs/ ────────────────────────
+        help_tab_ui
       )
     )
   )
@@ -12839,6 +12959,9 @@ server <- function(input, output, session) {
   output$downloadAnalysisStatsCSV_tab <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
   
   # ── Dashboard (v2.11) ───────────────────────────────────────────────────────
+  # ── Help (v2.22.1): the guides are rendered once, when the tab is first shown ──
+  output$help_guides <- renderUI(help_guides_ui())
+
   output$dash_cards <- renderUI({
     if (is.null(rv$data) || is.null(input$selected_samples))
       return(div(class = "dash-empty", "Load a CSV or the demo data to populate the dashboard."))
