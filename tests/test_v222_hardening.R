@@ -348,5 +348,173 @@ check("S2: no 'Duplicated override.aes' warning on the main figure", !any(grepl(
 check("S2: no 'No shared levels' scale_fill_manual warning on the main figure or the dashboard figures", !any(grepl("shared levels", W2)))
 if (length(W2)) cat("   remaining warnings:", unique(W2), sep = "\n   ")
 
+# ── ingest hardening (round 1) ──────────────────────────────────────────────────────────────────────────────
+# One check per fixed case of the ingest break report (ids as in that report; files in tests/fixtures/ingest/).
+# drive() runs the REAL file observer (input$file) in testServer and returns what the loader detected plus the
+# notifications it showed; a refused file leaves rv$data NULL (or as it was).
+fx <- function(f) file.path("tests/fixtures/ingest", f)
+drive <- function(f, name = basename(f), want_plot = TRUE) {
+  path <- if (file.exists(f)) f else fx(f)
+  res <- new.env(); res$notes <- character(0); res$ok <- FALSE; res$err <- NULL
+  old_sn <- env$showNotification
+  env$showNotification <- function(ui, ..., type = "default") { res$notes <- c(res$notes, as.character(ui)); invisible(NULL) }
+  on.exit(env$showNotification <- old_sn)
+  tryCatch(testServer(app, {
+    session$setInputs(file = list(name = name, datapath = path, size = file.size(path), type = ""))
+    res$loaded <- !is.null(rv$data)
+    if (isTRUE(res$loaded)) {
+      res$time_col <- rv$time_col; res$long <- rv$is_long_format; res$blocks <- rv$n_blocks %||% 1L
+      res$samples <- rv$od_vars; res$tp <- rv$all_timepoints; res$dim <- dim(rv$data); res$dropped <- rv$dropped_cols
+      res$group <- rv$group_col; res$source <- rv$data_source
+      if (want_plot && length(rv$od_vars)) {
+        session$setInputs(selected_samples = rv$od_vars)
+        pd <- tryCatch(as.data.frame(prepare_plot_data()), error = function(e) NULL)
+        res$pd <- pd
+      }
+    }
+    res$ok <- TRUE
+  }), error = function(e) res$err <- conditionMessage(e))
+  as.list(res)
+}
+`%||%` <- function(a, b) if (is.null(a)) b else a
+refused <- function(r, pat = NULL) isTRUE(r$ok) && !isTRUE(r$loaded) && any(grepl("The file was not loaded", r$notes)) &&
+  (is.null(pat) || any(grepl(pat, r$notes)))
+wt_ok <- function(r, samples = c("WT", "MutA", "Ctrl")) isTRUE(r$loaded) && setequal(r$samples, samples) && identical(r$time_col, "Time")
+n_tp <- function(r) length(r$tp)
+
+cat("\n--- I1 (P0): the CSV branch never kills the session ---\n")
+r <- drive("Z01_empty_file.csv");        check("I1: Z01 an empty file is refused with a message (session alive)", refused(r, "empty"))
+r <- drive("Z07_binary_csv.csv");        check("I1: Z07 a binary file is refused with a message", refused(r, "Could not read"))
+r <- drive("Z08_binary_with_nuls.csv");  check("I1: Z08 a binary file with NUL bytes is refused with a message", refused(r, "Could not read"))
+r <- drive("Z01_empty_file.csv"); check("I1: the message has the 'Could not read <file>: ...' wording", any(grepl("^Could not read 'Z01_empty_file.csv': ", r$notes)))
+
+cat("\n--- I2: UTF-16 and cp1252 files LOAD ---\n")
+r <- drive("A04_utf16le_bom.csv");       check("I2: A04 UTF-16LE with BOM (Excel 'Unicode Text') loads", wt_ok(r) && n_tp(r) == 37 || (isTRUE(r$loaded) && length(r$samples) >= 3))
+r <- drive("A05_utf16le_tab.txt");       check("I2: A05 UTF-16LE tab-separated text loads with its samples", isTRUE(r$loaded) && length(r$samples) >= 3 && !any(grepl("^X", r$samples)))
+r <- drive("B05_spectramax_utf16_tab.txt"); check("I2: B05 SoftMax Pro UTF-16 export (preamble + tab table) loads", isTRUE(r$loaded) && length(r$samples) >= 3)
+r <- drive("A06_latin1_deg.csv");        check("I2: A06 a Latin-1 degree sign loads (temperature column not a sample)", isTRUE(r$loaded) && !any(grepl("600", r$samples)))
+u16 <- env$ensure_utf8_file(fx("A04_utf16le_bom.csv"))
+check("I2: ensure_utf8_file re-encodes UTF-16 to a valid UTF-8 copy (no BOM, no NUL)",
+      u16 != fx("A04_utf16le_bom.csv") && { b <- readBin(u16, "raw", file.size(u16)); !any(b == as.raw(0)) && validUTF8(rawToChar(b)) && b[1] != as.raw(0xEF) })
+check("I2: ensure_utf8_file stops cleanly (a message, not an invalid-string error) for binary input",
+      inherits(tryCatch(env$ensure_utf8_file(fx("Z07_binary_csv.csv")), error = function(e) e), "error") &&
+      grepl("binary", conditionMessage(tryCatch(env$ensure_utf8_file(fx("Z08_binary_with_nuls.csv")), error = function(e) e))))
+check("I2: detect_csv_locale does not error on invalid UTF-8 text",
+      env$detect_csv_locale(w(as.raw(c(0x54, 0xB0, 0x3b, 0x41, 0x0a)))) == "eu")
+
+cat("\n--- I3: long format: wells as samples, never zero value columns ---\n")
+r <- drive("L07_time_well_od.csv");      check("I3: L07 (Time, Well, OD) loads, wells are the samples", isTRUE(r$loaded) && isTRUE(r$long) && identical(r$group, "Well") && length(r$samples) >= 2 && !"OD" %in% r$samples)
+r <- drive("L03_time_well_value_plate.csv"); check("I3: L03 (Time, Well, Value, Plate): group is Well (9 wells), not Plate",
+      isTRUE(r$loaded) && identical(r$group, "Well") && setequal(r$samples, c("A1","A2","A3","B1","B2","B3","C1","C2","C3")))
+check("I3: detect_od_columns with no candidate column returns an empty vector, not an error",
+      { out <- NULL; testServer(app, { out <<- tryCatch(detect_od_columns(data.frame(Time = 1:3, G = c("a", "b", "c")), c("Time", "G")), error = function(e) e) }); is.character(out) && length(out) == 0 })
+
+cat("\n--- I4 (P1): unreadable time column: read it, or refuse ---\n")
+r <- drive("F04_min_text.csv");          check("I4: F04 '30 min' text is read as minutes (not 0 time points)", wt_ok(r) && n_tp(r) > 30 && max(r$tp) > 100)
+r <- drive("F05_h_text.csv");            check("I4: F05 '0.5 h' text is read (hours converted to minutes)", wt_ok(r) && n_tp(r) > 30 && near(r$tp[2], 10, 1e-6))
+r <- drive("F13_datetime_dmy_dots.csv"); check("I4: F13 '13.01.2024 10:30:15' (dotted d.m.Y) is read", wt_ok(r) && n_tp(r) > 30 && near(r$tp[1], 0))
+r <- drive("F27_time_dotnet_days.csv");  check("I4: F27 .NET 'd.hh:mm:ss' is read (1.02:00:00 = 1560 min)", isTRUE(r$loaded) && n_tp(r) >= 2 && 1560 %in% r$tp && 2880 %in% r$tp)
+r <- drive("Z02_whitespace_only.csv");   check("I4: Z02 whitespace-only file is refused with a message", refused(r))
+r <- drive("Z14_all_text_no_numbers.csv"); check("I4: Z14 a file of text only is refused: no readable time value", refused(r, "Could not read any time value from column"))
+r <- drive("Z17_zero_rows_blank_only_data.csv"); check("I4: Z17 header + blank rows only is refused with a message", refused(r))
+r <- drive("B06_tecan_wellrows.csv");    check("I4: B06 Tecan wells-in-rows layout is refused, not loaded as 40 'samples'", refused(r) || (isTRUE(r$loaded) && length(r$samples) < 20))
+r <- drive("B07_clariostar_wellrows.csv"); check("I4: B07 CLARIOstar wells-in-rows layout is refused, not loaded as time points", refused(r) || (isTRUE(r$loaded) && length(r$samples) < 20))
+check("I4: the time refusal names the column (Could not read any time value from column 'Time')",
+      { tt <- tempfile(fileext = ".csv"); writeLines(c("Time,WT", "abc,1", "def,2", "ghi,3"), tt)
+        rr <- drive(tt, "bad_time.csv"); refused(rr, "Could not read any time value from column 'Time'") })
+
+cat("\n--- I5 (P1): rows without a readable time are dropped; blocks survive repeated header lines ---\n")
+r <- drive("H03_blocks_repeated_headers.csv"); check("I5: H03 repeated header rows between blocks: 3 blocks, 3 samples", isTRUE(r$loaded) && r$blocks == 3 && length(r$samples) == 3)
+r <- drive("H04_blocks_title_rows.csv");   check("I5: H04 title rows between blocks: 3 blocks", isTRUE(r$loaded) && r$blocks == 3)
+check("I5: after the load the time column of H03 is numeric and finite (the header lines were dropped)",
+      { out <- NULL; testServer(app, {
+          session$setInputs(file = list(name = "H03.csv", datapath = fx("H03_blocks_repeated_headers.csv"), size = 1, type = ""))
+          out <<- rv$data[[rv$time_col]] }); is.numeric(out) && all(is.finite(out)) })
+
+cat("\n--- I6 (P2): AM/PM, time of day, Excel midnight cells ---\n")
+r <- drive("F14_datetime_ampm.csv");     check("I6: F14 '01/01/2024 10:30 AM' / PM: one block, 0..360 min", wt_ok(r) && r$blocks == 1 && near(max(r$tp), max(r$tp)) && near(min(r$tp), 0) && max(r$tp) < 1000)
+pm <- env$parse_time_column(c("01/01/2024 11:50 AM", "01/01/2024 12:00 PM", "01/01/2024 12:10 PM", "01/01/2024 1:00 PM"))
+check("I6: 12 PM is noon, 12 AM midnight: 11:50 AM -> 12:00 PM -> 1:00 PM = 0, 10, 20, 70 min", identical(round(pm$values), c(0, 10, 20, 70)))
+r <- drive("F16_clock_timeofday.csv");   check("I6: F16 time of day 21:00 -> 03:00 next day: elapsed 0..360, one block", wt_ok(r) && r$blocks == 1 && near(max(r$tp), 360) && near(min(r$tp), 0))
+r <- drive("F17_clock_timeofday_nocross.csv"); check("I6: F17 time of day 09:00..15:00 is elapsed 0..360 (not 540..900)", wt_ok(r) && near(min(r$tp), 0) && near(max(r$tp), 360))
+check("I6: a clock that starts at 0:00:00 (Gen5 elapsed) is left as it was (no re-zero, no midnight unwrap)",
+      identical(env$parse_time_column(c("0:00:00", "10:00:00", "20:00:00", "1:00:00", "11:00:00"))$values, c(0, 600, 1200, 60, 660)))
+r <- drive("X09_time_hms_cells.xlsx");   check("I6: X09 Excel h:mm:ss cells starting at exactly 0:00:00 keep their first row (t = 0 present)", isTRUE(r$loaded) && 0 %in% r$tp && n_tp(r) == 25)
+r <- drive("X12_time_datetime_midnight.xlsx"); check("I6: X12 Excel datetime cells starting at midnight keep their first row", isTRUE(r$loaded) && 0 %in% r$tp && n_tp(r) == 25)
+check("I6: parse_time_column converts POSIXct numerically (midnight kept)",
+      identical(env$parse_time_column(as.POSIXct(c("2024-01-01 00:00:00", "2024-01-01 00:10:00"), tz = "UTC"))$values, c(0, 10)))
+
+cat("\n--- I7 (P2): quoted thousands / decimal commas ---\n")
+r <- drive("F30_time_thousands_quoted.csv"); check("I7: F30 time '1,200' (quoted) is 1200, header kept, 3 samples", wt_ok(r) && 1200 %in% r$tp && n_tp(r) == 25)
+r <- drive("A14_comma_quoted_dec.csv");  check("I7: A14 quoted decimal commas \"0,0919\" give 3 samples", wt_ok(r) && !is.null(r$pd) && nrow(r$pd) == 75)
+r <- drive("A15_thousands_us.csv");      check("I7: A15 \"12,345.6\" thousands (US) give 3 samples", wt_ok(r) && !is.null(r$pd) && max(r$pd$mean_value, na.rm = TRUE) > 10000)
+r <- drive("A16_thousands_eu.csv");      check("I7: A16 1.234,5 (EU, ';') gives 3 samples", wt_ok(r) && !is.null(r$pd) && nrow(r$pd) == 75)
+nf <- env$numeric_from_text
+check("I7: numeric_from_text: both separators decide ('1.234,5' EU, '12,345.6' US)", near(nf("1.234,5"), 1234.5) && near(nf("12,345.6"), 12345.6))
+check("I7: numeric_from_text: '0,0919' is a decimal comma; a lone '1,200' is thousands; '1,234,567' is grouped",
+      near(nf("0,0919"), 0.0919) && near(nf("1,200"), 1200) && near(nf("1,234,567"), 1234567))
+check("I7: numeric_from_text leaves text and contradicting columns alone", all(is.na(nf(c("abc", "OVER")))) && is.na(nf(c("1,234,567", "0,5"))[1]))
+check("I7: csv_line_field_counts is quote-aware (a quoted comma is not a separator)",
+      identical(env$csv_line_field_counts(w("\"Time\",\"WT\"\n\"1,200\",\"0.5\"\n"), ",")$fc, c(2L, 2L)))
+
+cat("\n--- I8 (P2): preambles padded to the table width, Excel title / metadata blocks, empty first sheet ---\n")
+r <- drive("B02_gen5_pre_pad.csv");      check("I8: B02 Gen5 preamble padded with commas: time column 'Time', 6 samples (T° 600 is not one)", isTRUE(r$loaded) && identical(r$time_col, "Time") && length(r$samples) == 6 && !any(grepl("^T", r$samples)) && n_tp(r) > 30)
+r <- drive("B08_preamble_wide_same_width.csv"); check("I8: B08 30-line preamble as wide as the table: time column 'Time', 6 samples", isTRUE(r$loaded) && identical(r$time_col, "Time") && length(r$samples) == 6)
+r <- drive("B10_title_comma_pad.csv");   check("I8: B10 title line padded with commas above the header: time column 'Time', 6 samples", isTRUE(r$loaded) && identical(r$time_col, "Time") && length(r$samples) == 6)
+r <- drive("X05_merged_title_header.xlsx"); check("I8: X05 Excel merged title above the header: time column 'Time', WT / MutA / Ctrl", wt_ok(r))
+r <- drive("X06_gen5_meta_block.xlsx");  check("I8: X06 Excel Gen5 metadata block above the table: time column 'Time', WT / MutA / Ctrl", wt_ok(r))
+r <- drive("X14_two_row_header_merged.xlsx"); check("I8: X14 two-row Excel header (names above, 'Time' + R1/R2/R3 below): WT / MutA / Ctrl", wt_ok(r))
+r <- drive("X07_chart_sheet_first_empty.xlsx"); check("I8: X07 an empty first sheet is skipped: the first sheet with data loads and the user is told", wt_ok(r) && any(grepl("no data; loaded sheet", r$notes)))
+r <- drive("X23_xlsx_with_chart_image.xlsx"); check("I8: X23 workbook whose first sheet holds a chart image: the data sheet loads", wt_ok(r))
+check("I8: csv_preamble_skip finds the header under a comma-padded preamble (B02: 18 lines)", env$csv_preamble_skip(fx("B02_gen5_pre_pad.csv"), ",") > 10)
+check("I8: an ordinary file still takes skip 0", env$csv_preamble_skip(fx("A14_comma_quoted_dec.csv"), ",") == 0L && env$csv_preamble_skip(fx("F04_min_text.csv"), ",") == 0L)
+
+cat("\n--- I9 (P2): index / cycle / temperature columns, unnamed time column, plate label column ---\n")
+r <- drive("E10_index_col_writecsv.csv"); check("I9: E10 write.csv row-index column (named \"\") is not a sample", wt_ok(r))
+r <- drive("E11_rownames_time_unnamed_first.csv"); check("I9: E11 unnamed first column is the time column and is called 'Time'", wt_ok(r) && n_tp(r) > 20)
+r <- drive("D13_cycle_then_time.csv");   check("I9: D13 a Cycle 1..N column before Time is not a sample (and is listed under 'not used')", wt_ok(r) && any(grepl("Cycle", r$dropped$name)))
+r <- drive("C_temp_T600.csv");           check("I9: T600 with temperature values (37) is not a sample", wt_ok(r))
+check("I9: an OD600 column called T600 (values < 5) stays a sample",
+      { ws <- env$wide_sample_columns(data.frame(Time = c(0, 10, 20), T600 = c(.05, .2, .5), WT = c(.1, .2, .3)), "Time"); identical(ws$used, c("T600", "WT")) })
+check("I9: a text 'Cycle' counter with repeats per block is still a counter; numeric 'Read' sample values are not",
+      env$is_counter_column(c(1, 2, 3, 1, 2, 3), "Cycle") && !env$is_counter_column(c(0.1, 0.4, 0.9), "Read") && !env$is_counter_column(c(1, 2, 3), "WT"))
+r <- drive("H11_blocks_small_with_plate_col.csv"); check("I9: H11 two samples + a 'Plate' label per block is a WIDE file with 2 blocks", isTRUE(r$loaded) && !isTRUE(r$long) && r$blocks == 2 && setequal(r$samples, c("WT", "Mut")))
+
+cat("\n--- I10: degenerate files get a clear refusal ---\n")
+r <- drive("Z03_header_only.csv");       check("I10: Z03 header only: 'No data rows' refusal", refused(r, "No data rows"))
+r <- drive("Z05_single_column.csv");     check("I10: Z05 one column: 'only one column' refusal", refused(r, "only one column"))
+r <- drive("Z09_all_OVER.csv");          check("I10: Z09 every reading OVER: the message says so", refused(r, "OVER / saturated"))
+
+cat("\n--- I11: the user's real file loads identically (U01) ---\n")
+r <- drive("U01_user_file.csv")
+check("U01: three samples (MG1655 / MG1655 + WT / MG1655 + N4 r), time column 'Time', wide, 3 stacked blocks, 37 time points",
+      isTRUE(r$loaded) && identical(r$time_col, "Time") && !isTRUE(r$long) && r$blocks == 3 && n_tp(r) == 37 &&
+      setequal(r$samples, c("MG1655", "MG1655 + WT", "MG1655 + N4 r")))
+check("U01: 79 plot rows (the three samples x their time points) and no refusal or read-error notification",
+      !is.null(r$pd) && nrow(r$pd) == 111 - 32 && !any(grepl("not loaded|Could not read", r$notes)))
+
+cat("\n--- I12: Compare path = main path ---\n")
+chk_cmp <- function(f) { out <- NULL
+  testServer(app, { out <<- tryCatch(ingest_frame(compare_read_file(fx(f), f), f), error = function(e) e) }); out }
+cx <- chk_cmp("X01_simple.xlsx")
+check("I12: an xlsx with duplicate replicate headers pools them in Compare (3 samples, not one per column)", !inherits(cx, "error") && length(cx$od_vars) == 3 && max(lengths(cx$col_map)) >= 2)
+cx <- chk_cmp("X07_chart_sheet_first_empty.xlsx")
+check("I12: Compare skips an empty first sheet too", !inherits(cx, "error") && setequal(cx$od_vars, c("WT", "MutA", "Ctrl")))
+check("I12: Compare refuses an unreadable file with the ingest message", inherits(chk_cmp("Z14_all_text_no_numbers.csv"), "ingest_refused") || inherits(chk_cmp("Z14_all_text_no_numbers.csv"), "error"))
+check("I12: ingest_frame knows strain / Strain as a group column (LONG_GROUP_NAMES)",
+      { out <- NULL; testServer(app, { out <<- ingest_frame(data.frame(Time = rep(c(0, 10, 20), each = 2), Strain = rep(c("A", "B"), 3), Treat = rep("x", 6), OD = c(.1, .2, .15, .3, .2, .5)), "s")$group_col }); identical(out, "Strain") })
+
+cat("\n--- I13 (P3): upload cap and rolling_slope ---\n")
+check("I13: shiny.maxRequestSize is at least 50 MB once the app is loaded (default 5 MB)", getOption("shiny.maxRequestSize", 0) >= 50 * 1024^2)
+set.seed(11)
+rs_lm <- function(t, y, win) { n <- length(t); out <- rep(NA_real_, n); if (win > n || win < 2) return(out); off <- floor((win - 1) / 2)
+  for (s in seq_len(n - win + 1)) { idx <- s:(s + win - 1); ok <- is.finite(t[idx]) & is.finite(y[idx])
+    out[s + off] <- if (sum(ok) < 2) NA_real_ else if (diff(range(t[idx][ok])) == 0) 0 else unname(coef(lm(y[idx][ok] ~ t[idx][ok]))[2]) }; out }
+tt <- cumsum(runif(80, 5, 15)); yy <- log(0.05 + 1 / (1 + exp(-(tt - 400) / 60))) + rnorm(80, 0, .02); yy[c(7, 8, 9, 10, 11, 30)] <- NA
+check("I13: rolling_slope (closed form) equals the lm() version to 1e-10 (windows 3, 5, 8; with NA readings)",
+      all(vapply(c(3, 5, 8), function(wn) isTRUE(all.equal(env$rolling_slope(tt, yy, wn), rs_lm(tt, yy, wn), tolerance = 1e-10)), logical(1))))
+check("I13: rolling_slope keeps its flat-window / short-input behaviour",
+      identical(env$rolling_slope(1:5, rep(2, 5), 3), c(NA, 0, 0, 0, NA)) && all(is.na(env$rolling_slope(1:2, c(1, 2), 5))))
+
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (fail > 0) quit(status = 1)

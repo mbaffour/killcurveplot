@@ -150,7 +150,8 @@ testServer(app, {
   fl <- data.frame(Minutes = c(0, 5, 10, 15), Cycle = c(1, 2, 3, 4), A = c(.1, .2, .3, .4), B = c(.1, .1, .2, .2))
   ingest_data(fl, "cycles.csv")
   src0 <- rv$data_loaded
-  check("auto-detected time column is the first monotone numeric one", identical(rv$time_col, "Minutes") && identical(rv$od_vars, c("Cycle", "A", "B")))
+  # (ingest round 1: a Cycle 1..N counter next to the time column is not a sample any more; it is listed under "not used")
+  check("auto-detected time column is the first monotone numeric one", identical(rv$time_col, "Minutes") && identical(rv$od_vars, c("A", "B")) && "Cycle" %in% rv$dropped_cols$name)
   session$setInputs(time_col_choice = "Minutes")
   check("choosing the already-chosen column changes nothing", identical(rv$time_col, "Minutes"))
   session$setInputs(time_col_choice = "Cycle")

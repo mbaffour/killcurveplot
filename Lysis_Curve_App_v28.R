@@ -416,7 +416,7 @@ rgb_to_hex <- function(r, g, b, a = 1) {
 detect_csv_locale <- function(path) {
   first_line <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
   if (length(first_line) == 0) return("us")
-  if (grepl(";", first_line, fixed = TRUE)) "eu" else "us"
+  if (isTRUE(tryCatch(grepl(";", first_line, fixed = TRUE, useBytes = TRUE), error = function(e) FALSE))) "eu" else "us"
 }
 
 # Ingest hardening (ported from the companion app's read_csv_smart(),
@@ -424,18 +424,37 @@ detect_csv_locale <- function(path) {
 # detect_replicate_column(); see docs/PORTED_FROM_LYSIS_CURVE_APP.md).
 
 # Hardening round 1 (finding 1): a plate-reader export is often cp1252 / Latin-1 ("T<degree> 600" is byte 0xB0), which
-# is invalid UTF-8; strsplit() then errors and a ";" file collapses to one column. Returns a path to a UTF-8 copy
-# (a temp file, removed at the end of the session's tempdir) when the file is not valid UTF-8, else `path` itself.
+# is invalid UTF-8; strsplit() then errors and a ";" file collapses to one column. Ingest round 1 (items 1-2): Excel's
+# "Unicode Text" and SoftMax Pro write UTF-16 (a FF FE / FE FF byte-order mark, or every other byte NUL); those are
+# decoded too. Returns a path to a UTF-8 copy (a temp file) when the file is not valid UTF-8, else `path` itself.
+# An empty file or one that is binary rather than text stops with a message worded for the user (the file observer
+# shows it as "Could not read ...").
 ensure_utf8_file <- function(path) {
-  raw <- tryCatch(readBin(path, "raw", n = file.info(path)$size), error = function(e) NULL)
-  if (is.null(raw) || !length(raw)) return(path)
-  if (any(raw == as.raw(0))) return(path)          # not a text file we can re-encode (e.g. UTF-16)
+  size <- file.info(path)$size
+  if (is.na(size) || size == 0) stop("The file is empty.", call. = FALSE)
+  raw <- readBin(path, "raw", n = size)
+  not_text <- function() stop("This does not look like a text (CSV / TSV) file; it appears to be binary.", call. = FALSE)
+  write_utf8 <- function(out) {
+    if (is.null(out)) not_text()
+    tmp <- tempfile(fileext = ".csv"); writeBin(out, tmp); tmp
+  }
+  n <- length(raw)
+  if (n >= 2 && identical(raw[1:2], as.raw(c(0xFF, 0xFE))))
+    return(write_utf8(iconv(list(raw[-(1:2)]), from = "UTF-16LE", to = "UTF-8", toRaw = TRUE)[[1]]))
+  if (n >= 2 && identical(raw[1:2], as.raw(c(0xFE, 0xFF))))
+    return(write_utf8(iconv(list(raw[-(1:2)]), from = "UTF-16BE", to = "UTF-8", toRaw = TRUE)[[1]]))
+  nul <- raw == as.raw(0)
+  if (any(nul)) {
+    # UTF-16 without a byte-order mark: ASCII text has a NUL in every second byte
+    odd <- sum(nul[seq(1, n, by = 2)]); even <- sum(nul[seq(2, n, by = 2)])
+    if (n >= 4 && max(odd, even) >= 0.3 * (n / 2) && min(odd, even) <= 0.05 * (n / 2))
+      return(write_utf8(iconv(list(raw), from = if (even > odd) "UTF-16LE" else "UTF-16BE", to = "UTF-8", toRaw = TRUE)[[1]]))
+    not_text()
+  }
+  ctrl <- raw < as.raw(32) & !(raw %in% as.raw(c(9, 10, 13, 12, 27)))     # control bytes that never occur in a table
+  if (sum(ctrl) > 0.02 * n) not_text()
   if (validUTF8(rawToChar(raw))) return(path)
-  out <- iconv(list(raw), from = "CP1252", to = "UTF-8", sub = "byte", toRaw = TRUE)[[1]]
-  if (is.null(out)) return(path)
-  tmp <- tempfile(fileext = ".csv")
-  writeBin(out, tmp)
-  tmp
+  write_utf8(iconv(list(raw), from = "CP1252", to = "UTF-8", sub = "byte", toRaw = TRUE)[[1]])
 }
 
 # read.csv() warns "incomplete final line found by readTableHeader" for any file without a trailing newline
@@ -486,14 +505,49 @@ csv_line_field_counts <- function(path, sep, n = 500) {
 # Position (within z$line) of the table header: the first line whose field count is `modal`. A header whose last
 # cells are blank ("Time,WT,,": finding 2) is as wide as its data rows; a comma-padded preamble line is too, so
 # when the candidate has trailing empty fields it must be followed by a data row, otherwise the next candidate.
+# Ingest round 1 (item 9): that candidate is then CHECKED -- the lines under a header are data rows of the same width.
+# When they are not (a preamble padded with commas to the table width, a preamble as wide as the table, or one WIDER
+# than the table so that `modal` is the preamble's width), the header is the line above the first run of data rows
+# (csv_header_by_data()); a file whose candidate passes the check is untouched.
 csv_header_index <- function(z, sep, modal) {
   cands <- which(z$fc == modal)
   if (!length(cands)) return(NA_integer_)
+  pick <- NULL
   for (i in cands) {
-    if (z$fc_eff[i] == modal) return(i)
-    if (i < length(z$text) && z$fc[i + 1L] == modal && csv_line_is_data(z$text[i + 1L], sep)) return(i)
+    if (z$fc_eff[i] == modal) { pick <- i; break }
+    if (i < length(z$text) && z$fc[i + 1L] == modal && csv_line_is_data(z$text[i + 1L], sep)) { pick <- i; break }
   }
-  cands[1]
+  if (is.null(pick)) pick <- cands[1]
+  if (csv_header_ok(z, sep, pick)) return(pick)
+  alt <- csv_header_by_data(z, sep)
+  if (is.na(alt)) pick else alt
+}
+
+# The (up to three) lines under header position `i` are data rows (mostly numbers); true for a header that is the
+# last line of the file. A units row ("min,OD600,OD600,...": all text, as wide as the header) directly under the
+# header is skipped once.
+csv_header_ok <- function(z, sep, i) {
+  n <- length(z$text)
+  if (i >= n) return(TRUE)
+  isd <- function(k) vapply(z$text[k], csv_line_is_data, logical(1), sep = sep)
+  if (all(isd((i + 1L):min(i + 3L, n)))) return(TRUE)
+  if (!isd(i + 1L) && z$fc[i + 1L] == z$fc[i] && i + 1L < n) return(all(isd((i + 2L):min(i + 4L, n))))
+  FALSE
+}
+
+# The header position found from the data: the line above the first run of >= 3 consecutive data rows of one width
+# (the header is not a data row, has >= 2 non-empty fields and the same width as the rows). NA when there is none.
+csv_header_by_data <- function(z, sep) {
+  n <- length(z$text)
+  if (n < 4) return(NA_integer_)
+  isd <- vapply(z$text, csv_line_is_data, logical(1), sep = sep)
+  for (i in 2:(n - 2L)) {
+    if (isd[i] && isd[i + 1L] && isd[i + 2L] && !isd[i - 1L] &&
+        z$fc[i] == z$fc[i + 1L] && z$fc[i] == z$fc[i + 2L] && z$fc[i - 1L] == z$fc[i] &&
+        sum(nzchar(trimws(gsub("\"", "", strsplit(z$text[i - 1L], sep, fixed = TRUE)[[1]])))) >= 2L)
+      return(i - 1L)
+  }
+  NA_integer_
 }
 
 # Raw-line index (0-based, i.e. read.csv's `skip`) of the table header when the
@@ -621,6 +675,46 @@ read_csv_locale_aware <- function(path, locale = "auto") {
   smart$data
 }
 
+# Ingest round 1 (item 8): numbers written with a thousands separator or a decimal comma inside quotes ("12,345.6",
+# "0,0919", "1.234,5") read as text. numeric_from_text() turns the cells of ONE column into numbers: plain numbers as
+# they are; the other cells by the convention the column as a whole shows (a cell with both separators says which is
+# the decimal mark; 1,234,567 or 1.234.567 are grouped thousands; 0,5 / 12,3456 are decimal commas; a lone "1,200"
+# is read as thousands unless the column says otherwise). A column whose cells disagree is left alone (NA for those).
+NUMBER_PLAIN_REGEX <- "^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$"
+numeric_from_text <- function(txt) {
+  txt <- trimws(as.character(txt)); txt[is.na(txt)] <- ""
+  out <- rep(NA_real_, length(txt))
+  plain <- grepl(NUMBER_PLAIN_REGEX, txt)
+  out[plain] <- suppressWarnings(as.numeric(txt[plain]))
+  grouped <- grepl("^[+-]?[0-9]{1,3}([.,][0-9]{3})+([.,][0-9]+)?$", txt)
+  dcomma  <- grepl("^[+-]?[0-9]*,[0-9]+$", txt)
+  todo <- which(!plain & (grouped | dcomma))
+  if (!length(todo)) return(out)
+  x <- txt[todo]
+  n_dot <- lengths(regmatches(x, gregexpr(".", x, fixed = TRUE)))
+  n_com <- lengths(regmatches(x, gregexpr(",", x, fixed = TRUE)))
+  vote <- rep(NA_character_, length(x))                    # "us" = comma thousands / point decimal, "eu" = the reverse
+  both <- n_dot > 0 & n_com > 0
+  last_comma <- vapply(x, function(v) { pd <- regexpr("[.][^.,]*$", v); pc <- regexpr(",[^.,]*$", v); pc > pd }, logical(1))
+  vote[both] <- ifelse(last_comma[both], "eu", "us")
+  vote[!both & n_com >= 2] <- "us"
+  vote[!both & n_dot >= 2] <- "eu"
+  one <- !both & n_com == 1 & n_dot == 0
+  if (any(one)) {
+    parts <- strsplit(x[one], ",", fixed = TRUE)
+    vote[one] <- vapply(parts, function(p) {
+      a <- sub("^[+-]", "", p[1]); b <- if (length(p) > 1) p[2] else ""
+      if (nchar(b) != 3 || identical(a, "0") || identical(a, "") || grepl("^0", a)) "eu" else NA_character_
+    }, character(1))
+  }
+  votes <- unique(stats::na.omit(vote))
+  if (length(votes) > 1) return(out)                       # contradicting cells: do not guess
+  style <- if (length(votes) == 1) votes else "us"
+  y <- if (style == "us") gsub(",", "", x, fixed = TRUE) else sub(",", ".", gsub(".", "", x, fixed = TRUE), fixed = TRUE)
+  out[todo] <- suppressWarnings(as.numeric(y))
+  out
+}
+
 # Strings a reader writes into a well that went out of range (Gen5 OVRFLW,
 # i-control OVER, SoftMax Pro #SAT) make read.csv() type the whole column as
 # character, and detect_od_column_idx()'s is.numeric() fallback then dropped that
@@ -643,6 +737,9 @@ coerce_sentinel_columns <- function(data, skip_cols = character(0),
     txt <- trimws(as.character(col))
     txt[is.na(txt)] <- ""
     num <- suppressWarnings(as.numeric(txt))
+    if (any(!is.finite(num) & nzchar(txt))) {              # ingest round 1 (item 8): "12,345.6" / "0,0919" / "1.234,5"
+      alt <- numeric_from_text(txt); fill <- !is.finite(num) & is.finite(alt); num[fill] <- alt[fill]
+    }
     nonblank <- nzchar(txt)
     if (!any(nonblank)) next
     if (sum(is.finite(num) & nonblank) / sum(nonblank) < min_numeric_frac) next
@@ -663,44 +760,110 @@ coerce_sentinel_columns <- function(data, skip_cols = character(0),
 # BioTek Gen5 and Tecan i-control write elapsed time as 0:15:00, and an Excel
 # round-trip turns the column into a full datetime. Both are non-numeric, so the
 # is.finite() row filter used to delete EVERY row. Returns list(values, converted,
-# unit): values in MINUTES when converted (clock durations H:MM[:SS[.s]], or
-# date-times as minutes from the earliest timestamp), otherwise the numeric
-# values as they were.
+# unit, note): values in MINUTES when converted (clock durations H:MM[:SS[.s]], .NET
+# d.hh:mm:ss, "30 min" / "0.5 h", or date-times as minutes from the earliest timestamp),
+# otherwise the numeric values as they were. `note` is the sentence the loader shows
+# when something was converted.
+#
+# Ingest round 1: AM/PM clocks; a clock time of day without a date (it is elapsed from the first row, and runs
+# through midnight); Excel date-time / time cells arriving as POSIXct / difftime (converted as numbers: printed, a
+# midnight POSIXct has no time part and lost its first row); "30 min" / "0.5 h" text; ".NET" d.hh:mm:ss;
+# dd.mm.yyyy dates; and thousands separators ("1,200").
+TIME_UNIT_REGEX <- "^([0-9]+[.]?[0-9]*|[.][0-9]+)\\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$"
+
+# "10:30 PM" / "1/1/2024 1:05:09 pm" -> the same text on a 24-hour clock (independent of the locale's AM/PM strings).
+ampm_to_24h <- function(txt) {
+  m <- regexec("^(.*?)\\b([0-9]{1,2}):([0-9]{2})(:[0-9]{2}(?:[.][0-9]+)?)?\\s*([AaPp])\\.?[Mm]\\.?$", txt, perl = TRUE)
+  parts <- regmatches(txt, m)
+  vapply(seq_along(txt), function(i) {
+    p <- parts[[i]]
+    if (length(p) < 6) return(txt[i])
+    h <- suppressWarnings(as.integer(p[3]))
+    if (is.na(h) || h < 1 || h > 12) return(txt[i])
+    pm <- toupper(p[6]) == "P"
+    h <- if (pm && h < 12) h + 12L else if (!pm && h == 12L) 0L else h
+    paste0(p[2], sprintf("%02d", h), ":", p[4], p[5])
+  }, character(1), USE.NAMES = FALSE)
+}
+
 parse_time_column <- function(x) {
+  if (inherits(x, c("difftime", "hms"))) {                       # Excel / typed durations: numbers, not text
+    v <- tryCatch(as.numeric(x, units = "mins"), error = function(e) suppressWarnings(as.numeric(unclass(x)) / 60))
+    return(list(values = v, converted = TRUE, unit = "minutes"))
+  }
+  if (inherits(x, c("POSIXct", "Date"))) {
+    t <- if (inherits(x, "Date")) as.POSIXct(x) else x
+    if (!any(is.finite(as.numeric(t)))) return(list(values = rep(NA_real_, length(x)), converted = FALSE, unit = NA_character_))
+    return(list(values = as.numeric(difftime(t, min(t, na.rm = TRUE), units = "mins")),
+                converted = TRUE, unit = "minutes"))
+  }
   txt  <- trimws(as.character(x))
   txt[is.na(txt)] <- ""
   keep <- nzchar(txt)
   # finding 8: only plain decimal numbers count ("0x10" is not 16)
-  num  <- ifelse(grepl("^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$", txt),
-                 suppressWarnings(as.numeric(txt)), NA_real_)
+  num  <- ifelse(grepl(NUMBER_PLAIN_REGEX, txt), suppressWarnings(as.numeric(txt)), NA_real_)
   if (any(keep) && all(is.finite(num[keep])))
     return(list(values = num, converted = FALSE, unit = NA_character_))
 
   out <- rep(NA_real_, length(txt))
+  conv <- function(values) list(values = values, converted = TRUE, unit = "minutes")
 
-  # 1. clock durations H:MM / H:MM:SS (optionally with fractional seconds)
-  is_clock <- grepl("^[0-9]{1,5}:[0-9]{1,2}(:[0-9]{1,2}([.][0-9]+)?)?$", txt)
-  if (any(is_clock)) {
-    out[is_clock] <- vapply(strsplit(txt[is_clock], ":", fixed = TRUE), function(p) {
+  # 0. thousands separators / decimal commas in a numeric column ("1,200")
+  nt <- numeric_from_text(txt)
+  if (any(keep) && all(is.finite(nt[keep])))
+    return(list(values = nt, converted = TRUE, unit = NA_character_,
+                note = "Time column values were written with thousands separators or decimal commas; read as numbers."))
+
+  # 1. numbers with a unit: "30 min", "0.5 h", "90 s" -> minutes
+  um <- regmatches(txt, regexec(TIME_UNIT_REGEX, txt, ignore.case = TRUE))
+  is_unit <- lengths(um) == 3
+  if (sum(is_unit) >= max(2, 0.8 * sum(keep))) {
+    out[is_unit] <- vapply(um[is_unit], function(p) {
+      v <- as.numeric(p[2]); u <- tolower(p[3])
+      v * if (u %in% c("s", "sec", "secs", "second", "seconds")) 1 / 60
+          else if (u %in% c("h", "hr", "hrs", "hour", "hours")) 60
+          else if (u %in% c("d", "day", "days")) 1440 else 1
+    }, numeric(1))
+    return(conv(out))
+  }
+
+  # 2. clock durations H:MM / H:MM:SS (optionally with fractional seconds), .NET d.hh:mm:ss, 12-hour clocks
+  txt24 <- ampm_to_24h(txt)
+  is_clock <- grepl("^[0-9]{1,5}:[0-9]{1,2}(:[0-9]{1,2}([.][0-9]+)?)?$", txt24)
+  is_net   <- grepl("^[0-9]+[.][0-9]{1,2}:[0-9]{1,2}(:[0-9]{1,2}([.][0-9]+)?)?$", txt)
+  if (any(is_clock) || any(is_net)) {
+    if (any(is_clock)) out[is_clock] <- vapply(strsplit(txt24[is_clock], ":", fixed = TRUE), function(p) {
       p <- suppressWarnings(as.numeric(p))
       if (length(p) == 2) p[1] * 60 + p[2] else p[1] * 60 + p[2] + p[3] / 60
     }, numeric(1))
+    if (any(is_net)) out[is_net] <- vapply(strsplit(txt[is_net], "[.:]"), function(p) {
+      # (a fractional-seconds tail has more than 4 pieces: d, hh, mm, ss, frac)
+      p <- suppressWarnings(as.numeric(p[seq_len(min(length(p), 4))]))
+      p[1] * 1440 + p[2] * 60 + p[3] + (if (length(p) >= 4) p[4] / 60 else 0)
+    }, numeric(1))
     out[is.finite(num)] <- num[is.finite(num)]
-    return(list(values = out, converted = TRUE, unit = "minutes"))
+    # A clock TIME OF DAY (the first reading is 1:00:00 or later; every value under 24 h) is elapsed time from the first
+    # row, running on through midnight (a drop of more than 12 h is the next day).
+    fin <- which(is.finite(out))
+    if (length(fin) >= 2 && out[fin[1]] >= 60 && all(out[fin] < 1440) && all(out[fin] >= 0)) {
+      r <- out[fin]
+      adj <- r + 1440 * cumsum(c(0, diff(r)) < -720)
+      out[fin] <- adj - adj[1]
+    }
+    return(conv(out))
   }
 
-  # 2. datetimes -> minutes elapsed from the earliest timestamp
+  # 3. datetimes -> minutes elapsed from the earliest timestamp
   fmts <- c("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S",
             "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
-            "%m/%d/%Y %H:%M")
-  for (f in fmts) {
-    pt <- suppressWarnings(as.POSIXct(txt, format = f, tz = "UTC"))
+            "%m/%d/%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d/%m/%Y %H:%M")
+  for (tx in unique(list(txt24, txt))) for (f in fmts) {          # (12-hour text first: its 24-hour rewrite)
+    pt <- suppressWarnings(as.POSIXct(tx, format = f, tz = "UTC"))
     if (sum(!is.na(pt)) >= max(2, 0.8 * sum(keep)))
-      return(list(values = as.numeric(difftime(pt, min(pt, na.rm = TRUE), units = "mins")),
-                  converted = TRUE, unit = "minutes"))
+      return(conv(as.numeric(difftime(pt, min(pt, na.rm = TRUE), units = "mins"))))
   }
 
-  # 3. whatever was already numeric; the caller decides what to do with the rest
+  # 4. whatever was already numeric; the caller decides what to do with the rest
   out[is.finite(num)] <- num[is.finite(num)]
   list(values = out, converted = FALSE, unit = NA_character_)
 }
@@ -772,15 +935,43 @@ TEMP_COL_REGEX <- "^T°|(?<![A-Za-z])temp(?:erature)?s?(?![A-Za-z])|^[\\s\\[(]*(
 # count), except a column whose name matches TEMP_COL_REGEX. Replaces the old "keep only columns named OD / value /
 # absorbance" rule, which silently dropped samples called e.g. "Mod" or "Product" (audit N4-3). Returns
 # list(idx = integer column positions, used = names, dropped = data.frame(name, reason)).
+#
+# Ingest round 1 (item 11): also never samples -- a counter column ("Cycle", "Cycle Nr.", "Read", "Index", "Kinetic",
+# or the unnamed / "X" / "...1" row-index column write.csv() adds) whose values count 1, 2, 3 ...; a header
+# "T600" / "T 600" whose values are temperatures (15 to 60; an OD600 column called T600 has values below 5 and stays a
+# sample); and a column that holds only OVER / saturated readings.
+INDEX_COL_NAME_REGEX <- "^(cycle([ _.]*(nr|no|number|#))?[. ]*|cycles?|read|reads|reading|readings|index|idx|kinetic|kinetic[ _]cycle|#|no[.]?|nr[.]?|n|x|[.]{3}[0-9]+|unnamed:? ?[0-9]+)$"
+OVER_TOKEN_REGEX     <- "^(over|ovr|ovrflw|overflow|overrange|saturated|sat|#sat|#over|#ovrflw|\\*+|out of range|oor|n/?a|nd|na|nan|-+|inf|infinity)$"
+is_counter_column <- function(v, nm) {
+  nm <- if (is.null(nm)) "" else trimws(nm)
+  if (!(is.na(nm) || !nzchar(nm) || grepl(INDEX_COL_NAME_REGEX, nm, ignore.case = TRUE, perl = TRUE))) return(FALSE)
+  if (!is.numeric(v)) return(FALSE)
+  x <- v[is.finite(v)]
+  if (length(x) < 3 || length(x) != length(v) || any(x != round(x))) return(FALSE)
+  d <- diff(x)                                           # 1, 2, 3 ... (a stacked file counts up again for each block)
+  x[1] %in% c(0, 1) && all(d == 1 | (d < 0 & x[-1] == x[1]))
+}
 wide_sample_columns <- function(data, time_col) {
   cn   <- colnames(data)
   cand <- setdiff(seq_along(cn), which(cn == time_col))
   is_temp <- grepl(TEMP_COL_REGEX, cn[cand], ignore.case = TRUE, perl = TRUE)
   is_num  <- vapply(cand, function(i) is.numeric(data[[i]]), logical(1))
-  keep    <- is_num & !is_temp
-  dropped <- data.frame(name   = cn[cand][!keep],
-                        reason = ifelse(is_temp[!keep], "temperature column", "not numeric"),
-                        stringsAsFactors = FALSE)
+  is_t600 <- is_num & grepl("^T\\s*[0-9]{3}$", cn[cand], ignore.case = TRUE) &
+    vapply(cand, function(i) { x <- data[[i]]; x <- x[is.finite(x)]; length(x) > 0 && all(x >= 15 & x <= 60) }, logical(1))
+  is_temp <- is_temp | is_t600
+  is_idx  <- is_num & !is_temp & vapply(cand, function(i) is_counter_column(data[[i]], cn[i]), logical(1))
+  is_over <- !is_num & vapply(cand, function(i) {
+    v <- data[[i]]
+    if (!(is.character(v) || is.factor(v))) return(FALSE)
+    t <- trimws(as.character(v)); t <- t[!is.na(t) & nzchar(t)]
+    length(t) > 0 && all(grepl(OVER_TOKEN_REGEX, t, ignore.case = TRUE)) &&
+      any(grepl("^(over|ovr|ovrflw|overflow|overrange|saturated|sat|#sat|#over|#ovrflw|\\*+|out of range|oor)$", t, ignore.case = TRUE))
+  }, logical(1))
+  keep    <- is_num & !is_temp & !is_idx
+  reason  <- ifelse(is_temp, "temperature column", ifelse(is_idx, "counter / index column",
+             ifelse(is_over, "every reading is OVER / saturated", "not numeric")))
+  nm_out  <- cn[cand][!keep]; nm_out[is.na(nm_out) | !nzchar(nm_out)] <- "(unnamed column)"
+  dropped <- data.frame(name = nm_out, reason = reason[!keep], stringsAsFactors = FALSE)
   list(idx = cand[keep], used = cn[cand][keep], dropped = dropped)
 }
 
@@ -793,18 +984,82 @@ excel_sheet_names <- function(path) {
   tryCatch(readxl::excel_sheets(path), error = function(e) character(0))
 }
 
+# Where the table starts in a sheet (ingest round 1, item 9): a title line, merged cells or an instrument's metadata
+# block above the header made readxl take row 1 as the header. The header is the first non-blank row followed by
+# data rows (mostly numbers); when it is not, the header is the row above the first run of three data rows. Returns
+# list(row = the sheet row of the header (0 = leave it to readxl: an ordinary sheet), names = combined names of a
+# two-row header, or NULL).
+excel_header_info <- function(path, sheet = 1) {
+  none <- list(row = 0L, names = NULL)
+  raw <- tryCatch(suppressMessages(readxl::read_excel(path, sheet = sheet, range = readxl::cell_rows(c(1, 300)),
+                                                      col_names = FALSE, col_types = "text", .name_repair = "minimal")),
+                  error = function(e) NULL)
+  if (is.null(raw) || nrow(raw) < 2 || ncol(raw) < 2) return(none)
+  m  <- as.matrix(raw)
+  nb <- !is.na(m) & nzchar(trimws(m))
+  num <- matrix(FALSE, nrow(m), ncol(m))
+  num[nb] <- is.finite(suppressWarnings(as.numeric(sub(",", ".", trimws(m[nb]), fixed = TRUE))))
+  cnt  <- rowSums(nb)
+  isd  <- cnt >= 2 & rowSums(num) >= 0.5 * cnt
+  rows <- which(cnt > 0)
+  if (length(rows) < 2) return(none)
+  f <- rows[1]
+  nxt <- utils::head(rows[rows > f], 3)
+  if (length(nxt) && all(isd[nxt])) return(none)               # row f is a header followed by data: an ordinary sheet
+  for (k in seq_along(rows)) {                                  # the first run of three consecutive data rows
+    r <- rows[k]
+    if (k >= 2 && k + 2 <= length(rows) && all(isd[rows[k:(k + 2)]]) && !isd[rows[k - 1]] && cnt[rows[k - 1]] >= 2) {
+      h <- rows[k - 1]
+      nm <- NULL
+      if (k >= 3) {                                             # a two-row header: names above, "Time" + labels below
+        pr <- rows[k - 2]
+        if (pr == h - 1 && !nb[pr, 1] && nb[h, 1] && cnt[pr] >= 2 && all(nb[h, nb[h, ] | nb[pr, ]])) {
+          top <- trimws(m[pr, ]); top[!nb[pr, ]] <- NA
+          for (j in seq_along(top)[-1]) if (is.na(top[j]) && !is.na(top[j - 1])) top[j] <- top[j - 1]
+          nm <- ifelse(is.na(top), trimws(m[h, ]), top); nm[1] <- trimws(m[h, 1])
+        }
+      }
+      return(list(row = as.integer(h), names = nm))
+    }
+  }
+  none
+}
+
 # One sheet of a workbook as a plain data frame; duplicate headers are kept (replicate columns share a name).
 read_excel_sheet <- function(path, sheet = 1) {
   if (!requireNamespace("readxl", quietly = TRUE))
     stop("Reading Excel files needs the 'readxl' package: install.packages(\"readxl\"), or save the sheet as CSV.", call. = FALSE)
-  x <- readxl::read_excel(path, sheet = sheet, .name_repair = "minimal")
+  hi <- excel_header_info(path, sheet)
+  x <- if (hi$row > 0L)
+         readxl::read_excel(path, sheet = sheet, range = readxl::cell_rows(c(hi$row, NA)), .name_repair = "minimal")
+       else readxl::read_excel(path, sheet = sheet, .name_repair = "minimal")
   x <- as.data.frame(x, stringsAsFactors = FALSE, check.names = FALSE)
+  if (!is.null(hi$names) && length(hi$names) == ncol(x)) colnames(x) <- hi$names
   nm <- colnames(x); blank_nm <- is.na(nm) | !nzchar(nm)
   all_na <- vapply(x, function(v) all(is.na(v)), logical(1))
   keep <- !(blank_nm & all_na)
   x <- x[, keep, drop = FALSE]
   colnames(x) <- nm[keep]        # `[.data.frame` renames duplicate headers (WT, WT -> WT, WT.1): put them back
   x
+}
+
+# The workbook sheet the app loads (ingest round 1, item 9): the one asked for, else the first that holds data (an
+# empty first sheet, e.g. a chart sheet, is skipped). Returns list(data, sheet, sheets, skipped).
+read_workbook_data <- function(path, name = path, sheet = NULL, locale = "auto") {
+  sheets <- excel_sheet_names(path)
+  if (!is.null(sheet) || length(sheets) < 2) {
+    sh <- if (!is.null(sheet)) sheet else if (length(sheets)) sheets[1] else 1
+    return(list(data = read_data_file(path, name, sheet = sh, locale = locale), sheet = sh, sheets = sheets, skipped = character(0)))
+  }
+  skipped <- character(0); first <- NULL
+  for (sh in sheets) {
+    d <- tryCatch(read_data_file(path, name, sheet = sh, locale = locale), error = function(e) NULL)
+    if (is.null(first)) first <- d
+    if (!is.null(d) && nrow(d) > 0 && ncol(d) > 1) return(list(data = d, sheet = sh, sheets = sheets, skipped = skipped))
+    skipped <- c(skipped, sh)
+  }
+  if (is.null(first)) first <- read_data_file(path, name, sheet = sheets[1], locale = locale)     # (raises the read error)
+  list(data = first, sheet = sheets[1], sheets = sheets, skipped = character(0))
 }
 
 # Blank header cells after the first column take the name of the cell to their left: the common Excel layout that
@@ -1136,8 +1391,12 @@ rolling_slope <- function(t, y, win) {
     # non-positive ODs, whose logs are NA) has no slope; lm() on it raised "0 (non-NA) cases", the caller's
     # tryCatch turned the WHOLE curve into NA, and mu_max / doubling time / lag were lost. Now only that window is NA.
     ok <- is.finite(tt) & is.finite(yy)
-    out[s + offset] <- if (sum(ok) < 2) NA_real_ else if (diff(range(tt[ok])) == 0) 0 else
-      unname(coef(lm(yy[ok] ~ tt[ok]))[2])
+    # Ingest round 1 (item 16): the least-squares slope in closed form (centered cross-product over centered sum of
+    # squares), not one lm() per window: lm() was a third of the time of a 96-well plate. Identical to lm() to 1e-10.
+    out[s + offset] <- if (sum(ok) < 2) NA_real_ else if (diff(range(tt[ok])) == 0) 0 else {
+      tk <- tt[ok] - mean(tt[ok]); yk <- yy[ok] - mean(yy[ok])
+      sum(tk * yk) / sum(tk * tk)
+    }
   }
   out
 }
@@ -10182,7 +10441,7 @@ server <- function(input, output, session) {
     # xlsx_*: the uploaded workbook (sheet selector); data_version counts fresh loads (the Data tab table and the
     # replicate exclusion list start afresh on it; a cell edit or a time-column change keeps them)
     data_loaded = NULL, data_loaded_source = NULL, data_loaded_tc = NULL, dropped_cols = NULL,
-    xlsx_path = NULL, xlsx_name = NULL, xlsx_sheets = NULL, data_version = 0L
+    xlsx_path = NULL, xlsx_name = NULL, xlsx_sheets = NULL, xlsx_sheet = NULL, data_version = 0L
   )
   # v2.22: the "every sample has n = 1" warning is shown once per loaded file (see build_plot)
   n1_state <- new.env(); n1_state$shown <- FALSE; n1_state$notes_shown <- character(0)
@@ -10270,7 +10529,10 @@ server <- function(input, output, session) {
   })
   
   # ── Data loading ─────────────────────────────────────────────────────────────
-  is_long_format_detect <- function(data) {
+  # Ingest round 1: a wide file with a text column that holds one value per stacked block (a plate / run label
+  # such as "Plate 1" on every row of the first block, "Plate 2" on the second) is a wide file with blocks, not a
+  # long file whose group column is that label (item 12).
+  is_long_format_detect <- function(data, tc = NULL) {
     if (nrow(data) == 0) return(FALSE)
     potential <- LONG_GROUP_NAMES      # v2.22: + strain / Strain
     if (any(potential %in% colnames(data))) return(TRUE)
@@ -10279,13 +10541,25 @@ server <- function(input, output, session) {
       # column with repeated values (e.g. a flat/constant control) must not
       # flip a small wide file into long format.
       nn <- !vapply(data, is.numeric, logical(1))
+      if (!is.null(tc)) nn[colnames(data) %in% tc] <- FALSE
       if (!any(nn)) return(FALSE)
+      if (!is.null(tc) && sum(!colnames(data) %in% tc & !nn) >= 2) {       # >= 2 numeric non-time columns: samples
+        wb <- infer_wide_replicates(data, tc)
+        if (!is.null(wb$reps) && wb$reps > 1) {
+          is_label <- vapply(which(nn), function(j) {
+            v <- as.character(data[[j]])
+            all(tapply(v, wb$block_id, function(z) length(unique(z))) == 1L)
+          }, logical(1))
+          nn[which(nn)[is_label]] <- FALSE
+          if (!any(nn)) return(FALSE)
+        }
+      }
       vd <- sapply(data[nn], function(x) length(unique(x)) / nrow(data))
       return(any(vd < 0.3 & vd > 0))
     }
     FALSE
   }
-  
+
   detect_time_column <- function(data) {
     hits <- grep("^(time|Time|TIME|t|T)$", colnames(data), value = TRUE)
     if (length(hits)) return(hits[1])
@@ -10297,13 +10571,37 @@ server <- function(input, output, session) {
     }
     colnames(data)[1]
   }
-  
+
+  # The value column of a long file. Never an empty result when a numeric column is left.
   detect_od_columns <- function(data, exclude_cols) {
     cols <- setdiff(colnames(data), exclude_cols)
     hits <- grep("od|OD|absorbance|Absorbance|value|Value", cols,
                  ignore.case = TRUE, value = TRUE)
     if (length(hits)) return(hits)
-    cols[sapply(data[cols], is.numeric)]
+    cols[vapply(cols, function(cn) is.numeric(data[[cn]]), logical(1))]
+  }
+
+  # The group (sample) column of a long file. A named one (LONG_GROUP_NAMES) wins. Otherwise only NON-numeric columns
+  # with repeated values are candidates (a numeric "Rep" or "OD" is never the sample); among them one that is not the
+  # replicate / well column and has two or more values wins, so a constant "Plate" column does not turn a Time / Well /
+  # Value / Plate file into one pooled sample. When the well / replicate column is all there is, the wells ARE the
+  # samples (ingest round 1, item 3; L03, L07).
+  detect_long_group <- function(data, tc, group_names = LONG_GROUP_NAMES) {
+    found <- group_names[group_names %in% colnames(data)]
+    if (length(found) > 0) return(found[1])
+    rep_col0 <- detect_replicate_column(data, tc, NULL, NULL)
+    others   <- setdiff(colnames(data), tc)
+    nonnum   <- others[!vapply(others, function(cn) is.numeric(data[[cn]]), logical(1))]
+    nd       <- vapply(nonnum, function(cn) length(unique(data[[cn]])), integer(1))
+    cands    <- nonnum[nd / nrow(data) < 0.3 & nd > 0]
+    pref     <- setdiff(cands, rep_col0)
+    pref     <- pref[vapply(pref, function(cn) length(unique(data[[cn]])) >= 2L, logical(1))]
+    if (length(pref)) return(pref[1])
+    if (!is.null(rep_col0) && rep_col0 %in% nonnum) return(rep_col0)
+    if (length(cands)) return(cands[1])
+    dv    <- sapply(data, function(x) length(unique(x)) / nrow(data))      # (the earlier rule, for numeric groups)
+    cands <- setdiff(names(which(dv < 0.3 & dv > 0)), c(tc, rep_col0))
+    if (length(cands)) cands[1] else setdiff(colnames(data), c(tc, rep_col0))[1]
   }
 
   # Wide format: detect OD columns BY POSITION so replicate columns that share
@@ -10313,45 +10611,53 @@ server <- function(input, output, session) {
   # file). The old "only columns named OD / value / absorbance" rule dropped samples such as "Mod" or "Product".
   detect_od_column_idx <- function(data, time_col) wide_sample_columns(data, time_col)$idx
 
-  # Shared ingestion for both file upload and demo data.
-  # v2.22: split in two. ingest_data() is the file-level part (the loaded copy kept for "Revert", the per-file state
-  # that starts afresh); apply_time_col() is everything that follows from the chosen time column (format and sample
-  # detection, ranges, the sample list), so the Time column box and the Data tab re-run it without re-reading the file.
-  # keep_state = TRUE (a cell edit, a different time column, Revert) keeps the display names, the sample selection,
-  # the typed time-point exclusions and the replicate exclusions instead of starting from scratch.
-  ingest_data <- function(data, source_name, keep_state = FALSE, time_col = NULL) {
-    if (!keep_state) {
-      rv$display_names  <- NULL    # v2.21: names and colours typed in the quick-edit strip belong to the old data
-      rv$qe_colors      <- list()
-      rv$data_loaded    <- data    # v2.22: the data as it was loaded (Data tab: Revert)
-      rv$data_loaded_source <- source_name
-      n1_state$shown    <- FALSE
-      n1_state$notes_shown <- character(0)
-    }
-    tc <- time_col %||% detect_time_column(data)
-    apply_time_col(data, tc, source_name, keep_state = keep_state)
-    if (!keep_state) { rv$data_loaded_tc <- rv$time_col; rv$data_version <- rv$data_version + 1L }   # a new load re-draws the Data tab table
-    invisible(NULL)
+  # Refusals are errors of this class: their message is shown to the user as it stands.
+  ingest_refused <- function(msg) stop(structure(class = c("ingest_refused", "error", "condition"), list(message = msg, call = NULL)))
+  # What the user sees when a file cannot be loaded (nothing in the app was changed).
+  load_failed_message <- function(e, fname) {
+    m <- conditionMessage(e)
+    if (inherits(e, "ingest_refused")) return(paste0(sub("[.]\\s*$", "", m), ". The file was not loaded."))
+    sprintf("Could not read '%s': %s. The file was not loaded.", fname, sub("[.]\\s*$", "", m))
   }
 
-  apply_time_col <- function(data, tc, source_name = rv$data_source, keep_state = FALSE) {
-    prev_time_col     <- rv$time_col
-    rv$time_col       <- tc
-    rv$col_map        <- NULL
-    rv$replicate_col  <- NULL    # long format: replicate / well column, when the file has one
-    rv$n_blocks       <- NULL    # wide format: stacked time blocks (replicates), when > 1
-    rv$block_id       <- NULL
-    rv$dropped_cols   <- NULL    # v2.22: wide format: columns that are not samples (temperature, text), with the reason
+  # ingest_frame() is the whole of the ingest: data in, the dataset's structure out (the data as it will be kept, the
+  # time column, samples, column map, long / wide, replicate column, stacked blocks, time points, notes), with NO
+  # session side effects. ingest_data() / apply_time_col() commit it to rv; the Compare tab reads its second file with
+  # the same function, so both go through exactly the same rules.
+  # strict = TRUE (a file or pasted data is loaded): a file that holds nothing usable is REFUSED (an ingest_refused
+  # error: no rows, one column, no readable time value, no numeric columns) and rows without a readable time (a
+  # repeated header line between blocks, a blank row, a footer) are dropped. strict = FALSE (a cell edit, a different
+  # time column, Revert) keeps every row and never refuses.
+  ingest_frame <- function(data, source_name = "", time_col = NULL, strict = TRUE) {
     notes <- character(0)
-
-    # Elapsed time as 0:15:00 (Gen5 / i-control) or a full date-time: convert to minutes
-    # so the numeric time handling downstream (filters, axis range) just works.
-    pt <- parse_time_column(data[[rv$time_col]])
-    if (isTRUE(pt$converted)) {
-      data[[rv$time_col]] <- pt$values
-      notes <- c(notes, paste0("Time column '", rv$time_col, "' was written as clock time / date-time; converted to minutes."))
+    if (strict) {
+      if (is.null(data) || nrow(data) == 0) ingest_refused("No data rows were found (the file has no readings below its header)")
+      if (ncol(data) < 2) ingest_refused("The file has only one column; it needs a time column and at least one sample column")
     }
-
+    tc <- time_col %||% detect_time_column(data)
+    if (is.na(tc) || !nzchar(tc)) {                              # an unnamed first column used as time (row-names style)
+      j <- which(is.na(colnames(data)) | !nzchar(colnames(data)))[1]
+      if (is.na(j)) j <- 1L
+      colnames(data)[j] <- "Time"; tc <- "Time"
+      notes <- c(notes, "The first column had no name; it is used as the time column and called 'Time'.")
+    }
+    # Elapsed time as 0:15:00 (Gen5 / i-control), a full date-time, "30 min" ...: convert to minutes so the numeric
+    # time handling downstream (filters, axis range) just works.
+    pt <- parse_time_column(data[[tc]])
+    if (isTRUE(pt$converted)) {
+      data[[tc]] <- pt$values
+      notes <- c(notes, if (!is.null(pt$note)) pt$note else
+        paste0("Time column '", tc, "' was written as clock time / date-time; converted to minutes."))
+    }
+    if (strict) {
+      tv <- suppressWarnings(as.numeric(as.character(data[[tc]])))
+      if (!any(is.finite(tv))) ingest_refused(sprintf("Could not read any time value from column '%s'", tc))
+      if (any(!is.finite(tv))) {                                 # rows with no readable time: repeated headers, blanks, footers
+        data <- data[is.finite(tv), , drop = FALSE]
+        data[[tc]] <- tv[is.finite(tv)]
+        rownames(data) <- NULL
+      }
+    }
     # A well that went out of range (OVER / OVRFLW / #SAT) makes read.csv type the whole
     # column as text: keep the column, turn just those cells into NA. The time column and
     # any group / replicate column are left alone.
@@ -10359,70 +10665,108 @@ server <- function(input, output, session) {
     rep_names   <- colnames(data)[tolower(colnames(data)) %in%
                      c("replicate","rep","rep_id","replicate_id","well","well_id","wellid",
                        "technical_replicate","biological_replicate","repeat")]
-    cs <- coerce_sentinel_columns(data, skip_cols = c(rv$time_col, group_names, rep_names),
-                                  time_values = data[[rv$time_col]])
+    cs <- coerce_sentinel_columns(data, skip_cols = c(tc, group_names, rep_names), time_values = data[[tc]])
     data <- cs$data
     if (!is.null(cs$report))
       notes <- c(notes, paste0(nrow(cs$report), " non-numeric reading(s) (",
                                paste(utils::head(unique(cs$report$value), 3), collapse = ", "),
                                ") were treated as missing; affected column(s): ",
                                paste(unique(cs$report$sample), collapse = ", "), "."))
-    rv$sentinel_report <- cs$report
-
-    rv$is_long_format <- is_long_format_detect(data)
-
-    if (rv$is_long_format) {
-      potential <- group_names
-      found     <- potential[potential %in% colnames(data)]
-      rep_col0  <- detect_replicate_column(data, rv$time_col, NULL, NULL)
-      group_col <- if (length(found) > 0) found[1] else {
-        dv    <- sapply(data, function(x) length(unique(x)) / nrow(data))
-        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), c(rv$time_col, rep_col0))
-        if (length(cands)) cands[1] else setdiff(colnames(data), c(rv$time_col, rep_col0))[1]
-      }
+    ds <- list(data = data, data_source = source_name, time_col = tc, is_long_format = is_long_format_detect(data, tc),
+               col_map = NULL, od_vars = NULL, od_vars_raw = NULL, group_col = NULL, value_col = NULL, replicate_col = NULL,
+               n_blocks = NULL, block_id = NULL, all_timepoints = NULL, dropped = NULL, sentinel_report = cs$report, notes = notes)
+    if (ds$is_long_format) {
+      group_col <- detect_long_group(data, tc, group_names)
       # the replicate column must never be taken for the value column (a numeric "rep"
       # column would win the is.numeric() fallback)
-      rep_col <- detect_replicate_column(data, rv$time_col, group_col, NULL)
-      vc <- detect_od_columns(data, c(rv$time_col, group_col, rep_col))
+      rep_col <- detect_replicate_column(data, tc, group_col, NULL)
+      vc <- detect_od_columns(data, c(tc, group_col, rep_col))
       if (length(vc) > 1) vc <- vc[1]
-      rep_col <- detect_replicate_column(data, rv$time_col, group_col, vc)
-      rv$group_col     <- group_col
-      rv$value_col     <- vc
-      rv$replicate_col <- rep_col
-      rv$od_vars       <- as.character(unique(data[[group_col]]))
-      rv$od_vars_raw   <- rv$od_vars
-      set_safe_id_pool(rv$od_vars)
+      if (strict && !length(vc)) ingest_refused("No numeric value column was found next to the time and sample columns")
+      rep_col <- detect_replicate_column(data, tc, group_col, vc)
+      ds$group_col <- group_col; ds$value_col <- vc; ds$replicate_col <- rep_col
+      ds$od_vars <- as.character(unique(data[[group_col]])); ds$od_vars_raw <- ds$od_vars
     } else {
       # Index-based detection keeps ALL replicate columns, including
       # duplicates of the same name (v2.8 REPLICATE FIX).
-      ws  <- wide_sample_columns(data, rv$time_col)
+      ws  <- wide_sample_columns(data, tc)
       idx <- ws$idx
       cn  <- colnames(data)
       oc  <- unique(cn[idx])
-      rv$col_map     <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
-      rv$od_vars     <- oc
-      rv$od_vars_raw <- oc
-      set_safe_id_pool(oc)
-      rv$dropped_cols <- if (nrow(ws$dropped)) ws$dropped else NULL
+      ds$col_map <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
+      ds$od_vars <- oc; ds$od_vars_raw <- oc
+      ds$dropped <- if (nrow(ws$dropped)) ws$dropped else NULL
       if (nrow(ws$dropped))
-        notes <- c(notes, paste0("Not used as samples: ",
-                                 paste0(ws$dropped$name, " (", ws$dropped$reason, ")", collapse = ", "), "."))
+        ds$notes <- c(ds$notes, paste0("Not used as samples: ",
+                                       paste0(ws$dropped$name, " (", ws$dropped$reason, ")", collapse = ", "), "."))
+      if (strict && !length(oc))
+        ingest_refused(if (nrow(ws$dropped) && all(ws$dropped$reason == "every reading is OVER / saturated"))
+          "Every sample column holds only OVER / saturated readings, so there is no usable data"
+        else if (nrow(ws$dropped) && all(ws$dropped$reason == "not numeric"))
+          "No numeric columns were found (every other column is text)"
+        else "No sample columns were found: every column besides time is text, a counter or a temperature")
       # Stacked replicate blocks (the time counter restarts for each block): every block is
       # one more replicate of every sample at each time point. prepare_plot_data() already
       # pools rows that share a time stamp; the block id lets prepare_replicate_data() keep
       # the blocks apart as separate replicate curves.
-      wb <- infer_wide_replicates(data, rv$time_col)
+      wb <- infer_wide_replicates(data, tc)
       if (!is.null(wb$reps) && wb$reps > 1) {
-        rv$n_blocks <- wb$reps
-        rv$block_id <- wb$block_id
-        notes <- c(notes, paste0("Detected ", wb$reps, " stacked time blocks (the time column restarts); ",
-                                 "each block is treated as one replicate."))
+        ds$n_blocks <- wb$reps; ds$block_id <- wb$block_id
+        ds$notes <- c(ds$notes, paste0("Detected ", wb$reps, " stacked time blocks (the time column restarts); ",
+                                       "each block is treated as one replicate."))
       }
     }
+    if (strict && !length(ds$od_vars)) ingest_refused("No samples were found in the file")
+    all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[tc]])))))
+    ds$all_timepoints <- all_t[is.finite(all_t)]
+    ds
+  }
+
+  # Shared ingestion for both file upload and demo data.
+  # v2.22: split in two. ingest_data() is the file-level part (the loaded copy kept for "Revert", the per-file state
+  # that starts afresh); apply_time_col() is everything that follows from the chosen time column (format and sample
+  # detection, ranges, the sample list), so the Time column box and the Data tab re-run it without re-reading the file.
+  # keep_state = TRUE (a cell edit, a different time column, Revert) keeps the display names, the sample selection,
+  # the typed time-point exclusions and the replicate exclusions instead of starting from scratch.
+  # Ingest round 1: the data goes through ingest_frame() BEFORE anything in the session changes, so a file that is
+  # refused (an ingest_refused error) leaves the loaded data exactly as it was.
+  ingest_data <- function(data, source_name, keep_state = FALSE, time_col = NULL) {
+    ds <- ingest_frame(data, source_name, time_col = time_col, strict = !keep_state)
+    if (!keep_state) {
+      rv$display_names  <- NULL    # v2.21: names and colours typed in the quick-edit strip belong to the old data
+      rv$qe_colors      <- list()
+      rv$data_loaded    <- ds$data # v2.22: the data as it was loaded (Data tab: Revert)
+      rv$data_loaded_source <- source_name
+      n1_state$shown    <- FALSE
+      n1_state$notes_shown <- character(0)
+    }
+    apply_time_col(ds, source_name, keep_state = keep_state)
+    if (!keep_state) { rv$data_loaded_tc <- rv$time_col; rv$data_version <- rv$data_version + 1L }   # a new load re-draws the Data tab table
+    invisible(TRUE)
+  }
+
+  apply_time_col <- function(ds, source_name = rv$data_source, keep_state = FALSE) {
+    prev_time_col     <- rv$time_col
+    data              <- ds$data
+    rv$time_col       <- ds$time_col
+    rv$col_map        <- ds$col_map
+    rv$replicate_col  <- ds$replicate_col    # long format: replicate / well column, when the file has one
+    rv$n_blocks       <- ds$n_blocks         # wide format: stacked time blocks (replicates), when > 1
+    rv$block_id       <- ds$block_id
+    rv$dropped_cols   <- ds$dropped          # v2.22: wide format: columns that are not samples (temperature, text), with the reason
+    rv$sentinel_report <- ds$sentinel_report
+    rv$is_long_format <- ds$is_long_format
+    if (ds$is_long_format) {
+      rv$group_col   <- ds$group_col
+      rv$value_col   <- ds$value_col
+    }
+    rv$od_vars     <- ds$od_vars
+    rv$od_vars_raw <- ds$od_vars_raw
+    set_safe_id_pool(ds$od_vars)
     rv$data        <- data
     rv$data_source <- source_name
     # Tell the user what was repaired on load (best effort: no notification channel in tests)
-    for (nt in notes)
+    for (nt in ds$notes)
       tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)
 
     # the time-column box lists every column, with the chosen one selected (the box's own echo of this value is ignored)
@@ -10460,36 +10804,46 @@ server <- function(input, output, session) {
 
   observeEvent(input$file, {
     req(input$file)
-    # v2.22: Excel workbooks (.xlsx / .xls) are read with readxl (first sheet; a sheet selector appears for more)
-    if (is_excel_file(input$file$name)) {
-      rv$xlsx_path <- input$file$datapath; rv$xlsx_name <- input$file$name
-      sheets <- excel_sheet_names(input$file$datapath)
-      rv$xlsx_sheets <- sheets
-      data <- tryCatch(read_data_file(input$file$datapath, input$file$name, sheet = 1),
-                       error = function(e) { guard_notify("file_read", conditionMessage(e), "error"); NULL })
-      if (is.null(data)) return(invisible(NULL))
-      ingest_data(data, if (length(sheets) > 1) paste0(input$file$name, " [", sheets[1], "]") else input$file$name)
-    } else {
-      rv$xlsx_path <- NULL; rv$xlsx_sheets <- NULL
-      data <- read_csv_locale_aware(input$file$datapath, input$csv_locale %||% "auto")
-      ingest_data(data, input$file$name)
-    }
+    fname <- input$file$name
+    # Ingest round 1: EVERY read error (an empty file, a binary file, a bad encoding, a workbook that will not open) and
+    # every refusal of ingest_frame() is a notification and nothing else: the loaded data is left exactly as it was.
+    tryCatch({
+      # v2.22: Excel workbooks (.xlsx / .xls) are read with readxl (the first sheet that holds data; a sheet selector
+      # appears for more)
+      if (is_excel_file(fname)) {
+        wb <- read_workbook_data(input$file$datapath, fname)
+        label <- if (length(wb$sheets) > 1) paste0(fname, " [", wb$sheet, "]") else fname
+        ingest_data(wb$data, label)
+        rv$xlsx_path <- input$file$datapath; rv$xlsx_name <- fname
+        rv$xlsx_sheets <- wb$sheets; rv$xlsx_sheet <- wb$sheet
+        if (length(wb$skipped))
+          guard_notify("sheet_skipped", sprintf("Sheet%s %s ha%s no data; loaded sheet '%s' instead (the Excel sheet box lists the others).",
+                                                if (length(wb$skipped) > 1) "s" else "", paste0("'", wb$skipped, "'", collapse = ", "),
+                                                if (length(wb$skipped) > 1) "ve" else "s", wb$sheet), "message")
+      } else {
+        data <- read_csv_locale_aware(input$file$datapath, input$csv_locale %||% "auto")
+        ingest_data(data, fname)
+        rv$xlsx_path <- NULL; rv$xlsx_sheets <- NULL; rv$xlsx_sheet <- NULL
+      }
+    }, error = function(e) guard_notify("file_read", load_failed_message(e, fname), "error"))
+    invisible(NULL)
   })
 
   # v2.22: another sheet of the uploaded workbook (re-reads that sheet of the same upload; a new load otherwise)
   output$sheet_ui <- renderUI({
     sh <- rv$xlsx_sheets
     if (length(sh) < 2) return(NULL)
-    selectInput("sheet_choice", "Excel sheet:", choices = sh, selected = sh[1])
+    selectInput("sheet_choice", "Excel sheet:", choices = sh, selected = if (!is.null(rv$xlsx_sheet) && rv$xlsx_sheet %in% sh) rv$xlsx_sheet else sh[1])
   })
   observeEvent(input$sheet_choice, {
     req(rv$xlsx_path, input$sheet_choice)
     sh <- input$sheet_choice
     if (identical(paste0(rv$xlsx_name, " [", sh, "]"), rv$data_source)) return(invisible(NULL))
-    data <- tryCatch(read_data_file(rv$xlsx_path, rv$xlsx_name, sheet = sh),
-                     error = function(e) { guard_notify("file_read", conditionMessage(e), "error"); NULL })
-    if (is.null(data)) return(invisible(NULL))
-    ingest_data(data, paste0(rv$xlsx_name, " [", sh, "]"))
+    tryCatch({
+      data <- read_data_file(rv$xlsx_path, rv$xlsx_name, sheet = sh)
+      ingest_data(data, paste0(rv$xlsx_name, " [", sh, "]"))
+      rv$xlsx_sheet <- sh
+    }, error = function(e) guard_notify("file_read", load_failed_message(e, paste0(rv$xlsx_name, " [", sh, "]")), "error"))
   }, ignoreInit = TRUE)
 
   # v2.22: the Time column box (under the file picker): re-runs the detection that follows from the time column on the
@@ -16746,58 +17100,6 @@ server <- function(input, output, session) {
   })
 
   # ── Compare: a second dataset through the same ingest path ──────────────────────────────────────
-  # ingest_frame() is ingest_data() without the session side effects: it returns the dataset's structure (data, time
-  # column, samples, column map, long / wide, replicate column, stacked blocks, time points) instead of writing rv. It calls
-  # the same detectors (detect_time_column, is_long_format_detect, detect_od_column_idx, detect_od_columns,
-  # infer_wide_replicates, detect_replicate_column, coerce_sentinel_columns, parse_time_column); a test compares the two.
-  ingest_frame <- function(data, source_name = "") {
-    notes <- character(0)
-    tc <- detect_time_column(data)
-    pt <- parse_time_column(data[[tc]])
-    if (isTRUE(pt$converted)) {
-      data[[tc]] <- pt$values
-      notes <- c(notes, paste0("Time column '", tc, "' was written as clock time / date-time; converted to minutes."))
-    }
-    group_names <- c("variable","Variable","condition","Condition","treatment","Treatment","sample","Sample","group","Group")
-    rep_names   <- colnames(data)[tolower(colnames(data)) %in%
-                     c("replicate","rep","rep_id","replicate_id","well","well_id","wellid","technical_replicate","biological_replicate","repeat")]
-    cs <- coerce_sentinel_columns(data, skip_cols = c(tc, group_names, rep_names), time_values = data[[tc]])
-    data <- cs$data
-    if (!is.null(cs$report))
-      notes <- c(notes, paste0(nrow(cs$report), " non-numeric reading(s) (", paste(utils::head(unique(cs$report$value), 3), collapse = ", "),
-                               ") were treated as missing; affected column(s): ", paste(unique(cs$report$sample), collapse = ", "), "."))
-    ds <- list(data = data, data_source = source_name, time_col = tc, is_long_format = is_long_format_detect(data),
-               col_map = NULL, od_vars = NULL, od_vars_raw = NULL, group_col = NULL, value_col = NULL, replicate_col = NULL,
-               n_blocks = NULL, block_id = NULL, all_timepoints = NULL, sentinel_report = cs$report, notes = notes)
-    if (ds$is_long_format) {
-      found    <- group_names[group_names %in% colnames(data)]
-      rep_col0 <- detect_replicate_column(data, tc, NULL, NULL)
-      group_col <- if (length(found) > 0) found[1] else {
-        dv    <- sapply(data, function(x) length(unique(x)) / nrow(data))
-        cands <- setdiff(names(which(dv < 0.3 & dv > 0)), c(tc, rep_col0))
-        if (length(cands)) cands[1] else setdiff(colnames(data), c(tc, rep_col0))[1]
-      }
-      rep_col <- detect_replicate_column(data, tc, group_col, NULL)
-      vc <- detect_od_columns(data, c(tc, group_col, rep_col))
-      if (length(vc) > 1) vc <- vc[1]
-      rep_col <- detect_replicate_column(data, tc, group_col, vc)
-      ds$group_col <- group_col; ds$value_col <- vc; ds$replicate_col <- rep_col
-      ds$od_vars <- as.character(unique(data[[group_col]])); ds$od_vars_raw <- ds$od_vars
-    } else {
-      idx <- detect_od_column_idx(data, tc)
-      cn  <- colnames(data); oc <- unique(cn[idx])
-      ds$col_map <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
-      ds$od_vars <- oc; ds$od_vars_raw <- oc
-      wb <- infer_wide_replicates(data, tc)
-      if (!is.null(wb$reps) && wb$reps > 1) {
-        ds$n_blocks <- wb$reps; ds$block_id <- wb$block_id
-        ds$notes <- c(ds$notes, paste0("Detected ", wb$reps, " stacked time blocks (the time column restarts); each block is treated as one replicate."))
-      }
-    }
-    all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[tc]])))))
-    ds$all_timepoints <- all_t[is.finite(all_t)]
-    ds
-  }
   # prepare_plot_data() / prepare_replicate_data() / apply_time_filters() re-bound to another dataset: copies of the
   # three closures whose enclosing environment holds `rv` = the dataset (a list from ingest_frame), so the second file
   # goes through exactly the code of the first (filters, blank subtraction, replicate pooling, SD / SEM / CI).
@@ -16810,11 +17112,8 @@ server <- function(input, output, session) {
   }
   rv_cmp <- reactiveValues(ds = NULL, error = NULL)
   compare_read_file <- function(path, name = path) {
-    ext <- tolower(tools::file_ext(name))
-    if (ext %in% c("xlsx", "xls")) {
-      if (!requireNamespace("readxl", quietly = TRUE)) stop("Reading Excel files needs the 'readxl' package: install.packages('readxl')")
-      as.data.frame(readxl::read_excel(path), stringsAsFactors = FALSE, check.names = FALSE)
-    } else read_csv_locale_aware(path, input$csv_locale %||% "auto")
+    if (is_excel_file(name)) read_workbook_data(path, name)$data      # the same reader as the main path: the first sheet with data
+    else read_csv_locale_aware(path, input$csv_locale %||% "auto")
   }
   compare_load <- function(path, name = path) {
     ds <- ingest_frame(compare_read_file(path, name), name)
@@ -17095,5 +17394,11 @@ server <- function(input, output, session) {
   }
 
 }
+
+# Ingest round 1 (item 15): Shiny's default upload limit is 5 MB, which a plate-reader export of a 96-well plate (or any
+# long file) exceeds; fileInput() then refuses it before the app sees it. 50 MB: a 96 x 150 plate (about 270 KB)
+# takes about 30 s CPU to analyse after the rolling_slope speed-up, and the app is not tuned for more than that. A
+# larger limit set by the user is kept.
+options(shiny.maxRequestSize = max(getOption("shiny.maxRequestSize", 0), 50 * 1024^2))
 
 shinyApp(ui, server)
