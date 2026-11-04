@@ -300,6 +300,23 @@ has_ragg      <- requireNamespace("ragg",      quietly = TRUE)
 has_patchwork <- requireNamespace("patchwork", quietly = TRUE)
 has_DT        <- requireNamespace("DT",        quietly = TRUE)   # v2.16: searchable summary-statistics table
 
+# Hardening round 1 (supervisor finding 1): text extents and gtable sizes (fixed_panel_grob, legend heights, the matrix
+# legend, build_parity_frames) are measured with no device open, and R then auto-opens its default pdf() device, which
+# has no Arial ("font family 'Arial' not found in PostScript font database" warnings) and leaves a 0-byte Rplots.pdf.
+# Headless sessions (Rscript / a server) get a null RASTER device instead: ragg's in-memory agg_capture() when ragg
+# is installed, else png() to a temporary file. An interactive session that has its own device (RStudio, a window)
+# is left alone.
+kc_null_device <- if (requireNamespace("ragg", quietly = TRUE)) {
+  function(...) ragg::agg_capture(...)
+} else {
+  function(...) grDevices::png(tempfile(fileext = ".png"), ...)
+}
+local({
+  dev <- getOption("device")
+  if (!interactive() || is.null(dev) || identical(dev, "pdf") || identical(dev, grDevices::pdf))
+    options(device = kc_null_device)
+})
+
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
@@ -307,13 +324,75 @@ APP_VERSION <- "2.22.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-safe_id <- function(x) gsub("[^A-Za-z0-9_]", "_", x)
+# Hardening round 1 (finding 30): the id of a sample's widgets (color_<id>, qe_name_<id>, facet_of_<id>, ...). Two
+# names that differ only in punctuation or case-free symbols ("a b", "a_b", "a-b", "a.b"; every Greek-letter-only name)
+# sanitise to the same string and used to share ONE widget. When the sanitised id is shared by different names among the
+# current samples (set_safe_id_pool(), called when data are loaded; per Shiny session) or among the names passed in,
+# a short hash of the RAW name is appended to each of them. A unique id stays exactly as it was ("Phage_MOI_10").
+.safe_id_global <- new.env()
+set_safe_id_pool <- function(samples) {
+  dom <- shiny::getDefaultReactiveDomain()
+  pool <- unique(as.character(samples))
+  if (!is.null(dom)) dom$userData$safe_id_pool <- pool else assign("pool", pool, envir = .safe_id_global)
+  invisible(pool)
+}
+safe_id_hash <- function(x) vapply(as.character(x), function(v) {
+  h <- 5381
+  for (cp in utf8ToInt(enc2utf8(v))) h <- (h * 33 + cp) %% 4294967296
+  sprintf("%06x", as.integer(h %% 16777216))
+}, character(1), USE.NAMES = FALSE)
+safe_id <- function(x) {
+  raw  <- as.character(x)
+  base <- gsub("[^A-Za-z0-9_]", "_", raw)
+  dom  <- shiny::getDefaultReactiveDomain()
+  pool <- (if (!is.null(dom)) dom$userData$safe_id_pool else get0("pool", envir = .safe_id_global)) %||% character(0)
+  pool <- unique(c(pool, raw[!is.na(raw)]))
+  pb   <- gsub("[^A-Za-z0-9_]", "_", pool)
+  hit  <- !is.na(base) & base %in% pb[duplicated(pb)]
+  if (any(hit)) base[hit] <- paste0(base[hit], "_", safe_id_hash(raw[hit]))
+  base
+}
+
+# Hardening round 1 (finding 4): setTimeLimit() / interrupt-style stops arrive as an ordinary error condition, so a
+# long loop that wraps each step in tryCatch(error = ...) swallowed them and carried on. Handlers in the long engine
+# loops call this first: it re-raises a time-limit stop and does nothing for any other error.
+# Hardening round 1 (finding 19): split(d, list(variable, time)) names each group "variable.time" and so merged
+# sample "A" at time 4.5 with sample "A.4" at time 5 (both "A.4.5"). Group by the EXACT key columns instead: a list of
+# row-index vectors, one per distinct combination, in the sorted order of the key columns.
+exact_groups <- function(df, cols) {
+  if (!nrow(df)) return(list())
+  key <- do.call(paste, c(unname(lapply(df[cols], as.character)), sep = "\r"))
+  first <- !duplicated(key)
+  ux <- df[first, cols, drop = FALSE]
+  ord <- do.call(order, unname(as.list(ux)))
+  lv <- key[first][ord]
+  split(seq_len(nrow(df)), factor(key, levels = lv))
+}
+# Run expr with a fixed RNG seed and put the caller's random-number stream back afterwards (finding 25: the Dunnett
+# p-values come from a Monte-Carlo integral, so two calls on the same data differed in the 3rd digit).
+with_fixed_seed <- function(seed, expr) {
+  had <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  old <- if (had) get(".Random.seed", envir = globalenv(), inherits = FALSE) else NULL
+  on.exit({ if (had) assign(".Random.seed", old, envir = globalenv())
+            else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv()) }, add = TRUE)
+  set.seed(seed)
+  expr
+}
+# A character key for matching time stamps of two frames: each value formatted on its own, float noise below 1e-8
+# removed (and -0 made 0), so 60 and 60 + 1e-13 match.
+time_match_key <- function(x) sprintf("%.10g", round(as.numeric(x), 8) + 0)
+is_time_limit_error <- function(e) inherits(e, "interrupt") ||
+  grepl("reached (elapsed|CPU) time limit", conditionMessage(e), ignore.case = TRUE)
+reraise_time_limit <- function(e) if (is_time_limit_error(e)) stop(e)
 
 normalize_hex_color <- function(hex) {
   if (is.null(hex) || is.na(hex) || nchar(trimws(hex)) == 0) return("#000000")
   hex <- trimws(hex)
-  if (!grepl("^#", hex)) hex <- paste0("#", hex)
+  if (!grepl("^#", hex) && grepl("^[0-9A-Fa-f]{3,8}$", hex)) hex <- paste0("#", hex)
+  if (grepl("^#[0-9A-Fa-f]{3}$", hex)) hex <- paste0("#", paste(rep(strsplit(substring(hex, 2), "")[[1]], each = 2), collapse = ""))   # finding 35: #fff
   if (grepl("^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$", hex)) return(toupper(hex))
+  nm <- tryCatch(grDevices::col2rgb(hex), error = function(e) NULL)                      # finding 35: "red"
+  if (!is.null(nm)) return(toupper(grDevices::rgb(nm[1], nm[2], nm[3], maxColorValue = 255)))
   "#000000"
 }
 
@@ -344,17 +423,77 @@ detect_csv_locale <- function(path) {
 # coerce_sentinel_columns(), parse_time_column(), infer_wide_replicates() and
 # detect_replicate_column(); see docs/PORTED_FROM_LYSIS_CURVE_APP.md).
 
+# Hardening round 1 (finding 1): a plate-reader export is often cp1252 / Latin-1 ("T<degree> 600" is byte 0xB0), which
+# is invalid UTF-8; strsplit() then errors and a ";" file collapses to one column. Returns a path to a UTF-8 copy
+# (a temp file, removed at the end of the session's tempdir) when the file is not valid UTF-8, else `path` itself.
+ensure_utf8_file <- function(path) {
+  raw <- tryCatch(readBin(path, "raw", n = file.info(path)$size), error = function(e) NULL)
+  if (is.null(raw) || !length(raw)) return(path)
+  if (any(raw == as.raw(0))) return(path)          # not a text file we can re-encode (e.g. UTF-16)
+  if (validUTF8(rawToChar(raw))) return(path)
+  out <- iconv(list(raw), from = "CP1252", to = "UTF-8", sub = "byte", toRaw = TRUE)[[1]]
+  if (is.null(out)) return(path)
+  tmp <- tempfile(fileext = ".csv")
+  writeBin(out, tmp)
+  tmp
+}
+
+# read.csv() warns "incomplete final line found by readTableHeader" for any file without a trailing newline
+# (finding 9); that is not worth a warning, so only that one is muffled.
+quiet_incomplete <- function(expr) withCallingHandlers(expr, warning = function(w)
+  if (grepl("incomplete final line", conditionMessage(w), fixed = TRUE)) invokeRestart("muffleWarning"))
+
+# Field counts of the lines `raw`, QUOTE-AWARE (a quoted comma is not a separator: finding 3). raw = every field,
+# trailing empty ones included ("Time,WT,," has 4); eff = the count without the trailing empty fields (what
+# strsplit() used to return), which is what tells a comma-padded preamble line from a header.
+csv_field_counts <- function(raw, sep) {
+  if (!length(raw)) return(list(raw = integer(0), eff = integer(0)))
+  r <- tryCatch(suppressWarnings(utils::count.fields(textConnection(raw), sep = sep, quote = "\"",
+                                                     blank.lines.skip = FALSE, comment.char = "")),
+                error = function(e) rep(NA_integer_, length(raw)))
+  if (length(r) != length(raw)) r <- rep(NA_integer_, length(raw))
+  if (anyNA(r)) {                                   # an unbalanced quote: fall back to the plain split count
+    r_alt <- vapply(raw, function(l) tryCatch(length(strsplit(l, sep, fixed = TRUE)[[1]]), error = function(e) 1L),
+                    integer(1), USE.NAMES = FALSE)
+    r <- ifelse(is.na(r), r_alt, r)
+  }
+  pad <- vapply(raw, function(l) {
+    m <- regmatches(l, regexpr(paste0("(\\Q", sep, "\\E[ ]*)+$"), l, perl = TRUE))
+    if (length(m)) lengths(regmatches(m, gregexpr(sep, m, fixed = TRUE))) else 0L
+  }, integer(1), USE.NAMES = FALSE)
+  list(raw = as.integer(r), eff = as.integer(pmax(r - pad, 1L)))
+}
+
+# TRUE when most non-empty cells of `line` read as numbers (decimal comma allowed): a data row, not a header.
+csv_line_is_data <- function(line, sep) {
+  f <- trimws(gsub("\"", "", strsplit(line, sep, fixed = TRUE)[[1]]))
+  f <- f[nzchar(f)]
+  if (!length(f)) return(FALSE)
+  mean(is.finite(suppressWarnings(as.numeric(sub(",", ".", f, fixed = TRUE))))) >= 0.5
+}
+
 # Field counts of the non-blank lines of a file, WITH their raw line numbers
-# (read.csv's `skip` counts raw lines, blank ones included). Counts come from
-# strsplit(), which drops trailing empty fields: a preamble line padded with
-# commas out to the table width ("Software Version,3.08,,,,") therefore still
-# counts as narrow, which is what the preamble test needs.
+# (read.csv's `skip` counts raw lines, blank ones included). fc = quote-aware count including trailing empty
+# fields; fc_eff = the same without trailing empty fields (a preamble line padded with commas out to the table
+# width ("Software Version,3.08,,,,") is narrow by fc_eff, and csv_header_index() uses that).
 csv_line_field_counts <- function(path, sep, n = 500) {
   raw <- tryCatch(readLines(path, n = n, warn = FALSE), error = function(e) character(0))
   keep <- which(nzchar(trimws(raw)))
-  list(line = keep, text = raw[keep],
-       fc = vapply(raw[keep], function(l) length(strsplit(l, sep, fixed = TRUE)[[1]]),
-                   integer(1), USE.NAMES = FALSE))
+  cnt <- csv_field_counts(raw[keep], sep)
+  list(line = keep, text = raw[keep], fc = cnt$raw, fc_eff = cnt$eff)
+}
+
+# Position (within z$line) of the table header: the first line whose field count is `modal`. A header whose last
+# cells are blank ("Time,WT,,": finding 2) is as wide as its data rows; a comma-padded preamble line is too, so
+# when the candidate has trailing empty fields it must be followed by a data row, otherwise the next candidate.
+csv_header_index <- function(z, sep, modal) {
+  cands <- which(z$fc == modal)
+  if (!length(cands)) return(NA_integer_)
+  for (i in cands) {
+    if (z$fc_eff[i] == modal) return(i)
+    if (i < length(z$text) && z$fc[i + 1L] == modal && csv_line_is_data(z$text[i + 1L], sep)) return(i)
+  }
+  cands[1]
 }
 
 # Raw-line index (0-based, i.e. read.csv's `skip`) of the table header when the
@@ -367,8 +506,9 @@ csv_preamble_skip <- function(path, sep = ",") {
   rep_counts <- as.integer(names(tab)[tab >= 2])
   if (!length(rep_counts)) return(0L)
   modal <- max(rep_counts)
-  if (z$fc[1] >= modal) return(0L)
-  as.integer(z$line[which(z$fc == modal)[1]] - 1L)
+  h <- csv_header_index(z, sep, modal)
+  if (is.na(h) || h == 1L) return(0L)
+  as.integer(z$line[h] - 1L)
 }
 
 # Delimiter / preamble sniffing. Tries comma, semicolon and tab; the table is
@@ -382,7 +522,8 @@ csv_preamble_skip <- function(path, sep = ",") {
 # original filtered blank lines out first, so a blank line inside a preamble
 # made read.csv skip too few lines).
 read_csv_smart <- function(path) {
-  plain <- tryCatch(read.csv(path, stringsAsFactors = FALSE, check.names = FALSE),
+  path  <- ensure_utf8_file(path)            # hardening round 1 (finding 1): cp1252 / Latin-1 exports
+  plain <- tryCatch(quiet_incomplete(read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)),
                     error = function(e) NULL)
   if (!is.null(plain) && ncol(plain) >= 2 && nrow(plain) > 0 && csv_preamble_skip(path, ",") == 0L)
     return(list(data = plain, sep = ",", dec = ".", skip = 0L, sniffed = FALSE))
@@ -392,8 +533,7 @@ read_csv_smart <- function(path) {
   lines <- raw[keep]
   if (length(lines) == 0) stop("The file is empty.", call. = FALSE)
 
-  nf <- function(sep) vapply(lines, function(l)
-    length(strsplit(l, sep, fixed = TRUE)[[1]]), integer(1), USE.NAMES = FALSE)
+  nf <- function(sep) csv_field_counts(lines, sep)$raw     # quote-aware, trailing empty fields counted (findings 2-3)
 
   # European Excel writes 0,05 for 0.05. With a comma separator that is
   # unparseable by construction -- the header has k fields and every data row
@@ -410,6 +550,7 @@ read_csv_smart <- function(path) {
   best <- NULL
   for (sep in c(",", ";", "\t")) {
     fc  <- nf(sep)
+    fe  <- csv_field_counts(lines, sep)$eff
     tab <- table(fc[fc > 1])
     if (!length(tab)) next
     rep_counts <- as.integer(names(tab)[tab >= 2])
@@ -418,25 +559,35 @@ read_csv_smart <- function(path) {
     if (modal <= 1) next
     score <- sum(fc == modal) * modal
     if (is.null(best) || score > best$score)
-      best <- list(sep = sep, modal = modal, fc = fc, score = score)
+      best <- list(sep = sep, modal = modal, fc = fc, fe = fe, score = score)
   }
   if (is.null(best))
     stop("Could not find a consistent column separator (comma, semicolon and ",
          "tab were all tried). Check that the file is a plain-text table.",
          call. = FALSE)
 
-  skip <- as.integer(keep[which(best$fc == best$modal)[1]] - 1L)   # raw lines above the header
+  zz <- list(line = keep, text = lines, fc = best$fc, fc_eff = best$fe)
+  hdr <- csv_header_index(zz, best$sep, best$modal)
+  # finding 4: a header NARROWER than every data row, with the first full-width line already a data row, is a
+  # header missing a name (or a row with an extra field), not a preamble: say so instead of dropping the header.
+  if (best$fc[1] < best$modal && hdr == 2L && csv_line_is_data(lines[2], best$sep) &&
+      all(best$fc[-1] == best$modal))
+    stop(structure(class = c("csv_header_mismatch", "error", "condition"),
+      list(message = paste0("The header has ", best$fc[1], " field(s) but every data row has ", best$modal,
+                            ". Name each column in the header (or remove the extra field from the rows)."),
+           call = NULL)))
+  skip <- as.integer(keep[hdr] - 1L)   # raw lines above the header
 
   # decimal comma only makes sense when the separator is not a comma
   dec  <- "."
-  body <- lines[best$fc == best$modal][-1]
+  body <- lines[best$fc == best$modal][-1]   # (the header is among them)
   if (length(body) && best$sep != "," &&
       sum(grepl("[0-9],[0-9]", body)) >= 0.5 * length(body))
     dec <- ","
 
   data <- tryCatch(
-    read.csv(path, sep = best$sep, dec = dec, skip = skip,
-             stringsAsFactors = FALSE, check.names = FALSE),
+    quiet_incomplete(read.csv(path, sep = best$sep, dec = dec, skip = skip,
+             stringsAsFactors = FALSE, check.names = FALSE)),
     error = function(e)
       stop("Could not read the file even after detecting a '",
            if (best$sep == "\t") "tab" else best$sep, "' separator and ",
@@ -450,18 +601,20 @@ read_csv_smart <- function(path) {
 # error, a single column because the wrong locale was picked, or a preamble above
 # the header) the separator/preamble sniffer read_csv_smart() takes over.
 read_csv_locale_aware <- function(path, locale = "auto") {
+  path <- ensure_utf8_file(path)             # hardening round 1 (finding 1)
   loc <- if (identical(locale, "auto")) detect_csv_locale(path) else locale
   sep <- if (identical(loc, "eu")) ";" else ","
   dec <- if (identical(loc, "eu")) "," else "."
   plain <- tryCatch(
-    read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = FALSE),
+    quiet_incomplete(read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = FALSE)),
     error = function(e) tryCatch(
-      read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE),
+      quiet_incomplete(read.csv(path, sep = sep, dec = dec, stringsAsFactors = FALSE, check.names = TRUE)),
       error = function(e2) NULL))
   if (!is.null(plain) && ncol(plain) >= 2 && nrow(plain) > 0 && csv_preamble_skip(path, sep) == 0L)
     return(plain)
   smart <- tryCatch(read_csv_smart(path), error = function(e) e)
   if (inherits(smart, "error")) {
+    if (inherits(smart, "csv_header_mismatch")) stop(smart)   # never fall back to a parse that shifted the columns
     if (!is.null(plain)) return(plain)       # nothing better than the locale-aware parse
     stop(smart)
   }
@@ -500,6 +653,7 @@ coerce_sentinel_columns <- function(data, skip_cols = character(0),
         time   = if (!is.null(time_values) && length(time_values) == nrow(data))
                    as.character(time_values[bad]) else as.character(bad),
         value  = txt[bad], stringsAsFactors = FALSE)
+    num[!is.finite(num)] <- NA_real_      # finding 7: "Inf" / "NaN" / "Infinity" become NA, as documented
     data[[j]] <- num
   }
   list(data = data,
@@ -516,7 +670,9 @@ parse_time_column <- function(x) {
   txt  <- trimws(as.character(x))
   txt[is.na(txt)] <- ""
   keep <- nzchar(txt)
-  num  <- suppressWarnings(as.numeric(txt))
+  # finding 8: only plain decimal numbers count ("0x10" is not 16)
+  num  <- ifelse(grepl("^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$", txt),
+                 suppressWarnings(as.numeric(txt)), NA_real_)
   if (any(keep) && all(is.finite(num[keep])))
     return(list(values = num, converted = FALSE, unit = NA_character_))
 
@@ -557,10 +713,14 @@ infer_wide_replicates <- function(data, time_col) {
   if (is.null(data) || nrow(data) == 0) return(list(reps = NULL, block_id = NULL))
   t_vec <- suppressWarnings(as.numeric(as.character(data[[time_col]])))
   if (all(is.na(t_vec))) return(list(reps = NULL, block_id = NULL))
-  resets <- which(diff(t_vec) < 0)
-  if (length(resets) == 0) return(list(reps = 1L, block_id = rep(1L, nrow(data))))
-  block_starts <- c(1L, resets + 1L)
-  block_ends   <- c(resets, nrow(data))
+  # finding 6: a blank / NA time cell between two stacked blocks hides the restart from diff(); compare each finite
+  # time with the previous FINITE one. A block starts at the first finite time after a drop; rows with no time stay
+  # with the block they follow (they are dropped later).
+  fin <- which(is.finite(t_vec))
+  st  <- if (length(fin) > 1) fin[-1][diff(t_vec[fin]) < 0] else integer(0)
+  if (length(st) == 0) return(list(reps = 1L, block_id = rep(1L, nrow(data))))
+  block_starts <- c(1L, st)
+  block_ends   <- c(st - 1L, nrow(data))
   block_id <- integer(nrow(data))
   for (i in seq_along(block_starts)) block_id[block_starts[i]:block_ends[i]] <- i
   list(reps = length(block_starts), block_id = block_id)
@@ -584,7 +744,8 @@ parse_excluded_timepoints <- function(text, all_timepoints) {
   parts <- strsplit(trimws(text), "[,; ]+")[[1]]
   vals  <- suppressWarnings(as.numeric(parts))
   vals  <- vals[!is.na(vals)]
-  if (length(vals) == 0 || is.null(all_timepoints)) return(numeric(0))
+  if (!is.null(all_timepoints)) all_timepoints <- all_timepoints[is.finite(all_timepoints)]   # finding 39: NA time points
+  if (length(vals) == 0 || !length(all_timepoints)) return(numeric(0))
   matched <- sapply(vals, function(v) {
     diffs <- abs(all_timepoints - v)
     tol   <- max(abs(all_timepoints)) * 0.001 + 0.001
@@ -602,7 +763,10 @@ LONG_GROUP_NAMES <- c("variable", "Variable", "condition", "Condition", "treatme
                       "sample", "Sample", "group", "Group", "strain", "Strain")
 
 # A wide-format column whose name says it is a temperature trace (Gen5 "T° 600", "Temp", "37 °C"): never a sample.
-TEMP_COL_REGEX <- "^T°|temp|°C"
+# Hardening round 1 (finding 5): whole words only -- "Template", "Temperate phage", "Attempt2" and "Phage at 4 °C"
+# are samples. A temperature header is one that starts with T° ("T° 600"), contains the WORD temp / temperature(s)
+# ("Temp", "Temperature [°C]"), or is just the unit, optionally with a number ("°C", "(°C)", "37 °C").
+TEMP_COL_REGEX <- "^T°|(?<![A-Za-z])temp(?:erature)?s?(?![A-Za-z])|^[\\s\\[(]*(?:[-+]?[0-9.]+\\s*)?°\\s?C[\\s\\])]*$"
 
 # Wide format: EVERY non-time numeric column is a sample (by position, so replicate columns that share a name all
 # count), except a column whose name matches TEMP_COL_REGEX. Replaces the old "keep only columns named OD / value /
@@ -643,9 +807,22 @@ read_excel_sheet <- function(path, sheet = 1) {
   x
 }
 
+# Blank header cells after the first column take the name of the cell to their left: the common Excel layout that
+# names only the first replicate column ("Time,WT,,,Mut,,") means WT, WT, WT, Mut, Mut, Mut (hardening round 1,
+# finding 2). Without it every blank column would be a sample called "".
+fill_blank_headers <- function(d) {
+  if (is.null(d) || ncol(d) < 3) return(d)
+  nm <- colnames(d)
+  blank <- function(v) is.na(v) | !nzchar(trimws(v))
+  for (j in 3:length(nm))                      # (never inherits the first column's name, the time axis)
+    if (blank(nm[j]) && !blank(nm[j - 1])) nm[j] <- nm[j - 1]
+  colnames(d) <- nm
+  d
+}
+
 # The app's file loader: CSV / text through the locale-aware reader, Excel through readxl (first sheet unless asked).
 read_data_file <- function(path, name = path, sheet = 1, locale = "auto") {
-  if (is_excel_file(name)) read_excel_sheet(path, sheet) else read_csv_locale_aware(path, locale)
+  fill_blank_headers(if (is_excel_file(name)) read_excel_sheet(path, sheet) else read_csv_locale_aware(path, locale))
 }
 
 # Text pasted from Excel / a text editor -> data frame. sep: "auto" (tab / comma / semicolon, decided by the
@@ -659,12 +836,12 @@ parse_pasted_text <- function(text, sep = "auto") {
   d <- if (identical(sep, "auto")) {
     r <- tryCatch(read_csv_smart(tmp)$data, error = function(e) NULL)
     if (is.null(r)) {                                   # a one-column paste is not a table the sniffer accepts
-      tryCatch(utils::read.csv(tmp, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE), error = function(e) NULL)
+      tryCatch(quiet_incomplete(utils::read.csv(tmp, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)), error = function(e) NULL)
     } else r
   } else {
     s <- switch(sep, tab = "\t", comma = ",", semicolon = ";", "\t")
     dec <- if (identical(s, ";") && length(grep("[0-9],[0-9]", text))) "," else "."
-    tryCatch(utils::read.csv(tmp, sep = s, dec = dec, stringsAsFactors = FALSE, check.names = FALSE),
+    tryCatch(quiet_incomplete(utils::read.csv(tmp, sep = s, dec = dec, stringsAsFactors = FALSE, check.names = FALSE)),
              error = function(e) NULL)
   }
   if (is.null(d) || ncol(d) < 1 || nrow(d) < 1) return(NULL)
@@ -677,7 +854,7 @@ parse_pasted_text <- function(text, sep = "auto") {
   d <- d[!empty_row, , drop = FALSE]
   if (nrow(d) < 1 || ncol(d) < 1) return(NULL)
   rownames(d) <- NULL
-  d
+  fill_blank_headers(d)
 }
 
 # ── Replicate identities (the exclusion list) ─────────────────────────────────────────────────────────
@@ -696,14 +873,14 @@ replicate_catalog <- function(data, is_long, time_col = NULL, group_col = NULL, 
   if (isTRUE(is_long)) {
     if (is.null(group_col) || !group_col %in% colnames(data)) return(empty)
     g <- as.character(data[[group_col]])
-    for (s in unique(g)) {
+    for (s in unique(g[!is.na(g)])) {         # finding 39: an NA sample name has no replicates to list
       ix <- which(g == s)
       if (!is.null(rep_col) && rep_col %in% colnames(data)) {
         rc <- data[[rep_col]][ix]; u <- sort(unique(rc))
         for (k in seq_along(u)) add(s, k, sprintf("rep %d (%s %s)", k, rep_col, u[k]))
       } else {
         tt <- data[[time_col]][ix]
-        k  <- max(1L, as.integer(max(table(tt))))
+        tb <- table(tt); k <- if (length(tb)) max(1L, as.integer(max(tb))) else 1L
         for (j in seq_len(k)) add(s, j, if (k == 1L) "rep 1" else sprintf("rep %d (row %d at each time)", j, j))
       }
     }
@@ -780,7 +957,14 @@ transform_frame <- function(df, blank_mode = "constant", blank_sample = "", blan
       notes <- c(notes, if (nzchar(blank_sample %||% "")) sprintf("The blank sample '%s' has no readings: no blank was subtracted.", blank_sample)
                         else "No blank sample is chosen: no blank was subtracted.")
     } else {
+      v_before <- df$value
       df$value <- df$value - bc(df$time)
+      # finding 13: the blank curve is interpolated, never extrapolated: a reading outside the blank's time range
+      # has no blank to subtract and becomes NA. Say so (it used to vanish without a note).
+      lost <- is.finite(v_before) & !is.finite(df$value) & df$variable != blank_sample
+      if (any(lost))
+        notes <- c(notes, sprintf("%d reading(s) of the samples lie outside the time range of the blank sample '%s' and were left out (no blank to subtract there).",
+                                  sum(lost), blank_sample))
       keep_rows <- df$variable != blank_sample
       df <- df[keep_rows, , drop = FALSE]; kept <- kept[keep_rows]
     }
@@ -816,7 +1000,7 @@ transform_frame <- function(df, blank_mode = "constant", blank_sample = "", blan
       d <- df[kept & df$variable == s & is.finite(df$value), , drop = FALSE]
       max(vapply(sort(unique(d$time)), function(x) mean(d$value[d$time == x]), numeric(1)))
     }, numeric(1))
-    m <- mx[as.character(df$variable)]
+    m <- unname(mx[match(as.character(df$variable), names(mx))])   # (match: a sample named "" is not addressable by name)
     bad <- !is.finite(m) | m <= 0
     if (any(bad & is.finite(df$value)))
       notes <- c(notes, "Some samples have a maximum at or below 0: they were left out of the 0-100 % scaling.")
@@ -948,8 +1132,12 @@ rolling_slope <- function(t, y, win) {
   for (s in seq_len(n - win + 1)) {
     idx <- s:(s + win - 1)
     tt  <- t[idx]; yy <- y[idx]
-    out[s + offset] <- if (diff(range(tt)) == 0) 0 else
-      unname(coef(lm(yy ~ tt))[2])
+    # Hardening round 1 (finding 10): a window with fewer than two finite readings (e.g. five consecutive
+    # non-positive ODs, whose logs are NA) has no slope; lm() on it raised "0 (non-NA) cases", the caller's
+    # tryCatch turned the WHOLE curve into NA, and mu_max / doubling time / lag were lost. Now only that window is NA.
+    ok <- is.finite(tt) & is.finite(yy)
+    out[s + offset] <- if (sum(ok) < 2) NA_real_ else if (diff(range(tt[ok])) == 0) 0 else
+      unname(coef(lm(yy[ok] ~ tt[ok]))[2])
   }
   out
 }
@@ -1066,16 +1254,20 @@ curve_centroid <- function(t_vec, od_vec) {
 
 # Port of the extinction block: first time the curve falls below the floor
 # `thr` (default 0.05 OD, as in the reference), linearly interpolated between
-# the last point at/above it and the first below. A curve that STARTS below the
-# floor reports its first time point. NA when it never falls below.
+# the last point at/above it and the first below. Extinction is a crossing FROM ABOVE: a curve that STARTS below
+# the floor (a healthy inoculum at OD 0.02-0.05 after blank subtraction) has not gone extinct at its first point, so
+# it is not "extinct at t_start" (hardening round 1, finding 12: it used to report its first time point, so a growing
+# uninfected control was "extinct" at t = 0). Such a curve reports the first later crossing from above (it grew, then
+# lysed back below the floor); if it never rises to the floor and falls again the result is NA, with
+# attr(, "reason") = "starts_below_floor". NA when it never falls below.
 curve_extinction_time <- function(t_vec, od_vec, thr = 0.05) {
   n <- length(t_vec)
   thr <- suppressWarnings(as.numeric(thr))
   if (n < 1 || length(thr) != 1 || !is.finite(thr)) return(NA_real_)
-  if (isTRUE(od_vec[1] < thr)) return(t_vec[1])
   if (n < 2) return(NA_real_)
   cross <- which(od_vec[-1] < thr & od_vec[-n] >= thr)
-  if (length(cross) == 0) return(NA_real_)
+  if (length(cross) == 0)
+    return(if (isTRUE(od_vec[1] < thr)) structure(NA_real_, reason = "starts_below_floor") else NA_real_)
   j  <- cross[1]
   y0 <- od_vec[j]; y1 <- od_vec[j + 1]; x0 <- t_vec[j]; x1 <- t_vec[j + 1]
   if (y0 == y1) x1 else x0 + (x1 - x0) * (y0 - thr) / (y0 - y1)
@@ -1164,7 +1356,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       log_od <- rep(NA_real_, n_pts)
       log_od[pos_od] <- log(od_vec[pos_od])
       roll_slopes <- tryCatch(rolling_slope(t_vec, log_od, win),
-                              error = function(e) rep(NA_real_, n_pts))
+                              error = function(e) { reraise_time_limit(e); rep(NA_real_, n_pts) })
       if (n_nonpositive_od > 0) {
         offset <- floor((win - 1) / 2)
         for (s in seq_len(n_pts - win + 1)) {
@@ -1252,7 +1444,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
           if (length(lw) >= 2)
             lysis_rate <- tryCatch(
               unname(coef(lm(od_vec[lw] ~ t_vec[lw]))[2]),
-              error = function(e) NA_real_)
+              error = function(e) { reraise_time_limit(e); NA_real_ })
         }
         post_min    <- min(od_vec[post_peak], na.rm = TRUE)
         od_drop     <- max_od - post_min
@@ -1261,7 +1453,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
           rw <- trough_idx:n_pts
           if (length(rw) >= 3) {
             rec <- tryCatch(unname(coef(lm(od_vec[rw] ~ t_vec[rw]))[2]),
-                            error = function(e) NA_real_)
+                            error = function(e) { reraise_time_limit(e); NA_real_ })
             recovery_slope <- if (is.finite(rec) && rec > 0) rec else NA_real_
           }
         }
@@ -1306,12 +1498,12 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       sm_vec   <- smooth3_raw_edges(od_vec)
       sm_range <- diff(range(sm_vec))
       fp_idx   <- tryCatch(first_prominent_peak_idx(sm_vec, 0.05 * sm_range),
-                           error = function(e) NA_integer_)
+                           error = function(e) { reraise_time_limit(e); NA_integer_ })
     }
     if (is.na(fp_idx)) fp_idx <- which.max(od_vec)
     first_peak_od <- od_vec[fp_idx]
     t_first_peak  <- t_vec[fp_idx]
-    extinction_time <- curve_extinction_time(t_vec, od_vec, extinction_threshold)
+    extinction_time <- as.vector(curve_extinction_time(t_vec, od_vec, extinction_threshold))   # (drops the "reason" attribute)
     cen <- curve_centroid(t_vec, od_vec)
 
     data.frame(
@@ -1609,7 +1801,7 @@ METRIC_DEFINITIONS <- c(
   steepest_decline_interval = "Time interval over which the steepest decline occurs",
   first_peak_od   = "OD at the first prominent peak: the earliest local maximum of the 3-point smoothed curve whose prominence is at least 5% of the curve's range (Blazanin et al., PNAS 2025); the global maximum when there is no prominent peak. Unlike max_od it is not displaced by regrowth that overtakes the first peak",
   t_first_peak    = "Time of the first prominent peak (see first_peak_od)",
-  extinction_time = "First time the mean falls below the extinction floor (0.05 OD), linearly interpolated between the last point at or above it and the first below; the first time point if the curve starts below the floor; NA if it never falls below (Blazanin et al., PNAS 2025)",
+  extinction_time = "First time the mean falls below the extinction floor (0.05 OD), linearly interpolated between the last point at or above it and the first below; extinction is a crossing from above, so a curve that starts below the floor and never rises to it and falls again is NA, as is one that never falls below (Blazanin et al., PNAS 2025)",
   centroid_x      = "Time coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
   centroid_y      = "OD coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
   relative_growth    = "auc / auc(reference sample)",
@@ -2209,6 +2401,13 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
 DEMO_SCENARIOS <- c("lysis", "moi_series", "resistance", "hours", "two_phages")
 make_demo_data <- function(scenario = "lysis") {
   scenario <- match.arg(scenario, DEMO_SCENARIOS)
+  # finding 38: the demo is seeded (same data every time) but must not reset the CALLER's random-number stream
+  had_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = globalenv(), inherits = FALSE) else NULL
+  on.exit({
+    if (had_seed) assign(".Random.seed", old_seed, envir = globalenv())
+    else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
+  }, add = TRUE)
   set.seed(42)
   grow  <- function(t, k = 0.028, y0 = 0.05, cap = 1.4)
     cap / (1 + ((cap - y0) / y0) * exp(-k * t))
@@ -2449,8 +2648,8 @@ svglite_inkscape_device <- function(filename, width, height, bg = "white", ...) 
 # v2.22: the SVG svglite wrote, ready to be inlined in the page as the true-size preview. Strips the <?xml?> prolog,
 # sets the root <svg>'s width / height to the preview size in px (svglite writes pt; the viewBox stays, so the drawing
 # scales) and adds the kc-canvas-svg class next to svglite's own. NULL when the file is missing or over max_bytes.
-svg_inline_for_preview <- function(path, width_px, height_px, max_bytes = 6e6) {
-  if (!is.character(path) || length(path) != 1L || is.na(path) || !file.exists(path)) return(NULL)
+svg_inline_for_preview <- function(path, width_px, height_px, max_bytes = 6e6) tryCatch({   # finding 46: unusable input -> NULL, never an error
+  if (!is.character(path) || length(path) != 1L || is.na(path) || !file.exists(path) || dir.exists(path)) return(NULL)
   sz <- file.size(path)
   if (is.na(sz) || sz > max_bytes) return(NULL)
   x <- paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
@@ -2470,7 +2669,7 @@ svg_inline_for_preview <- function(path, width_px, height_px, max_bytes = 6e6) {
     root <- sub("<svg", "<svg class='svglite kc-canvas-svg'", root, fixed = TRUE)
   }
   paste0(root, rest)
-}
+}, error = function(e) NULL)
 export_device <- function(format) {
   switch(format,
          pdf  = if (isTRUE(capabilities("aqua"))) quartz_pdf_device
@@ -2740,8 +2939,11 @@ time_unit_from_label <- function(xlab) {
 }
 
 # MOI from sample names: "Phage MOI 10", "MOI=0.1", "moi_1e-2", "MOI: 5" ...
+# Hardening round 1 (finding 28): "MOI" must be a whole word ("Chemoi 5" has none) and the number must be a plain
+# decimal: "MOI 1/10", "MOI 10^-3", "MOI 1,5" and "MOI 1.2.3" are ambiguous and give NA instead of a wrong 1 / 10 / 1.
+MOI_TOKEN_RE <- "(?i)(?<![A-Za-z])MOI[[:space:]_:=]*([0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?)(?![0-9]*[/^]|[,.][0-9])"
 parse_moi <- function(x) {
-  m <- regmatches(x, regexec("(?i)MOI[[:space:]_:=]*([0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", x, perl = TRUE))
+  m <- regmatches(x, regexec(MOI_TOKEN_RE, x, perl = TRUE))
   vapply(m, function(v) if (length(v) >= 2) suppressWarnings(as.numeric(v[2])) else NA_real_, numeric(1))
 }
 # override text: one "sample = MOI" per line or separated by ";"
@@ -2752,7 +2954,10 @@ moi_map <- function(samples, override = "") {
     parts <- trimws(unlist(strsplit(ov, "[;\n]+")))
     for (p in parts[nzchar(parts)]) {
       kv <- trimws(unlist(strsplit(p, "=", fixed = TRUE)))
-      if (length(kv) == 2 && kv[1] %in% samples) moi[kv[1]] <- suppressWarnings(as.numeric(kv[2]))
+      if (length(kv) == 2 && kv[1] %in% samples) {
+        val <- suppressWarnings(as.numeric(sub(",", ".", kv[2], fixed = TRUE)))   # finding 29: "0,5" is 0.5
+        if (is.finite(val)) moi[kv[1]] <- val                                      # junk keeps the parsed MOI
+      }
     }
   }
   moi
@@ -2786,9 +2991,9 @@ compute_growth_rate_curves <- function(rep_pd, window = 5) {
   d <- do.call(rbind, c(pieces, list(make.row.names = FALSE)))
   d <- d[is.finite(d$mu), , drop = FALSE]
   if (nrow(d) == 0) return(NULL)
-  out <- lapply(split(d, list(d$variable, d$time), drop = TRUE), function(g)
+  out <- lapply(exact_groups(d, c("variable", "time")), function(ix) { g <- d[ix, , drop = FALSE]
     data.frame(time = g$time[1], variable = g$variable[1], n = nrow(g), mu_mean = mean(g$mu),
-               mu_sd = if (nrow(g) >= 2) sd(g$mu) else NA_real_, stringsAsFactors = FALSE))
+               mu_sd = if (nrow(g) >= 2) sd(g$mu) else NA_real_, stringsAsFactors = FALSE) })
   out <- do.call(rbind, c(out, list(make.row.names = FALSE)))
   out[order(out$variable, out$time), , drop = FALSE]
 }
@@ -3447,8 +3652,7 @@ od_at_times <- function(rep_pd, times, method = c("interpolate", "nearest")) {
 # app's summary statistics) of a value column, per group. SD / SEM / CI are NA with fewer than 2 values.
 summarise_replicate_values <- function(x, value_col, group_cols) {
   if (is.null(x) || nrow(x) == 0) return(NULL)
-  g <- interaction(x[group_cols], drop = TRUE, lex.order = TRUE)
-  rows <- lapply(split(seq_len(nrow(x)), g), function(ix) {
+  rows <- lapply(exact_groups(x, group_cols), function(ix) {
     v <- x[[value_col]][ix]; v <- v[is.finite(v)]; n <- length(v)
     sd_v <- if (n >= 2) stats::sd(v) else NA_real_
     sem  <- if (n >= 2) sd_v / sqrt(n) else NA_real_
@@ -3541,8 +3745,13 @@ FIT_MODEL_LABELS_V222 <- c(
   baranyi           = "Baranyi-Roberts (1994)")
 
 # ── small internal helpers (names start with .f22_) ───────────────────────────
-.f22_tq <- function(level, df)                      # two-sided t quantile, NA when df is not positive
+# finding 40: a confidence level typed as a percentage (95) means 0.95 in every family (.s22_level, .f22_level, fit_ci);
+# one family used to read it as 0.95 and another returned NA intervals without a word.
+.f22_level <- function(level) { level <- suppressWarnings(as.numeric(level))[1]; if (is.finite(level) && level > 1 && level < 100) level / 100 else level }
+.f22_tq <- function(level, df) {                    # two-sided t quantile, NA when df is not positive
+  level <- .f22_level(level)
   if (is.finite(df) && df > 0 && is.finite(level) && level > 0 && level < 1) stats::qt(1 - (1 - level) / 2, df) else NA_real_
+}
 
 .f22_num <- function(x) suppressWarnings(as.numeric(x))
 
@@ -3646,7 +3855,7 @@ akaike_weights <- function(aicc) {
 #'   actually used for that row ("profile" or "wald"). A single NA row when `fit` is NULL or has no
 #'   coefficients. se / Wald limits are NA when the covariance matrix is not available (df = 0 or singular).
 fit_ci <- function(fit, level = 0.95, method = c("profile", "wald")) {
-  method <- match.arg(method)
+  method <- match.arg(method); level <- .f22_level(level)
   empty <- data.frame(term = NA_character_, estimate = NA_real_, se = NA_real_, lo = NA_real_, hi = NA_real_,
                       method = NA_character_, stringsAsFactors = FALSE)
   if (is.null(fit)) return(empty)
@@ -3828,6 +4037,12 @@ fit_bands <- function(fit, newdata_t, level = 0.95, type = c("confidence", "pred
   r
 }
 .f22_set_par <- function(r, name, est, se = NA_real_, lo = NA_real_, hi = NA_real_) {
+  # finding 20: with very few residual df a profile interval can come back inverted (lo > hi) or not containing its own
+  # estimate (n = 5 post-peak points: plateau -20.8 .. -31.8 around 0.0127). That is not an interval: NA, and the caller is told.
+  if (length(est) == 1 && is.finite(est) && length(lo) == 1 && length(hi) == 1 && is.finite(lo) && is.finite(hi) &&
+      (lo > hi || est < lo - 1e-8 * (abs(hi - lo) + 1) || est > hi + 1e-8 * (abs(hi - lo) + 1))) {
+    lo <- NA_real_; hi <- NA_real_; attr(r, "bad_ci") <- c(attr(r, "bad_ci"), name)
+  }
   r[[name]] <- est; r[[paste0(name, "_se")]] <- se; r[[paste0(name, "_lo")]] <- lo; r[[paste0(name, "_hi")]] <- hi
   r
 }
@@ -3991,6 +4206,8 @@ fit_lysis_models <- function(t, od, models = c("one_phase_decay", "fpl_decay"), 
     }
     qa <- fit_quality(fit)
     for (cc in c("r2", "adj_r2", "rmse", "sigma", "aic", "aicc", "bic", "df_resid")) r[[cc]] <- qa[[cc]]
+    if (length(attr(r, "bad_ci")))
+      msg <- c(msg, sprintf("the interval of %s was not valid (it did not contain the estimate) and is left out", paste(unique(attr(r, "bad_ci")), collapse = ", ")))
     if (!is.finite(dfr) || dfr <= 0) msg <- c(msg, "no residual degrees of freedom: intervals unavailable")
     else if (dfr < 3) msg <- c(msg, sprintf("only %d residual degree(s) of freedom: intervals are very wide", as.integer(dfr)))
     r$ci_method <- paste(unique(stats::na.omit(ci$method)), collapse = "+"); if (!nzchar(r$ci_method)) r$ci_method <- NA_character_
@@ -4018,11 +4235,13 @@ predict_lysis_fit <- function(res, model, t) {
 #' @param min_points smallest number of consecutive points a window may have (default 4).
 #' @param auto with window = NULL: TRUE searches every contiguous window of at least `min_points` points
 #'   and takes the one with the highest R2 among those with a positive slope (ties within 1e-10: the longer
-#'   window, then the earlier one); FALSE uses all points.
+#'   window, then the earlier one); FALSE uses all points. With more than 500 positive points the window ends are
+#'   taken from a stride grid (every ceiling(n / 500)-th point) so the search stays bounded.
 #' @param level confidence level of the slope interval (default 0.95; t distribution, n - 2 df).
 #' @return one-row data.frame: t_start, t_end, n, mu (slope of ln od, per time unit), mu_se, mu_lo, mu_hi,
 #'   doubling_time = ln 2 / mu, doubling_time_lo = ln 2 / mu_hi, doubling_time_hi = ln 2 / mu_lo (NA when
 #'   mu_lo <= 0), r2, intercept (of ln od at t = 0), note. NA row (with a note) when no window qualifies.
+FIT_EXP_MAX_CANDIDATES <- 500L
 fit_exponential_window <- function(t, od, window = NULL, min_points = 4, auto = TRUE, level = 0.95) {
   nar <- function(msg, n = NA_integer_) data.frame(t_start = NA_real_, t_end = NA_real_, n = as.integer(n), mu = NA_real_,
          mu_se = NA_real_, mu_lo = NA_real_, mu_hi = NA_real_, doubling_time = NA_real_, doubling_time_lo = NA_real_,
@@ -4047,14 +4266,27 @@ fit_exponential_window <- function(t, od, window = NULL, min_points = 4, auto = 
       cs <- function(v) c(0, cumsum(v))
       Sx <- cs(xc); Sy <- cs(yc); Sxx <- cs(xc^2); Sxy <- cs(xc * yc); Syy <- cs(yc^2)
       best <- NULL
-      for (i in 1:(n - min_points + 1)) for (j in (i + min_points - 1):n) {
-        m <- j - i + 1
-        sx <- Sx[j + 1] - Sx[i]; sy <- Sy[j + 1] - Sy[i]
-        sxx <- Sxx[j + 1] - Sxx[i] - sx^2 / m; sxy <- Sxy[j + 1] - Sxy[i] - sx * sy / m; syy <- Syy[j + 1] - Syy[i] - sy^2 / m
-        if (!(sxx > 1e-12 * max(1, abs(Sxx[n + 1])) && syy > 1e-14 && sxy > 0)) next     # need spread and a positive slope
-        r2 <- sxy^2 / (sxx * syy)
-        better <- is.null(best) || r2 > best$r2 + 1e-10 || (abs(r2 - best$r2) <= 1e-10 && m > best$m)
-        if (better) best <- list(r2 = r2, i = i, j = j, m = m)
+      # Hardening round 1 (finding 15): the search was a double R loop over every (start, end) pair, O(n^2) with a
+      # big constant (1440 points: 2 s per curve; 5000: 27 s). The inner loop over the window end is now one vector
+      # operation, and when there are more than FIT_EXP_MAX_CANDIDATES (500) positive points the window ENDS are
+      # only taken from a stride grid (every ceiling(n / 500)-th point plus the last), so the cost is bounded
+      # whatever the sampling density. A window still fits every reading inside it; n <= 500 searches every window.
+      cand <- if (n > FIT_EXP_MAX_CANDIDATES) unique(c(seq(1L, n, by = ceiling(n / FIT_EXP_MAX_CANDIDATES)), n)) else seq_len(n)
+      Sxx_tot <- max(1, abs(Sxx[n + 1]))
+      for (i in cand) {
+        js <- cand[cand >= i + min_points - 1L]
+        if (!length(js)) break
+        m <- js - i + 1L
+        sx <- Sx[js + 1L] - Sx[i]; sy <- Sy[js + 1L] - Sy[i]
+        sxx <- Sxx[js + 1L] - Sxx[i] - sx^2 / m; sxy <- Sxy[js + 1L] - Sxy[i] - sx * sy / m; syy <- Syy[js + 1L] - Syy[i] - sy^2 / m
+        ok <- which(sxx > 1e-12 * Sxx_tot & syy > 1e-14 & sxy > 0)       # need spread and a positive slope
+        if (!length(ok)) next
+        r2v <- sxy[ok]^2 / (sxx[ok] * syy[ok])
+        for (q in which(is.null(best) | r2v >= (if (is.null(best)) -Inf else best$r2) - 1e-9)) {   # only these can win
+          r2 <- r2v[q]; mq <- m[ok[q]]
+          better <- is.null(best) || r2 > best$r2 + 1e-10 || (abs(r2 - best$r2) <= 1e-10 && mq > best$m)
+          if (better) best <- list(r2 = r2, i = i, j = js[ok[q]], m = mq)
+        }
       }
       if (is.null(best)) return(nar("no window with a positive slope and variation in ln od"))
       sel <- best$i:best$j
@@ -4073,7 +4305,7 @@ fit_exponential_window <- function(t, od, window = NULL, min_points = 4, auto = 
                doubling_time_hi = if (is.finite(mlo) && mlo > 0) log(2) / mlo else NA_real_,
                r2 = smr$r.squared, intercept = unname(stats::coef(fit)[1]),
                note = .f22_join_note(note, if (mu <= 0) "slope is not positive: not an exponential growth window"), stringsAsFactors = FALSE)
-  }, error = function(e) nar(paste("error:", conditionMessage(e))))
+  }, error = function(e) { reraise_time_limit(e); nar(paste("error:", conditionMessage(e))) })
 }
 
 # ── growth fits as nls objects (for bands, residuals, CIs) ────────────────────
@@ -4573,6 +4805,10 @@ curve_phases_by_sample <- function(pd, ...) {
 # table reports). NA interval when the sample has < 2 replicates or < 20 finite draws.
 # The draws for one sample depend only on `seed` and the sample's replicate count, so they do
 # not change when other samples are loaded. The caller's RNG state is left untouched.
+# Hardening round 1 (finding 16): one metric-engine run per DISTINCT resample per sample (about 10-20 ms each).
+# 30 samples x 6 replicates x 5000 draws is ~14 000 runs (4 minutes, synchronous). Above this budget the number of
+# draws is lowered (never below 20) so the run stays bounded, and the result says so (attr "note", "n_boot_used").
+BOOT_MAX_ENGINE_RUNS <- 4000L
 bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.95,
                               smooth_window = 5, peak_smooth_window = 1,
                               peak_mode = "global", lysis_threshold = 0.05) {
@@ -4592,6 +4828,20 @@ bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.
   if (length(bad)) stop("unknown metric(s): ", paste(bad, collapse = ", "))
   alpha <- (1 - conf) / 2
 
+  # cap draws x samples (finding 16): distinct resamples of R replicates number choose(2R - 1, R)
+  boot_note <- NA_character_; n_boot_req <- n_boot
+  Rv <- vapply(split(rep_pd$replicate[is.finite(rep_pd$value)], as.character(rep_pd$variable[is.finite(rep_pd$value)])),
+               function(x) length(unique(x)), numeric(1))
+  Dv <- ifelse(Rv >= 2, choose(2 * pmin(Rv, 30) - 1, pmin(Rv, 30)), 0)
+  runs_for <- function(nb) sum(pmin(nb, Dv))
+  if (runs_for(n_boot) > BOOT_MAX_ENGINE_RUNS) {
+    lo <- 20L; hi <- n_boot
+    while (hi - lo > 1L) { mid <- (lo + hi) %/% 2L; if (runs_for(mid) <= BOOT_MAX_ENGINE_RUNS) lo <- mid else hi <- mid }
+    n_boot <- as.integer(lo)
+    boot_note <- sprintf("%d draws were requested but %d samples would need about %d metric runs: the bootstrap used %d draws per sample (the limit is %d runs in all).",
+                         n_boot_req, length(Rv), as.integer(runs_for(n_boot_req)), n_boot, BOOT_MAX_ENGINE_RUNS)
+  }
+
   # keep the caller's RNG stream intact
   had_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
   old_seed <- if (had_seed) get(".Random.seed", envir = globalenv(), inherits = FALSE) else NULL
@@ -4604,7 +4854,7 @@ bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.
     ok <- is.finite(tv) & is.finite(ov)
     r <- tryCatch(compute_one_curve_metrics(tv[ok], ov[ok], nm, smooth_window, peak_smooth_window,
                                             peak_mode, lysis_threshold),
-                  error = function(e) NULL)
+                  error = function(e) { reraise_time_limit(e); NULL })
     if (is.null(r)) return(rep(NA_real_, length(metrics)))
     vapply(metrics, function(k) suppressWarnings(as.numeric(r[[k]][1])), numeric(1))
   }
@@ -4657,7 +4907,10 @@ bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.
   })
   res <- do.call(rbind, c(out, list(make.row.names = FALSE)))
   res$n_boot_ok <- as.integer(res$n_boot_ok); res$n_replicates <- as.integer(res$n_replicates)
-  res[, cols, drop = FALSE]
+  res <- res[, cols, drop = FALSE]
+  attr(res, "n_boot_used") <- n_boot
+  if (!is.na(boot_note)) attr(res, "note") <- boot_note
+  res
 }
 
 # Curve difference versus a reference sample, per time point.
@@ -4675,7 +4928,8 @@ curve_difference <- function(pd, ref_sample, rep_pd = NULL, mode = c("difference
   if (is.null(ref_sample) || !nzchar(ref_sample) || !ref_sample %in% as.character(pd$variable))
     stop("reference sample '", ref_sample, "' is not in the data")
   rg <- pd[as.character(pd$variable) == ref_sample & is.finite(pd$mean_value), , drop = FALSE]
-  ref_mean <- tapply(rg$mean_value, rg$time, mean)
+  tkey <- time_match_key                      # finding 36: float noise (1e-13) in a time stamp must not break the match
+  ref_mean <- tapply(rg$mean_value, tkey(rg$time), mean)
   dfn <- function(x, r) {
     if (mode == "difference") x - r
     else ifelse(is.finite(x) & is.finite(r) & x > 0 & r > 0, log2(x / r), NA_real_)
@@ -4683,7 +4937,7 @@ curve_difference <- function(pd, ref_sample, rep_pd = NULL, mode = c("difference
   out <- do.call(rbind, lapply(unique(as.character(pd$variable)), function(v) {
     g <- pd[as.character(pd$variable) == v, , drop = FALSE]
     g <- g[order(g$time), , drop = FALSE]
-    r <- unname(ref_mean[match(as.character(g$time), names(ref_mean))])
+    r <- unname(ref_mean[match(tkey(g$time), names(ref_mean))])
     d <- if (v == ref_sample) ifelse(is.finite(g$mean_value) & is.finite(r), 0, NA_real_) else dfn(g$mean_value, r)
     data.frame(sample = v, time = g$time, mean_value = g$mean_value, ref_mean = r, diff = d,
                stringsAsFactors = FALSE)
@@ -4748,7 +5002,7 @@ first_separation_time <- function(x, alpha = 0.05) {
 
 .s22_num <- function(x) suppressWarnings(as.numeric(x))
 .s22_fin <- function(x) { x <- .s22_num(x); x[is.finite(x)] }
-.s22_level <- function(level) { level <- .s22_num(level)[1]; if (!is.finite(level) || level <= 0 || level >= 1) 0.95 else level }
+.s22_level <- function(level) { level <- .f22_level(.s22_num(level)[1]); if (!is.finite(level) || level <= 0 || level >= 1) 0.95 else level }
 .s22_pct <- function(level) format(round(100 * level, 1), trim = TRUE)
 
 # Normalise a replicate frame to sample / time / od / well / replicate (NULL when it cannot be done).
@@ -4943,10 +5197,10 @@ omnibus_table <- function(values, groups) {
   lowp <- if (any(P$n < 3)) "; some groups have n < 3: low power" else ""
   r1 <- tryCatch({
     a <- suppressWarnings(stats::anova(stats::lm(P$x ~ P$g))); f <- a[["F value"]][1]
-    if (!is.finite(f)) stop("degenerate")
+    if (!is.finite(f) || a[["Sum Sq"]][2] <= 1e-12 * sum(a[["Sum Sq"]])) stop("degenerate")   # finding 24: perfect fit = no test
     mk(tests[1], f, a$Df[1], a$Df[2], a[["Pr(>F)"]][1], a[["Sum Sq"]][1] / sum(a[["Sum Sq"]]), na,
        paste0("assumes equal variances and normal residuals", lowp, P$note_sfx))
-  }, error = function(e) mk(tests[1], na, na, na, na, na, na, "undefined (constant values or no residual df)"))
+  }, error = function(e) mk(tests[1], na, na, na, na, na, na, "undefined (constant values, zero within-group variance or no residual df)"))
   r2 <- tryCatch({
     o <- stats::oneway.test(P$x ~ P$g, var.equal = FALSE)
     if (!is.finite(o$p.value)) stop("degenerate")
@@ -4974,6 +5228,7 @@ omnibus_table <- function(values, groups) {
 #                 holm_welch against the reference and the `method` column says so
 # Groups with fewer than 2 finite values are excluded. Columns: group1, group2, estimate, ci_lo, ci_hi, statistic,
 # p_raw, p_adj, method, stars, note. Attribute "n": n per group used.
+POSTHOC_MAX_PAIRS <- 435L; POSTHOC_MAX_READINGS <- 5000L; DUNNETT_MAX_COMPARISONS <- 30L
 posthoc_table <- function(values, groups,
                           method = c("tukey", "holm_welch", "games_howell", "dunn", "dunnett", "bonferroni", "sidak"),
                           reference = NULL, level = 0.95, dunn_adjust = c("holm", "bonferroni")) {
@@ -4999,6 +5254,13 @@ posthoc_table <- function(values, groups,
   pairs <- if (!is.null(ref)) lapply(setdiff(lev, ref), function(l) c(l, ref))
            else lapply(utils::combn(k, 2, simplify = FALSE), function(ij) c(lev[ij[2]], lev[ij[1]]))
   m <- length(pairs); notes0 <- paste0(note_ref, P$note_sfx)
+  # Hardening round 1 (finding 18): the pair table grows with k^2 (Dunn 96 groups 27 s, Holm-Welch 1000 groups
+  # minutes). More than POSTHOC_MAX_PAIRS comparisons (all pairs of 30 groups) or POSTHOC_MAX_READINGS values:
+  # a note instead of a table; name a reference sample to compare against it only.
+  if (m > POSTHOC_MAX_PAIRS || length(P$x) > POSTHOC_MAX_READINGS)
+    return(na_row(paste0("too many comparisons for a table (", k, " groups, ", m, " pairs, ", length(P$x),
+                         " values; the limits are ", POSTHOC_MAX_PAIRS, " pairs and ", POSTHOC_MAX_READINGS,
+                         " values): choose a reference sample or fewer groups"), meth = method))
   fin <- function(...) paste(c(...)[nzchar(c(...))], collapse = "; ")
   low <- if (any(n < 3)) "some groups have n < 3: low power" else ""
   welch <- function(a, b, lv) {                      # list(est, se, t, df, p, lo, hi) or NULL
@@ -5010,8 +5272,9 @@ posthoc_table <- function(values, groups,
   }
   ok_out <- function(rows) { out <- do.call(rbind, c(rows, list(make.row.names = FALSE))); attr(out, "n") <- n; out }
 
+  dunnett_too_big <- method == "dunnett" && m > DUNNETT_MAX_COMPARISONS    # the multivariate-t integral: 95 groups 57 s
   if (method == "dunnett") {
-    if (requireNamespace("mvtnorm", quietly = TRUE)) {
+    if (requireNamespace("mvtnorm", quietly = TRUE) && !dunnett_too_big) {
       res <- tryCatch({
         N <- sum(n); dfe <- N - k; if (dfe < 1) stop("no residual df")
         mse <- sum((P$x - mu[as.character(P$g)])^2) / dfe; if (!is.finite(mse) || mse <= 0) stop("zero residual variance")
@@ -5020,17 +5283,18 @@ posthoc_table <- function(values, groups,
         else {
           R <- outer(seq_along(oth), seq_along(oth), function(i, j) sqrt(n[oth][i] * n[oth][j] / ((n[oth][i] + n[ref]) * (n[oth][j] + n[ref]))))
           diag(R) <- 1
-          p <- vapply(abs(tt), function(a) 1 - mvtnorm::pmvt(lower = rep(-a, m), upper = rep(a, m), corr = R, df = dfe)[1], numeric(1))
-          crit <- mvtnorm::qmvt(level, tail = "both.tails", corr = R, df = dfe)$quantile
+          p <- with_fixed_seed(1L, vapply(abs(tt), function(a) 1 - mvtnorm::pmvt(lower = rep(-a, m), upper = rep(a, m), corr = R, df = dfe)[1], numeric(1)))
+          crit <- with_fixed_seed(1L, mvtnorm::qmvt(level, tail = "both.tails", corr = R, df = dfe)$quantile)
         }
         lapply(seq_along(oth), function(i)
           row1(oth[i], ref, unname(est[i]), unname(est[i] - crit * se[i]), unname(est[i] + crit * se[i]), unname(tt[i]),
                na, min(1, max(0, unname(p[i]))), "Dunnett (pooled-variance multivariate t)",
                fin(notes0, low, "CIs are simultaneous")))
-      }, error = function(e) NULL)
+      }, error = function(e) { reraise_time_limit(e); NULL })
       if (!is.null(res)) return(ok_out(res))
     }
-    fb_reason <- if (requireNamespace("mvtnorm", quietly = TRUE)) "multivariate-t integral failed" else "mvtnorm not installed"
+    fb_reason <- if (dunnett_too_big) paste0("more than ", DUNNETT_MAX_COMPARISONS, " comparisons: the multivariate-t integral is skipped")
+                 else if (requireNamespace("mvtnorm", quietly = TRUE)) "multivariate-t integral failed" else "mvtnorm not installed"
     method <- "holm_welch"; fallback <- TRUE
   } else { fallback <- FALSE; fb_reason <- "" }
   meth_label <- switch(method, tukey = "Tukey HSD", holm_welch = "Holm-adjusted Welch t", games_howell = "Games-Howell",
@@ -5051,7 +5315,11 @@ posthoc_table <- function(values, groups,
       g1 <- lev[i2[r]]; g2 <- lev[i1[r]]
       if (!is.null(ref) && !(g1 == ref || g2 == ref)) return(NULL)
       q <- tk[r, "diff"] / sqrt(mse / 2 * (1 / n[g1] + 1 / n[g2]))
-      row1(g1, g2, tk[r, "diff"], tk[r, "lwr"], tk[r, "upr"], unname(q), na, tk[r, "p adj"], meth_label,
+      est <- tk[r, "diff"]; lwr <- tk[r, "lwr"]; upr <- tk[r, "upr"]
+      if (!is.null(ref) && g1 == ref) {      # finding 21: estimate = group1 - group2 with group2 = the reference, as every other method
+        g1 <- g2; g2 <- ref; est <- -est; q <- -q; tmp <- lwr; lwr <- -upr; upr <- -tmp
+      }
+      row1(g1, g2, est, lwr, upr, unname(q), na, tk[r, "p adj"], meth_label,
            fin(notes0, low, if (!is.null(ref)) "Tukey family is all pairs; only pairs with the reference are shown", "statistic is the studentised range q"))
     })
     rows <- Filter(Negate(is.null), rows)
@@ -5109,6 +5377,8 @@ posthoc_table <- function(values, groups,
 #   2. otherwise aov(y ~ sample * time + Error(well))
 #   3. otherwise (or rm = FALSE) plain two-way aov, which ignores the repeated measures (too liberal for the sample effect)
 # Time is a factor. Tests are sequential (type I). Returns list(anova = data.frame(term, df_num, df_den, F, p), method, note).
+TWO_WAY_MAX_GROUPS <- 30L; TWO_WAY_MAX_READINGS <- 5000L
+TWO_WAY_NLME_MAX_GROUPS <- 12L; TWO_WAY_NLME_MAX_READINGS <- 1500L
 two_way_time_anova <- function(long, response = "od", time = "time", sample = "sample", id = "well", log = TRUE, rm = TRUE) {
   terms <- c("Sample", "Time", "Sample x Time"); na <- NA_real_
   res <- function(an, method, note) list(anova = an, method = method, note = note)
@@ -5123,6 +5393,15 @@ two_way_time_anova <- function(long, response = "od", time = "time", sample = "s
   } else d$y <- d$od
   if (nrow(d) == 0 || length(unique(d$sample)) < 2) return(empty("need at least two samples with data"))
   if (length(unique(d$time)) < 2) return(empty("need at least two time points"))
+  # Hardening round 1 (finding 17): the nlme AR(1) mixed model needs minutes (12 samples 6 s, 24 samples 63 s, 96
+  # samples never finished, and optim cannot be interrupted). More than TWO_WAY_MAX_GROUPS samples or
+  # TWO_WAY_MAX_READINGS readings: a note instead of a fit. Above TWO_WAY_NLME_MAX_* the mixed model is skipped
+  # and the (fast) aov Error(well) fit is used.
+  if (length(unique(d$sample)) > TWO_WAY_MAX_GROUPS || nrow(d) > TWO_WAY_MAX_READINGS)
+    return(empty(paste0("too large for the two-way time ANOVA (", length(unique(d$sample)), " samples, ", nrow(d),
+                        " readings; the limits are ", TWO_WAY_MAX_GROUPS, " samples and ", TWO_WAY_MAX_READINGS,
+                        " readings): choose fewer samples")))
+  big <- length(unique(d$sample)) > TWO_WAY_NLME_MAX_GROUPS || nrow(d) > TWO_WAY_NLME_MAX_READINGS
   d$well <- paste(d$sample, d$well, sep = "::")
   d <- d[order(d$sample, d$well, d$time), , drop = FALSE]
   tv <- sort(unique(d$time)); d$tf <- factor(d$time, levels = tv); d$tidx <- as.integer(d$tf)
@@ -5137,17 +5416,19 @@ two_way_time_anova <- function(long, response = "od", time = "time", sample = "s
   }
   fin_ok <- function(an) !is.null(an) && nrow(an) == 3 && any(is.finite(an$F))
   fail_note <- character(0)
-  if (rm && requireNamespace("nlme", quietly = TRUE)) {
+  if (rm && big) fail_note <- c(fail_note, paste0("the AR(1) mixed model was skipped (more than ", TWO_WAY_NLME_MAX_GROUPS,
+                                                  " samples or ", TWO_WAY_NLME_MAX_READINGS, " readings: it would take minutes)"))
+  if (rm && !big && requireNamespace("nlme", quietly = TRUE)) {
     an <- tryCatch({
       fit <- suppressWarnings(nlme::lme(y ~ sample * tf, random = ~ 1 | well, correlation = nlme::corAR1(form = ~ tidx | well),
                                         data = d, method = "REML", na.action = stats::na.omit,
                                         control = nlme::lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200)))
       a <- stats::anova(fit); a <- as.data.frame(a)
       ans(a, rownames(a), "numDF", "denDF", "F-value", "p-value")
-    }, error = function(e) { fail_note <<- c(fail_note, paste0("mixed model failed (", conditionMessage(e), ")")); NULL })
+    }, error = function(e) { reraise_time_limit(e); fail_note <<- c(fail_note, paste0("mixed model failed (", conditionMessage(e), ")")); NULL })
     if (fin_ok(an)) return(res(an, "two-way repeated-measures: mixed model, random intercept per well, AR(1) errors (nlme::lme, REML)",
                                paste(c(notes, "sequential (type I) F tests", if (log) "on log readings", lowp), collapse = "; ")))
-  } else if (rm) fail_note <- c(fail_note, "nlme not installed")
+  } else if (rm && !big) fail_note <- c(fail_note, "nlme not installed")
   if (rm) {
     an <- tryCatch({
       s <- summary(stats::aov(y ~ sample * tf + Error(well), data = d))
@@ -5157,7 +5438,7 @@ two_way_time_anova <- function(long, response = "od", time = "time", sample = "s
       }))
       idx <- match(c("sample", "tf", "sample:tf"), tab$term)
       data.frame(term = terms, df_num = tab$Df[idx], df_den = tab$dfd[idx], F = tab$F[idx], p = tab$p[idx], stringsAsFactors = FALSE)
-    }, error = function(e) { fail_note <<- c(fail_note, paste0("aov Error(well) failed (", conditionMessage(e), ")")); NULL })
+    }, error = function(e) { reraise_time_limit(e); fail_note <<- c(fail_note, paste0("aov Error(well) failed (", conditionMessage(e), ")")); NULL })
     if (fin_ok(an)) return(res(an, "two-way repeated-measures ANOVA: aov(y ~ sample * time + Error(well))",
                                paste(c(notes, fail_note, "compound symmetry assumed (no sphericity correction)", if (log) "on log readings", lowp), collapse = "; ")))
   }
@@ -5228,6 +5509,7 @@ outlier_tests <- function(x, method = c("grubbs", "mad", "iqr"), alpha = 0.05) {
     G <- abs(v - mean(v)) / s; i <- which.max(G); g <- G[i]
     p <- grubbs_p(g, n)
     j <- which(ok)[i]; out$statistic[j] <- g; out$p[j] <- p; out$flagged[j] <- is.finite(p) && p < alpha
+    if (!is.finite(p)) setnote("the other values are identical (their SD is 0): the Grubbs statistic is degenerate, p is undefined and nothing is flagged")
     if (n < 6) setnote(paste0("n = ", n, ": Grubbs has very low power; it can only flag a value when n >= 3 and G exceeds ", signif(grubbs_critical(n, alpha), 4)))
   } else if (method == "mad") {
     med <- stats::median(v); mad0 <- 1.4826 * stats::median(abs(v - med))
@@ -5248,7 +5530,9 @@ outlier_tests <- function(x, method = c("grubbs", "mad", "iqr"), alpha = 0.05) {
 grubbs_p <- function(G, n) {
   if (!is.finite(G) || n < 3) return(NA_real_)
   den <- (n - 1)^2 - n * G^2
-  if (den <= 0) return(0)
+  # finding 23: G reaches its maximum (n - 1) / sqrt(n) exactly when the other n - 1 values are identical (their SD is
+  # 0), e.g. n = 3 with a tie. The statistic is then degenerate, not "p = 0": undefined.
+  if (den <= 1e-9 * (n - 1)^2) return(NA_real_)
   tt <- sqrt(n * (n - 2) * G^2 / den)
   min(1, 2 * n * stats::pt(tt, n - 2, lower.tail = FALSE))
 }
@@ -5471,6 +5755,8 @@ stats_method_sentence <- function(result, kind = c("posthoc", "describe", "norma
                                                   "outlier", "auc", "one_sample", "correlation", "linear"),
                                   what = "The measured quantity", n = NULL, level = 0.95) {
   kind <- match.arg(kind); level <- .s22_level(level); pct <- paste0(.s22_pct(level), "%")
+  if (is.null(what) || !length(what) || is.na(what[1]) || !nzchar(trimws(as.character(what[1])))) what <- "The measured quantity"   # finding 43
+  what <- as.character(what[1])
   n <- if (!is.null(n)) n else attr(result, "n")
   ntxt <- if (is.null(n) || !length(n) || all(!is.finite(.s22_num(n)))) "" else {
     nn <- .s22_num(n); nn <- nn[is.finite(nn)]
@@ -5491,7 +5777,7 @@ stats_method_sentence <- function(result, kind = c("posthoc", "describe", "norma
                else "pairwise Welch t tests with Holm correction"
   omni <- if (has("tukey") || has("dunnett") && !fallback_dunnett) "one-way ANOVA"
           else if (has("games")) "one-way Welch ANOVA"
-          else if (has("dunn")) "the Kruskal–Wallis test" else NA_character_
+          else if (has("dunn") && !has("dunnett")) "the Kruskal–Wallis test" else NA_character_   # finding 22: "Dunnett" contains "dunn"
   switch(kind,
     describe = paste0(what, " is summarised as mean ± SD (with ", pct, " t-based confidence intervals of the mean) per sample", ntxt, "."),
     normality = paste0("Normality of ", tolower(substr(what, 1, 1)), substr(what, 2, nchar(what)), " was assessed per sample and on pooled residuals by the Shapiro–Wilk test and Q–Q plots", ntxt, "; with so few replicates these checks have low power."),
@@ -5987,7 +6273,7 @@ compare_fits_test_display <- function(test) {
 # The series of a sample label: the label with its MOI token removed ("Phage A MOI 10" -> "Phage A"), "Phage" when nothing is left
 # (the same rule as the dose-response figure's connecting lines).
 dose_series_name <- function(label) {
-  s <- trimws(gsub("(?i)\\s*MOI[[:space:]_:=]*[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?", "", label, perl = TRUE))
+  s <- trimws(gsub(paste0("\\s*", MOI_TOKEN_RE), "", label, perl = TRUE))
   s[!nzchar(s)] <- "Phage"
   s
 }
@@ -6247,13 +6533,16 @@ phase_layout <- function(lo, hi, k) {
     lim <- c(lo - pad * P, hi + pad * P)
     return(list(limits = lim, strips = NULL, full = lim))
   }
-  strips_f <- PHASE_STRIP_FRAC * k
+  # finding 26: k strips of 6 % each leave nothing for the curves from k = 15 and a NEGATIVE height from k = 16;
+  # the strips share at most 40 % of the panel (unchanged up to 6 samples).
+  frac <- min(PHASE_STRIP_FRAC, 0.40 / k)
+  strips_f <- frac * k
   bot <- 0.04; gap <- 0.03
   P   <- span / (1 - bot - gap - strips_f)
   y0  <- lo - bot * P
   lim <- c(y0, y0 + P)
-  top <- lim[2] - (seq_len(k) - 1) * PHASE_STRIP_FRAC * P
-  list(limits = lim, strips = data.frame(ymin = top - PHASE_STRIP_FRAC * P, ymax = top), full = lim)
+  top <- lim[2] - (seq_len(k) - 1) * frac * P
+  list(limits = lim, strips = data.frame(ymin = top - frac * P, ymax = top), full = lim)
 }
 
 # The phases table as shown (Statistics tab, reports): 3 significant digits, an em dash for a non-finite number.
@@ -6640,6 +6929,8 @@ n4_positional_samples <- function(flat) {
   m <- Filter(function(x) length(x) == 3, m)
   if (!length(m)) return(list())
   idx <- sort(unique(as.integer(vapply(m, `[`, "", 3))))
+  idx <- idx[is.finite(idx) & idx >= 1L]          # finding 34: "color_0" is not a sample position
+  if (!length(idx)) return(list())
   out <- lapply(idx, function(i) {
     g <- function(k) settings_unbox(flat[[paste0(k, "_", i)]])
     sel <- g("color_selector"); col <- g("color")
@@ -6668,6 +6959,10 @@ count_sample_settings <- function(samples) {
 #   positional (when no data), ignored (named character: key -> reason), notes (character), n_global (keys kept),
 #   n_sample_settings.
 translate_old_settings <- function(s, od_vars = NULL, known_ids = NULL) {
+  # finding 34: a file that parses to a scalar / array / nothing is not a settings object (indexing it with [[ crashed)
+  if (!is.list(s) || !length(s) || is.null(names(s)))
+    stop("This is not a settings file: it holds ", if (!is.list(s)) "a single value" else if (!length(s)) "nothing" else "a list without names",
+         ", not the named settings that the app saves.", call. = FALSE)
   kind <- legacy_settings_kind(s)
   if (identical(kind, "current"))
     return(list(kind = kind, s = s, unselect = character(0), positional = NULL, ignored = character(0), notes = character(0),
@@ -6958,6 +7253,7 @@ theme_read <- function(name, dir = themes_dir_path()) {
   f <- theme_path(name, dir)
   if (!nzchar(theme_key(name)) || !file.exists(f)) return(NULL)
   s <- tryCatch(jsonlite::fromJSON(f, simplifyVector = FALSE), error = function(e) NULL)
+  if (!is.list(s)) return(NULL)            # finding 37: a file holding a bare value is not a theme
   sa <- s[["sample_aesthetics"]] %||% s[["samples"]]
   if (is.null(sa) || !length(sa)) return(NULL)
   list(sample_aesthetics = sa, qe_colors = s$qe_colors %||% list(), display_names = s$display_names %||% list())
@@ -7312,8 +7608,10 @@ replicate_bounds <- function(rp) {
 asymmetric_error_bounds <- function(plot_data, bounds, type = "range", mult = 1) {
   nr <- nrow(plot_data); out <- data.frame(lo = rep(NA_real_, nr), hi = rep(NA_real_, nr))
   if (is.null(bounds) || !nr) return(out)
-  k  <- match(paste(plot_data$variable, format(plot_data$time, digits = 15), sep = "\r"),
-              paste(bounds$variable, format(bounds$time, digits = 15), sep = "\r"))
+  # finding 27: format(x, digits = 15) pads to a common width / decimals PER VECTOR, so the keys of two different
+  # vectors never matched (a plot_data subset got no error bars); sprintf() formats each time on its own.
+  k  <- match(paste(plot_data$variable, time_match_key(plot_data$time), sep = "\r"),
+              paste(bounds$variable, time_match_key(bounds$time), sep = "\r"))
   ok <- !is.na(k) & (bounds$n[k] >= 2 | is.na(bounds$n[k]))
   lo_b <- if (type == "range") bounds$min else bounds$q25
   hi_b <- if (type == "range") bounds$max else bounds$q75
@@ -7387,7 +7685,8 @@ time_convert_factor <- function(mode) switch(mode %||% "none", min_to_h = 1 / 60
 convert_time_label <- function(label, mode = "none") {
   if (is.null(label) || !length(label) || identical(mode, "none")) return(label)
   if (identical(mode, "min_to_h")) {
-    x <- gsub("(?i)\\bminutes\\b", "hours", label, perl = TRUE); x <- gsub("(?i)\\bmins?\\b", "h", x, perl = TRUE)
+    # finding 33: the abbreviation is the lower-case unit "min" / "mins" only ("Min OD" is a name, not a unit)
+    x <- gsub("(?i)\\bminutes\\b", "hours", label, perl = TRUE); x <- gsub("\\bmins?\\b", "h", x, perl = TRUE)
   } else {
     x <- gsub("(?i)\\bhours\\b", "minutes", label, perl = TRUE); x <- gsub("(?i)\\b(hrs?|h)\\b", "min", x, perl = TRUE)
   }
@@ -7571,9 +7870,9 @@ compute_od_rate_curves <- function(rep_pd, window = 5) {
   d <- do.call(rbind, c(pieces, list(make.row.names = FALSE)))
   d <- d[is.finite(d$rate), , drop = FALSE]
   if (nrow(d) == 0) return(NULL)
-  out <- lapply(split(d, list(d$variable, d$time), drop = TRUE), function(g)
+  out <- lapply(exact_groups(d, c("variable", "time")), function(ix) { g <- d[ix, , drop = FALSE]
     data.frame(time = g$time[1], variable = g$variable[1], n = nrow(g), rate_mean = mean(g$rate),
-               rate_sd = if (nrow(g) >= 2) sd(g$rate) else NA_real_, stringsAsFactors = FALSE))
+               rate_sd = if (nrow(g) >= 2) sd(g$rate) else NA_real_, stringsAsFactors = FALSE) })
   out <- do.call(rbind, c(out, list(make.row.names = FALSE)))
   out[order(out$variable, out$time), , drop = FALSE]
 }
@@ -10092,6 +10391,7 @@ server <- function(input, output, session) {
       rv$replicate_col <- rep_col
       rv$od_vars       <- as.character(unique(data[[group_col]]))
       rv$od_vars_raw   <- rv$od_vars
+      set_safe_id_pool(rv$od_vars)
     } else {
       # Index-based detection keeps ALL replicate columns, including
       # duplicates of the same name (v2.8 REPLICATE FIX).
@@ -10102,6 +10402,7 @@ server <- function(input, output, session) {
       rv$col_map     <- lapply(setNames(oc, oc), function(nm) idx[cn[idx] == nm])
       rv$od_vars     <- oc
       rv$od_vars_raw <- oc
+      set_safe_id_pool(oc)
       rv$dropped_cols <- if (nrow(ws$dropped)) ws$dropped else NULL
       if (nrow(ws$dropped))
         notes <- c(notes, paste0("Not used as samples: ",
@@ -10555,6 +10856,9 @@ server <- function(input, output, session) {
   # Never touches: file input, sample selection, time filter range.
   observeEvent(input$loadSettings, {
     req(input$loadSettings)
+    # Hardening round 1 (finding 34): the whole body is guarded. A settings file that parses to a scalar, an array or
+    # something this app cannot read used to raise an error in the observer, which ENDS the Shiny session.
+    tryCatch({
     s <- tryCatch(
       fromJSON(input$loadSettings$datapath, simplifyVector = FALSE),
       error = function(e) {
@@ -10687,6 +10991,12 @@ server <- function(input, output, session) {
       msg     = if (!is.null(legacy_msg)) legacy_msg else paste0(n_global, " global setting(s) applied. ", sample_msg),
       details = details_html
     )
+    }, error = function(e) {
+      reraise_time_limit(e)
+      msg <- paste("The settings file could not be applied:", friendly_error_message(e))
+      rv$settings_status <- list(type = "warn", msg = msg, details = NULL)
+      tryCatch(showNotification(msg, type = "error", duration = 12), error = function(e2) invisible(NULL))
+    })
   })
   
   # Applies imported per-sample aesthetics to any matching currently-loaded samples.
@@ -12124,7 +12434,9 @@ server <- function(input, output, session) {
       p <- p + scale_shape_manual(values = { sv <- shapes; sv[sv >= 100] <- sv[sv >= 100] - 100; sv }, labels = lg_labels, name = lg_title)
     
     p <- p +
-      guides(shape = guide_legend(override.aes = list(alpha = 1)),
+      # the shape and colour keys MERGE into one legend; override.aes on both is "Duplicated `override.aes` is
+      # ignored" (supervisor finding 2), so only the colour guide carries it
+      guides(shape = guide_legend(),
              color = guide_legend(override.aes = list(alpha = 1)))
     
     x_exp  <- expansion(mult = c(input$x_expand_left,   input$x_expand_right))
@@ -12928,7 +13240,11 @@ server <- function(input, output, session) {
     tag    <- trimws(input$analysis_panel_label %||% "")
     ref    <- input$metrics_ref_sample %||% ""
     base_scales <- list(scale_color_manual(   values = cols, labels = labs_v, name = NULL),
-                        scale_fill_manual(    values = cols, labels = labs_v, name = NULL),
+                        # Fills are matched on the RAW sample key (names(cols)). The default limits function warns "No shared
+                        # levels" whenever a figure has no fill mapped at all (replicate overlay, normalised OD: supervisor
+                        # finding 2); this one returns the shared levels, possibly none, silently (same result otherwise).
+                        scale_fill_manual(    values = cols, labels = labs_v, name = NULL,
+                                              limits = function(x) intersect(x, names(cols))),
                         scale_linetype_manual(values = lts,  labels = labs_v, name = NULL))
     p <- switch(type,
       metric_summary = {
@@ -13170,8 +13486,7 @@ server <- function(input, output, session) {
         # One series per phage: the legend label with its MOI token removed
         # ("Phage A MOI 10" -> "Phage A"); one connecting line per series.
         smp_lab <- unname(labs_v[as.character(summ$sample)])
-        series  <- trimws(gsub("(?i)\\s*MOI[[:space:]_:=]*[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?", "", smp_lab, perl = TRUE))
-        series[!nzchar(series)] <- "Phage"
+        series  <- dose_series_name(smp_lab)
         summ$series <- series
         summ <- summ[order(summ$series, summ$moi), , drop = FALSE]
         series_levels <- unique(summ$series[order(match(as.character(summ$sample), samps))])
@@ -14701,10 +15016,11 @@ server <- function(input, output, session) {
                         peak_mode = input$metrics_peak_mode %||% "global", lysis_threshold = lysis_threshold_current()),
       error = function(e) { guard_notify("boot_run", paste("Bootstrap failed:", friendly_error_message(e)), "error"); NULL })
     if (is.null(bt)) return(invisible(NULL))
-    boot_cache(list(table = bt, metrics = mets, dropped = dropped, n_boot = nb, seed = sd,
+    nb_used <- attr(bt, "n_boot_used") %||% nb
+    boot_cache(list(table = bt, metrics = mets, dropped = dropped, n_boot = nb_used, seed = sd, note = attr(bt, "note"),
                     signature = boot_signature(), time = format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
-    guard_notify("boot_run", sprintf("Bootstrap done: %d draws per sample for %d metric%s.", nb, length(mets),
-                                     if (length(mets) == 1) "" else "s"), "message")
+    guard_notify("boot_run", paste0(sprintf("Bootstrap done: %d draws per sample for %d metric%s.", nb_used, length(mets),
+                                     if (length(mets) == 1) "" else "s"), if (!is.null(attr(bt, "note"))) paste0(" ", attr(bt, "note"))), "message")
     invisible(bt)
   }
   observeEvent(input$boot_run, run_bootstrap_now())
@@ -14723,6 +15039,7 @@ server <- function(input, output, session) {
       if (length(b$dropped))
         div(class = "stats-note", paste0("Not bootstrapped: ", paste(metric_label(b$dropped), collapse = ", "),
                                          " (relative to the reference sample, so not a property of one curve; the engine does not resample them).")),
+      if (!is.null(b$note) && !is.na(b$note)) div(class = "stats-note", b$note),
       if (few) div(class = "stats-note", "A sample with fewer than two replicates has no interval (NA)."))
   })
   output$boot_table <- renderTable({
