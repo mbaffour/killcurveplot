@@ -98,10 +98,11 @@ one-element array), `lca` (the lysis-curve-app file: `experiment_notes`, `notes_
 | lca `notes_show_caption`, `notes_caption_fields`, `notes_caption_size` | same ids (the notes caption, section 5) |
 
 Ignored with a reason: N4 `x_minor_step`, `y_major_step`, `y_minor_step`, `plot_height`, `line_type` (global), `time_col_choice`,
-`error_cap_type`, `use_od_filter` / `od_min` / `od_max`, `exclude_times`; lca `floating_labels`, per-sample `panel`, `leg_row`,
-`leg_col`, `legend_position` values `direct` / `floating` / `matrix`, `error_display_mode` values that do not exist here
-(spaghetti, quantile bands, jitter, combo), `axis_frame`, `exact_panel`, `legend_title`, facet controls; any key that is not an
-input of this version. Per-sample keys are positional: the file's i-th sample is the i-th loaded sample; a different count is
+`error_cap_type`, `exclude_times`; lca `floating_labels`, `legend_position` value `floating`, `exact_panel`, `enable_facets`;
+any key that is not an input of this version. Keys that became controls in v2.22 are applied, not ignored: N4 `use_od_filter` /
+`od_min` / `od_max` (Data tab); lca per-sample `panel`, `leg_row`, `leg_col` (Panels section, matrix legend), `legend_position`
+values `direct` / `matrix`, every `error_display_mode` (spaghetti, quantile bands, jitter, combo), `axis_frame`, `legend_title`,
+`facet_ncol` (figure styling). Per-sample keys are positional: the file's i-th sample is the i-th loaded sample; a different count is
 reported (the extra keys are ignored). A file loaded before any data waits (`rv$pending_positional`) and is applied by position
 when data is loaded.
 

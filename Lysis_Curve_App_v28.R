@@ -1904,7 +1904,7 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df, analysis = NU
 
   paste0(
 "<!DOCTYPE html><html><head><meta charset='utf-8'>
-<title>", html_escape(meta$title), "</title>
+<title>", html_escape(markup_to_plain(meta$title)), "</title>
 <style>
   html { background: #ffffff; }
   body { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -1927,7 +1927,7 @@ build_html_report <- function(meta, img_b64, stats_df, metrics_df, analysis = NU
   footer { margin-top: 40px; color: #adb5bd; font-size: 0.8em; border-top: 1px solid #dee2e6; padding-top: 8px; }
   @media print { body { max-width: none; } h2 { page-break-after: avoid; } .tblwrap { overflow-x: visible; } }
 </style></head><body>
-<h1>", html_escape(meta$title), "</h1>
+<h1>", markup_to_html(html_escape(meta$title)), "</h1>
 <div class='meta'>",
   if (nzchar(meta$author %||% "")) paste0(html_escape(meta$author), " &middot; ") else "",
   "Generated ", html_escape(meta$generated), "</div>",
@@ -1985,7 +1985,7 @@ build_pdf_report <- function(file, meta, plot_obj, stats_df, metrics_df,
 
   # ── Page 1: title + provenance ──
   grid::grid.newpage()
-  grid::grid.text(meta$title, y = 0.90, gp = grid::gpar(fontsize = 22 * fscale, fontface = "bold"))
+  grid::grid.text(markup_label(meta$title), y = 0.90, gp = grid::gpar(fontsize = 22 * fscale, fontface = "bold"))   # v2.22: markup in the title
   sub <- paste0(if (nzchar(meta$author %||% "")) paste0(meta$author, "  •  ") else "",
                 "Generated ", meta$generated)
   grid::grid.text(sub, y = 0.84, gp = grid::gpar(fontsize = 11 * fscale, col = "grey40"))
@@ -2560,6 +2560,8 @@ fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
   rows <- rows[grid::unitType(g$heights)[rows] == "null"]
   for (i in cols) g$widths[i]  <- grid::unit(panel_w_mm / length(cols), "mm")
   for (i in rows) g$heights[i] <- grid::unit(panel_h_mm / length(rows), "mm")
+  ml <- attr(p, "matrix_legend")        # v2.22: the matrix (grid) legend becomes a real gtable track / overlay
+  if (!is.null(ml)) g <- tryCatch(attach_matrix_legend(g, ml$grob, ml$placement), error = function(e) g)
   for (i in which(grid::unitType(g$widths)  == "null")) g$widths[i]  <- grid::unit(0, "mm")
   for (i in which(grid::unitType(g$heights) == "null")) g$heights[i] <- grid::unit(0, "mm")
   g$respect <- FALSE
@@ -2648,7 +2650,8 @@ ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "me
                              "Replicate small multiples (one panel per sample)" = "replicate_facets",   # v2.21
                              "Fraction of replicates lysed vs time"      = "lysed_fraction",       # v2.21
                              "Per-time comparisons vs reference (stars)" = "per_time",             # v2.22
-                             "AUC per sample"                            = "auc")                  # v2.22
+                             "AUC per sample"                            = "auc",                  # v2.22
+                             "Rate of OD change (dOD/dt)"                = "od_rate")              # v2.22
 COMPOSE_PANEL_CHOICES <- c("Lysis curve (main)" = "main",
                            "Lysis curve, one panel per group" = "main_by_group",   # v2.18
                            ANALYSIS_FIGURE_CHOICES,
@@ -3029,7 +3032,20 @@ LEGACY_BASE <- list(
   lysis_models = c("one_phase_decay", "fpl_decay"), lysis_from = "peak", lysis_level = "mean", lysis_show = FALSE,
   expwin_level = "mean", expwin_mode = "auto", expwin_from = "", expwin_to = "", expwin_min_points = 4, expwin_show = FALSE,
   cmp_model = "logistic", cmp_param = "mu",
-  dr_fit = FALSE, dr_fix_bottom = "", dr_fix_top = "", dr_band = TRUE, dr_ec50 = TRUE
+  dr_fit = FALSE, dr_fix_bottom = "", dr_fix_top = "", dr_band = TRUE, dr_ec50 = TRUE,
+  # v2.22: figure styling. Every default is the pre-v2.22 figure (axis_frame "auto" = the frame the Advanced-ticks box gives).
+  axis_frame = "auto",
+  facet_source = "group", facet_ncol = NA_real_, facet_scales = "fixed", facet_strip_style = "plain", facet_strip_size = NA_real_,
+  spaghetti_alpha = 0.35, qband_inner_alpha = 0.40, qband_outer_alpha = 0.15,
+  jitter_alpha = 0.55, jitter_size = 1.5, jitter_width = 0,
+  legend_title = "", legend_text_face = "plain", legend_wrap_width = NA_real_, hide_lines = FALSE,
+  matrix_legend_title = "", matrix_legend_placement = "right", matrix_swatch_len = 34, matrix_col_gap = 10, matrix_row_gap = 8,
+  matrix_legend_box = FALSE, matrix_swatch_points = TRUE,
+  y_tick_interval = NA_real_, y_minor_interval = NA_real_, x_minor_interval = NA_real_,
+  time_convert = "none", marker_label_yplace = "data",
+  threshold_width = NA_real_, threshold_color_custom = "#666666",
+  metric_sort = "data", metric_horizontal = FALSE, metric_custom_colors = "", metric_single_large = FALSE,
+  heatmap_palette = "viridis"
 )
 
 # The inputs the journal preset sets, at their legacy values.
@@ -3107,7 +3123,9 @@ get_palette_colors <- function(pal, n) {
          plasma      = scales::viridis_pal(option = "C")(n),
          colorblind  = rep_len(c("#000000","#E69F00","#56B4E9","#009E73",
                                  "#F0E442","#0072B2","#D55E00","#CC79A7"), n),
-         publication = rep_len(c("#E41A1C","#377EB8","#4DAF4A","#984EA3",
+         publication = rep_len(c("#000000","#E69F00","#56B4E9","#009E73",     # v2.22: Okabe-Ito, what "publication" means in the N4 paper app
+                                 "#F0E442","#0072B2","#D55E00","#CC79A7"), n),
+         set1        = rep_len(c("#E41A1C","#377EB8","#4DAF4A","#984EA3",      # v2.22: what "publication" was before (ColorBrewer Set1)
                                  "#FF7F00","#FFFF33","#A65628","#F781BF"), n),
          rainbow     = rainbow(n),
          gray        = gray.colors(n, start = 0.15, end = 0.85),
@@ -6087,10 +6105,10 @@ metric_summary_styled <- function(style = c("bar", "box", "violin", "dot"), long
     geom_point(aes(color = sample), shape = 21, fill = "white", size = ptsz * 0.6, stroke = pt2lw(0.5), position = jit)
   else
     geom_point(color = pt_col, shape = 21, fill = "white", size = ptsz * 0.6, stroke = pt2lw(0.5), position = jit)
-  if (facet) g <- g + facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 18))
+  if (facet) g <- g + facet_wrap(~ metric, scales = "free_y", labeller = facet_strip_labeller(levels(long$metric)))   # v2.22: markup in a facet title
   g + scale_color_manual(values = cols_by_label, guide = "none") +
     scale_fill_manual(values = cols_by_label, guide = "none") +
-    scale_x_discrete(guide = x_guide, drop = x_drop) +
+    scale_x_discrete(guide = x_guide, drop = x_drop, labels = if (any(markup_has(levels(long$sample)))) markup_labels else waiver()) +
     scale_y_continuous(expand = expansion(mult = y_exp)) +
     labs(x = NULL, y = NULL)
 }
@@ -6442,7 +6460,7 @@ pheno_heatmap_frame <- function(pm, scale = "z", sample_order = NULL, sample_lab
 # ── v2.21: navigation helpers and display names ───────────────────────────────
 # The sidebar sections, in order: title -> id key. The same list builds the <details id="sec_<key>"> elements
 # (kc_section) and the "Jump to" menu, so the menu can never name a section that does not exist.
-SIDEBAR_SECTIONS <- c("Axis Settings" = "axis", "Time Point Filtering" = "time_filter", "Region Highlighting" = "regions",
+SIDEBAR_SECTIONS <- c("Axis Settings" = "axis", "Panels" = "panels", "Time Point Filtering" = "time_filter", "Region Highlighting" = "regions",
                       "Time Point Markers" = "markers", "Color Palettes" = "palettes", "Line & Point Settings" = "line_point",
                       "Label Options" = "labels", "Error Bars / Shadow" = "error_bars", "Journal Figure Preset" = "journal",
                       "Plot Dimensions & Export" = "export", "Experiment Notebook" = "notebook",
@@ -6576,7 +6594,7 @@ OLD_SAMPLE_KEY_RE <- "^(color_selector|color|shape|shape_filled|line_type|legend
 OLD_NEVER_GLOBAL <- c("file", "loadSettings", "selected_samples", "time_filter_range", "exclude_timepoints", "samples_select_all",
                       "samples_deselect_all", "saveSettings", "clearSettings", "load_demo", "compare_file")
 LEGEND_POSITIONS_OK <- c("right", "left", "top", "bottom", "none", "inside-auto", "inside-top-left", "inside-top-right",
-                         "inside-bottom-left", "inside-bottom-right")
+                         "inside-bottom-left", "inside-bottom-right", "direct", "matrix")   # v2.22 styling: direct labels, matrix legend
 
 # one JSON value as an R scalar / vector: a one-element array (list) becomes its element, NULL / empty -> NULL
 settings_unbox <- function(v) {
@@ -6604,8 +6622,8 @@ legacy_settings_kind <- function(s) {
   gs <- names(s[["global_settings"]] %||% list())
   # this app's own notes-caption inputs also start with "notes_": only the OLD app's notes keys mark an old file
   gs_old_notes <- setdiff(gs[grepl("^notes_", gs)], c("notes_show_caption", "notes_caption_fields", "notes_caption_size", "notes_pptx_slide"))
-  if (!is.null(s[["experiment_notes"]]) || !is.null(s[["floating_labels"]]) || length(gs_old_notes) ||
-      any(vapply(s[["sample_aesthetics"]] %||% list(), function(a) any(c("panel", "leg_row", "leg_col") %in% names(a)), logical(1))))
+  # (per-sample panel / leg_row / leg_col keys are NOT a signature: since v2.22 styling this app saves them too)
+  if (!is.null(s[["experiment_notes"]]) || !is.null(s[["floating_labels"]]) || length(gs_old_notes))
     return("lca")
   "current"
 }
@@ -6638,9 +6656,10 @@ n4_positional_samples <- function(flat) {
   })
   setNames(out, as.character(idx))
 }
-# Number of individual per-sample settings (color, shape, filled, line type, name, group, hidden) in a named list
+# Number of individual per-sample settings (color, shape, filled, line type, name, group, hidden, panel, legend cell) in a named list
 count_sample_settings <- function(samples) {
-  sum(vapply(samples, function(a) sum(names(a) %in% c("color", "shape", "shape_filled", "line_type", "legend_label", "group", "hidden")), numeric(1)))
+  sum(vapply(samples, function(a) sum(names(a) %in% c("color", "shape", "shape_filled", "line_type", "legend_label", "group", "hidden",
+                                                      "panel", "leg_row", "leg_col")), numeric(1)))
 }
 # Translate an old settings file into this app's structure. s = the parsed JSON (jsonlite::fromJSON(simplifyVector = FALSE));
 # od_vars = the loaded samples, in order (NULL = no data yet: positional per-sample keys are returned in $positional);
@@ -6674,7 +6693,7 @@ translate_old_settings <- function(s, od_vars = NULL, known_ids = NULL) {
       v <- "colorblind"; notes <- c(notes, "Palette 'publication' (Okabe-Ito in the old app) was mapped to 'colorblind', this app's Okabe-Ito palette.")
     }
     if (identical(id, "legend_position") && !(as.character(v) %in% LEGEND_POSITIONS_OK)) { ign(nm, paste0("legend position '", v, "' is not available")); next }
-    if (identical(id, "error_display_mode") && !(as.character(v) %in% c("bars", "shadow"))) { ign(nm, paste0("error display '", v, "' is not available")); next }
+    if (identical(id, "error_display_mode") && !(as.character(v) %in% unname(ERROR_DISPLAY_CHOICES))) { ign(nm, paste0("error display '", v, "' is not available")); next }
     if (!keep_id(id)) { ign(nm, "not a control in this version"); next }
     g[[id]] <- v
   }
@@ -6718,9 +6737,7 @@ translate_old_settings <- function(s, od_vars = NULL, known_ids = NULL) {
     for (nm in names(sa)) {
       a <- lapply(sa[[nm]], settings_unbox)
       a <- a[!vapply(a, is.null, logical(1))]
-      for (k in intersect(c("panel", "leg_row", "leg_col"), names(a))) {
-        ign(paste0(nm, "$", k), "panel / matrix-legend placement is not available"); a[[k]] <- NULL
-      }
+      # panel / leg_row / leg_col are kept: the Panels section and the matrix legend are controls here (v2.22 styling)
       samples[[nm]] <- a
     }
     if (!is.null(s[["floating_labels"]])) ign("floating_labels", OLD_IGNORED_REASONS[["floating_labels"]])
@@ -7092,6 +7109,535 @@ raw_wide_from_replicates <- function(rp) {
   for (cn in cols) { s <- rp[rp$col == cn, ]; out[[cn]] <- s$value[match(tt, s$time)] }
   out
 }
+# ── v2.22 figure styling helpers ─────────────────────────────────────────────
+# Pure functions (no Shiny state) behind the v2.22 styling features: text markup (italic / bold / sub- and
+# superscript) for every piece of figure text, the extra error types and display modes, the axis-interval helpers,
+# the time-unit conversion, the matrix (grid) legend, the panel (facet) helpers, the extra figures and the one-click
+# style buttons. Ported from the companion apps (Lysis Curve Ap 26.03.13.R and the N4 paper app); tested by
+# tests/test_v222_styling.R. See docs/STYLING_AND_MARKUP.md.
+
+# ── Text markup ──────────────────────────────────────────────────────────────
+# One convention for every piece of figure text: _{...} subscript, ^{...} superscript, *italic*, **bold**, \* a literal
+# asterisk ("A_{550}", "10^{-7} PFU", "*mltG*", "Δ*bshC*"). A string without markup is returned untouched, so a figure
+# whose text has none is exactly what it was before this feature. A string that mixes a newline with markup cannot be
+# typeset (plotmath has no line break) and falls back to its raw text.
+MARKUP_RE   <- paste0("\\\\\\*",                 # \*  escaped literal asterisk
+                      "|(_|\\^)\\{[^}]*\\}",     # _{..} / ^{..}
+                      "|\\*\\*[^*]+\\*\\*",      # **bold**
+                      "|\\*[^*]+\\*")            # *italic*
+MARKUP_HINT <- paste0(
+  "Highlight characters, then click a button or press Ctrl+= (subscript) / Ctrl+Shift+= (superscript); ",
+  "Ctrl+I italic, Ctrl+B bold. Click again to undo. Typed markup works too: A_{550}, 10^{-7}, *italic*, **bold** ",
+  "(write \\* for a literal asterisk; not with multi-line text).")
+
+# TRUE for each element that carries markup.
+markup_has <- function(s) {
+  if (is.null(s) || length(s) == 0) return(logical(0))
+  s   <- as.character(s)
+  out <- grepl(MARKUP_RE, s, perl = TRUE)
+  out[is.na(s)] <- FALSE
+  out
+}
+# Quote a literal run as a plotmath string atom (escapes \ and " for parse()).
+markup_quote <- function(txt) encodeString(txt, quote = "\"")
+# One string to a PLOTMATH SOURCE STRING: "A_{550}" -> "\"A\"[\"550\"]", "*mltG*" -> "italic(\"mltG\")", plain text -> one
+# quoted literal. NA_character_ when the string mixes a newline with markup.
+markup_to_plotmath <- function(s) {
+  if (is.null(s) || length(s) != 1) return(NA_character_)
+  s <- as.character(s)
+  if (is.na(s)) return(NA_character_)
+  m <- gregexpr(MARKUP_RE, s, perl = TRUE)[[1]]
+  if (m[1] == -1L) return(markup_quote(s))
+  if (grepl("\n", s, fixed = TRUE)) return(NA_character_)
+  starts <- as.integer(m); lens <- attr(m, "match.length")
+  atoms <- character(0); pos <- 1L
+  for (k in seq_along(starts)) {
+    st <- starts[k]; ln <- lens[k]
+    if (st > pos) atoms <- c(atoms, markup_quote(substr(s, pos, st - 1L)))
+    seg <- substr(s, st, st + ln - 1L); op <- substr(seg, 1L, 1L)
+    if (identical(seg, "\\*")) {
+      atoms <- c(atoms, markup_quote("*"))
+    } else if (identical(op, "*")) {
+      bold  <- identical(substr(seg, 1L, 2L), "**")
+      inner <- if (bold) substr(seg, 3L, nchar(seg) - 2L) else substr(seg, 2L, nchar(seg) - 1L)
+      atoms <- c(atoms, paste0(if (bold) "bold(" else "italic(", markup_quote(inner), ")"))
+    } else {
+      inner <- substr(seg, 3L, nchar(seg) - 1L)
+      if (length(atoms) == 0L) atoms <- "\"\""
+      j <- length(atoms)
+      atoms[j] <- if (identical(op, "_")) paste0(atoms[j], "[", markup_quote(inner), "]")
+                  else                    paste0(atoms[j], "^", markup_quote(inner))
+    }
+    pos <- st + ln
+  }
+  if (pos <= nchar(s)) atoms <- c(atoms, markup_quote(substr(s, pos, nchar(s))))
+  paste(atoms, collapse = "*")
+}
+# The label handed to ggplot: the untouched string without markup, otherwise a plotmath call. Never throws.
+markup_label <- function(s) {
+  if (is.null(s) || length(s) != 1) return(s)
+  if (is.na(s) || !markup_has(s)) return(s)
+  pm <- markup_to_plotmath(s)
+  if (is.na(pm)) return(s)
+  tryCatch(parse(text = pm)[[1]], error = function(e) s)
+}
+# Markup as real HTML sub / superscripts and <i> / <b>, for the reports. Runs on an ALREADY-ESCAPED string.
+markup_to_html <- function(x) {
+  esc <- "\u0001AST\u0001"
+  x <- gsub("\\\\\\*", esc, x)
+  x <- gsub("_\\{([^}]*)\\}",   "<sub>\\1</sub>", x)
+  x <- gsub("\\^\\{([^}]*)\\}", "<sup>\\1</sup>", x)
+  x <- gsub("\\*\\*([^*]+)\\*\\*", "<b>\\1</b>", x)
+  x <- gsub("\\*([^*]+)\\*",       "<i>\\1</i>", x)
+  gsub(esc, "*", x, fixed = TRUE)
+}
+# Markup as plain text (the figure legend text, file names, tables): Unicode sub- and superscripts where a glyph exists
+# (else the characters as they are), the italic / bold marks dropped, \* an asterisk.
+MARKUP_SUB_FROM <- c(strsplit("0123456789+-=()aehijklmnoprstuvx", "")[[1]])
+MARKUP_SUB_TO   <- c("₀","₁","₂","₃","₄","₅","₆","₇","₈","₉","₊","₋","₌",
+                     "₍","₎","ₐ","ₑ","ₕ","ᵢ","ⱼ","ₖ","ₗ","ₘ","ₙ","ₒ","ₚ",
+                     "ᵣ","ₛ","ₜ","ᵤ","ᵥ","ₓ")
+MARKUP_SUP_FROM <- c(strsplit("0123456789+-=()abcdefghijklmnoprstuvwxyz", "")[[1]])
+MARKUP_SUP_TO   <- c("⁰","¹","²","³","⁴","⁵","⁶","⁷","⁸","⁹","⁺","⁻","⁼",
+                     "⁽","⁾","ᵃ","ᵇ","ᶜ","ᵈ","ᵉ","ᶠ","ᵍ","ʰ","ⁱ","ʲ","ᵏ",
+                     "ˡ","ᵐ","ⁿ","ᵒ","ᵖ","ʳ","ˢ","ᵗ","ᵘ","ᵛ","ʷ","ˣ","ʸ","ᶻ")
+markup_to_plain <- function(x) {
+  if (is.null(x) || !length(x)) return(x)
+  conv <- function(inner, from, to) {
+    ch <- strsplit(inner, "")[[1]]; hit <- match(ch, from)
+    if (anyNA(hit)) inner else paste(to[hit], collapse = "")   # a glyph for every character, or the plain characters
+  }
+  one <- function(s) {
+    if (is.na(s) || !markup_has(s)) return(s)
+    esc <- "\u0001AST\u0001"
+    s <- gsub("\\\\\\*", esc, s)
+    repeat {                                  # each _{..} / ^{..} in turn (a loop: gsub cannot call a function per match)
+      m <- regexpr("(_|\\^)\\{[^}]*\\}", s, perl = TRUE)
+      if (m[1] == -1L) break
+      seg <- regmatches(s, m); inner <- substr(seg, 3L, nchar(seg) - 1L)
+      rep <- if (startsWith(seg, "_")) conv(inner, MARKUP_SUB_FROM, MARKUP_SUB_TO) else conv(inner, MARKUP_SUP_FROM, MARKUP_SUP_TO)
+      regmatches(s, m) <- rep
+    }
+    s <- gsub("\\*\\*([^*]+)\\*\\*", "\\1", s); s <- gsub("\\*([^*]+)\\*", "\\1", s)
+    gsub(esc, "*", s, fixed = TRUE)
+  }
+  out <- vapply(as.character(x), one, "", USE.NAMES = FALSE)
+  if (!is.null(names(x))) names(out) <- names(x)
+  out
+}
+# "A550" / "OD600" -> "A_{550}" / "OD_{600}" so a label that mixes markup with a wavelength still typesets both.
+markup_wavelength_to_markup <- function(x)
+  gsub("(?<![A-Za-z0-9])(OD|A)([0-9]+)(?![A-Za-z0-9])", "\\1_{\\2}", x, perl = TRUE)
+# The label for one piece of figure text (title, axis label ...). No markup: exactly what it was before v2.22 (the
+# wavelength subscript when `wavelength`, else the string itself). Markup: plotmath, the wavelength tokens typeset too.
+text_label <- function(x, wavelength = FALSE) {
+  if (is.null(x) || length(x) != 1L || !is.character(x) || is.na(x)) return(x)
+  if (!markup_has(x)) return(if (isTRUE(wavelength)) label_with_subscripts(x) else x)
+  if (isTRUE(wavelength)) x <- markup_wavelength_to_markup(x)
+  markup_label(x)
+}
+# Labels of a scale (legend keys, axis breaks, strips): the character vector itself when none has markup, else a named
+# list of plotmath calls / strings (accepted by every ggplot2 scale as `labels`).
+markup_labels <- function(x) {
+  if (!length(x) || !any(markup_has(x))) return(x)
+  out <- lapply(as.character(x), markup_label)
+  names(out) <- names(x)
+  out
+}
+# A facet labeller: the wrapped plain-text strips (as v2.18) when no level has markup, else parsed strips.
+facet_strip_labeller <- function(levels, wrap = 18) {
+  if (!any(markup_has(levels))) return(ggplot2::label_wrap_gen(width = wrap))
+  function(labels) lapply(labels, function(v) lapply(as.character(v), function(s) as.expression(markup_label(s))))
+}
+# Wrap legend labels at `width` characters (NA / <= 0 = no wrapping); a label with markup is left as typed.
+wrap_legend_labels <- function(x, width = NA) {
+  w <- suppressWarnings(as.numeric(width))
+  if (!length(x) || length(w) != 1L || !is.finite(w) || w <= 0) return(x)
+  out <- vapply(as.character(x), function(s) if (is.na(s) || markup_has(s)) s else paste(strwrap(s, width = w), collapse = "\n"), "", USE.NAMES = FALSE)
+  names(out) <- names(x); out
+}
+# The small button row of the markup helper (sub, super, italic, bold): client side (kcMarkup in the page script), acts
+# on the text box named by `target` (an input id) or, with NULL, on the last text box the user was in.
+markup_buttons_ui <- function(target = NULL, label = "Markup:") {
+  tgt <- if (is.null(target)) "" else target
+  btn <- function(mode, html, title)
+    tags$button(type = "button", class = "btn btn-default btn-xs kc-mk-btn", `data-mode` = mode, `data-target` = tgt,
+                title = title, `aria-label` = title, HTML(html))
+  div(class = "kc-markup-row",
+      span(class = "kc-mk-label", label),
+      btn("sub", "x<sub>2</sub>", "Subscript (Ctrl+=)"), btn("sup", "x<sup>2</sup>", "Superscript (Ctrl+Shift+=)"),
+      btn("italic", "<i>I</i>", "Italic (Ctrl+I)"), btn("bold", "<b>B</b>", "Bold (Ctrl+B)"),
+      tags$span(class = "kc-mk-help", title = MARKUP_HINT, "?"))
+}
+
+# ── Error types and display modes ────────────────────────────────────────────
+# One spread of the values `v` as offsets from their mean: list(lower, upper, half). sd / sem / ci95 are symmetric
+# (lower == upper == half); range (min to max) and iqr (25th to 75th percentile) are asymmetric about the mean, `half`
+# being half the width. `mult` scales every offset. NA when fewer than 2 finite values (an undefined spread, not zero).
+error_spread <- function(v, type = "sem", mult = 1) {
+  v <- v[is.finite(v)]; n <- length(v)
+  na <- list(lower = NA_real_, upper = NA_real_, half = NA_real_)
+  if (type == "none" || n < 2) return(na)
+  m <- mean(v)
+  if (type == "range") {
+    r <- c(min(v), max(v))
+    return(list(lower = mult * (m - r[1]), upper = mult * (r[2] - m), half = mult * diff(r) / 2))
+  }
+  if (type == "iqr") {
+    q <- unname(stats::quantile(v, c(0.25, 0.75), names = FALSE))
+    return(list(lower = mult * (m - q[1]), upper = mult * (q[2] - m), half = mult * diff(q) / 2))
+  }
+  s <- sd(v)
+  h <- mult * switch(type, sd = s, sem = s / sqrt(n), ci95 = qt(0.975, df = n - 1) * s / sqrt(n), s)
+  list(lower = h, upper = h, half = h)
+}
+# Per (time, sample) summary of a replicate frame (columns time, variable, value): n, mean and the bounds the error
+# types and the quantile bands need. Used by the main curve for range / iqr bars and the quantile bands.
+replicate_bounds <- function(rp) {
+  if (is.null(rp) || nrow(rp) == 0) return(NULL)
+  rp <- rp[is.finite(rp$value), , drop = FALSE]
+  if (nrow(rp) == 0) return(NULL)
+  key <- paste(rp$variable, format(rp$time, digits = 15), sep = "\r")
+  idx <- split(seq_len(nrow(rp)), factor(key, levels = unique(key)))
+  rows <- lapply(idx, function(i) {
+    v <- rp$value[i]
+    q <- unname(stats::quantile(v, c(0.025, 0.25, 0.75, 0.975), names = FALSE, type = 7))
+    data.frame(time = rp$time[i[1]], variable = as.character(rp$variable[i[1]]), n = length(v), mean = mean(v),
+               min = min(v), max = max(v), q025 = q[1], q25 = q[2], q75 = q[3], q975 = q[4], stringsAsFactors = FALSE)
+  })
+  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+}
+# Lower / upper error bounds for the asymmetric types, aligned to the rows of `plot_data` (time, variable, mean_value):
+# data.frame(lo, hi) (NA where the point has fewer than 2 replicates). `bounds` = replicate_bounds().
+asymmetric_error_bounds <- function(plot_data, bounds, type = "range", mult = 1) {
+  nr <- nrow(plot_data); out <- data.frame(lo = rep(NA_real_, nr), hi = rep(NA_real_, nr))
+  if (is.null(bounds) || !nr) return(out)
+  k  <- match(paste(plot_data$variable, format(plot_data$time, digits = 15), sep = "\r"),
+              paste(bounds$variable, format(bounds$time, digits = 15), sep = "\r"))
+  ok <- !is.na(k) & (bounds$n[k] >= 2 | is.na(bounds$n[k]))
+  lo_b <- if (type == "range") bounds$min else bounds$q25
+  hi_b <- if (type == "range") bounds$max else bounds$q75
+  m <- plot_data$mean_value
+  out$lo[ok] <- (m - mult * (m - lo_b[k]))[ok]
+  out$hi[ok] <- (m + mult * (hi_b[k] - m))[ok]
+  out$lo[!is.finite(out$lo)] <- NA_real_; out$hi[!is.finite(out$hi)] <- NA_real_
+  out
+}
+ERROR_DISPLAY_CHOICES <- c("Error bars"                      = "bars",
+                           "Shadow / ribbon"                 = "shadow",
+                           "Spaghetti (every replicate)"     = "spaghetti",
+                           "Quantile bands (IQR + 2.5-97.5 %)" = "quantile_bands",
+                           "Jitter (replicate points)"       = "jitter",
+                           "Combo (replicate traces + band)" = "combo")
+ERROR_TYPE_CHOICES <- c("None" = "none", "SD" = "sd", "SEM" = "sem", "95% CI" = "ci95",
+                        "Range (min-max)" = "range", "IQR (25th-75th percentile)" = "iqr")
+# The error measure as words (captions, legends): NULL for none.
+error_type_words <- function(type, long = FALSE)
+  switch(type %||% "none", sd = if (long) "s.d." else "SD", sem = if (long) "s.e.m." else "SEM",
+         ci95 = if (long) "the 95% confidence interval" else "95% CI",
+         range = if (long) "the range (minimum to maximum)" else "range",
+         iqr = if (long) "the interquartile range" else "IQR", NULL)
+# Display modes that draw something whatever the error type (they do not read the SD / SEM selector).
+ERROR_MODES_WITHOUT_STAT <- c("spaghetti", "quantile_bands", "jitter")
+
+# ── Axis intervals ───────────────────────────────────────────────────────────
+# Breaks anchored to a major interval: list(major, minor), minor never on a major, minor <= major (else major / 2).
+# More than `max_n` breaks (an interval far smaller than the range) returns NULL: the caller keeps ggplot's defaults.
+interval_breaks <- function(lo, hi, step_major, step_minor = NA, max_n = 500L) {
+  step_major <- suppressWarnings(as.numeric(step_major)); step_minor <- suppressWarnings(as.numeric(step_minor))
+  if (!is.finite(lo) || !is.finite(hi) || length(step_major) != 1L || !is.finite(step_major) || step_major <= 0) return(NULL)
+  if (!is.finite(hi - lo) || hi <= lo) hi <- lo + step_major
+  if (!is.finite(step_minor) || step_minor <= 0) step_minor <- step_major / 2
+  if (step_minor >= step_major) step_minor <- step_major / 2
+  if ((hi - lo) / step_minor + 2 > max_n) return(NULL)
+  anchor <- floor(lo / step_major) * step_major
+  major  <- seq(anchor, hi + step_major, by = step_major)
+  minor  <- seq(anchor, hi + step_minor, by = step_minor)
+  minor  <- minor[vapply(minor, function(v) !any(abs(v - major) < step_minor * 1e-6), logical(1))]
+  list(major = major, minor = minor)
+}
+# guide_prism_minor() only when at least two minor ticks fall inside the visible range (a guide with none crashes
+# with a zero-length unit vector); otherwise the default guide.
+prism_guide_if_safe <- function(minor_breaks, lo, hi) {
+  if (length(minor_breaks) == 0) return(ggplot2::waiver())
+  if (sum(minor_breaks >= lo & minor_breaks <= hi, na.rm = TRUE) >= 2) ggprism::guide_prism_minor() else ggplot2::waiver()
+}
+# A blank / non-positive / non-numeric interval box is "auto": NA.
+interval_or_na <- function(x) { v <- suppressWarnings(as.numeric(x)); if (length(v) == 1L && is.finite(v) && v > 0) v else NA_real_ }
+# Marker-label y position. "data" is the v2.9 rule (a fraction of the plotted data's range); "limits" places the label by
+# the axis limits: top = 0.95 x the upper limit, bottom = 1.05 x the lower limit, middle = the geometric (log axis) or
+# arithmetic (linear) mean, as the N4 paper app does.
+marker_label_y <- function(pos, yr, log_y = FALSE, placement = "data") {
+  if (identical(placement, "limits")) {
+    top <- yr[2] * 0.95; bot <- yr[1] * 1.05
+    return(switch(pos, top = top, bottom = bot,
+                  middle = if (log_y && all(yr > 0)) sqrt(yr[1] * yr[2]) else mean(yr), mean(yr)))
+  }
+  switch(pos,
+         top    = if (log_y) 10^(log10(yr[2]) - diff(log10(yr)) * 0.08) else yr[1] + diff(yr) * 0.92,
+         bottom = if (log_y) 10^(log10(yr[1]) + diff(log10(yr)) * 0.08) else yr[1] + diff(yr) * 0.08,
+         middle = if (log_y) 10^(mean(log10(yr))) else mean(yr))
+}
+
+# ── Time-unit conversion (a display conversion: the data stay in the file's unit) ──
+TIME_CONVERT_CHOICES <- c("As in the file (no conversion)" = "none", "Minutes to hours" = "min_to_h", "Hours to minutes" = "h_to_min")
+time_convert_factor <- function(mode) switch(mode %||% "none", min_to_h = 1 / 60, h_to_min = 60, 1)
+# The axis label with its unit word swapped to the converted one ("Time (minutes)" -> "Time (hours)"); a label without a
+# unit word is returned unchanged.
+convert_time_label <- function(label, mode = "none") {
+  if (is.null(label) || !length(label) || identical(mode, "none")) return(label)
+  if (identical(mode, "min_to_h")) {
+    x <- gsub("(?i)\\bminutes\\b", "hours", label, perl = TRUE); x <- gsub("(?i)\\bmins?\\b", "h", x, perl = TRUE)
+  } else {
+    x <- gsub("(?i)\\bhours\\b", "minutes", label, perl = TRUE); x <- gsub("(?i)\\b(hrs?|h)\\b", "min", x, perl = TRUE)
+  }
+  x
+}
+
+# ── Matrix (grid) legend (two-factor legend: rows x columns of line swatches) ──
+# Ported from the companion app. Built with grid / gtable only: `spec` carries the data (rows, cols, cells), `opts` the
+# styling. attach_matrix_legend() bolts it onto the finished plot gtable AFTER the panels are pinned and BEFORE the
+# figure is measured, so the panel keeps its size while the figure grows to hold the legend.
+MATRIX_PT     <- 72.27 / 25.4
+MATRIX_STROKE <- 96    / 25.4
+matrix_legend_key <- function(row, col) paste(row, col, sep = "\r")
+matrix_legend_defaults <- function()
+  list(title = "", lwd = 2, show_points = TRUE, point_size = 8, point_lwd = 1, swatch_len = 34, col_gap = 10, row_gap = 8,
+       fontsize = 12, fontfamily = "", fontface = "plain", box = FALSE, box_fill = "white", box_col = "grey20", margin = 4)
+matrix_legend_swatch <- function(cell, o, nm = "mlcell") {
+  if (is.null(cell) || is.null(cell$colour) || length(cell$colour) != 1 || is.na(cell$colour) || !nzchar(cell$colour))
+    return(grid::nullGrob(name = nm))
+  lty <- cell$linetype
+  if (is.null(lty) || length(lty) != 1 || is.na(lty) || !nzchar(lty)) lty <- "solid"
+  ln <- if (isTRUE(o$hide_lines)) NULL else
+    grid::linesGrob(x = grid::unit.c(grid::unit(0, "npc"), grid::unit(1, "npc")), y = grid::unit(c(0.5, 0.5), "npc"),
+                    gp = grid::gpar(col = cell$colour, lty = lty, lwd = o$lwd), name = paste0(nm, "-line"))
+  sh <- suppressWarnings(as.numeric(cell$shape %||% NA))
+  if (!isTRUE(o$show_points) || length(sh) != 1 || !is.finite(sh)) return(if (is.null(ln)) grid::nullGrob(name = nm) else ln)
+  pg <- grid::pointsGrob(x = grid::unit(0.5, "npc"), y = grid::unit(0.5, "npc"), pch = sh,
+                         gp = grid::gpar(col = cell$colour, fill = if (isTRUE(cell$filled)) cell$colour else NA,
+                                         fontsize = o$point_size, lwd = o$point_lwd), name = paste0(nm, "-point"))
+  if (is.null(ln)) return(pg)
+  grid::gTree(children = grid::gList(ln, pg), name = nm)
+}
+# spec: list(rows, cols, cells = named list keyed by matrix_legend_key(row, col) -> list(sample, colour, linetype, shape, filled)).
+# Returns a gtable (NULL if it cannot be built). Row / column / title text accepts the figure markup.
+matrix_legend_grob <- function(spec, opts = list()) {
+  if (is.null(spec)) return(NULL)
+  o <- matrix_legend_defaults()
+  for (nm in names(opts)) { v <- opts[[nm]]; if (is.null(v) || length(v) != 1L || is.na(v)) next; o[[nm]] <- v }
+  rows <- as.character(spec$rows); cols <- as.character(spec$cols)
+  nr <- length(rows); nc <- length(cols)
+  if (nr < 1L || nc < 1L) return(NULL)
+  cells <- spec$cells; if (is.null(cells)) cells <- list()
+  gp_txt <- grid::gpar(fontsize = o$fontsize, fontfamily = o$fontfamily, fontface = o$fontface)
+  mk_txt <- function(lab, hj, nm) grid::textGrob(markup_label(lab), x = grid::unit(hj, "npc"), hjust = hj, gp = gp_txt, name = nm)
+  col_lab <- lapply(seq_len(nc), function(j) mk_txt(cols[j], 0.5, paste0("mlcol-", j)))
+  row_lab <- lapply(seq_len(nr), function(i) mk_txt(rows[i], 1,   paste0("mlrow-", i)))
+  ttl     <- if (nzchar(trimws(as.character(o$title)))) mk_txt(o$title, 1, "mltitle") else NULL
+  lab_w <- grid::unit(0, "pt")
+  for (gx in row_lab) lab_w <- grid::unit.pmax(lab_w, grid::grobWidth(gx))
+  if (!is.null(ttl))  lab_w <- grid::unit.pmax(lab_w, grid::grobWidth(ttl))
+  min_h <- grid::unit(max(o$fontsize, 6) * 1.35, "pt")
+  hdr_h <- min_h
+  for (gx in col_lab) hdr_h <- grid::unit.pmax(hdr_h, grid::grobHeight(gx))
+  if (!is.null(ttl))  hdr_h <- grid::unit.pmax(hdr_h, grid::grobHeight(ttl))
+  cell_w <- lapply(col_lab, function(gx) grid::unit.pmax(grid::unit(max(o$swatch_len, 1), "pt"), grid::grobWidth(gx)))
+  row_h  <- lapply(row_lab, function(gx) grid::unit.pmax(min_h, grid::grobHeight(gx)))
+  ws <- lab_w
+  for (j in seq_len(nc)) ws <- grid::unit.c(ws, grid::unit(o$col_gap, "pt"), cell_w[[j]])
+  hs <- hdr_h
+  for (i in seq_len(nr)) hs <- grid::unit.c(hs, grid::unit(o$row_gap, "pt"), row_h[[i]])
+  gt <- gtable::gtable(widths = ws, heights = hs, name = "matrix-legend")
+  if (!is.null(ttl)) gt <- gtable::gtable_add_grob(gt, ttl, t = 1, l = 1, clip = "off", name = "mltitle")
+  for (j in seq_len(nc)) gt <- gtable::gtable_add_grob(gt, col_lab[[j]], t = 1, l = 1 + 2 * j, clip = "off", name = paste0("mlcol-", j))
+  for (i in seq_len(nr)) gt <- gtable::gtable_add_grob(gt, row_lab[[i]], t = 1 + 2 * i, l = 1, clip = "off", name = paste0("mlrow-", i))
+  for (i in seq_len(nr)) for (j in seq_len(nc)) {
+    nm <- paste0("mlcell-", i, "-", j)
+    gt <- gtable::gtable_add_grob(gt, matrix_legend_swatch(cells[[matrix_legend_key(rows[i], cols[j])]], o, nm),
+                                  t = 1 + 2 * i, l = 1 + 2 * j, clip = "off", name = nm)
+  }
+  m <- max(o$margin, 0)
+  if (m > 0) {
+    gt <- gtable::gtable_add_cols(gt, grid::unit(m, "pt"), pos = 0); gt <- gtable::gtable_add_cols(gt, grid::unit(m, "pt"), pos = -1)
+    gt <- gtable::gtable_add_rows(gt, grid::unit(m, "pt"), pos = 0); gt <- gtable::gtable_add_rows(gt, grid::unit(m, "pt"), pos = -1)
+  }
+  if (isTRUE(o$box))
+    gt <- gtable::gtable_add_grob(gt, grid::rectGrob(gp = grid::gpar(fill = o$box_fill, col = o$box_col, lwd = 0.8)),
+                                  t = 1, l = 1, b = nrow(gt), r = ncol(gt), z = 0, clip = "off", name = "matrix-legend-box")
+  gt
+}
+# Size of a gtable (points) resolved on a scratch svglite / ragg / pdf device (font metrics resolve there).
+matrix_grob_size_pt <- function(gr) {
+  f <- tempfile(fileext = ".svg"); fp <- tempfile(fileext = ".png"); on.exit(unlink(c(f, fp)), add = TRUE)
+  cur <- grDevices::dev.cur()
+  opened <- if (requireNamespace("svglite", quietly = TRUE)) tryCatch({ svglite::svglite(f, width = 8, height = 8); TRUE }, error = function(e) FALSE)
+            else FALSE
+  if (!opened && requireNamespace("ragg", quietly = TRUE)) opened <- tryCatch({ ragg::agg_png(fp, width = 800, height = 800, res = 100); TRUE }, error = function(e) FALSE)
+  if (!opened) grDevices::pdf(NULL, width = 30, height = 30)
+  on.exit({ grDevices::dev.off(); if (cur > 1) try(grDevices::dev.set(cur), silent = TRUE) }, add = TRUE)
+  wu <- if (inherits(gr, "gtable")) gtable::gtable_width(gr)  else grid::grobWidth(gr)
+  hu <- if (inherits(gr, "gtable")) gtable::gtable_height(gr) else grid::grobHeight(gr)
+  c(w = grid::convertWidth(wu, "pt", valueOnly = TRUE), h = grid::convertHeight(hu, "pt", valueOnly = TRUE))
+}
+# Bolt `leg` onto the plot gtable `g`: a new column (right / left) or row (top / bottom) beside the panels, or, "inside",
+# drawn over the panels at npc (x, y). Call after the panels are pinned and before the figure is measured.
+attach_matrix_legend <- function(g, leg, placement = "right", pad_pt = 8, x = 0.85, y = 0.95) {
+  if (is.null(g) || is.null(leg)) return(g)
+  cells <- g$layout[grepl("^panel", g$layout$name), , drop = FALSE]
+  if (nrow(cells) < 1) return(g)
+  if (!is.finite(pad_pt)) pad_pt <- 8
+  pt <- min(cells$t); pb <- max(cells$b); pl <- min(cells$l); pr <- max(cells$r)
+  if (identical(placement, "inside")) {
+    sz <- tryCatch(matrix_grob_size_pt(leg), error = function(e) NULL)
+    if (is.null(sz) || !all(is.finite(sz))) return(g)
+    if (!is.finite(x)) x <- 0.85
+    if (!is.finite(y)) y <- 0.95
+    vp <- grid::viewport(x = grid::unit(x, "npc"), y = grid::unit(y, "npc"), width = grid::unit(sz[["w"]], "pt"),
+                         height = grid::unit(sz[["h"]], "pt"), just = c(if (x <= 0.5) "left" else "right", if (y <= 0.5) "bottom" else "top"))
+    return(gtable::gtable_add_grob(g, grid::gTree(children = grid::gList(leg), vp = vp, name = "matrix-legend-inside"),
+                                   t = pt, l = pl, b = pb, r = pr, clip = "off", z = Inf, name = "matrix-legend"))
+  }
+  if (placement %in% c("right", "left")) {
+    w <- grid::unit(pad_pt, "pt") + gtable::gtable_width(leg)
+    if (identical(placement, "left")) {
+      g <- gtable::gtable_add_cols(g, w, pos = 0); lc <- 1L
+      cells <- g$layout[grepl("^panel", g$layout$name), , drop = FALSE]; pt <- min(cells$t); pb <- max(cells$b)
+    } else { g <- gtable::gtable_add_cols(g, w, pos = -1); lc <- ncol(g) }
+    return(gtable::gtable_add_grob(g, leg, t = pt, l = lc, b = pb, r = lc, clip = "off", z = Inf, name = "matrix-legend"))
+  }
+  h <- grid::unit(pad_pt, "pt") + gtable::gtable_height(leg)
+  if (identical(placement, "top")) {
+    g <- gtable::gtable_add_rows(g, h, pos = 0); lr <- 1L
+    cells <- g$layout[grepl("^panel", g$layout$name), , drop = FALSE]; pl <- min(cells$l); pr <- max(cells$r)
+  } else { g <- gtable::gtable_add_rows(g, h, pos = -1); lr <- nrow(g) }
+  gtable::gtable_add_grob(g, leg, t = lr, l = pl, b = lr, r = pr, clip = "off", z = Inf, name = "matrix-legend")
+}
+
+# ── Points: hollow variants ──────────────────────────────────────────────────
+# Shape codes >= 100 are the hollow versions (white fill whatever the Filled box says): 123 = open diamond, 125 = open
+# down-triangle. Returns list(shape, fill) for one sample: the plotted pch and the fill colour ("white" or `colour`).
+resolve_point_shape <- function(shape, filled = TRUE, colour = "black") {
+  pt <- as.integer(shape)
+  if (!is.na(pt) && pt >= 100L) return(list(shape = pt - 100L, fill = "white"))
+  if (!isTRUE(filled)) {
+    pt <- switch(as.character(pt), "16" = 21L, "15" = 22L, "17" = 24L, "18" = 23L, pt)
+    return(list(shape = pt, fill = "white"))
+  }
+  list(shape = pt, fill = colour)
+}
+
+# ── Panels (facets) ──────────────────────────────────────────────────────────
+FACET_SCALES_CHOICES <- c("Shared axes" = "fixed", "Free y" = "free_y", "Free x" = "free_x", "Free both" = "free")
+FACET_STRIP_CHOICES  <- c("Plain text (default)" = "plain", "Boxed strip" = "box", "None" = "none")
+# The facet layers of the main curve: strip text, strip style and size, scales, columns. `ncol` NA = facet_wrap's own rule.
+facet_layers <- function(levels, scales = "fixed", ncol = NA, strip_style = "plain", strip_size = 7, axis_lw = 0.5, wrap = 18) {
+  nc <- suppressWarnings(as.integer(ncol)); if (length(nc) != 1L || !is.finite(nc) || nc < 1L) nc <- NULL
+  if (!scales %in% unname(FACET_SCALES_CHOICES)) scales <- "fixed"
+  fw <- ggplot2::facet_wrap(ggplot2::vars(group), scales = scales, ncol = nc, labeller = facet_strip_labeller(levels, wrap))
+  th <- switch(strip_style,
+    none = ggplot2::theme(strip.text = ggplot2::element_blank(), strip.background = ggplot2::element_blank()),
+    box  = ggplot2::theme(strip.text = ggplot2::element_text(size = strip_size, face = "plain"),
+                          strip.background = ggplot2::element_rect(fill = "grey92", color = "black", linewidth = axis_lw)),
+    ggplot2::theme(strip.text = ggplot2::element_text(size = strip_size, face = "plain"), strip.background = ggplot2::element_blank()))
+  list(fw, th)
+}
+# The panel of every sample from one of three sources: the typed Groups ("group"), a text box per sample ("manual":
+# `manual` = named character vector sample -> panel) or a metadata column of a long file (`meta` = named vector
+# sample -> value). A blank entry = "no panel" (the "Other" panel, as for groups). Returns a named character vector.
+panel_assignment <- function(samples, source = "group", groups = NULL, manual = NULL, meta = NULL) {
+  pick <- switch(source, manual = manual, group = groups, meta)
+  if (is.null(pick)) return(NULL)
+  out <- as.character(unname(pick[samples])); out[is.na(out)] <- ""
+  setNames(trimws(out), samples)
+}
+
+# ── Rate of OD change (dOD/dt) ───────────────────────────────────────────────
+# d OD / dt per replicate by the same centred rolling regression as the specific growth rate (window = the mu_max
+# smoothing window; base R, no zoo), then mean and SD across the replicates at each time. Zero crossings mark the peak
+# (growth to lysis), negative values lysis. Columns: time, variable, n, rate_mean, rate_sd.
+compute_od_rate_curves <- function(rep_pd, window = 5) {
+  if (is.null(rep_pd) || nrow(rep_pd) == 0) return(NULL)
+  rep_pd <- rep_pd[is.finite(rep_pd$value), , drop = FALSE]
+  if (nrow(rep_pd) == 0) return(NULL)
+  rep_pd <- rep_pd[order(rep_pd$variable, rep_pd$replicate, rep_pd$time), , drop = FALSE]
+  key <- interaction(rep_pd$variable, rep_pd$replicate, drop = TRUE)
+  pieces <- lapply(split(rep_pd, key, drop = TRUE), function(g) {
+    n <- nrow(g); win <- min(window, n)
+    rate <- rep(NA_real_, n)
+    if (n >= win && win >= 3) rate <- tryCatch(rolling_slope(g$time, g$value, win), error = function(e) rep(NA_real_, n))
+    data.frame(time = g$time, variable = g$variable[1], replicate = g$replicate[1], rate = rate, stringsAsFactors = FALSE)
+  })
+  d <- do.call(rbind, c(pieces, list(make.row.names = FALSE)))
+  d <- d[is.finite(d$rate), , drop = FALSE]
+  if (nrow(d) == 0) return(NULL)
+  out <- lapply(split(d, list(d$variable, d$time), drop = TRUE), function(g)
+    data.frame(time = g$time[1], variable = g$variable[1], n = nrow(g), rate_mean = mean(g$rate),
+               rate_sd = if (nrow(g) >= 2) sd(g$rate) else NA_real_, stringsAsFactors = FALSE))
+  out <- do.call(rbind, c(out, list(make.row.names = FALSE)))
+  out[order(out$variable, out$time), , drop = FALSE]
+}
+
+# ── Metric summary: sort order, horizontal bars, custom bar colours ──────────
+METRIC_SORT_CHOICES <- c("As the legend order (default)" = "data", "Alphabetical" = "alpha",
+                         "By value, ascending (first metric shown)" = "asc", "By value, descending (first metric shown)" = "desc")
+# The sample order for the metric summary. `summ` has sample, mean (and metric); "asc" / "desc" order by the mean over the
+# metrics shown, "alpha" alphabetically by label, "data" keeps `default` (the legend order). Returns the sample names.
+metric_sample_order <- function(default, summ = NULL, mode = "data") {
+  default <- as.character(default)
+  if (is.null(summ) || !nrow(summ) || identical(mode, "data") || !mode %in% c("alpha", "asc", "desc")) return(default)
+  if (identical(mode, "alpha")) return(default[order(tolower(default))])
+  mv <- tapply(summ$mean, as.character(summ$sample), function(v) mean(v, na.rm = TRUE))
+  val <- unname(mv[default]); val[is.na(val)] <- if (identical(mode, "asc")) Inf else -Inf
+  default[order(val, decreasing = identical(mode, "desc"))]
+}
+# "sample = #HEX" lines (a display or file name on the left, `=`, `:` or a tab between) -> named colour vector; entries
+# that are not colours are ignored.
+parse_bar_colors <- function(txt) {
+  lines <- trimws(unlist(strsplit(txt %||% "", "[\r\n;]+")))
+  lines <- lines[nzchar(lines)]
+  out <- character(0)
+  for (ln in lines) {
+    kv <- regmatches(ln, regexec("^(.*?)\\s*[=:\t]\\s*(#?[0-9A-Fa-f]{6}|[A-Za-z]+)\\s*$", ln, perl = TRUE))[[1]]
+    if (length(kv) != 3) next
+    col <- kv[3]; if (grepl("^[0-9A-Fa-f]{6}$", col)) col <- paste0("#", col)
+    ok <- tryCatch({ grDevices::col2rgb(col); TRUE }, error = function(e) FALSE)
+    if (ok) out[kv[2]] <- col
+  }
+  out
+}
+HEATMAP_PALETTE_CHOICES <- c("Viridis" = "viridis", "Inferno" = "inferno", "Plasma" = "plasma", "Magma" = "magma")
+heatmap_palette_option <- function(x) { x <- tolower(x %||% "viridis"); if (x %in% c("viridis", "inferno", "plasma", "magma")) x else "viridis" }
+
+# ── One-click style buttons (they only set existing inputs) ──────────────────
+# Band style: thin lines, no points, a shaded band, open L-shaped axes (the ribbon look of most published growth / lysis
+# curves). A figure already showing SD / SEM / 95 % CI keeps that measure; one showing none gets SD.
+band_style_settings <- function(current_error_type = NULL) {
+  et <- if (!is.null(current_error_type) && length(current_error_type) == 1 && current_error_type %in% c("sd", "sem", "ci95", "range", "iqr"))
+    current_error_type else "sd"
+  list(show_points = FALSE, line_thickness = 0.8, error_type = et, error_display_mode = "shadow", shadow_alpha = 0.25, axis_frame = "L")
+}
+# Presentation slide: 10 x 7.5 in PNG, large text, thick lines, a canvas preview (not the journal's fixed panel).
+slide_style_settings <- function()
+  list(export_units = "in", export_width = 10, export_height = 7.5, export_format = "png", export_dpi = 300,
+       preview_mode = "canvas", panel_size_mode = "fit", font_family = "sans",
+       title_font_size = 22, axis_label_font_size = 20, axis_text_font_size = 18, legend_font_size = 18, label_font_size = 16,
+       line_thickness = 1.6, shape_size = 3.5, point_stroke = 0.5, error_bar_thickness = 0.8, axis_line_pt = 1.5, tick_length_mm = 2,
+       theme_base_pt = 0, bold_title = TRUE, legend_position = "right", legend_box_border = TRUE, legend_key_mm = 0, show_error_caption = TRUE)
+# PDF vector: 7 x 5 in PDF (fonts embedded), journal-weight text, canvas preview.
+pdf_vector_style_settings <- function()
+  list(export_units = "in", export_width = 7, export_height = 5, export_format = "pdf", export_dpi = 300,
+       preview_mode = "canvas", panel_size_mode = "fit", font_family = "sans",
+       title_font_size = 14, axis_label_font_size = 12, axis_text_font_size = 11, legend_font_size = 11, label_font_size = 10,
+       line_thickness = 1, shape_size = 2.5, point_stroke = 0.5, error_bar_thickness = 0.8, axis_line_pt = 1.07, tick_length_mm = 1.5,
+       theme_base_pt = 0, bold_title = FALSE, legend_position = "right", legend_box_border = TRUE, legend_key_mm = 0)
+# Settings written before v2.22 (no `styling_schema` key) called ColorBrewer Set1 "publication"; "publication" is now the
+# Okabe-Ito set (what it means in the N4 paper app), so such a file is mapped to "set1" and keeps drawing what it drew.
+migrate_styling_settings <- function(global, styling_schema = NULL) {
+  if (is.null(styling_schema) && identical(global$color_palette, "publication")) global$color_palette <- "set1"
+  global
+}
+# ── end v2.22 figure styling helpers ──
 
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
@@ -7257,6 +7803,7 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
   div(style = "display:none;", checkboxInput("quick_edit_open", "Show the quick-edit strip", APP_DEFAULTS$quick_edit_open)),
   conditionalPanel("input.quick_edit_open == true",
     uiOutput("quick_edit_rows"),
+    markup_buttons_ui(),   # v2.22: acts on the name / label box last clicked
     div(class = "kc-qe-global",
       div(class = "kc-qe-field", textInput("x_axis_label", "X-axis label:", "Time (minutes)")),
       div(class = "kc-qe-field", textInput("y_axis_label", "Y-axis label:", "A550")),
@@ -7271,6 +7818,8 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
                                   "Inside: bottom-left"  = "inside-bottom-left",
                                   "Inside: bottom-right" = "inside-bottom-right",
                                   "Inside: emptiest corner (auto)" = "inside-auto",
+                                  "Direct labels at line ends"     = "direct",   # v2.22: no legend box, each line named in its colour
+                                  "Matrix (grid) legend"           = "matrix",   # v2.22: rows x columns (set under Figure Layout)
                                   "None"                 = "none"),
                       selected = APP_DEFAULTS$legend_position))),
     p(class = "kc-qe-note",
@@ -7515,7 +8064,66 @@ ui <- fluidPage(
          if (window.jQuery) jQuery(document).on('shiny:connected', report);
        })();"
     )),
+    # v2.22: markup buttons (sub, super, italic, bold) and Ctrl+= / Ctrl+Shift+= / Ctrl+I / Ctrl+B on the figure-text boxes.
+    # They wrap the highlighted text in the figure markup (_{..} ^{..} *..* **..**; the same click again unwraps it) and
+    # tell Shiny; a button acts on its own box (data-target) or, without one, on the last figure-text box the user was in.
+    tags$script(HTML(
+      "(function() {
+         var last = null;
+         var IDS = ['plot_title', 'plot_subtitle', 'x_axis_label', 'y_axis_label', 'legend_title', 'threshold_label', 'report_title', 'matrix_legend_title'];
+         var PRE = ['qe_name_', 'marker_text_', 'legrow_', 'legcol_', 'facet_of_', 'group_'];
+         function ok(el) {
+           if (!el || !el.id) return false;
+           var tag = (el.tagName || '').toLowerCase();
+           if (!(tag === 'textarea' || (tag === 'input' && el.type === 'text'))) return false;
+           if (IDS.indexOf(el.id) >= 0) return true;
+           for (var i = 0; i < PRE.length; i++) if (el.id.indexOf(PRE[i]) === 0) return true;
+           return false;
+         }
+         var PAIRS = {sub: ['_{', '}'], sup: ['^{', '}'], italic: ['*', '*'], bold: ['**', '**']};
+         function wrap(el, mode) {
+           var s = el.selectionStart, e = el.selectionEnd, v = el.value, pr = PAIRS[mode][0], po = PAIRS[mode][1];
+           if (s === e) {                                  // nothing selected: a brief hint
+             var old = el.placeholder; el.placeholder = 'select the characters first';
+             setTimeout(function() { el.placeholder = old; }, 1600); el.focus(); return;
+           }
+           var sel = v.substring(s, e), out, ns, ne;
+           if (sel.length >= pr.length + po.length && sel.indexOf(pr) === 0 && sel.slice(-po.length) === po && !(mode === 'italic' && sel.indexOf('**') === 0)) {
+             out = v.substring(0, s) + sel.slice(pr.length, sel.length - po.length) + v.substring(e); ns = s; ne = e - pr.length - po.length;
+           } else if (s >= pr.length && v.substring(s - pr.length, s) === pr && v.substring(e, e + po.length) === po && !(mode === 'italic' && v.substring(s - 2, s) === '**')) {
+             out = v.substring(0, s - pr.length) + sel + v.substring(e + po.length); ns = s - pr.length; ne = ns + sel.length;
+           } else {
+             out = v.substring(0, s) + pr + sel + po + v.substring(e); ns = s + pr.length; ne = ns + sel.length;
+           }
+           el.value = out; el.setSelectionRange(ns, ne);
+           el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('change', {bubbles: true}));
+           el.focus();
+         }
+         window.kcMarkup = wrap;
+         document.addEventListener('focusin', function(ev) { if (ok(ev.target)) last = ev.target.id; });
+         // mousedown (not click): pressing the button must not first steal the focus and collapse the selection
+         document.addEventListener('mousedown', function(ev) {
+           var b = ev.target && ev.target.closest ? ev.target.closest('button.kc-mk-btn') : null;
+           if (!b) return;
+           ev.preventDefault();
+           var id = b.getAttribute('data-target') || last, el = id ? document.getElementById(id) : null;
+           if (el) wrap(el, b.getAttribute('data-mode'));
+         });
+         document.addEventListener('keydown', function(ev) {
+           if (!ev.ctrlKey || ev.altKey || ev.metaKey || !ok(document.activeElement)) return;
+           var k = ev.key, mode = null;
+           if (k === '=' || k === '+') mode = (ev.shiftKey || k === '+') ? 'sup' : 'sub';
+           else if ((k === 'i' || k === 'I') && !ev.shiftKey) mode = 'italic';
+           else if ((k === 'b' || k === 'B') && !ev.shiftKey) mode = 'bold';
+           if (mode) { ev.preventDefault(); wrap(document.activeElement, mode); }
+         });
+       })();"
+    )),
     tags$style(HTML("
+      .kc-markup-row { display:flex; align-items:center; gap:4px; margin:0 0 6px; }
+      .kc-markup-row .kc-mk-label { font-size:.75em; color:#777; margin-right:2px; }
+      .kc-markup-row .kc-mk-btn { font-size:.75em; padding:0 6px; line-height:1.5; }
+      .kc-markup-row .kc-mk-help { font-size:.7em; color:#999; border:1px solid #ccc; border-radius:50%; width:14px; height:14px; line-height:12px; text-align:center; cursor:help; }
       .fig-bar { background:#f1f3f5; border:1px solid #dee2e6; border-radius:3px; padding:4px 10px;
                  font-size:.85em; margin-bottom:8px; color:#495057; }
       .fig-bar.warn { background:#fff3cd; border-color:#ffe08a; color:#856404; }
@@ -7700,6 +8308,11 @@ ui <- fluidPage(
                                    choices  = c("Linear" = "linear", "Logarithmic" = "log",
                                                 "Square Root" = "sqrt", "Reverse" = "reverse"),
                                    selected = "log"),
+                       selectInput("time_convert", "Time unit of the figures:", choices = TIME_CONVERT_CHOICES, selected = APP_DEFAULTS$time_convert),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "A display conversion: the file's times are multiplied for the figures, tables and exports and the unit word of the ",
+                         "X-axis label follows. The data stay in the file's unit; the time filter and per-sample windows still use the file's unit, ",
+                         "while axis limits, tick intervals and marker times are in the converted unit."),
                        checkboxInput("use_advanced_ticks", "Advanced Tick Customization", value = TRUE),
                        conditionalPanel(
                          condition = "input.use_advanced_ticks == true && input.y_scale_type == 'log'",
@@ -7718,14 +8331,25 @@ ui <- fluidPage(
                                                value = NA, min = 0.001, step = 1)
                            ),
                            column(6,
-                                  p(style = "font-size:.8em;color:#777;margin-top:28px;",
-                                    "Leave blank = auto")
+                                  numericInput("x_minor_interval", "Minor Interval:",
+                                               value = NA, min = 0.0001, step = 1)
                            )
                          ),
+                         p(style = "font-size:.8em;color:#777;margin-top:-6px;", "Leave blank = auto"),
                          textInput("x_extra_ticks", "Extra tick positions:",
                                    value = "", placeholder = "e.g. 270, 450"),
                          p(style = "font-size:.8em;color:#777;margin-top:-6px;",
                            "Values always shown regardless of interval. Comma-separated.")
+                       ),
+                       conditionalPanel(
+                         condition = "input.y_scale_type == 'linear' || input.y_scale_type == 'sqrt'",
+                         h5("Y-axis Tick Control", style = "margin:10px 0 4px;"),
+                         fluidRow(
+                           column(6, numericInput("y_tick_interval",  "Major Interval:", value = NA, min = 0.0001, step = 0.1)),
+                           column(6, numericInput("y_minor_interval", "Minor Interval:", value = NA, min = 0.0001, step = 0.05))
+                         ),
+                         p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+                           "Leave blank = auto. Minor ticks are drawn only when two or more fall inside the axis range.")
                        ),
                        checkboxInput("custom_x_limits", "Custom X-axis limits", value = FALSE),
                        conditionalPanel(condition = "input.custom_x_limits == true",
@@ -7761,6 +8385,7 @@ ui <- fluidPage(
                                      APP_DEFAULTS$axis_subscripts),
                        textInput("plot_title",    "Plot Title:",    ""),
                        textInput("plot_subtitle", "Plot Subtitle:", ""),
+                       markup_buttons_ui(),   # v2.22: sub / superscript, italic, bold for the title and subtitle (and the axis labels under the figure)
                        h5("Gridlines", style = "margin-top:12px;"),
                        checkboxInput("show_major_gridlines", "Show Major Gridlines", APP_DEFAULTS$show_major_gridlines),
                        checkboxInput("show_minor_gridlines", "Show Minor Gridlines", APP_DEFAULTS$show_minor_gridlines),
@@ -7768,6 +8393,7 @@ ui <- fluidPage(
                                         selectInput("major_gridline_color", "Major Gridline Color:",
                                                     choices  = c("Light Gray" = "#E6E6E6", "Medium Gray" = "#CCCCCC",
                                                                  "Dark Gray"  = "#999999", "Light Blue"  = "#DEEBF7",
+                                                                 "Light Red"  = "#FFEAE9",
                                                                  "Custom"     = "custom"),
                                                     selected = "#E6E6E6"),
                                         conditionalPanel(condition = "input.major_gridline_color == 'custom'",
@@ -7778,6 +8404,7 @@ ui <- fluidPage(
                                         selectInput("minor_gridline_color", "Minor Gridline Color:",
                                                     choices  = c("Light Gray" = "#F2F2F2", "Medium Gray" = "#E6E6E6",
                                                                  "Dark Gray"  = "#CCCCCC", "Light Blue"  = "#EFF6FB",
+                                                                 "Light Red"  = "#FFF2F1",
                                                                  "Custom"     = "custom"),
                                                     selected = "#F2F2F2"),
                                         conditionalPanel(condition = "input.minor_gridline_color == 'custom'",
@@ -7820,6 +8447,35 @@ ui <- fluidPage(
                                                "As selected / as in the file" = "selected"),
                                    selected = APP_DEFAULTS$legend_order),
                        numericInput("legend_key_mm", "Legend key size (mm; 0 = auto):", APP_DEFAULTS$legend_key_mm, 0, 20, 0.5),
+                       # v2.22: legend title, text style, wrapping; the matrix (grid) legend
+                       fluidRow(
+                         column(6, textInput("legend_title", "Legend title (blank = none):", APP_DEFAULTS$legend_title, placeholder = "e.g. MOI")),
+                         column(6, selectInput("legend_text_face", "Legend text:", choices = c("Plain" = "plain", "Bold" = "bold", "Italic" = "italic", "Bold italic" = "bold.italic"),
+                                               selected = APP_DEFAULTS$legend_text_face))
+                       ),
+                       numericInput("legend_wrap_width", "Wrap legend labels at (characters; blank = no wrapping):", APP_DEFAULTS$legend_wrap_width, 5, 80, 1),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "The legend position (Quick edit strip) also offers \u2018Direct labels at line ends\u2019 (each line named in its own colour, ",
+                         "using the names from the strip) and a \u2018Matrix (grid) legend\u2019. Floating drag-to-place labels of the companion app are not ",
+                         "offered: the preview here is an inline SVG, not a plot image the page can place labels over."),
+                       conditionalPanel(
+                         condition = "input.legend_position == 'matrix'",
+                         p(style = "font-size:.82em;color:#555;margin-bottom:4px;",
+                           "Type a Row and a Column for each sample (Row = strain, Column = MOI, say); a sample with either left blank is left out. ",
+                           "Labels accept the figure markup."),
+                         uiOutput("matrix_legend_ui"),
+                         fluidRow(
+                           column(7, textInput("matrix_legend_title", "Corner title:", APP_DEFAULTS$matrix_legend_title, placeholder = "e.g. MOI")),
+                           column(5, selectInput("matrix_legend_placement", "Placement:",
+                                                 choices = c("Right" = "right", "Left" = "left", "Top" = "top", "Bottom" = "bottom", "Inside plot" = "inside"),
+                                                 selected = APP_DEFAULTS$matrix_legend_placement))),
+                         fluidRow(
+                           column(4, numericInput("matrix_swatch_len", "Swatch (pt):", APP_DEFAULTS$matrix_swatch_len, 10, 120)),
+                           column(4, numericInput("matrix_col_gap", "Column gap (pt):", APP_DEFAULTS$matrix_col_gap, 0, 60)),
+                           column(4, numericInput("matrix_row_gap", "Row gap (pt):", APP_DEFAULTS$matrix_row_gap, 0, 60))),
+                         checkboxInput("matrix_legend_box", "Draw a box around the legend", APP_DEFAULTS$matrix_legend_box),
+                         checkboxInput("matrix_swatch_points", "Show the point symbol in each swatch", APP_DEFAULTS$matrix_swatch_points)
+                       ),
                        fluidRow(
                          column(6, numericInput("axis_line_pt",   "Axis / tick line (pt):", APP_DEFAULTS$axis_line_pt, 0.1, 4, 0.05)),
                          column(6, numericInput("tick_length_mm", "Tick length (mm):",     APP_DEFAULTS$tick_length_mm,  0,  10, 0.1))
@@ -7860,6 +8516,37 @@ ui <- fluidPage(
                    )
                  ),
                  
+                 # ── Panels (v2.22) ────────────────────────────────────────────────────────
+                 kc_section("Panels",
+                   div(class = "panel-section",
+                       h4("Multi-panel figure", class = "panel-title"),
+                       checkboxInput("facet_by_group", "One panel per group (main figure)", APP_DEFAULTS$facet_by_group),
+                       selectInput("facet_source", "Each sample's panel comes from:",
+                                   choices = c("The Group typed in Variable Styling" = "group", "A panel name typed below" = "manual"),
+                                   selected = APP_DEFAULTS$facet_source),
+                       uiOutput("facet_manual_ui"),
+                       fluidRow(
+                         column(6, numericInput("facet_ncol", "Panels per row (blank = auto):", APP_DEFAULTS$facet_ncol, 1, 8, 1)),
+                         column(6, selectInput("facet_scales", "Axis scales:", choices = FACET_SCALES_CHOICES, selected = APP_DEFAULTS$facet_scales))),
+                       fluidRow(
+                         column(6, selectInput("facet_strip_style", "Panel headers:", choices = FACET_STRIP_CHOICES, selected = APP_DEFAULTS$facet_strip_style)),
+                         column(6, numericInput("facet_strip_size", "Header size (pt; blank = axis-title size):", APP_DEFAULTS$facet_strip_size, 4, 32, 0.5))),
+                       p(style = "font-size:.78em;color:#777;margin-top:-4px;",
+                         "With two or more different panels the lysis curve is split into a grid. Samples without a panel go to \u2018Other\u2019. ",
+                         "Panel names accept the figure markup (*italic*, A_{550}). With a long-format file the panel can also come from another ",
+                         "column of the file. In the fixed panel size the panel area is shared by the sub-panels, so the figure keeps the same panel size.")
+                   ),
+                   div(class = "panel-section",
+                       h4("Axis frame", class = "panel-title"),
+                       selectInput("axis_frame", "Frame around the panel:",
+                                   choices = c("Automatic (follows the Advanced Tick Customization box)" = "auto", "Box (four sides)" = "box",
+                                               "L-shaped (left and bottom)" = "L", "None (tick marks only)" = "none"),
+                                   selected = APP_DEFAULTS$axis_frame),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Automatic is the frame the figure has always had (a box). L and None remove the top and right lines; the tick marks stay.")
+                   )
+                 ),
+
                  # ── Time Point Filtering ──────────────────────────────────────────────────
                  kc_section("Time Point Filtering",
                    div(class = "panel-section",
@@ -7920,6 +8607,9 @@ ui <- fluidPage(
                    div(class = "panel-section",
                        checkboxInput("enable_time_markers", "Enable Time Markers", FALSE),
                        conditionalPanel(condition = "input.enable_time_markers == true",
+                                        selectInput("marker_label_yplace", "Marker label height (Top / Middle / Bottom):",
+                                                    choices = c("By the plotted data (default)" = "data", "By the axis limits" = "limits"),
+                                                    selected = APP_DEFAULTS$marker_label_yplace),
                                         numericInput("marker_count", "Number of Markers:", 1, 1, 10),
                                         uiOutput("time_marker_settings")
                        ),
@@ -7931,15 +8621,20 @@ ui <- fluidPage(
                                         fluidRow(
                                           column(6, selectInput("threshold_color", "Colour:",
                                                                 choices = c("Grey" = "grey40", "Black" = "black", "Red" = "firebrick",
-                                                                            "Blue" = "steelblue4", "Green" = "darkgreen"),
+                                                                            "Blue" = "steelblue4", "Green" = "darkgreen", "Custom (HEX below)" = "custom"),
                                                                 selected = APP_DEFAULTS$threshold_color)),
                                           column(6, selectInput("threshold_linetype", "Line type:",
                                                                 choices = c("Dashed" = "dashed", "Dotted" = "dotted", "Solid" = "solid",
                                                                             "Dot-dash" = "dotdash"),
                                                                 selected = APP_DEFAULTS$threshold_linetype))
                                         ),
+                                        fluidRow(
+                                          column(6, numericInput("threshold_width", "Width (pt; blank = axis line):", APP_DEFAULTS$threshold_width, 0.1, 6, 0.1)),
+                                          column(6, conditionalPanel(condition = "input.threshold_color == 'custom'",
+                                                                     textInput("threshold_color_custom", "HEX:", APP_DEFAULTS$threshold_color_custom)))
+                                        ),
                                         p(style = "font-size:.8em;color:#777;margin-top:-6px;",
-                                          "Drawn at the axis-line weight; the label sits at the right end in the axis-text size.")
+                                          "Drawn at the axis-line weight unless a width is typed; the label sits at the right end in the axis-text size (markup allowed).")
                        )
                    )
                  ),
@@ -7952,7 +8647,8 @@ ui <- fluidPage(
                                                 "Viridis"             = "viridis",
                                                 "Plasma"              = "plasma",
                                                 "Colorblind-friendly" = "colorblind",
-                                                "Publication"         = "publication",
+                                                "Publication (Okabe-Ito)" = "publication",
+                                                "Set1 (ColorBrewer)"  = "set1",
                                                 "Rainbow"             = "rainbow",
                                                 "Grayscale"           = "gray",
                                                 "Blues (dose gradient)"        = "blues",
@@ -7983,7 +8679,8 @@ ui <- fluidPage(
                  kc_section("Line & Point Settings",
                    div(class = "panel-section",
                        h4("Line Options", class = "panel-title"),
-                       sliderInput("line_thickness", "Line Thickness (1 = 2.1 pt):", 0.1, 3, APP_DEFAULTS$line_thickness, 0.05)
+                       sliderInput("line_thickness", "Line Thickness (1 = 2.1 pt):", 0.1, 3, APP_DEFAULTS$line_thickness, 0.05),
+                       checkboxInput("hide_lines", "Hide lines (show only points and error bars; the legend key becomes a point)", APP_DEFAULTS$hide_lines)
                    ),
                    div(class = "panel-section",
                        h4("Point Options", class = "panel-title"),
@@ -8010,21 +8707,17 @@ ui <- fluidPage(
                  # ── Error Bars / Shadow ───────────────────────────────────────────────────
                  kc_section("Error Bars / Shadow",
                    div(class = "panel-section",
-                       selectInput("error_type", "Error Type:",
-                                   choices  = c("None" = "none", "SD" = "sd",
-                                                "SEM"  = "sem",  "95% CI" = "ci95"),
-                                   selected = "sem"),
-                       conditionalPanel(condition = "input.error_type != 'none'",
-                                        selectInput("error_display_mode", "Display Mode:",
-                                                    choices  = c("Error Bars" = "bars", "Shadow/Ribbon" = "shadow"),
-                                                    selected = "bars"),
+                       selectInput("error_type", "Error Type:", choices = ERROR_TYPE_CHOICES, selected = "sem"),
+                       selectInput("error_display_mode", "Display Mode:", choices = ERROR_DISPLAY_CHOICES, selected = "bars"),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Spaghetti, quantile bands and jitter draw the replicates themselves, so they do not need an error type. ",
+                         "Range (min-max) and IQR whiskers are asymmetric about the mean."),
+                       conditionalPanel(condition = "input.error_type != 'none' && ['bars', 'shadow', 'combo'].indexOf(input.error_display_mode) !== -1",
                                         numericInput("error_multiplier", "Error Multiplier:", 1, 0.1, 5, 0.1),
                                         checkboxInput("asymmetric_error", "Floor errors at zero", FALSE),
                                         selectInput("error_bar_color", "Error colour:",
                                                     choices = c("Sample colour" = "sample", "Black" = "black", "Grey" = "grey50"),
                                                     selected = APP_DEFAULTS$error_bar_color),
-                                        checkboxInput("show_replicate_points",
-                                                      "Show individual replicate values (open circles behind the mean)", FALSE),
                                         checkboxInput("error_log_floor",
                                                       "On a log axis, draw bars that cross zero down to the axis minimum", TRUE),
                                         p(style = "font-size:.78em;color:#777;margin-top:-6px;",
@@ -8043,17 +8736,28 @@ ui <- fluidPage(
                                                                      choices  = c("Middle" = "middle", "Dodge" = "dodge"),
                                                                      selected = "middle")
                                         ),
-                                        conditionalPanel(condition = "input.error_display_mode == 'shadow'",
+                                        conditionalPanel(condition = "['shadow', 'combo'].indexOf(input.error_display_mode) !== -1",
                                                          sliderInput("shadow_alpha", "Ribbon Alpha:", 0.05, 0.6, 0.2, 0.05)
-                                        ),
-                                        checkboxInput("show_error_caption",
-                                                      "Annotate error type + n in caption",
-                                                      value = APP_DEFAULTS$show_error_caption),
-                                        p(style = "font-size:.8em;color:#777;margin-top:-6px;",
-                                          "Adds a figure caption stating the error measure (SD / SEM / 95% CI) ",
-                                          "and the replicate count — on by default (KC-6) so a default SEM-bar ",
-                                          "figure never leaves the app unlabelled; recommended for publication figures.")
-                       )
+                                        )
+                       ),
+                       conditionalPanel(condition = "['spaghetti', 'combo'].indexOf(input.error_display_mode) !== -1",
+                                        sliderInput("spaghetti_alpha", "Replicate trace alpha:", 0.05, 0.9, APP_DEFAULTS$spaghetti_alpha, 0.05)),
+                       conditionalPanel(condition = "input.error_display_mode == 'quantile_bands'",
+                                        sliderInput("qband_inner_alpha", "Inner band alpha (IQR):", 0.05, 0.8, APP_DEFAULTS$qband_inner_alpha, 0.05),
+                                        sliderInput("qband_outer_alpha", "Outer band alpha (2.5-97.5 %):", 0.05, 0.5, APP_DEFAULTS$qband_outer_alpha, 0.05)),
+                       conditionalPanel(condition = "input.error_display_mode == 'jitter'",
+                                        sliderInput("jitter_alpha", "Point alpha:", 0.1, 1, APP_DEFAULTS$jitter_alpha, 0.05),
+                                        sliderInput("jitter_size", "Point size:", 0.3, 5, APP_DEFAULTS$jitter_size, 0.1),
+                                        sliderInput("jitter_width", "Jitter width (time units; 0 = none):", 0, 20, APP_DEFAULTS$jitter_width, 0.1)),
+                       checkboxInput("show_replicate_points",
+                                     "Show individual replicate values (open circles behind the mean; the alias of the Jitter mode)", FALSE),
+                       checkboxInput("show_error_caption",
+                                     "Annotate error type + n in caption",
+                                     value = APP_DEFAULTS$show_error_caption),
+                       p(style = "font-size:.8em;color:#777;margin-top:-6px;",
+                         "Adds a figure caption stating the error measure (SD / SEM / 95% CI / range / IQR) ",
+                         "and the replicate count — on by default (KC-6) so a default SEM-bar ",
+                         "figure never leaves the app unlabelled; recommended for publication figures.")
                    )
                  ),
                  
@@ -8090,6 +8794,17 @@ ui <- fluidPage(
                        p(style = "font-size:.78em;color:#777;margin-top:4px;",
                          "N4 paper look: the defaults of the N4 Lysis Curve Shiny App (10 x 8 in, PDF, 20 pt text, point stroke 1.5, ",
                          "x ticks every 30, bars drawn as that app drew them)."),
+                       # v2.22: three more one-click looks (each only sets existing inputs)
+                       div(style = "display:flex;gap:6px;margin-top:6px;",
+                           actionButton("apply_style_band", "Band style",
+                                        style = "flex:1;background:#f8f9fa;color:#495057;border:1px solid #ced4da;font-size:.85em;"),
+                           actionButton("apply_style_slide", "Presentation slide",
+                                        style = "flex:1;background:#f8f9fa;color:#495057;border:1px solid #ced4da;font-size:.85em;"),
+                           actionButton("apply_style_pdf", "PDF vector",
+                                        style = "flex:1;background:#f8f9fa;color:#495057;border:1px solid #ced4da;font-size:.85em;")),
+                       p(style = "font-size:.78em;color:#777;margin-top:4px;",
+                         "Band style: thin lines, no points, a shaded band, L-shaped axes. Presentation slide: 10 x 7.5 in PNG, large text, thick lines. ",
+                         "PDF vector: 7 x 5 in PDF with embedded fonts. Like the presets above they only set ordinary controls."),
                        p(style = "font-size:.78em;color:#777;margin-top:4px;",
                          "The app starts in the journal standard (Nature single column, 89 x 65 mm). ",
                          "Legacy look restores the pre-v2.14 start: 10 x 8 in, 20 pt text, PDF, pixel canvas."),
@@ -8402,10 +9117,9 @@ ui <- fluidPage(
                        div(style = "margin:-8px 0 8px 0;",
                            actionButton("samples_all",  "All",  class = "btn-xs"),
                            actionButton("samples_none", "None", class = "btn-xs")),
-                       checkboxInput("facet_by_group", "One panel per group (main figure)", APP_DEFAULTS$facet_by_group),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
-                         "Type a Group for each sample below. With two or more different groups the lysis curve is split into ",
-                         "one panel per group (shared axes, the group name above each panel); samples without a group go to ",
+                         "Type a Group for each sample below. With the Panels section's \u2018One panel per group\u2019 ticked and two or more ",
+                         "different groups the lysis curve is split into one panel per group; samples without a group go to ",
                          "\u2018Other\u2019. The Compose figure tab can also add one separate panel per group."),
                        uiOutput("var_settings")
                    )
@@ -8461,6 +9175,11 @@ ui <- fluidPage(
                   selectInput("analysis_metrics", "Metrics (one facet each):",
                               choices  = setNames(names(ANALYSIS_METRIC_LABELS), ANALYSIS_METRIC_LABELS),
                               selected = c("lysis_time", "od_drop"), multiple = TRUE),
+                  selectInput("metric_sort", "Sample order:", choices = METRIC_SORT_CHOICES, selected = APP_DEFAULTS$metric_sort),
+                  checkboxInput("metric_horizontal", "Horizontal bars", APP_DEFAULTS$metric_horizontal),
+                  checkboxInput("metric_single_large", "One metric: draw it large", APP_DEFAULTS$metric_single_large),
+                  textAreaInput("metric_custom_colors", "Custom bar colours (optional):", APP_DEFAULTS$metric_custom_colors, rows = 2,
+                                placeholder = "Uninfected = #000000; Phage = #D55E00"),
                   radioButtons("metric_error_source", "Whiskers:",
                                choices = c("Replicate spread (SD/SEM/CI as in Error Bars)" = "replicates",
                                            "Bootstrap 95 % CI of the mean-curve metric" = "bootstrap"),
@@ -8512,6 +9231,11 @@ ui <- fluidPage(
                     "\u03bc(t) = d ln(OD)/dt per replicate by the same rolling regression as ",
                     "\u03bcmax (window under Stats & Reports), then mean \u00b1 SD (band). ",
                     "Lysis shows as a negative rate.")),
+                conditionalPanel("input.analysis_type == 'od_rate'",
+                  p(style = "font-size:.78em;color:#777;",
+                    "dOD/dt per replicate by the same centred rolling regression as \u03bcmax (window under Stats & Reports; base R), ",
+                    "then mean \u00b1 SD (band). The dashed line is no change: above it the culture grows, below it lyses, and a zero ",
+                    "crossing marks the peak.")),
                 conditionalPanel("input.analysis_type == 'replicate_overlay'",
                   p(style = "font-size:.78em;color:#777;",
                     "Every replicate curve (thin) with the mean (bold): the variance the error ",
@@ -8536,6 +9260,7 @@ ui <- fluidPage(
                     "Each sample's mean curve minus the reference's (or log2 of their ratio) at every time; the dashed line is no ",
                     "difference. Needs a reference sample (Stats & Reports). Exploratory: a Welch test per time point.")),
                 conditionalPanel("input.analysis_type == 'heatmap'",
+                  selectInput("heatmap_palette", "Colour scale:", choices = HEATMAP_PALETTE_CHOICES, selected = APP_DEFAULTS$heatmap_palette),
                   p(style = "font-size:.78em;color:#777;",
                     "Mean OD per sample and time point; for screens with many samples.")),
                 conditionalPanel("input.analysis_type == 'metric_explorer'",
@@ -9174,8 +9899,19 @@ server <- function(input, output, session) {
   # v2.16: y-axis-derived labels (main figure, analysis figures, dose-response, heatmap key) go through
   # this so the wavelength can be typeset as a subscript. Plain text when the box is off (and in the
   # Figure Legend Text, the facet strips and the report captions, which never use it).
-  axis_y_label <- function(txt)
-    if (isTRUE(input$axis_subscripts)) label_with_subscripts(txt) else txt
+  # v2.22: the figure markup (_{sub} ^{sup} *italic* **bold**) comes first; a text without markup takes exactly the
+  # v2.16 path (the wavelength subscript when the box is on, else the text as typed).
+  axis_y_label <- function(txt) text_label(txt, isTRUE(input$axis_subscripts))
+  # v2.22: time-unit conversion (a display conversion: the file's times are multiplied for the figures, tables and
+  # exports; the x label's unit word follows). time_convert "none" (the default) changes nothing.
+  time_conv_k <- function() time_convert_factor(input$time_convert %||% "none")
+  time_display <- function(df) {
+    k <- time_conv_k()
+    if (!identical(k, 1) && !is.null(df) && nrow(df) && "time" %in% names(df)) df$time <- df$time * k
+    df
+  }
+  xlab_now    <- function() convert_time_label(input$x_axis_label, input$time_convert %||% "none")
+  x_label_obj <- function() text_label(xlab_now(), FALSE)
   
   # v2.10: warn when the chosen font family is not installed -- every device
   # would silently substitute another face, and the SVG would name a font the
@@ -9195,7 +9931,7 @@ server <- function(input, output, session) {
     rv$palette_colors <- if (input$color_palette != "custom" && !is.null(rv$od_vars))
       get_palette_colors(input$color_palette, length(rv$od_vars)) else NULL
     # v2.10: these two palettes have 8 distinct colours; beyond that they repeat.
-    if (input$color_palette %in% c("colorblind", "publication") &&
+    if (input$color_palette %in% c("colorblind", "publication", "set1") &&
         !is.null(rv$od_vars) && length(rv$od_vars) > 8)
       showNotification(paste0("The '", input$color_palette, "' palette has 8 distinct colours but ",
                               length(rv$od_vars), " samples are loaded, so colours will repeat. ",
@@ -9750,14 +10486,16 @@ server <- function(input, output, session) {
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                            "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
                            "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",   # v2.22
-                           "cmp_samples")   # v2.22: the samples of the Compare fits block belong to the file
+                           "cmp_samples",   # v2.22: the samples of the Compare fits block belong to the file
+                           "apply_style_band", "apply_style_slide", "apply_style_pdf")   # v2.22: one-click style buttons
       # Per-sample dynamic input prefixes — handled separately below
       sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                            "color_","use_rgb_","red_","green_","blue_","alpha_",
                            "use_hex_","hex_color_","legend_label_",
                            "apply_rgb_","apply_hex_",
                            "tw_min_","tw_max_","group_",
-                           "qe_name_","qe_color_","qe_show_")   # v2.18: per-sample time window and group
+                           "qe_name_","qe_color_","qe_show_",   # v2.18: per-sample time window and group
+                           "facet_of_","legrow_","legcol_")             # v2.22: per-sample panel, matrix-legend row / column
       # v2.8 SETTINGS SAVE FIX: these GLOBAL inputs collide with per-sample
       # prefixes ("shape_", "color_") and were silently dropped from saved files
       global_exceptions <- c("shape_size", "color_palette")
@@ -9787,7 +10525,10 @@ server <- function(input, output, session) {
             shape_filled = input[[paste0("shape_filled_", vid)]],
             line_type    = input[[paste0("line_type_",    vid)]],
             legend_label = display_name_of(vn, rv$display_names),   # v2.21: the display name (the key stays the raw name)
-            group        = trimws(input[[paste0("group_", vid)]] %||% "")      # v2.18; a file with this key also carries the windows
+            group        = trimws(input[[paste0("group_", vid)]] %||% ""),     # v2.18; a file with this key also carries the windows
+            panel        = trimws(input[[paste0("facet_of_", vid)]] %||% ""),  # v2.22: the panel typed in the Panels section
+            leg_row      = trimws(input[[paste0("legrow_", vid)]] %||% ""),    # v2.22: matrix-legend row / column
+            leg_col      = trimws(input[[paste0("legcol_", vid)]] %||% "")
           )
           tw <- time_window_for(vn)                                             # v2.18: only finite limits are written
           if (is.finite(tw[1])) sample_aesthetics[[vn]]$tw_min <- unname(tw[1])
@@ -9797,6 +10538,7 @@ server <- function(input, output, session) {
       
       list(
         version           = APP_VERSION,
+        styling_schema    = 222L,    # v2.22: "publication" in a file without this key meant the old Set1 set (see migrate_styling_settings)
         saved_at          = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
         global_settings   = global_settings,
         sample_aesthetics = sample_aesthetics
@@ -9838,8 +10580,9 @@ server <- function(input, output, session) {
     else if (!is.null(s$samples))       s$samples
     else list()
     
+    global <- migrate_styling_settings(global, s$styling_schema)   # v2.22: palette names of a pre-v2.22 file
     rv$imported_settings <- list(global = global, samples = sample_aes)
-    
+
     # ── Apply global visual settings ──────────────────────────────────────────
     # Skip anything data-specific or per-sample — only visual controls
     data_inputs     <- c("file","loadSettings","selected_samples",
@@ -9852,12 +10595,14 @@ server <- function(input, output, session) {
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                          "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
                          "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",   # v2.22
-                           "cmp_samples")   # v2.22: the samples of the Compare fits block belong to the file
+                           "cmp_samples",   # v2.22: the samples of the Compare fits block belong to the file
+                         "apply_style_band", "apply_style_slide", "apply_style_pdf")   # v2.22
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
                          "color_","use_rgb_","red_","green_","blue_","alpha_",
                          "use_hex_","hex_color_","legend_label_","apply_rgb_","apply_hex_",
                          "tw_min_","tw_max_","group_",
-                           "qe_name_","qe_color_","qe_show_")
+                           "qe_name_","qe_color_","qe_show_",
+                           "facet_of_","legrow_","legcol_")             # v2.22
     global_exceptions <- c("shape_size", "color_palette")   # see save handler note
     is_sample_inp <- function(nm) !(nm %in% global_exceptions) &&
       any(vapply(sample_prefixes, startsWith, logical(1), x = nm))
@@ -9997,6 +10742,9 @@ server <- function(input, output, session) {
           updateCheckboxInput(session, paste0("shape_filled_",   vid), value    = TRUE)
           updateSelectInput(session,   paste0("line_type_",      vid), selected = "solid")
           updateTextInput(session,     paste0("group_",          vid), value    = "")        # v2.18
+          updateTextInput(session,     paste0("facet_of_",       vid), value    = "")        # v2.22
+          updateTextInput(session,     paste0("legrow_",         vid), value    = "")
+          updateTextInput(session,     paste0("legcol_",         vid), value    = "")
           updateNumericInput(session,  paste0("tw_min_",         vid), value    = NA)
           updateNumericInput(session,  paste0("tw_max_",         vid), value    = NA)
         }, error = function(e) invisible(NULL))
@@ -10054,7 +10802,8 @@ server <- function(input, output, session) {
     shape_opts <- c("Circle" = 16, "Square" = 15, "Triangle Up" = 17,
                     "Diamond" = 18, "Triangle Down" = 25, "Cross" = 4,
                     "X" = 8, "Open Circle" = 21, "Open Square" = 22,
-                    "Open Triangle" = 24, "Plus" = 3, "Star" = 10)
+                    "Open Triangle" = 24, "Plus" = 3, "Star" = 10,
+                    "Open Diamond" = 123, "Open Triangle Down" = 125)    # v2.22: hollow whatever the Filled box says
     default_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
                         "#984EA3","#FF7F00","#A65628","#F781BF",
                         "#999999","#66C2A5","#FC8D62","#8DA0CB")
@@ -10081,7 +10830,7 @@ server <- function(input, output, session) {
       i   <- idx_start + j - 1L   # global index across all samples
       vn  <- page_samps[j]
       vid <- safe_id(vn)
-      shape_def <- as.character(shape_opts[1 + (i - 1L) %% length(shape_opts)])
+      shape_def <- as.character(shape_opts[1 + (i - 1L) %% 12L])   # the default cycle stays the twelve shapes of v2.21
       
       imp_aes <- rv$imported_settings$samples[[vn]]
       qe_c    <- isolate(rv$qe_colors[[vn]])   # v2.21: a colour picked in the quick-edit strip (isolated: this UI must not redraw on every pick)
@@ -10376,11 +11125,12 @@ server <- function(input, output, session) {
           selectInput(paste0("marker_line_type_", i), "Line Type:",
                       choices  = c("Dashed" = "dashed", "Solid" = "solid",
                                    "Dotted" = "dotted", "DotDash" = "dotdash",
-                                   "LongDash" = "longdash"),
+                                   "LongDash" = "longdash", "TwoDash" = "twodash"),
                       selected = "dashed"),
           selectInput(paste0("marker_color_", i), "Color:",
                       choices  = c("Black" = "#000000", "Red"   = "#E41A1C",
                                    "Blue"  = "#377EB8", "Green" = "#4DAF4A",
+                                   "Purple" = "#984EA3", "Orange" = "#FF7F00",
                                    "Gray"  = "#999999", "Custom" = "custom"),
                       selected = "#000000"),
           conditionalPanel(
@@ -10652,7 +11402,7 @@ server <- function(input, output, session) {
     # unaffected either way (SD is shift-invariant).
     blank <- blank_od_effective()
     if (is.numeric(blank) && !is.na(blank) && blank != 0) pd$mean_value <- pd$mean_value - blank
-    pd %>% filter(is.finite(time) & is.finite(mean_value))
+    time_display(pd %>% filter(is.finite(time) & is.finite(mean_value)))   # v2.22: optional min <-> h display conversion
   }
 
   # KC-4: the un-averaged counterpart of prepare_plot_data() -- one row per
@@ -10722,7 +11472,7 @@ server <- function(input, output, session) {
     blank <- blank_od_effective()
     if (is.numeric(blank) && !is.na(blank) && blank != 0) out$value <- out$value - blank
     out <- curate_replicates_post(out, samps, which)   # v2.22: blank sample / baseline, transform, restrict
-    out %>% filter(is.finite(time) & is.finite(value))
+    time_display(out %>% filter(is.finite(time) & is.finite(value)))   # v2.22: optional min <-> h display conversion
   }
 
   # ── Aesthetics resolver ──────────────────────────────────────────────────────
@@ -10783,7 +11533,7 @@ server <- function(input, output, session) {
   # byte-identical to v2.10 (test suite).
   # v2.12.2: xy = list(x, y) of the plotted points, n_entries = legend entries,
   # log_y = y axis is log. Only used by legend_position "inside-auto".
-  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12) {
+  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12, special_legend = FALSE) {
     tf      <- if (isTRUE(input$bold_title))        "bold"   else "plain"
     af      <- if (isTRUE(input$italic_axis_labels)) "italic" else "plain"
     # v2.10: theme spacing (margins, gaps) follows the theme's base_size, which
@@ -10809,7 +11559,11 @@ server <- function(input, output, session) {
     leg_pos  <- input$legend_position %||% "right"
     leg_bord <- if (isTRUE(input$legend_box_border %||% TRUE)) "gray80" else NA
     leg_key  <- input$legend_key_mm %||% 0
-    
+    leg_face <- { f <- input$legend_text_face %||% "plain"; if (f %in% c("bold", "italic", "bold.italic")) f else NULL }   # v2.22 (NULL = the theme's own plain)
+    # v2.22: "Direct labels at line ends" and the matrix legend replace the legend box; a figure without end labels
+    # (the analysis figures) keeps an ordinary key on the right
+    if (leg_pos %in% c("direct", "matrix")) leg_pos <- if (isTRUE(special_legend)) "none" else "right"
+
     layers <- list(base_t, theme(
       text             = element_text(family = input$font_family),
       plot.title       = element_text(size = input$title_font_size,       face = tf, hjust = 0.5),
@@ -10827,8 +11581,8 @@ server <- function(input, output, session) {
         element_line(color = min_col, linewidth = input$minor_gridline_size) else element_blank(),
       axis.ticks        = element_line(color = "black", linewidth = axis_lw),
       axis.ticks.length = unit(tick_cm, "cm"),
-      legend.text       = element_text(size = input$legend_font_size %||% 14),
-      legend.title      = element_text(size = input$legend_font_size %||% 14),
+      legend.text       = element_text(size = input$legend_font_size %||% 14, face = leg_face),
+      legend.title      = element_text(size = input$legend_font_size %||% 14, face = leg_face),
       legend.background = element_rect(fill = "white", color = leg_bord),
       legend.key        = element_rect(fill = NA),
       panel.border      = element_rect(color = "black", fill = NA, linewidth = axis_lw)
@@ -10857,8 +11611,17 @@ server <- function(input, output, session) {
     } else {
       layers <- c(layers, list(theme(legend.position = leg_pos)))
     }
-    if (!isTRUE(input$use_advanced_ticks))          # theme_pubr draws axis lines
-      layers <- c(layers, list(theme(axis.line = element_line(linewidth = axis_lw))))
+    frame <- input$axis_frame %||% "auto"           # v2.22: L / box / none, independent of the Advanced-ticks box
+    if (identical(frame, "auto")) {
+      if (!isTRUE(input$use_advanced_ticks))          # theme_pubr draws axis lines
+        layers <- c(layers, list(theme(axis.line = element_line(linewidth = axis_lw))))
+    } else if (identical(frame, "box")) {
+      layers <- c(layers, list(theme(axis.line = element_blank())))
+    } else if (identical(frame, "L")) {
+      layers <- c(layers, list(theme(panel.border = element_blank(), axis.line = element_line(color = "black", linewidth = axis_lw))))
+    } else if (identical(frame, "none")) {
+      layers <- c(layers, list(theme(panel.border = element_blank(), axis.line = element_blank())))
+    }
     if (is.numeric(leg_key) && is.finite(leg_key) && leg_key > 0)
       layers <- c(layers, list(theme(legend.key.size = unit(leg_key, "mm"))))
     layers
@@ -10883,6 +11646,131 @@ server <- function(input, output, session) {
     if (identical(input$legend_order, "selected")) samples else sort(samples)
   }
   
+  # ── v2.22: Panels section and matrix-legend inputs ───────────────────────────
+  # The panel sources: the typed Groups, a panel box per sample, or (long-format file) another column of the file.
+  facet_source_choices <- reactive({
+    ch <- c("The Group typed in Variable Styling" = "group", "A panel name typed below" = "manual")
+    if (isTRUE(rv$is_long_format) && !is.null(rv$data)) {
+      cand <- setdiff(names(rv$data), c(rv$time_col, rv$value_col, rv$group_col, rv$replicate_col))
+      if (length(cand) > 0) ch <- c(ch, setNames(cand, paste0("Column of the file: ", cand)))
+    }
+    ch
+  })
+  observe({
+    ch  <- facet_source_choices()
+    cur <- isolate(input$facet_source) %||% "group"
+    updateSelectInput(session, "facet_source", choices = ch, selected = if (cur %in% ch) cur else "group")
+  })
+  # One text box per selected sample for the panel it belongs to (samples typed with the same name share a panel).
+  output$facet_manual_ui <- renderUI({
+    if (!identical(input$facet_source %||% "group", "manual")) return(NULL)
+    samps <- input$selected_samples
+    if (is.null(samps) || length(samps) == 0) return(p(style = "font-size:.85em;color:#888;", "Select samples first."))
+    tagList(
+      p(style = "font-size:.8em;color:#555;margin:6px 0 4px;", "Type the panel each sample belongs to; samples sharing a name share a panel."),
+      lapply(samps, function(vn) {
+        vid <- safe_id(vn); imp <- isolate(rv$imported_settings$samples[[vn]])
+        fluidRow(style = "margin-bottom:-14px;",
+          column(5, p(style = "font-size:.85em;margin-top:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;", vn)),
+          column(7, textInput(paste0("facet_of_", vid), NULL, value = isolate(input[[paste0("facet_of_", vid)]]) %||% imp$panel %||% "")))
+      }))
+  })
+  # The matrix legend's Row / Column boxes (Figure Layout, shown while the legend position is "matrix").
+  output$matrix_legend_ui <- renderUI({
+    if (!identical(input$legend_position %||% "right", "matrix")) return(NULL)
+    samps <- input$selected_samples
+    if (is.null(samps) || length(samps) == 0) return(p(style = "font-size:.85em;color:#888;", "Select samples first."))
+    hd <- function(x) p(style = "font-size:.78em;color:#555;font-weight:600;margin:6px 0 0 0;", x)
+    tagList(
+      fluidRow(column(5, hd("Sample")), column(3, hd("Row:")), column(4, hd("Column:"))),
+      lapply(samps, function(vn) {
+        vid <- safe_id(vn); imp <- isolate(rv$imported_settings$samples[[vn]])
+        fluidRow(style = "margin-bottom:-14px;",
+          column(5, p(style = "font-size:.85em;margin-top:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;", vn)),
+          column(3, textInput(paste0("legrow_", vid), NULL, value = isolate(input[[paste0("legrow_", vid)]]) %||% imp$leg_row %||% "")),
+          column(4, textInput(paste0("legcol_", vid), NULL, value = isolate(input[[paste0("legcol_", vid)]]) %||% imp$leg_col %||% "")))
+      }))
+  })
+
+  # ── v2.22: panel assignment, matrix legend, y limits ─────────────────────────
+  # The panel of each sample for facet_by_group: the typed Groups (default), a text box per sample (facet_source
+  # "manual", the Panels section) or a metadata column of a long file. NULL = no assignment (no facets).
+  panel_groups <- function(samples, aes_vals) {
+    src <- input$facet_source %||% "group"
+    if (identical(src, "manual")) {
+      man <- vapply(samples, function(vn) trimws(as.character(input[[paste0("facet_of_", safe_id(vn))]] %||% "")[1]), "")
+      return(panel_assignment(samples, "manual", manual = man))
+    }
+    if (!identical(src, "group") && isTRUE(rv$is_long_format) && !is.null(rv$data) && !is.null(rv$group_col) && src %in% names(rv$data)) {
+      gv <- as.character(rv$data[[rv$group_col]]); col <- as.character(rv$data[[src]])
+      meta <- vapply(samples, function(vn) { hit <- col[gv == vn]; hit <- hit[!is.na(hit) & nzchar(hit)]; if (length(hit)) hit[1] else "" }, "")
+      return(panel_assignment(samples, "meta", meta = meta))
+    }
+    aes_vals$groups
+  }
+  # The matrix (grid) legend for the legend position "matrix": the grob and where it goes, or NULL (off, or nothing
+  # assigned yet). A sample needs both a Row and a Column (legrow_ / legcol_ boxes); the first sample of a cell wins.
+  matrix_legend_now <- function(samples, aes_vals) {
+    if (!identical(input$legend_position %||% "right", "matrix") || is.null(aes_vals)) return(NULL)
+    rows <- character(0); cols <- character(0); cells <- list()
+    for (vn in samples) {
+      vid <- safe_id(vn)
+      rl <- trimws(as.character(input[[paste0("legrow_", vid)]] %||% "")[1]); cl <- trimws(as.character(input[[paste0("legcol_", vid)]] %||% "")[1])
+      if (is.na(rl) || is.na(cl) || !nzchar(rl) || !nzchar(cl)) next
+      if (!(rl %in% rows)) rows <- c(rows, rl)
+      if (!(cl %in% cols)) cols <- c(cols, cl)
+      k <- matrix_legend_key(rl, cl)
+      if (!is.null(cells[[k]])) next
+      cells[[k]] <- list(sample = vn, colour = unname(aes_vals$colors[vn]), linetype = unname(aes_vals$line_types[vn]),
+                         shape = unname(aes_vals$shapes[vn]), filled = unname(aes_vals$filled_map[vn]))
+    }
+    if (!length(cells)) return(NULL)
+    num <- function(v, d) { x <- suppressWarnings(as.numeric(v %||% d)); if (length(x) == 1 && is.finite(x)) x else d }
+    sh  <- unname(aes_vals$shapes); fl <- unname(aes_vals$filled_map)
+    for (k in names(cells)) { rs <- resolve_point_shape(cells[[k]]$shape, cells[[k]]$filled, cells[[k]]$colour); cells[[k]]$shape <- rs$shape; cells[[k]]$filled <- identical(rs$fill, cells[[k]]$colour) }
+    fs <- num(input$legend_font_size, num(input$axis_text_font_size, 12))
+    opts <- list(title = as.character(input$matrix_legend_title %||% "")[1],
+                 lwd = num(input$line_thickness, 1) * MATRIX_PT, show_points = isTRUE(input$show_points %||% TRUE) && isTRUE(input$matrix_swatch_points %||% TRUE),
+                 hide_lines = isTRUE(input$hide_lines), point_size = num(input$shape_size, 3) * MATRIX_PT,
+                 point_lwd = num(input$point_stroke, 0.5) * MATRIX_STROKE / 2, swatch_len = num(input$matrix_swatch_len, 34),
+                 col_gap = num(input$matrix_col_gap, 10), row_gap = num(input$matrix_row_gap, 8), fontsize = fs,
+                 fontfamily = if (input$font_family %in% c("sans", "serif", "mono")) "" else as.character(input$font_family %||% "")[1],
+                 fontface = as.character(input$legend_text_face %||% "plain")[1], box = isTRUE(input$matrix_legend_box))
+    leg <- tryCatch(matrix_legend_grob(list(rows = rows, cols = cols, cells = cells), opts), error = function(e) NULL)
+    if (is.null(leg)) return(NULL)
+    list(grob = leg, placement = as.character(input$matrix_legend_placement %||% "right")[1])
+  }
+  # v2.22: scale arguments (breaks, minor_breaks, guide) for a typed linear / sqrt y interval; list() when blank.
+  y_interval_scale_args <- function(plot_data, y_lims) {
+    ymj <- interval_or_na(input$y_tick_interval); ymn <- interval_or_na(input$y_minor_interval)
+    if (is.na(ymj) && is.na(ymn)) return(list())
+    yl <- y_limits_now(plot_data)
+    if (!is.null(y_lims)) yl <- y_lims
+    if (is.na(ymj)) {                                    # only a minor interval: the major breaks stay automatic
+      if (!is.finite(diff(yl)) || diff(yl) / ymn + 2 > TICK_MAX_BREAKS) return(list())
+      mn <- seq(floor(yl[1] / ymn) * ymn, yl[2] + ymn, by = ymn)
+      out <- list(minor_breaks = mn)
+      if (isTRUE(input$use_advanced_ticks)) out$guide <- prism_guide_if_safe(mn, yl[1], yl[2])
+      return(out)
+    }
+    ib <- interval_breaks(yl[1], yl[2], ymj, ymn, max_n = TICK_MAX_BREAKS)
+    if (is.null(ib)) { guard_notify("tick_guard", "The y tick interval would draw too many ticks (or is not usable); ggplot's default breaks are used instead."); return(list()) }
+    out <- list(breaks = ib$major, minor_breaks = if (length(ib$minor)) ib$minor else waiver())
+    if (isTRUE(input$use_advanced_ticks)) out$guide <- prism_guide_if_safe(ib$minor, yl[1], yl[2])
+    out
+  }
+  # The y limits the axis ends up with (custom limits, the log tick range, else the data range): the marker labels'
+  # "by axis limits" placement and the linear / sqrt tick intervals read them.
+  y_limits_now <- function(plot_data) {
+    if (isTRUE(input$custom_y_limits)) return(c(input$y_min, input$y_max))
+    yr <- suppressWarnings(range(c(plot_data$mean_value, plot_data$err_lo, plot_data$err_hi), na.rm = TRUE))
+    if (identical(input$y_scale_type, "log") && isTRUE(input$use_advanced_ticks)) {
+      mn <- input$y_log_min_exponent; mx <- input$y_log_max_exponent
+      if (is.finite(mn) && is.finite(mx)) return(c(10^mn, if (mx >= 0) 10^(mx + 1) else 10^mx))
+    }
+    yr
+  }
+
   # ── Core plot builder ────────────────────────────────────────────────────────
   # highlight_samples: if non-NULL, all other samples are greyed out (not removed)
   build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL) {
@@ -10895,7 +11783,7 @@ server <- function(input, output, session) {
     
     # v2.18: one panel per sample group (facet_by_group, >= 2 distinct non-empty groups). Every layer that
     # is built from plot_data carries the `group` column; layers without it are drawn in every panel.
-    grp_map <- if (isTRUE(input$facet_by_group)) sample_group_map(samples, aes_vals$groups) else NULL
+    grp_map <- if (isTRUE(input$facet_by_group)) sample_group_map(samples, panel_groups(samples, aes_vals)) else NULL
     if (!is.null(grp_map))
       plot_data$group <- factor(unname(grp_map[as.character(plot_data$variable)]), levels = attr(grp_map, "levels"))
     
@@ -10939,11 +11827,13 @@ server <- function(input, output, session) {
           lsz  <- input[[paste0("marker_label_size_",   i)]]
           lpos <- input[[paste0("marker_label_position_",i)]]
           lhj  <- input[[paste0("marker_label_hjust_",  i)]]; if (is.null(lhj)) lhj <- 0
-          yp <- switch(lpos,
-                       top    = if (input$y_scale_type == "log") 10^(log10(yr[2]) - diff(log10(yr)) * 0.08) else yr[1] + diff(yr) * 0.92,
-                       bottom = if (input$y_scale_type == "log") 10^(log10(yr[1]) + diff(log10(yr)) * 0.08) else yr[1] + diff(yr) * 0.08,
-                       middle = if (input$y_scale_type == "log") 10^(mean(log10(yr))) else mean(yr))
-          p <- p + annotate("text", x = tp + lhj, y = yp, label = lbl, size = lsz, color = lc)
+          plc <- input$marker_label_yplace %||% "data"          # v2.22: "limits" = by the axis limits (the N4 paper app's rule)
+          yr_l <- if (identical(plc, "limits")) { yl <- y_limits_now(plot_data); if (identical(input$y_scale_type, "log")) yl[1] <- max(1e-9, yl[1]); yl } else yr
+          yp <- marker_label_y(lpos, yr_l, identical(input$y_scale_type, "log"), plc)
+          if (any(markup_has(lbl)))                                  # v2.22: markup in the label
+            p <- p + annotate("text", x = tp + lhj, y = yp, label = markup_to_plotmath(lbl), parse = TRUE, size = lsz, color = lc)
+          else
+            p <- p + annotate("text", x = tp + lhj, y = yp, label = lbl, size = lsz, color = lc)
         }
       }
     }
@@ -10954,14 +11844,19 @@ server <- function(input, output, session) {
     if (isTRUE(input$enable_threshold) && length(thr) == 1 && is.finite(thr) &&
         !(identical(input$y_scale_type, "log") && thr <= 0)) {
       thr_col <- input$threshold_color %||% "grey40"
+      if (identical(thr_col, "custom")) thr_col <- tryCatch({ grDevices::col2rgb(input$threshold_color_custom); input$threshold_color_custom }, error = function(e) "grey40")   # v2.22
+      thr_w <- suppressWarnings(as.numeric(input$threshold_width %||% NA))
+      thr_w <- if (length(thr_w) == 1 && is.finite(thr_w) && thr_w > 0) thr_w else (input$axis_line_pt %||% 0.5)       # v2.22: blank = the axis-line weight
       p <- p + geom_hline(yintercept = thr, linetype = input$threshold_linetype %||% "dashed",
-                          color = thr_col, linewidth = pt2lw(input$axis_line_pt %||% 0.5))
+                          color = thr_col, linewidth = pt2lw(thr_w))
       thr_lbl <- trimws(input$threshold_label %||% "")
-      if (nzchar(thr_lbl) && any(is.finite(plot_data$time)))
-        p <- p + geom_text(data = data.frame(x = max(plot_data$time, na.rm = TRUE), y = thr, label = thr_lbl),
-                           aes(x = x, y = y, label = label), inherit.aes = FALSE, hjust = 1, vjust = -0.4,
+      if (nzchar(thr_lbl) && any(is.finite(plot_data$time))) {
+        thr_parse <- any(markup_has(thr_lbl))                                                                          # v2.22: markup in the label
+        p <- p + geom_text(data = data.frame(x = max(plot_data$time, na.rm = TRUE), y = thr, label = if (thr_parse) markup_to_plotmath(thr_lbl) else thr_lbl),
+                           aes(x = x, y = y, label = label), inherit.aes = FALSE, hjust = 1, vjust = -0.4, parse = thr_parse,
                            color = thr_col, size = (input$axis_text_font_size %||% 8) / 2.835,
                            family = if (nzchar(input$font_family %||% "")) input$font_family else "")
+      }
     }
 
     # Error bars / shadow
@@ -10969,8 +11864,23 @@ server <- function(input, output, session) {
     # with the points layer later (ggplot2 only allows ONE scale per aesthetic).
     using_shadow <- FALSE
     
-    if (input$error_type != "none") {
-      ec     <- switch(input$error_type, sd="sd_value", sem="sem_value", ci95="ci95_value")
+    direct_w_pt <- 0                                       # v2.22: right margin (pt) for the direct labels, set where they are drawn
+    dm0 <- input$error_display_mode %||% "bars"            # v2.22: bars | shadow | spaghetti | quantile_bands | jitter | combo
+    rp_all <- NULL                                         # the replicate frame, fetched once for every mode that needs it
+    get_rp <- function() {
+      if (is.null(rp_all)) {
+        r <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
+        if (!is.null(r) && nrow(r) > 0) {
+          if (identical(input$y_scale_type, "log")) r <- r[r$value > 0, , drop = FALSE]
+          if (!is.null(grp_map)) r$group <- factor(unname(grp_map[as.character(r$variable)]), levels = attr(grp_map, "levels"))
+        } else r <- data.frame()
+        rp_all <<- r
+      }
+      rp_all
+    }
+    kg <- if (isTRUE(input$hide_lines)) list(key_glyph = "point") else list()    # v2.22: with the lines hidden the key is a point
+    if (input$error_type != "none" && dm0 %in% c("bars", "shadow", "combo")) {
+      ec     <- switch(input$error_type, sd="sd_value", sem="sem_value", ci95="ci95_value", "sd_value")
       em     <- input$error_multiplier
       # KC-1: an NA error value means "undefined" (n < 2 replicates at that
       # point), not zero. Leave it NA — pmax()/arithmetic below propagate it
@@ -11011,16 +11921,30 @@ server <- function(input, output, session) {
         plot_data$mean_value - err_vals * em
       plot_data$err_lo <- lo_val
       plot_data$err_hi <- plot_data$mean_value + err_vals * em
+      if (input$error_type %in% c("range", "iqr")) {          # v2.22: asymmetric about the mean (min-max / 25th-75th percentile)
+        rpb <- replicate_bounds(tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL))
+        ab  <- asymmetric_error_bounds(plot_data, rpb, input$error_type, em)
+        lo_a <- ab$lo
+        if (identical(input$y_scale_type, "log")) {
+          y_fl <- if (!isTRUE(input$error_log_floor %||% TRUE)) 1e-9
+                  else if (isTRUE(input$custom_y_limits)) input$y_min
+                  else if (isTRUE(input$use_advanced_ticks)) 10^(input$y_log_min_exponent %||% -2)
+                  else min(plot_data$mean_value[plot_data$mean_value > 0], na.rm = TRUE) / 2
+          lo_a <- pmax(lo_a, y_fl)
+        } else if (isTRUE(input$asymmetric_error)) lo_a <- pmax(lo_a, 0)
+        plot_data$err_lo <- lo_a; plot_data$err_hi <- ab$hi
+      }
       eb_data <- plot_data[!is.na(plot_data$err_lo) & !is.na(plot_data$err_hi), , drop = FALSE]
 
-      dm <- if (!is.null(input$error_display_mode)) input$error_display_mode else "bars"
-      if (dm == "shadow") {
+      dm <- dm0
+      if (dm %in% c("shadow", "combo")) {
         using_shadow <- TRUE
         p <- p +
           geom_ribbon(data = eb_data,
                       aes(x = time, ymin = err_lo, ymax = err_hi,
                           group = variable, fill = variable),
-                      alpha = input$shadow_alpha, color = NA, inherit.aes = FALSE)
+                      alpha = if (identical(dm, "combo")) input$shadow_alpha * 0.6 else input$shadow_alpha,
+                      color = NA, inherit.aes = FALSE, show.legend = FALSE)
         # NOTE: scale_fill_manual is added AFTER the points section to unify
         # the fill scale for both ribbon and points (if points are enabled).
       } else {
@@ -11038,18 +11962,50 @@ server <- function(input, output, session) {
         if (!is.null(input$error_bar_style) && input$error_bar_style == "T") {
           p <- p + do.call(geom_errorbar, c(list(data = eb_data, mapping = eb_aes,
                                  width = cap_w, linewidth = input$error_bar_thickness,
-                                 linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed))
+                                 linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed, kg))
         } else {
           p <- p + do.call(geom_linerange, c(list(data = eb_data, mapping = eb_aes,
                                   linewidth = input$error_bar_thickness,
-                                  linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed))
+                                  linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed, kg))
         }
       }
     }
     
     # v2.12: individual replicate values behind the mean (mean +/- error with
     # the raw observations is what reviewers ask for at n = 3)
-    if (isTRUE(input$show_replicate_points)) {
+    if (dm0 %in% c("spaghetti", "combo")) {                 # v2.22: every replicate as a faint trace behind the mean
+      rpt <- get_rp()
+      if (nrow(rpt) > 0 && "replicate" %in% names(rpt))
+        p <- p + geom_line(data = rpt, aes(x = time, y = value, group = interaction(variable, replicate), color = variable),
+                           alpha = input$spaghetti_alpha %||% 0.35, linewidth = input$line_thickness * (if (identical(dm0, "combo")) 0.45 else 0.55),
+                           inherit.aes = FALSE, show.legend = FALSE)
+    }
+    if (identical(dm0, "quantile_bands")) {                 # v2.22: nested empirical bands, IQR inside 2.5-97.5 %
+      qb <- replicate_bounds(get_rp())
+      if (!is.null(qb) && nrow(qb) > 0) {
+        if (!is.null(grp_map)) qb$group <- factor(unname(grp_map[qb$variable]), levels = attr(grp_map, "levels"))
+        if (identical(input$y_scale_type, "log")) {
+          y_fq <- if (isTRUE(input$custom_y_limits)) input$y_min else if (isTRUE(input$use_advanced_ticks)) 10^(input$y_log_min_exponent %||% -2) else 1e-9
+          qb$q025 <- pmax(qb$q025, y_fq); qb$q975 <- pmax(qb$q975, y_fq); qb$q25 <- pmax(qb$q25, y_fq); qb$q75 <- pmax(qb$q75, y_fq)
+        }
+        using_shadow <- TRUE
+        p <- p +
+          geom_ribbon(data = qb, aes(x = time, ymin = q025, ymax = q975, group = variable, fill = variable),
+                      alpha = input$qband_outer_alpha %||% 0.15, color = NA, inherit.aes = FALSE, show.legend = FALSE) +
+          geom_ribbon(data = qb, aes(x = time, ymin = q25, ymax = q75, group = variable, fill = variable),
+                      alpha = input$qband_inner_alpha %||% 0.40, color = NA, inherit.aes = FALSE, show.legend = FALSE)
+      }
+    }
+    if (identical(dm0, "jitter")) {                         # v2.22: the replicate values as (jittered) points, with their own alpha / size / width
+      rpj <- get_rp()
+      if (nrow(rpj) > 0)
+        p <- p + geom_point(data = rpj, aes(x = time, y = value, color = variable), shape = 1,
+                            size = input$jitter_size %||% 1.5, alpha = input$jitter_alpha %||% 0.55,
+                            stroke = max(0.2, (input$point_stroke %||% 0.5) * 0.8),
+                            position = position_jitter(width = input$jitter_width %||% 0, height = 0, seed = 1),
+                            inherit.aes = FALSE, show.legend = FALSE)
+    }
+    if (isTRUE(input$show_replicate_points) && !identical(dm0, "jitter")) {
       rp <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
       if (!is.null(rp) && nrow(rp) > 0) {
         if (input$y_scale_type == "log") rp <- rp[rp$value > 0, , drop = FALSE]
@@ -11074,22 +12030,17 @@ server <- function(input, output, session) {
       }
     }
     
-    p <- p + geom_line(aes(group = variable), linewidth = input$line_thickness)
-    
+    if (!isTRUE(input$hide_lines))                           # v2.22: "Hide lines" leaves points and error bars
+      p <- p + geom_line(aes(group = variable), linewidth = input$line_thickness)
+
     if (input$show_points) {
       # Build lookup tables of shape and fill per variable.
       shape_map <- integer(n_vars)
       fill_map  <- character(n_vars)
       for (i in seq_len(n_vars)) {
-        pt_s <- as.integer(shapes[i])
-        if (!filled_map[i]) {
-          pt_s         <- switch(as.character(pt_s),
-                                 "16" = 21L, "15" = 22L, "17" = 24L, "18" = 23L, pt_s)
-          fill_map[i]  <- "white"
-        } else {
-          fill_map[i]  <- display_colors[i]
-        }
-        shape_map[i] <- pt_s
+        rs <- resolve_point_shape(shapes[i], filled_map[i], display_colors[i])   # v2.22: codes 123 / 125 are the hollow diamond / down-triangle
+        fill_map[i]  <- rs$fill
+        shape_map[i] <- rs$shape
       }
       names(shape_map) <- samples
       names(fill_map)  <- samples
@@ -11141,26 +12092,36 @@ server <- function(input, output, session) {
                                   labels = leg_labels, guide = "none")
     }
     
-    if (input$show_end_labels) {
+    if (isTRUE(input$show_end_labels) || identical(input$legend_position, "direct")) {   # v2.22: "direct" hides the legend, names the lines
       mt  <- max(plot_data$time, na.rm = TRUE)
-      off <- mt * (input$label_offset / 100)
+      off <- mt * ((input$label_offset %||% 3.5) / 100)
       ep  <- plot_data %>% group_by(variable) %>% filter(time == max(time)) %>% ungroup()
+      ep$lab <- unname(leg_labels[as.character(ep$variable)])           # v2.22: the DISPLAY name (was the raw column name)
+      ep$lab[is.na(ep$lab)] <- as.character(ep$variable)[is.na(ep$lab)]
+      if (identical(input$legend_position, "direct"))      # v2.22: the labels sit outside the panel; "direct" makes room for the longest one
+        direct_w_pt <- max(nchar(markup_to_plain(ep$lab))) * (input$label_font_size %||% 12) * (if (isTRUE(input$label_bold %||% TRUE)) 0.6 else 0.54) + 4
+      ep_parse <- any(markup_has(ep$lab))
+      if (ep_parse) ep$lab <- vapply(ep$lab, function(s) { pm <- markup_to_plotmath(s); if (is.na(pm)) markup_quote(s) else pm }, "")
       p   <- p + geom_text_repel(data = ep,
-                                 aes(label = variable, color = variable, x = Inf, y = mean_value),
+                                 aes(label = lab, color = variable, x = Inf, y = mean_value),
                                  direction = "y", xlim = c(mt + off, Inf),
-                                 min.segment.length = Inf, hjust = 0,
-                                 size = input$label_font_size / 2.835,
-                                 fontface = if (input$label_bold) "bold" else "plain")
+                                 min.segment.length = Inf, hjust = 0, parse = ep_parse,
+                                 size = (input$label_font_size %||% 12) / 2.835,
+                                 fontface = if (isTRUE(input$label_bold %||% TRUE)) "bold" else "plain")
     }
     
+    # v2.22: legend labels (markup, wrapped at legend_wrap_width) and the optional legend title, identical on every
+    # scale that can draw a key so the key stays one
+    lg_labels <- markup_labels(wrap_legend_labels(leg_labels, input$legend_wrap_width))
+    lg_title  <- { tl <- trimws(input$legend_title %||% ""); if (nzchar(tl)) text_label(tl) else NULL }
     p <- p +
-      scale_color_manual(   values = setNames(display_colors, samples), labels = leg_labels, name = NULL) +
-      scale_linetype_manual(values = line_types,                         labels = leg_labels, name = NULL)
-    
+      scale_color_manual(   values = setNames(display_colors, samples), labels = lg_labels, name = lg_title) +
+      scale_linetype_manual(values = line_types,                         labels = lg_labels, name = lg_title)
+
     # When points are disabled the shape scale wasn't added inside the points block;
     # add it now for a consistent legend.
     if (!isTRUE(input$show_points))
-      p <- p + scale_shape_manual(values = shapes, labels = leg_labels, name = NULL)
+      p <- p + scale_shape_manual(values = { sv <- shapes; sv[sv >= 100] <- sv[sv >= 100] - 100; sv }, labels = lg_labels, name = lg_title)
     
     p <- p +
       guides(shape = guide_legend(override.aes = list(alpha = 1)),
@@ -11219,7 +12180,11 @@ server <- function(input, output, session) {
         mnb <- seq(x0, max(mjb), by = iv / 2)
       } else {
         # Auto interval (original logic)
-        if (mt2 <= 60)       { iv <- 10;  mjb <- seq(0, ceiling(mt2/10)*10,  10);  mnb <- seq(0, ceiling(mt2/10)*10,  5) }
+        if (!identical(time_conv_k(), 1)) {   # v2.22: a converted time axis: "nice" breaks for the new unit (the 10 / 30 / 60 rule is for minutes)
+          mjb <- scales::extended_breaks()(c(x0, mt2)); iv <- if (length(mjb) > 1) diff(mjb)[1] else 1
+          mnb <- seq(min(mjb), max(mjb), by = iv / 2)
+        }
+        else if (mt2 <= 60)  { iv <- 10;  mjb <- seq(0, ceiling(mt2/10)*10,  10);  mnb <- seq(0, ceiling(mt2/10)*10,  5) }
         else if (mt2 <= 120) { iv <- 30;  mjb <- seq(0, ceiling(mt2/30)*30,  30);  mnb <- seq(0, ceiling(mt2/30)*30, 10) }
         else                 { iv <- 60;  mjb <- seq(0, ceiling(mt2/60)*60,  60);  mnb <- seq(0, ceiling(mt2/60)*60, 30) }
         # Always include the actual data endpoint even in auto mode
@@ -11230,10 +12195,18 @@ server <- function(input, output, session) {
       # Union in any extra positions the user explicitly requested
       if (!is.null(mjb) && length(extra_ticks) > 0)
         mjb <- sort(unique(c(mjb, extra_ticks)))
-      
+      # v2.22: an explicit minor interval (blank = auto), guarded like the N4 paper app: more than TICK_MAX_BREAKS minors
+      # keep the automatic ones, and guide_prism_minor() is attached only when two or more minors fall in range
+      xmi <- interval_or_na(input$x_minor_interval)
+      x_guide_min <- if (is.null(mnb)) guide_prism_minor() else prism_guide_if_safe(mnb, x0, mt2)   # the guard: with fewer than two minors in range the guide would crash
+      if (!is.na(xmi) && !is.null(mjb) && is.finite(max(mjb) - x0) && (max(mjb) - x0) / xmi + 1 <= TICK_MAX_BREAKS) {
+        mnb <- seq(x0, max(mjb), by = xmi)
+        x_guide_min <- prism_guide_if_safe(mnb, x0, max(mjb))
+      }
+
       p <- p + if (is.null(mjb)) scale_x_continuous(limits = x_lims, expand = x_exp, guide = guide_prism_minor())
                else scale_x_continuous(limits = x_lims, expand = x_exp, breaks = mjb,
-                                       minor_breaks = mnb, guide = guide_prism_minor())
+                                       minor_breaks = mnb, guide = x_guide_min)
     } else {
       p <- p + scale_x_continuous(limits = x_lims, expand = x_exp)
     }
@@ -11258,25 +12231,34 @@ server <- function(input, output, session) {
         p <- p + scale_y_log10(limits = y_lims, expand = y_exp, labels = y_labs, oob = y_oob)
       }
     } else if (input$y_scale_type == "sqrt") {
-      p <- p + scale_y_sqrt(limits = y_lims, expand = y_exp, oob = y_oob)
+      yb <- y_interval_scale_args(plot_data, y_lims)     # v2.22: a typed major / minor interval (blank = ggplot's own breaks)
+      p <- p + do.call(scale_y_sqrt, c(list(limits = y_lims, expand = y_exp, oob = y_oob), yb))
     } else if (input$y_scale_type == "reverse") {
       p <- p + scale_y_reverse(limits = y_lims, expand = y_exp, oob = y_oob)
     } else {
-      p <- p + scale_y_continuous(limits = y_lims, expand = y_exp, oob = y_oob)
+      yb <- y_interval_scale_args(plot_data, y_lims)
+      p <- p + do.call(scale_y_continuous, c(list(limits = y_lims, expand = y_exp, oob = y_oob), yb))
     }
     
     bs     <- input$theme_base_pt %||% 0
     pl_lab <- trimws(input$panel_label %||% "")
     p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value, g = plot_data$variable),
                                  n_entries = n_vars, log_y = identical(input$y_scale_type, "log"),
-                                 label_chars = max(nchar(unname(leg_labels)), 1))
+                                 label_chars = max(nchar(unname(leg_labels)), 1), special_legend = TRUE)
+    ml_now <- matrix_legend_now(samples, aes_vals)          # v2.22: the matrix (grid) legend, attached in the grob pipeline
+    if (identical(input$legend_position, "matrix") && is.null(ml_now)) p <- p + theme(legend.position = "right")   # nothing assigned yet: the ordinary key
+    if (direct_w_pt > 0) {                                  # v2.22: room outside the panel for the direct labels (the figure grows in the fixed panel size)
+      pmg <- tryCatch(ggplot2::calc_element("plot.margin", p$theme), error = function(e) NULL)
+      if (!is.null(pmg) && all(grid::unitType(pmg) == "points"))
+        p <- p + theme(plot.margin = margin(as.numeric(pmg[1]), as.numeric(pmg[2]) + direct_w_pt, as.numeric(pmg[3]), as.numeric(pmg[4]), unit = "pt"))
+    }
     
     if (!is.null(grp_map)) {
       # v2.18: facet strips read as plain text at the axis-title size, no box; one key for all panels,
       # outside (an inside key would sit in a corner of the whole panel block, over one facet's curves)
-      p <- p + facet_wrap(~ group, scales = "fixed", labeller = label_wrap_gen(width = 18)) +   # plain-text strips (as the metric summary)
-        theme(strip.text = element_text(size = input$axis_label_font_size, face = "plain"),
-              strip.background = element_blank())
+      fsz <- suppressWarnings(as.numeric(input$facet_strip_size %||% NA)); if (!length(fsz) || !is.finite(fsz[1]) || fsz[1] <= 0) fsz <- input$axis_label_font_size
+      p <- p + facet_layers(attr(grp_map, "levels"), scales = input$facet_scales %||% "fixed", ncol = input$facet_ncol %||% NA,   # v2.22: columns, scales, strip style / size, parsed strips
+                            strip_style = input$facet_strip_style %||% "plain", strip_size = fsz[1], axis_lw = pt2lw(input$axis_line_pt %||% 1.07))
       if (startsWith(input$legend_position %||% "right", "inside-")) p <- p + theme(legend.position = "right")
     }
     if (isTRUE(input$custom_aspect_ratio))
@@ -11286,13 +12268,9 @@ server <- function(input, output, session) {
     # Purely additive: NULL (unchanged output) unless the user opts in AND error bars
     # are being drawn. Reads n from plot_data, which is populated in prepare_plot_data().
     err_caption <- NULL
-    if (isTRUE(input$show_error_caption) && input$error_type != "none" &&
+    if (isTRUE(input$show_error_caption) && input$error_type != "none" && !(dm0 %in% ERROR_MODES_WITHOUT_STAT) &&
         !is.null(plot_data$n) && length(plot_data$n) > 0) {
-      err_lab <- switch(input$error_type,
-                        sd   = "SD",
-                        sem  = "SEM",
-                        ci95 = "95% CI",
-                        input$error_type)
+      err_lab <- error_type_words(input$error_type) %||% input$error_type
       n_rng <- range(plot_data$n, na.rm = TRUE)
       n_txt <- if (is.finite(n_rng[1]) && n_rng[1] == n_rng[2])
         paste0("n = ", n_rng[1])
@@ -11302,21 +12280,30 @@ server <- function(input, output, session) {
                       is.numeric(input$error_multiplier) &&
                       input$error_multiplier != 1)
         paste0(input$error_multiplier, "× ") else ""
-      err_caption <- paste0("Error bars: ", mult_txt, "mean ± ", err_lab,
-                            " (", n_txt, ").")
+      err_caption <- if (input$error_type %in% c("range", "iqr"))            # v2.22: asymmetric measures are not "mean +/- x"
+        paste0("Error bars: ", mult_txt, if (identical(input$error_type, "range")) "range (minimum to maximum)" else "interquartile range", " (", n_txt, ").")
+      else paste0("Error bars: ", mult_txt, "mean ± ", err_lab,
+                  " (", n_txt, ").")
+    } else if (isTRUE(input$show_error_caption) && identical(dm0, "quantile_bands") &&
+               !is.null(plot_data$n) && length(plot_data$n) > 0) {              # v2.22
+      n_rng <- range(plot_data$n, na.rm = TRUE)
+      err_caption <- paste0("Bands: inner = interquartile range, outer = 2.5th to 97.5th percentile of the replicates (",
+                            if (n_rng[1] == n_rng[2]) paste0("n = ", n_rng[1]) else paste0("n = ", n_rng[1], "–", n_rng[2]), ").")
     }
 
-    p + coord_cartesian(clip = "off") +
-      labs(x        = input$x_axis_label,
+    out_p <- p + coord_cartesian(clip = "off") +
+      labs(x        = x_label_obj(),
            y        = axis_y_label(input$y_axis_label),
            # v2.10: with journal spacing (theme_base_pt > 0) a blank title is NULL,
            # so no empty title row (~5 mm) is reserved above the panel. Legacy
            # spacing keeps "" so pre-2.10 figures reproduce exactly.
-           title    = if (nchar(trimws(input$plot_title %||% "")) > 0) input$plot_title
+           title    = if (nchar(trimws(input$plot_title %||% "")) > 0) text_label(input$plot_title)
                       else if (is.numeric(bs) && is.finite(bs) && bs > 0) NULL else "",
-           subtitle = if (nchar(trimws(input$plot_subtitle)) > 0) input$plot_subtitle else NULL,
+           subtitle = if (nchar(trimws(input$plot_subtitle)) > 0) text_label(input$plot_subtitle) else NULL,
            caption  = err_caption,
            tag      = if (nzchar(pl_lab)) pl_lab else NULL)
+    if (!is.null(ml_now)) attr(out_p, "matrix_legend") <- ml_now    # v2.22: fixed_panel_grob() / matrix_figure() attach it
+    out_p
   }
   
   # v2.18: the composer panel "Lysis curve, one panel per group": one single-group main figure per group
@@ -11400,7 +12387,7 @@ server <- function(input, output, session) {
   }
   # ── Fixed panel size (v2.15) ────────────────────────────────────────────────
   fixed_mode <- function() identical(input$panel_size_mode, "fixed")
-  CURVE_KINDS <- c("main", "main_by_group", "growth_rate", "normalized", "replicate_overlay", "landmarks", "dose_response",
+  CURVE_KINDS <- c("main", "main_by_group", "growth_rate", "od_rate", "normalized", "replicate_overlay", "landmarks", "dose_response",
                    "metric_explorer", "fit_overlay", "phases", "difference", "compare",
                    "per_time", "qq", "fit_residuals")   # v2.19: the fit figure is square, v2.20: so are the phases and separation figures; the phenotype heatmap (like the OD heatmap) is not
   # Panel (plotting area) size in mm for a figure kind: curve figures are square when
@@ -11410,6 +12397,9 @@ server <- function(input, output, session) {
     w  <- cl(input$panel_width_mm, 65)
     h  <- cl(input$panel_height_mm, w)
     if (kind %in% CURVE_KINDS && isTRUE(input$panel_square %||% TRUE)) h <- w
+    if (identical(kind, "metric_summary") && isTRUE(input$metric_single_large) && length(input$analysis_metrics %||% character(0)) == 1L) {
+      w <- min(w * 1.5, 400); h <- min(h * 1.5, 400)   # v2.22: single-metric large mode
+    }
     if (identical(kind, "phenotype_heatmap")) {   # v2.20.1: the height follows the rows so the tiles stay square-ish
       n <- tryCatch(nrow(pheno_current()$matrix), error = function(e) NA_integer_)
       if (!is.finite(n) || n < 1) n <- length(input$selected_samples)
@@ -11426,7 +12416,13 @@ server <- function(input, output, session) {
   analysis_fixed_info <- reactive(fixed_figure(generate_analysis_plot(input$analysis_type %||% "metric_summary"),
                                                input$analysis_type %||% "metric_summary"))
   # what the main / analysis figure is drawn as: the fixed-panel gtable, or the plain ggplot (fit mode)
-  main_plot_obj     <- function() if (fixed_mode()) main_fixed_info() else generate_plot()
+  # v2.22: with a matrix legend even the fit-mode figure is a gtable (the legend is attached in the grob pipeline)
+  drawable_figure   <- function(p) {
+    ml <- attr(p, "matrix_legend")
+    if (is.null(ml)) return(p)
+    tryCatch(attach_matrix_legend(ggplot2::ggplotGrob(p), ml$grob, ml$placement), error = function(e) p)
+  }
+  main_plot_obj     <- function() if (fixed_mode()) main_fixed_info() else drawable_figure(generate_plot())
   analysis_plot_obj <- function() if (fixed_mode()) analysis_fixed_info()
                                   else generate_analysis_plot(input$analysis_type %||% "metric_summary")
   size_from_grob <- function(g, kind) {
@@ -11778,6 +12774,19 @@ server <- function(input, output, session) {
   observeEvent(input$apply_journal_preset,     apply_journal_preset_now())
   observeEvent(input$apply_journal_preset_bar, apply_journal_preset_now())   # the size bar's button
   # the pre-v2.14 look (10 x 8 in, 20 pt, PDF, canvas preview), as one click
+  # v2.22: three more one-click looks; each only sets existing inputs (and stays an ordinary control afterwards)
+  observeEvent(input$apply_style_band, {
+    apply_settings(band_style_settings(isolate(input$error_type)))
+    showNotification("Band style applied: thin lines, no points, a shaded band, L-shaped axes.", type = "message", duration = 6)
+  })
+  observeEvent(input$apply_style_slide, {
+    apply_settings(slide_style_settings())
+    showNotification("Presentation slide look applied: 10 x 7.5 in PNG, large text, thick lines.", type = "message", duration = 6)
+  })
+  observeEvent(input$apply_style_pdf, {
+    apply_settings(pdf_vector_style_settings())
+    showNotification("PDF vector look applied: 7 x 5 in PDF with embedded fonts.", type = "message", duration = 6)
+  })
   observeEvent(input$apply_legacy_look, {
     apply_settings(legacy_preset_settings())
     showNotification("Legacy look applied (the v2.9 defaults: 10 x 8 in, 20 pt, PDF).", type = "message", duration = 6)
@@ -11797,7 +12806,7 @@ server <- function(input, output, session) {
                             if (is.null(v) || !nzchar(trimws(as.character(v)))) NULL else trimws(as.character(v)) }
     pl    <- nb("panel_label"); host <- nb("nb_host_strain"); phage <- nb("nb_phage_plasmid")
     moi   <- nb("nb_moi");      med  <- nb("nb_media");       temp  <- nb("nb_temperature")
-    ylab  <- nb("y_axis_label") %||% "optical density"
+    ylab  <- markup_to_plain(nb("y_axis_label") %||% "optical density")   # v2.22: the figure markup as plain text
     s1 <- paste0(if (!is.null(pl)) paste0("(", pl, ") ") else "",
                  "Growth and lysis of ", host %||% "the host strain",
                  if (!is.null(phage)) paste0(" infected with ", phage) else "",
@@ -11805,23 +12814,26 @@ server <- function(input, output, session) {
                  ", measured as ", ylab, " over time",
                  if (!is.null(med))   paste0(" in ", med) else "",
                  if (!is.null(temp))  paste0(" at ", temp, " °C") else "", ".")
-    s2 <- paste0("Curves: ", paste(unname(aes_v$leg_labels[input$selected_samples]), collapse = "; "), ".")
+    s2 <- paste0("Curves: ", paste(markup_to_plain(unname(aes_v$leg_labels[input$selected_samples])), collapse = "; "), ".")
     n_rng <- suppressWarnings(range(pd$n, na.rm = TRUE))
     n_txt <- if (all(is.finite(n_rng)) && n_rng[1] == n_rng[2]) paste0("n = ", n_rng[1])
              else if (all(is.finite(n_rng))) paste0("n = ", n_rng[1], "–", n_rng[2])
              else "n not available"
-    err  <- switch(input$error_type %||% "none",
-                   sd = "s.d.", sem = "s.e.m.", ci95 = "the 95% confidence interval", NULL)
+    err  <- error_type_words(input$error_type %||% "none", long = TRUE)
+    dmod <- input$error_display_mode %||% "bars"
+    if (dmod %in% ERROR_MODES_WITHOUT_STAT) err <- NULL        # v2.22: those modes do not draw the SD / SEM
     mult <- input$error_multiplier %||% 1
     s3 <- paste0(if (isTRUE(input$show_points)) "Symbols and lines" else "Lines",
                  " show the mean of ", n_txt, " replicates",
                  if (!is.null(nb("nb_replicate"))) paste0(" (", nb("nb_replicate"), ")") else "",
                  if (!is.null(err)) paste0(
-                   "; ", if (identical(input$error_display_mode, "shadow")) "shaded bands" else "error bars",
+                   "; ", if (dmod %in% c("shadow", "combo")) "shaded bands" else "error bars",
                    " indicate ", if (is.numeric(mult) && mult != 1) paste0(mult, " × ") else "", err,
                    if (any(pd$n < 2, na.rm = TRUE)) " (omitted where n = 1)" else "") else "")
     s3 <- paste0(sub("\\.$", "", s3), ".")   # "s.e.m." already ends with a period
-    if (isTRUE(input$show_replicate_points)) s3 <- paste(s3, "Open circles show the individual replicate values.")
+    if (isTRUE(input$show_replicate_points) || identical(dmod, "jitter")) s3 <- paste(s3, "Open circles show the individual replicate values.")
+    if (dmod %in% c("spaghetti", "combo")) s3 <- paste(s3, "Thin lines show the individual replicate curves.")                # v2.22
+    if (identical(dmod, "quantile_bands")) s3 <- paste(s3, "Shaded bands show the interquartile range (dark) and the 2.5th to 97.5th percentile (light) of the replicates.")
     s4 <- if (identical(input$y_scale_type, "log")) "The y axis is log10-scaled." else NULL
     blank <- blank_od_effective()
     s5 <- if (is.numeric(blank) && is.finite(blank) && blank != 0)
@@ -11886,13 +12898,14 @@ server <- function(input, output, session) {
   # The analysis figures show the SAME error measure as the main figure
   # (Error Bars panel): SD, SEM or 95% CI of the per-replicate values; none
   # draws no whiskers. Returns a function(values) -> half-width.
+  # v2.22: side = "lower" / "upper" give the asymmetric offsets from the mean of the range and iqr error types
+  # (sd / sem / ci95 are symmetric: lower == upper == half); "half" (default) is half the interval width.
   error_half_width <- function() {
     et <- input$error_type %||% "sem"; em <- input$error_multiplier %||% 1
-    function(v) {
-      v <- v[is.finite(v)]; n <- length(v)
-      if (et == "none" || n < 2) return(NA_real_)
-      s <- sd(v)
-      em * switch(et, sd = s, sem = s / sqrt(n), ci95 = qt(0.975, df = n - 1) * s / sqrt(n), s)
+    function(v, side = c("half", "lower", "upper")) {
+      side <- match.arg(side)
+      sp <- error_spread(v, et, em)
+      switch(side, half = sp$half, lower = sp$lower, upper = sp$upper)
     }
   }
   
@@ -11909,7 +12922,7 @@ server <- function(input, output, session) {
     aes_v  <- resolve_aesthetics(samps)
     cols   <- setNames(aes_v$colors, samps); labs_v <- aes_v$leg_labels
     lts    <- aes_v$line_types;              shp    <- aes_v$shapes
-    tunit  <- time_unit_from_label(input$x_axis_label)
+    tunit  <- time_unit_from_label(xlab_now())
     lw     <- input$line_thickness %||% 1
     ptsz   <- input$shape_size %||% 3
     tag    <- trimws(input$analysis_panel_label %||% "")
@@ -11929,15 +12942,28 @@ server <- function(input, output, session) {
         if (nrow(long) == 0) stop("The selected metrics are NA for every replicate (a relative metric needs a reference sample).")
         long$metric <- factor(long$metric, levels = mets,
                               labels = vapply(mets, metric_axis_label, "", tunit = tunit, ylab = input$y_axis_label %||% "OD"))
-        long$sample <- factor(long$sample, levels = sample_levels(samps), labels = unname(labs_v[sample_levels(samps)]))
-        x_guide <- if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+        # v2.22: sort order (the legend order by default), horizontal bars, one large metric
+        msort  <- input$metric_sort %||% "data"
+        s_lv   <- sample_levels(samps)
+        if (identical(msort, "alpha")) s_lv <- s_lv[order(tolower(unname(labs_v[s_lv])))]
+        else if (msort %in% c("asc", "desc")) {
+          tmpm <- long[as.integer(long$metric) == 1L, ] %>% group_by(sample) %>% summarise(mean = mean(value), .groups = "drop")   # the first metric shown
+          s_lv <- metric_sample_order(s_lv, tmpm, msort)
+        }
+        mflip  <- isTRUE(input$metric_horizontal)
+        if (mflip) s_lv <- rev(s_lv)                               # coord_flip draws the first level at the bottom: first on top
+        mlarge <- isTRUE(input$metric_single_large) && length(mets) == 1L
+        if (mlarge) ptsz <- ptsz * 1.4
+        long$sample <- factor(long$sample, levels = s_lv, labels = unname(labs_v[s_lv]))
+        x_guide <- if (mflip) waiver()
+          else if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
           else if (nlevels(long$sample) >= 5 || max(nchar(levels(long$sample))) > 16)
             guide_axis(angle = 45)      # 5+ samples (or names too long for two rows in a 44 mm facet): angle, not stagger
           else if (max(nchar(levels(long$sample))) > 6) guide_axis(n.dodge = 2)   # 3-4 long names: two staggered rows
           else waiver()
         summ <- long %>% group_by(metric, sample) %>%
-          summarise(mean = mean(value), sd = ehw(value), n = n(), .groups = "drop")
-        summ$lo <- summ$mean - summ$sd; summ$hi <- summ$mean + summ$sd
+          summarise(mean = mean(value), sd = ehw(value), sd_lo = ehw(value, "lower"), sd_hi = ehw(value, "upper"), n = n(), .groups = "drop")
+        summ$lo <- summ$mean - summ$sd_lo; summ$hi <- summ$mean + summ$sd_hi          # v2.22: range / iqr whiskers are asymmetric
         # v2.20: the whiskers can be the bootstrap 95 % CI of the mean-curve metric (Statistics tab, "Run bootstrap")
         # instead of the replicate spread: the bar is then the mean-curve estimate. A metric the cached bootstrap
         # does not hold keeps the replicate spread, with a notification.
@@ -11968,6 +12994,11 @@ server <- function(input, output, session) {
         brk      <- isTRUE(input$metric_brackets)
         y_exp    <- if (brk) c(0.08, 0.04) else c(0.08, 0.18)      # brackets bring their own headroom
         cols_lab <- setNames(unname(cols), unname(labs_v[names(cols)]))
+        cc <- parse_bar_colors(input$metric_custom_colors)             # v2.22: optional custom colour per bar ("name = #HEX", display or file name)
+        for (nm in names(cc)) {
+          key <- if (nm %in% names(cols_lab)) nm else if (nm %in% names(labs_v)) unname(labs_v[nm]) else NA_character_
+          if (!is.na(key) && key %in% names(cols_lab)) cols_lab[[key]] <- unname(cc[[nm]])
+        }
         if (mstyle != "dot") {
           g <- metric_summary_styled(mstyle, long, summ, cols_lab, eb_col = eb_col, ptsz = ptsz,
                                      x_guide = x_guide, y_exp = y_exp)
@@ -11984,9 +13015,9 @@ server <- function(input, output, session) {
                         width = 0.5, linewidth = pt2lw(0.75), inherit.aes = FALSE) +
           geom_point(aes(color = sample), shape = 21, fill = "white", size = ptsz * 0.6,
                      stroke = pt2lw(0.5), position = position_jitter(width = 0.12, height = 0, seed = 1)) +
-          facet_wrap(~ metric, scales = "free_y", labeller = label_wrap_gen(width = 18)) +
+          facet_wrap(~ metric, scales = "free_y", labeller = facet_strip_labeller(levels(long$metric))) +
           scale_color_manual(values = setNames(unname(cols), unname(labs_v[names(cols)])), guide = "none") +
-          scale_x_discrete(guide = x_guide) +
+          scale_x_discrete(guide = x_guide, labels = if (any(markup_has(levels(long$sample)))) markup_labels else waiver()) +
           scale_y_continuous(expand = expansion(mult = y_exp)) +   # headroom for marks
           labs(x = NULL, y = NULL)
         }
@@ -12073,8 +13104,24 @@ server <- function(input, output, session) {
           g <- g + geom_ribbon(aes(ymin = mu_mean - mu_sd, ymax = mu_mean + mu_sd, fill = variable),
                                alpha = 0.15, color = NA, linetype = "solid", na.rm = TRUE)
         g + geom_line(linewidth = lw) + base_scales +
-          labs(x = input$x_axis_label,
+          labs(x = x_label_obj(),
                y = paste0("Specific growth rate, μ (", tunit, "⁻¹)"))
+      },
+      od_rate = {
+        # v2.22: dOD/dt per replicate (centred rolling regression of OD on time, the mu_max window; base R, no zoo),
+        # then mean +/- SD across the replicates at each time. The dashed zero line: above it the culture grows, below it
+        # lyses; a zero crossing marks the peak.
+        gr <- compute_od_rate_curves(prepare_replicate_data(), window = input$metrics_smooth_window %||% 5)
+        if (is.null(gr)) stop("The rate of OD change needs at least 3 readings per replicate curve.")
+        gr$variable <- factor(gr$variable, levels = sample_levels(samps))
+        leg_xy <- list(x = gr$time, y = gr$rate_mean, g = gr$variable)
+        g <- ggplot(gr, aes(x = time, y = rate_mean, color = variable, linetype = variable, group = variable)) +
+          geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed")
+        if (any(is.finite(gr$rate_sd)))
+          g <- g + geom_ribbon(aes(ymin = rate_mean - rate_sd, ymax = rate_mean + rate_sd, fill = variable),
+                               alpha = 0.15, color = NA, linetype = "solid", na.rm = TRUE)
+        g + geom_line(linewidth = lw) + base_scales +
+          labs(x = x_label_obj(), y = axis_y_label(paste0("dOD/dt (", input$y_axis_label %||% "OD", " per ", tunit, ")")))
       },
       normalized = {
         mode <- input$analysis_norm_mode %||% "reference"
@@ -12089,7 +13136,7 @@ server <- function(input, output, session) {
           geom_hline(yintercept = 1, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
           geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7) +
           base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
-          labs(x = input$x_axis_label, y = axis_y_label(paste0(input$y_axis_label, " relative to ", ref_lab)))
+          labs(x = x_label_obj(), y = axis_y_label(paste0(input$y_axis_label, " relative to ", ref_lab)))
       },
       replicate_overlay = {
         rp <- prepare_replicate_data(); pd <- prepare_plot_data()
@@ -12101,7 +13148,7 @@ server <- function(input, output, session) {
                     linewidth = lw * 0.5, alpha = 0.45) +
           geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable,
                                    group = variable), linewidth = lw * 1.3) +
-          base_scales + labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+          base_scales + labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
         if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       dose_response = {
@@ -12225,7 +13272,7 @@ server <- function(input, output, session) {
           guides(fill = "none", color = guide_legend(order = 1, override.aes = list(shape = NA)),
                  linetype = guide_legend(order = 1),
                  shape = guide_legend(order = 2, override.aes = list(color = "black", fill = "grey60"))) +
-          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
         if (identical(input$y_scale_type, "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       phases = {
@@ -12286,7 +13333,7 @@ server <- function(input, output, session) {
           scale_x_continuous(expand = c(0, 0)) +
           (if (logy) scale_y_log10(limits = y_lim, expand = c(0, 0), breaks = y_brk, labels = y_tick_labels(), oob = y_oob_fn())
            else scale_y_continuous(limits = y_lim, expand = c(0, 0), breaks = y_brk)) +
-          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
         g
       },
       difference = {
@@ -12318,7 +13365,7 @@ server <- function(input, output, session) {
         }
         g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
           scale_y_continuous(expand = expansion(mult = c(0.06, 0.14))) +
-          labs(x = input$x_axis_label,
+          labs(x = x_label_obj(),
                y = axis_y_label(if (identical(mode, "log2_ratio")) paste0("log2 (", input$y_axis_label, " / ", ref_lab, ")")
                                 else paste0(input$y_axis_label, " minus ", ref_lab)))
       },
@@ -12447,7 +13494,7 @@ server <- function(input, output, session) {
           scale_fill_manual( values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
           scale_shape_manual(values = shp,  labels = labs_v, limits = sample_levels(samps), name = NULL) +   # same limits: one merged key
           guides(fill = "none") +
-          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
         # v2.22: optional overlays (Curve fitting tab): the growth-fit band, the fitted lysis decay, the exponential window; none by default
         ov <- s22_fit_overlay(fr, logy, lw, yr = range(c(pd$mean_value, pd$lo, pd$hi)[is.finite(c(pd$mean_value, pd$lo, pd$hi))]))   # the window spans the plotted data (-Inf is not drawn on a log axis)
         if (length(ov$back)) g <- s22_prepend_layers(g, ov$back)
@@ -12551,7 +13598,7 @@ server <- function(input, output, session) {
         g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
           scale_x_continuous(breaks = seq_along(tms), labels = as.character(tms), expand = expansion(add = 0.5),
                              guide = if (x_ang_ok && length(tms) >= 6) guide_axis(angle = 45) else waiver()) +
-          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn())
         else if (sty == "bar") g + expand_limits(y = 0) + scale_y_continuous(expand = expansion(mult = c(0, 0.08)))
         else g
@@ -12622,9 +13669,9 @@ server <- function(input, output, session) {
           geom_line(data = rp, aes(x = time, y = value, group = curve, color = col), linewidth = lw * 0.5) +
           geom_line(data = pd, aes(x = time, y = mean_value, group = panel, color = col), linewidth = lw * 1.3) +
           scale_color_identity() +
-          facet_wrap(~ panel, ncol = if (n_pan <= 3) n_pan else ceiling(sqrt(n_pan)), labeller = label_wrap_gen(width = 18)) +
+          facet_wrap(~ panel, ncol = if (n_pan <= 3) n_pan else ceiling(sqrt(n_pan)), labeller = facet_strip_labeller(levels(pd$panel))) +
           scale_x_continuous(breaks = scales::breaks_pretty(n = 3)) +
-          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       lysed_fraction = {
@@ -12653,7 +13700,7 @@ server <- function(input, output, session) {
         if (nrow(t50f)) g <- g + geom_point(data = t50f, aes(x = time, y = y, color = variable, shape = variable), size = ptsz, inherit.aes = FALSE)
         g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
           scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = expansion(mult = 0.03)) +
-          labs(x = input$x_axis_label, y = "Fraction of replicates lysed")
+          labs(x = x_label_obj(), y = "Fraction of replicates lysed")
       },
       per_time = {
         # v2.22: the mean curve of each sample with a star above every time point at which it differs from the reference
@@ -12733,8 +13780,9 @@ server <- function(input, output, session) {
         logit <- identical(input$y_scale_type, "log")
         pd$fillv <- if (logit) log10(pmax(pd$mean_value, 1e-6)) else pd$mean_value
         ggplot(pd, aes(x = time, y = variable, fill = fillv)) + geom_tile() +
-          scale_fill_viridis_c(name = axis_y_label(if (logit) paste0("log10 ", input$y_axis_label) else input$y_axis_label)) +
-          labs(x = input$x_axis_label, y = NULL)
+          scale_fill_viridis_c(option = heatmap_palette_option(input$heatmap_palette),   # v2.22: viridis (default) / inferno / plasma / magma
+                               name = axis_y_label(if (logit) paste0("log10 ", input$y_axis_label) else input$y_axis_label)) +
+          labs(x = x_label_obj(), y = NULL)
       },
       stop("Unknown analysis figure type"))
     p <- p + figure_theme_layers(xy = leg_xy, n_entries = length(samps), log_y = leg_log_y,
@@ -12763,7 +13811,8 @@ server <- function(input, output, session) {
     if (type == "od_at_times")         # v2.21: bars fill the panel, so the key sits outside
       p <- p + theme(legend.position = "right", legend.background = element_rect(fill = NA, color = NA))
     if (isTRUE(input$custom_aspect_ratio)) p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
-    p <- p + coord_cartesian(clip = "off") + labs(tag = if (nzchar(tag)) tag else NULL)
+    p <- p + (if (identical(type, "metric_summary") && isTRUE(input$metric_horizontal)) coord_flip(clip = "off") else coord_cartesian(clip = "off")) +
+      labs(tag = if (nzchar(tag)) tag else NULL)
     if (length(fig_notes)) attr(p, "figure_note") <- fig_notes   # v2.21: shown by output$analysis_figure_note
     p
   }
@@ -12977,7 +14026,7 @@ server <- function(input, output, session) {
         card("Replicates", if (n_rng[1] == n_rng[2]) n_rng[1] else paste0(n_rng[1], "–", n_rng[2]),
              "per sample and time point"),
         card("Time points", length(unique(pd$time)),
-             paste0(t_rng[1], " – ", t_rng[2], " ", time_unit_from_label(input$x_axis_label))),
+             paste0(t_rng[1], " – ", t_rng[2], " ", time_unit_from_label(xlab_now()))),
         card("Error measure", toupper(input$error_type %||% "none"),
              if (identical(input$error_display_mode, "shadow")) "shaded band" else "error bars"),
         card("Reference", if (nzchar(input$metrics_ref_sample %||% "")) dname(input$metrics_ref_sample) else "none set",
@@ -13554,7 +14603,7 @@ server <- function(input, output, session) {
     ph <- phases_current()
     miss <- dname(setdiff(input$selected_samples, if (is.null(ph)) character(0) else unique(ph$sample)))
     div(div(class = "stats-note", paste0(
-          "Times in ", time_unit_from_label(input$x_axis_label), ". Each phase edge is read back from the curve metrics of the mean curve ",
+          "Times in ", time_unit_from_label(xlab_now()), ". Each phase edge is read back from the curve metrics of the mean curve ",
           "(the metrics smoothing window, peak mode and lysis threshold under Stats & Reports; the peak-detection smoothing window is not used), ",
           "so it can be checked against the Curve landmarks figure. Phases that do not apply, or have zero length, are left out. ",
           "OD start / end are the curve values at the edges.")),
@@ -13585,7 +14634,7 @@ server <- function(input, output, session) {
   separation_table_build <- function() {
     req(rv$data, input$selected_samples)
     d <- separation_display_table(separation_current(), input$metrics_ref_sample %||% "",
-                                  time_unit_from_label(input$x_axis_label))
+                                  time_unit_from_label(xlab_now()))
     req(d); map_name_column(d, "Sample", rv$display_names)
   }
   separation_note_build <- function() {
@@ -14487,7 +15536,7 @@ server <- function(input, output, session) {
     samps <- input$selected_samples
     dsamps <- dname(samps)     # v2.21: the sentence names the samples as the user named them
     ylab  <- nb("y_axis_label") %||% "optical density"
-    tunit <- time_unit_from_label(input$x_axis_label)
+    tunit <- time_unit_from_label(xlab_now())
     n_rng <- suppressWarnings(range(pd$n, na.rm = TRUE))
     n_txt <- if (!all(is.finite(n_rng))) "replicate"
              else if (n_rng[1] == n_rng[2]) paste0(n_rng[1], " replicate", if (n_rng[1] == 1) "" else "s")
@@ -14981,13 +16030,13 @@ server <- function(input, output, session) {
     samps <- input$selected_samples
     ref   <- input$metrics_ref_sample %||% ""
     ref_d <- dname(ref)     # v2.21: the reference as the user named it, for the captions
-    tunit <- time_unit_from_label(input$x_axis_label)
+    tunit <- time_unit_from_label(xlab_now())
     ylab  <- input$y_axis_label %||% "OD"
     mets  <- input$analysis_metrics %||% c("lysis_time", "od_drop")
     moi   <- moi_map(samps, input$moi_override)
     win   <- input$metrics_smooth_window %||% 5
     norm_mode <- input$analysis_norm_mode %||% "reference"
-    types <- c("metric_summary", "growth_rate",
+    types <- c("metric_summary", "growth_rate", "od_rate",          # v2.22: dOD/dt after the specific growth rate
                if (nzchar(ref)) "normalized" else "replicate_overlay",
                "landmarks",
                "phases",                                                    # v2.20: figure + table after the landmarks
@@ -14998,6 +16047,7 @@ server <- function(input, output, session) {
                "phenotype_heatmap")   # v2.19: skipped silently when it cannot be drawn (one sample, no varying metric)
     titles <- c(metric_summary    = "Metric summary (replicates, mean ± SD)",
                 growth_rate       = "Specific growth rate vs time",
+                od_rate           = "Rate of OD change (dOD/dt)",
                 normalized        = "Normalized OD vs time",
                 replicate_overlay = "Replicate overlay",
                 landmarks         = "Curve landmarks",
@@ -15019,6 +16069,9 @@ server <- function(input, output, session) {
         "Specific growth rate μ(t) from a centred rolling regression on ln ", ylab,
         " (window ", win, " points), averaged across replicates; the band is ± SD. ",
         "The dashed line marks μ = 0."),
+      od_rate = paste0(
+        "dOD/dt per replicate by a centred rolling regression of ", ylab, " on time (window ", win, " points, base R), ",
+        "averaged across replicates; the band is ± SD. The dashed line marks no change; below it the culture lyses."),
       normalized = if (norm_mode == "t0")
         paste0("Mean ", ylab, " of each sample divided by its own value at t = 0; the dashed line marks a ratio of 1.")
       else paste0("Mean ", ylab, " of each sample divided by the mean ", ylab, " of the reference '", ref_d,
@@ -15283,6 +16336,9 @@ server <- function(input, output, session) {
           dn[[vn]] <- lab; rv$display_names <- dn
         }
       }
+      if (!is.null(aes$panel))   updateTextInput(session, paste0("facet_of_", vid), value = as.character(aes$panel))     # v2.22: the panel typed in the Panels section
+      if (!is.null(aes$leg_row)) updateTextInput(session, paste0("legrow_",   vid), value = as.character(aes$leg_row))   # v2.22: matrix-legend row / column
+      if (!is.null(aes$leg_col)) updateTextInput(session, paste0("legcol_",   vid), value = as.character(aes$leg_col))
       if (!is.null(aes$group)) {     # v2.18: a v2.18 file; a missing window means "no limit", not "leave as is"
         updateTextInput(session, paste0("group_", vid), value = as.character(aes$group))
         updateNumericInput(session, paste0("tw_min_", vid), value = if (is.null(aes$tw_min)) NA else aes$tw_min)
