@@ -160,11 +160,15 @@ check("lysis-curve-app: the notes caption inputs keep their ids (notes_show_capt
 check("lysis-curve-app: legend_label -> display name; shape / filled / line type kept",
       tl$s$sample_aesthetics$Uninfected$legend_label == "No phage" && tl$s$sample_aesthetics$`Phage MOI 10`$line_type == "dashed" &&
       isFALSE(tl$s$sample_aesthetics$`Phage MOI 10`$shape_filled))
-check("lysis-curve-app: floating labels, panel and matrix-legend keys are ignored with a reason",
-      all(c("floating_labels", "Uninfected$panel", "Uninfected$leg_row", "Phage MOI 10$leg_col") %in% names(tl$ignored)))
-check("lysis-curve-app: axis frame, exact panel, legend title, facets and the unsupported legend / error modes are ignored",
-      all(c("axis_frame", "exact_panel", "legend_title", "enable_facets", "legend_position", "error_display_mode") %in% names(tl$ignored)) &&
-      is.null(gl$legend_position) && is.null(gl$error_display_mode))
+check("lysis-curve-app: floating labels are ignored with a reason; panel and matrix-legend keys are controls here (v2.22 styling), so they are applied",
+      "floating_labels" %in% names(tl$ignored) &&
+      !any(c("Uninfected$panel", "Uninfected$leg_row", "Phage MOI 10$leg_col") %in% names(tl$ignored)) &&
+      identical(tl$s$sample_aesthetics$Uninfected$panel, "A") && tl$s$sample_aesthetics$`Phage MOI 10`$leg_row == 2)
+check("lysis-curve-app: exact panel and enable_facets are ignored; axis frame, legend title, direct labels and spaghetti are controls here (v2.22 styling), so they are applied",
+      all(c("exact_panel", "enable_facets") %in% names(tl$ignored)) &&
+      !any(c("axis_frame", "legend_title", "legend_position", "error_display_mode") %in% names(tl$ignored)) &&
+      identical(gl$axis_frame, "box") && identical(gl$legend_title, "Strain") &&
+      identical(gl$legend_position, "direct") && identical(gl$error_display_mode, "spaghetti"))
 check("lysis-curve-app: palette 'publication' (Okabe-Ito there) becomes 'colorblind', with a note",
       identical(gl$color_palette, "colorblind") && any(grepl("publication", tl$notes)))
 check("a current-format file passes through untouched (kind current, same structure)",
