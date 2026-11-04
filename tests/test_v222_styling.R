@@ -755,20 +755,29 @@ if (nzchar(old_path) && file.exists(old_path)) {
                             marker_label_1 = TRUE, marker_text_1 = "Phage", marker_label_size_1 = 3, marker_label_position_1 = "top", marker_label_hjust_1 = 0,
                             enable_threshold = TRUE, threshold_value = 0.2, threshold_label = "thr"),
                linear = list(y_scale_type = "linear"), title = list(plot_title = "Title", plot_subtitle = "Sub", y_axis_label = "OD600 relative"))
+  # Each app is rendered in its OWN R process: in one process the two apps share ggplot2's font-metric cache and the open
+  # devices, so a size that depends on the measuring device (hardening round 2, R2-REG01) cannot show up as a difference.
+  scen_rds <- of("scen.rds"); saveRDS(scen, scen_rds)
+  render_script <- of("render_proc.R")
+  writeLines(c(
+    'args <- commandArgs(TRUE); app_path <- args[1]; scen <- readRDS(args[2]); tag <- args[3]; outdir <- args[4]',
+    'suppressPackageStartupMessages({ library(shiny); library(tidyverse); library(ggpubr); library(scales); library(ggrepel); library(ggprism); library(svglite); library(jsonlite) })',
+    'quiet <- function(expr) suppressWarnings(suppressMessages(expr))',
+    'e <- new.env(); a <- quiet(source(app_path, local = e)$value); res <- list()',
+    'for (nm in names(scen)) testServer(a, {',
+    '  ingest_data(e$make_demo_data(), "Demo data (built-in)")',
+    '  do.call(session$setInputs, modifyList(e$APP_DEFAULTS, scen[[nm]]))',
+    '  session$setInputs(selected_samples = rv$od_vars, exclude_timepoints = "")',
+    '  set.seed(1); g <- main_plot_obj(); sz <- export_size_in(); f <- file.path(outdir, paste0(tag, "_", nm, ".svg"))',
+    '  quiet(ggsave(f, g, device = e$export_device("svg"), width = sz[1], height = sz[2], units = "in", bg = "white", limitsize = FALSE))',
+    '  f2 <- file.path(outdir, paste0(tag, "_", nm, "_print.svg")); quiet(svglite::svglite(f2, width = 8, height = 6)); set.seed(1); print(generate_plot()); dev.off()',
+    '  res[[nm]] <<- list(export = readLines(f), print = readLines(f2))',
+    '})',
+    'saveRDS(res, file.path(outdir, paste0(tag, ".rds")))'), render_script)
   render <- function(app_path, tag) {
-    e <- new.env(); a <- source(app_path, local = e)$value; res <- list()
-    for (nm in names(scen)) testServer(a, {
-      ingest_data(e$make_demo_data(), "Demo data (built-in)")
-      do.call(session$setInputs, modifyList(e$APP_DEFAULTS, scen[[nm]]))
-      session$setInputs(selected_samples = rv$od_vars, exclude_timepoints = "")
-      # the end labels are placed by ggrepel, which draws from the RNG: the same seed before every render, so the two
-      # apps are compared on their figure code, not on how much RNG each consumed before this point
-      set.seed(1); g <- main_plot_obj(); sz <- export_size_in(); f <- of(paste0(tag, "_", nm, ".svg"))
-      quiet(ggsave(f, g, device = e$export_device("svg"), width = sz[1], height = sz[2], units = "in", bg = "white", limitsize = FALSE))
-      f2 <- of(paste0(tag, "_", nm, "_print.svg")); quiet(svglite::svglite(f2, width = 8, height = 6)); set.seed(1); print(generate_plot()); dev.off()
-      res[[nm]] <<- list(export = readLines(f), print = readLines(f2))
-    })
-    res
+    wd0 <- setwd(out_dir); on.exit(setwd(wd0))      # (the old app opens R's default device: its Rplots.pdf lands here, not in the repository)
+    suppressWarnings(system2(file.path(R.home("bin"), "Rscript"), c(shQuote(render_script), shQuote(normalizePath(if (grepl("^(/|[A-Za-z]:)", app_path)) app_path else file.path(wd0, app_path))), shQuote(scen_rds), tag, shQuote(out_dir)), stdout = FALSE, stderr = FALSE))
+    f <- of(paste0(tag, ".rds")); if (file.exists(f)) readRDS(f) else list()
   }
   ra <- render(old_path, "old"); rb_ <- render("Lysis_Curve_App_v28.R", "new")
   for (nm in names(scen)) check(paste0("scenario '", nm, "': the SVG export and the printed figure are byte-identical to the v2.21 app"),

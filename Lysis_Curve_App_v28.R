@@ -450,16 +450,17 @@ ensure_utf8_file <- function(path) {
     tmp <- tempfile(fileext = ".csv"); writeBin(out, tmp); tmp
   }
   n <- length(raw)
+  even_len <- function(x) if (length(x) %% 2L == 1L) x[-length(x)] else x     # round 2 (ING01): a stray trailing byte made iconv fail on the whole file
   if (n >= 2 && identical(raw[1:2], as.raw(c(0xFF, 0xFE))))
-    return(write_utf8(iconv(list(raw[-(1:2)]), from = "UTF-16LE", to = "UTF-8", toRaw = TRUE)[[1]]))
+    return(write_utf8(iconv(list(even_len(raw[-(1:2)])), from = "UTF-16LE", to = "UTF-8", toRaw = TRUE)[[1]]))
   if (n >= 2 && identical(raw[1:2], as.raw(c(0xFE, 0xFF))))
-    return(write_utf8(iconv(list(raw[-(1:2)]), from = "UTF-16BE", to = "UTF-8", toRaw = TRUE)[[1]]))
+    return(write_utf8(iconv(list(even_len(raw[-(1:2)])), from = "UTF-16BE", to = "UTF-8", toRaw = TRUE)[[1]]))
   nul <- raw == as.raw(0)
   if (any(nul)) {
     # UTF-16 without a byte-order mark: ASCII text has a NUL in every second byte
     odd <- sum(nul[seq(1, n, by = 2)]); even <- sum(nul[seq(2, n, by = 2)])
     if (n >= 4 && max(odd, even) >= 0.3 * (n / 2) && min(odd, even) <= 0.05 * (n / 2))
-      return(write_utf8(iconv(list(raw), from = if (even > odd) "UTF-16LE" else "UTF-16BE", to = "UTF-8", toRaw = TRUE)[[1]]))
+      return(write_utf8(iconv(list(even_len(raw)), from = if (even > odd) "UTF-16LE" else "UTF-16BE", to = "UTF-8", toRaw = TRUE)[[1]]))
     not_text()
   }
   ctrl <- raw < as.raw(32) & !(raw %in% as.raw(c(9, 10, 13, 12, 27)))     # control bytes that never occur in a table
@@ -606,6 +607,7 @@ read_csv_smart <- function(path) {
   fc_comma <- nf(",")
   if (length(fc_comma) >= 2 && fc_comma[1] >= 2 &&
       all(fc_comma[-1] > fc_comma[1]) &&
+      csv_line_is_data(lines[2], ",") &&          # round 2 (ING05): a one-line preamble above a text header is not a decimal-comma file
       any(grepl("[0-9],[0-9]", lines[-1])))
     stop("The header has ", fc_comma[1], " comma-separated fields but the data ",
          "rows have more. This looks like a European CSV written with decimal ",
@@ -692,15 +694,21 @@ read_csv_locale_aware <- function(path, locale = "auto") {
 # the decimal mark; 1,234,567 or 1.234.567 are grouped thousands; 0,5 / 12,3456 are decimal commas; a lone "1,200"
 # is read as thousands unless the column says otherwise). A column whose cells disagree is left alone (NA for those).
 NUMBER_PLAIN_REGEX <- "^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$"
-numeric_from_text <- function(txt) {
+# Round 2 (ING04): the convention is decided ONCE per file (coerce_sentinel_columns pools every text column), not per
+# column: a column of "1,234", "1,345" next to a column of "0,123" is decimal commas in both. numeric_from_text_votes()
+# returns the votes of the cells that need converting; numeric_from_text(txt, style) converts with a given style
+# ("us" / "eu") or, when style is NULL, with the style of its own cells.
+text_number_cells <- function(txt) {
   txt <- trimws(as.character(txt)); txt[is.na(txt)] <- ""
-  out <- rep(NA_real_, length(txt))
   plain <- grepl(NUMBER_PLAIN_REGEX, txt)
-  out[plain] <- suppressWarnings(as.numeric(txt[plain]))
   grouped <- grepl("^[+-]?[0-9]{1,3}([.,][0-9]{3})+([.,][0-9]+)?$", txt)
   dcomma  <- grepl("^[+-]?[0-9]*,[0-9]+$", txt)
-  todo <- which(!plain & (grouped | dcomma))
-  if (!length(todo)) return(out)
+  which(!plain & (grouped | dcomma))
+}
+numeric_from_text_votes <- function(txt) {
+  txt <- trimws(as.character(txt)); txt[is.na(txt)] <- ""
+  todo <- text_number_cells(txt)
+  if (!length(todo)) return(character(0))
   x <- txt[todo]
   n_dot <- lengths(regmatches(x, gregexpr(".", x, fixed = TRUE)))
   n_com <- lengths(regmatches(x, gregexpr(",", x, fixed = TRUE)))
@@ -718,9 +726,21 @@ numeric_from_text <- function(txt) {
       if (nchar(b) != 3 || identical(a, "0") || identical(a, "") || grepl("^0", a)) "eu" else NA_character_
     }, character(1))
   }
-  votes <- unique(stats::na.omit(vote))
-  if (length(votes) > 1) return(out)                       # contradicting cells: do not guess
-  style <- if (length(votes) == 1) votes else "us"
+  unique(stats::na.omit(vote))
+}
+numeric_from_text <- function(txt, style = NULL) {
+  txt <- trimws(as.character(txt)); txt[is.na(txt)] <- ""
+  out <- rep(NA_real_, length(txt))
+  plain <- grepl(NUMBER_PLAIN_REGEX, txt)
+  out[plain] <- suppressWarnings(as.numeric(txt[plain]))
+  todo <- text_number_cells(txt)
+  if (!length(todo)) return(out)
+  x <- txt[todo]
+  votes <- numeric_from_text_votes(txt)
+  if (is.null(style)) {
+    if (length(votes) > 1) return(out)                     # contradicting cells: do not guess
+    style <- if (length(votes) == 1) votes else "us"
+  } else if (length(votes) > 1) return(out)                # (the pooled style was only passed for a consistent file)
   y <- if (style == "us") gsub(",", "", x, fixed = TRUE) else sub(",", ".", gsub(".", "", x, fixed = TRUE), fixed = TRUE)
   out[todo] <- suppressWarnings(as.numeric(y))
   out
@@ -740,6 +760,20 @@ coerce_sentinel_columns <- function(data, skip_cols = character(0),
                                     min_numeric_frac = 0.5) {
   report <- list()
   if (is.null(data) || ncol(data) == 0) return(list(data = data, report = NULL))
+  # round 2 (ING04): one number convention for the whole file. The cells of every text column that holds such numbers vote
+  # together; when they agree (or only some columns have decisive cells), that style is used for every column. A file whose
+  # columns contradict each other keeps the per-column reading.
+  pooled <- NULL
+  {
+    allv <- character(0)
+    for (j in seq_along(data)) {
+      if (colnames(data)[j] %in% skip_cols) next
+      col <- data[[j]]; if (is.numeric(col) || !(is.character(col) || is.factor(col))) next
+      allv <- c(allv, numeric_from_text_votes(col))
+    }
+    allv <- unique(allv)
+    if (length(allv) == 1L) pooled <- allv
+  }
   for (j in seq_along(data)) {
     nm  <- colnames(data)[j]
     if (nm %in% skip_cols) next
@@ -749,7 +783,7 @@ coerce_sentinel_columns <- function(data, skip_cols = character(0),
     txt[is.na(txt)] <- ""
     num <- suppressWarnings(as.numeric(txt))
     if (any(!is.finite(num) & nzchar(txt))) {              # ingest round 1 (item 8): "12,345.6" / "0,0919" / "1.234,5"
-      alt <- numeric_from_text(txt); fill <- !is.finite(num) & is.finite(alt); num[fill] <- alt[fill]
+      alt <- numeric_from_text(txt, style = pooled); fill <- !is.finite(num) & is.finite(alt); num[fill] <- alt[fill]
     }
     nonblank <- nzchar(txt)
     if (!any(nonblank)) next
@@ -797,7 +831,7 @@ ampm_to_24h <- function(txt) {
   }, character(1), USE.NAMES = FALSE)
 }
 
-parse_time_column <- function(x) {
+parse_time_column <- function(x, name = NULL) {
   if (inherits(x, c("difftime", "hms"))) {                       # Excel / typed durations: numbers, not text
     v <- tryCatch(as.numeric(x, units = "mins"), error = function(e) suppressWarnings(as.numeric(unclass(x)) / 60))
     return(list(values = v, converted = TRUE, unit = "minutes"))
@@ -855,8 +889,14 @@ parse_time_column <- function(x) {
     out[is.finite(num)] <- num[is.finite(num)]
     # A clock TIME OF DAY (the first reading is 1:00:00 or later; every value under 24 h) is elapsed time from the first
     # row, running on through midnight (a drop of more than 12 h is the next day).
+    # Round 2 (ING02): a first reading before 01:00 is a time of day too when the column says so: an AM / PM marker, a wrap
+    # through midnight (a drop of more than 12 h), or a header such as "Clock" / "Time of day". A column that starts at
+    # exactly 0:00:00 with none of these is elapsed time (Gen5) and is left alone.
     fin <- which(is.finite(out))
-    if (length(fin) >= 2 && out[fin[1]] >= 60 && all(out[fin] < 1440) && all(out[fin] >= 0)) {
+    has_ampm  <- any(grepl("[0-9]\\s*[AaPp]\\.?[Mm]\\.?\\s*$", txt))
+    clock_hdr <- is.character(name) && length(name) == 1L && !is.na(name) && grepl("clock|time[ _.]?of[ _.]?day|timestamp|wall", name, ignore.case = TRUE)
+    if (length(fin) >= 2 && all(out[fin] < 1440) && all(out[fin] >= 0) &&
+        (out[fin[1]] >= 60 || has_ampm || (out[fin[1]] > 0 && (any(diff(out[fin]) < -720) || clock_hdr)))) {
       r <- out[fin]
       adj <- r + 1440 * cumsum(c(0, diff(r)) < -720)
       out[fin] <- adj - adj[1]
@@ -870,7 +910,7 @@ parse_time_column <- function(x) {
             "%m/%d/%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d/%m/%Y %H:%M")
   for (tx in unique(list(txt24, txt))) for (f in fmts) {          # (12-hour text first: its 24-hour rewrite)
     pt <- suppressWarnings(as.POSIXct(tx, format = f, tz = "UTC"))
-    if (sum(!is.na(pt)) >= max(2, 0.8 * sum(keep)))
+    if (sum(!is.na(pt)) >= (if (sum(keep) == 1L) 1 else max(2, 0.8 * sum(keep))))     # round 2 (#8): one data row is a datetime too (0 min)
       return(conv(as.numeric(difftime(pt, min(pt, na.rm = TRUE), units = "mins"))))
   }
 
@@ -948,6 +988,25 @@ parse_excluded_timepoints <- function(text, all_timepoints) {
 # (an audited omission of the old N4 app, item N4-4).
 LONG_GROUP_NAMES <- c("variable", "Variable", "condition", "Condition", "treatment", "Treatment",
                       "sample", "Sample", "group", "Group", "strain", "Strain")
+
+# Round 2 (L08): a 3-column file (time + two numeric columns) whose middle column is named like a design factor
+# (moi / dose / conc / group ...) and has at most 12 distinct values, each present at every time point, is LONG with that
+# column as the sample column ("MOI 0", "MOI 0.1", "MOI 1"). Returns the column name, or NA.
+LONG_NUMERIC_GROUP_REGEX <- "^(moi|dose|conc|concentration|dilution|treatment|group|strain|sample|condition)$"
+long_numeric_group_col <- function(data, tc) {
+  if (is.null(data) || ncol(data) != 3L || nrow(data) < 2L || is.null(tc) || !(tc %in% colnames(data))) return(NA_character_)
+  others <- setdiff(colnames(data), tc)
+  if (length(others) != 2L || !all(vapply(others, function(cn) is.numeric(data[[cn]]), logical(1)))) return(NA_character_)
+  hit <- others[grepl(LONG_NUMERIC_GROUP_REGEX, trimws(others), ignore.case = TRUE)]
+  if (!length(hit)) return(NA_character_)
+  cand <- hit[1]                                          # (the other numeric column is the value)
+  g <- data[[cand]]; tt <- suppressWarnings(as.numeric(data[[tc]]))
+  ok <- is.finite(g) & is.finite(tt)
+  if (sum(ok) < 2L) return(NA_character_)
+  ug <- unique(g[ok]); if (length(ug) < 2L || length(ug) > 12L) return(NA_character_)
+  tab <- table(tt[ok], match(g[ok], ug))
+  if (all(tab > 0)) cand else NA_character_
+}
 
 # A wide-format column whose name says it is a temperature trace (Gen5 "T° 600", "Temp", "37 °C"): never a sample.
 # Hardening round 1 (finding 5): whole words only -- "Template", "Temperate phage", "Attempt2" and "Phage at 4 °C"
@@ -1417,7 +1476,7 @@ rolling_slope <- function(t, y, win) {
     ok <- is.finite(tt) & is.finite(yy)
     # Ingest round 1 (item 16): the least-squares slope in closed form (centered cross-product over centered sum of
     # squares), not one lm() per window: lm() was a third of the time of a 96-well plate. Identical to lm() to 1e-10.
-    out[s + offset] <- if (sum(ok) < 2) NA_real_ else if (diff(range(tt[ok])) == 0) 0 else {
+    out[s + offset] <- if (sum(ok) < 2) NA_real_ else if (diff(range(tt[ok])) == 0) NA_real_ else {      # round 2: all-equal times have no slope (lm() gives NA)
       tk <- tt[ok] - mean(tt[ok]); yk <- yy[ok] - mean(yy[ok])
       sum(tk * yk) / sum(tk * tk)
     }
@@ -2052,6 +2111,11 @@ compute_replicate_metrics <- function(rep_pd, smooth_window = 5, peak_smooth_win
     for (cc in metric_cols) {
       row[[paste0(cc, "_mean")]] <- safe_mean(g[[cc]])
       row[[paste0(cc, "_sd")]]   <- safe_sd(g[[cc]])
+    }
+    # round 2 (EXT01): why an extinction time is NA (the curve starts below the floor), as in the curve-metrics table
+    if ("extinction_note" %in% names(g)) {
+      k <- sum(!is.na(g$extinction_note))
+      row$extinction_note <- if (k) sprintf("starts below floor (%d of %d replicates)", k, nrow(g)) else NA_character_
     }
     row
   })
@@ -3015,6 +3079,21 @@ safe_dpi <- function(dpi, default = 300) {
   d <- suppressWarnings(as.numeric(dpi)); if (length(d) != 1L || is.na(d)) return(default)
   min(max(d, EXPORT_DPI_MIN), EXPORT_DPI_MAX)
 }
+# Round 2 (CSV01): a text cell that starts with = + - @ (or a tab / carriage return) is run as a formula by Excel and Sheets
+# ("-ve control" opens as #NAME?, "=HYPERLINK(...)" as a live link). Every CSV the app writes goes through csv_safe(): such a cell
+# gets a leading space, a column that is really a number stored as text ("-0.5") is left alone. Column names are treated the same.
+csv_safe <- function(x) {
+  if (!is.data.frame(x)) return(x)
+  fix <- function(v) {
+    v <- as.character(v)
+    hit <- !is.na(v) & grepl("^[=+@\t\r-]", v) & !grepl("^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$", v) & v != "-"
+    v[hit] <- paste0(" ", v[hit]); v
+  }
+  for (j in seq_along(x)) if (is.character(x[[j]]) || is.factor(x[[j]])) x[[j]] <- fix(x[[j]])
+  nm <- names(x); if (length(nm)) names(x) <- fix(nm)
+  x
+}
+write_csv_safe <- function(x, file, ...) utils::write.csv(csv_safe(x), file, ...)
 # A typed number read safely: NULL / NA / non-numeric / below `min` -> `default`, above `max` (Inf included) -> `max`.
 # The numericInput min / max are UI-only: a typed -1 or a cleared box reaches the server as-is.
 num_or <- function(x, default, min = 0, max = Inf) {
@@ -3312,10 +3391,12 @@ time_unit_from_label <- function(xlab) {
 # MOI from sample names: "Phage MOI 10", "MOI=0.1", "moi_1e-2", "MOI: 5" ...
 # Hardening round 1 (finding 28): "MOI" must be a whole word ("Chemoi 5" has none) and the number must be a plain
 # decimal: "MOI 1/10", "MOI 10^-3", "MOI 1,5" and "MOI 1.2.3" are ambiguous and give NA instead of a wrong 1 / 10 / 1.
-MOI_TOKEN_RE <- "(?i)(?<![A-Za-z])MOI[[:space:]_:=]*([0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?)(?![0-9]*[/^]|[,.][0-9])"
+MOI_TOKEN_RE <- "(?i)(?<![A-Za-z])MOI[[:space:]_:=]*([0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?)(?![0-9]*[/^]|[,.][0-9]|_[0-9])"
 parse_moi <- function(x) {
   m <- regmatches(x, regexec(MOI_TOKEN_RE, x, perl = TRUE))
-  vapply(m, function(v) if (length(v) >= 2) suppressWarnings(as.numeric(v[2])) else NA_real_, numeric(1))
+  out <- vapply(m, function(v) if (length(v) >= 2) suppressWarnings(as.numeric(v[2])) else NA_real_, numeric(1))
+  out[!is.finite(out)] <- NA_real_          # round 2 (#28): "MOI 1e400" overflows to Inf: not a dose
+  out
 }
 # override text: one "sample = MOI" per line or separated by ";"
 moi_map <- function(samples, override = "") {
@@ -4082,17 +4163,22 @@ summarise_time_to_od <- function(x) {
 apply_sample_time_windows <- function(df, windows) {
   if (is.null(df) || nrow(df) == 0 || length(windows) == 0 || is.null(names(windows))) return(df)
   samp <- as.character(df$variable)
-  keep <- rep(TRUE, nrow(df))
+  keep <- rep(TRUE, nrow(df)); swapped <- character(0)
   for (s in intersect(names(windows), unique(samp))) {
     w  <- windows[[s]]
     if (is.list(w)) w <- vapply(w, function(x) if (length(x) == 1) suppressWarnings(as.numeric(x)) else NA_real_, numeric(1))
     w  <- suppressWarnings(as.numeric(w))
     lo <- if (length(w) >= 1 && is.finite(w[1])) w[1] else -Inf
     hi <- if (length(w) >= 2 && is.finite(w[2])) w[2] else Inf
+    if (lo > hi) { tmp <- lo; lo <- hi; hi <- tmp; swapped <- c(swapped, s) }       # round 2 (#41): a reversed window is swapped, not silently empty
     sel <- samp == s
-    keep[sel] <- df$time[sel] >= lo & df$time[sel] <= hi
+    k <- df$time[sel] >= lo & df$time[sel] <= hi
+    keep[sel] <- !is.na(k) & k                                                       # a row with no time is dropped, never an all-NA row
   }
-  df[keep, , drop = FALSE]
+  out <- df[keep, , drop = FALSE]
+  if (length(swapped)) attr(out, "curation_notes") <- c(attr(df, "curation_notes"),
+    paste0("The time window of ", paste(swapped, collapse = ", "), " was given as (max, min); it was swapped."))
+  out
 }
 
 # ── end v2.18 engine ──
@@ -5232,6 +5318,20 @@ bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.
     vapply(metrics, function(k) suppressWarnings(as.numeric(r[[k]][1])), numeric(1))
   }
 
+  # the summary rows of one sample from its draws (metrics x draws)
+  boot_rows <- function(v, estimate, R, draws) {
+    rows <- lapply(seq_along(metrics), function(i) {
+      x <- draws[i, ]; x <- x[is.finite(x)]
+      okn <- length(x)
+      good <- okn >= 20
+      qs <- if (good) stats::quantile(x, c(alpha, 1 - alpha), names = FALSE, type = 7) else c(NA_real_, NA_real_)
+      data.frame(sample = v, metric = metrics[i], estimate = estimate[i],
+                 boot_mean = if (good) mean(x) else NA_real_,
+                 ci_low = qs[1], ci_high = qs[2], n_replicates = R, n_boot_ok = okn,
+                 method = "percentile", stringsAsFactors = FALSE)
+    })
+    do.call(rbind, rows)
+  }
   rep_pd <- rep_pd[is.finite(rep_pd$time), , drop = FALSE]
   out <- lapply(unique(as.character(rep_pd$variable)), function(v) {
     g     <- rep_pd[as.character(rep_pd$variable) == v, , drop = FALSE]
@@ -5271,31 +5371,27 @@ bootstrap_metrics <- function(rep_pd, metrics, n_boot = 500, seed = 1, conf = 0.
       }
     }
     draws <- res[, match(key, uk), drop = FALSE]                                   # metrics x n_boot
-    if (!all(proc)) draws_min <<- min(draws_min, sum(proc[match(key, uk)]))
-
-    rows <- lapply(seq_along(metrics), function(i) {
-      x <- draws[i, ]; x <- x[is.finite(x)]
-      okn <- length(x)
-      good <- okn >= 20
-      qs <- if (good) stats::quantile(x, c(alpha, 1 - alpha), names = FALSE, type = 7) else c(NA_real_, NA_real_)
-      data.frame(sample = v, metric = metrics[i], estimate = estimate[i],
-                 boot_mean = if (good) mean(x) else NA_real_,
-                 ci_low = qs[1], ci_high = qs[2], n_replicates = R, n_boot_ok = okn,
-                 method = "percentile", stringsAsFactors = FALSE)
-    })
-    do.call(rbind, rows)
+    done_draw <- proc[match(key, uk)]
+    if (!all(proc)) draws_min <<- min(draws_min, sum(done_draw))
+    list(v = v, estimate = estimate, R = R, draws = draws, done = which(done_draw))
+  })
+  # round 2 (BOOT01): the budget can stop a run part-way through the samples. Every sample is then summarised from the SAME number
+  # of draws (the fewest any sample got: its first m completed draws), so the figures of the samples are comparable.
+  out <- lapply(out, function(o) if (is.data.frame(o)) o else {
+    keep <- if (stopped_early && is.finite(draws_min)) utils::head(o$done, as.integer(draws_min)) else o$done
+    boot_rows(o$v, o$estimate, o$R, o$draws[, keep, drop = FALSE])
   })
   res <- do.call(rbind, c(out, list(make.row.names = FALSE)))
   res$n_boot_ok <- as.integer(res$n_boot_ok); res$n_replicates <- as.integer(res$n_replicates)
   res <- res[, cols, drop = FALSE]
   if (stopped_early && is.finite(draws_min)) {
     boot_note <- paste0(if (!is.na(boot_note)) paste0(boot_note, " ") else "",
-                        sprintf("The time budget (%s s) was reached: the bootstrap stopped early with %d of %d draws per sample.", format(budget_s), as.integer(draws_min), n_boot))
+                        sprintf("The time budget (%s s) was reached: the bootstrap stopped early with %d of %d draws per sample (the same number for every sample). This result is not reproducible: a faster or slower run would stop at a different number of draws.", format(budget_s), as.integer(draws_min), n_boot))
     n_boot <- as.integer(draws_min)
   }
   attr(res, "n_boot_used") <- n_boot
   if (!is.na(boot_note)) attr(res, "note") <- boot_note
-  res
+  return(res)
 }
 
 # Curve difference versus a reference sample, per time point.
@@ -5797,7 +5893,10 @@ two_way_time_anova <- function(long, response = "od", time = "time", sample = "s
   if (all(reps <= 1)) return(empty("one reading per sample and time: the interaction cannot be tested"))
   if (all(table(d$well) <= 1)) rm <- FALSE
   # the assumption named is the one of the model that ends up being fitted (never "AR(1)" for an aov fit)
-  lowp_for <- function(model) paste0("with n = 3 wells per sample the tests have limited power and the ",
+  # round 2 (STAT01): the n in the sentence is the real number of wells per sample (a range when the samples differ)
+  n_wells <- as.integer(tapply(as.character(d$well), as.character(d$sample), function(x) length(unique(x))))
+  n_txt   <- if (!length(n_wells)) "3" else if (min(n_wells) == max(n_wells)) as.character(n_wells[1]) else paste0(min(n_wells), " to ", max(n_wells))
+  lowp_for <- function(model) paste0("with n = ", n_txt, " wells per sample the tests have limited power and the ",
                                      if (identical(model, "lme_ar1")) "AR(1) / random-intercept" else if (identical(model, "aov_error_well")) "compound-symmetry" else "independence",
                                      " assumptions cannot be checked")
   ans <- function(a, rn, dfn, dfd, f, p) {
@@ -7297,6 +7396,27 @@ settings_unbox <- function(v) {
   }
   if (length(v) == 0) NULL else v
 }
+# Round 2 (F07): one sample's style from a settings / theme file reduced to values the widgets can take. A value of the wrong
+# type (a list where a checkbox needs TRUE / FALSE, a number where a name is wanted) is dropped instead of reaching shiny's
+# update*Input() and raising an error in the observer.
+SAMPLE_AES_KEYS <- c("color", "shape", "shape_filled", "line_type", "legend_label", "panel", "leg_row", "leg_col", "group",
+                     "tw_min", "tw_max", "hidden")
+sanitize_sample_aes <- function(aes) {
+  if (!is.list(aes) || is.null(names(aes))) return(list())
+  out <- list()
+  for (k in intersect(names(aes), SAMPLE_AES_KEYS)) {
+    if (is.list(aes[[k]]) && !is.null(names(aes[[k]]))) next            # a nested object is no value
+    v <- settings_unbox(aes[[k]])
+    if (is.null(v) || !is.atomic(v) || length(v) != 1L || is.na(v)) next
+    if (k %in% c("shape_filled", "hidden")) { if (is.logical(v)) out[[k]] <- v; next }
+    if (k %in% c("tw_min", "tw_max")) { v <- suppressWarnings(as.numeric(v)); if (is.finite(v)) out[[k]] <- v; next }
+    if (is.logical(v)) next
+    v <- as.character(v)
+    out[[k]] <- if (nchar(v, allowNA = TRUE) > 10000L) substr(v, 1L, 10000L) else v
+    if (k == "shape") { sv <- suppressWarnings(as.numeric(v)); if (is.finite(sv)) out[[k]] <- sv else out[[k]] <- NULL }
+  }
+  out
+}
 # a settings file as one of "current", "lca", "n4"
 legacy_settings_kind <- function(s) {
   if (!is.list(s)) return("current")
@@ -7327,8 +7447,8 @@ n4_positional_samples <- function(flat) {
   m <- regmatches(names(flat), regexec(OLD_SAMPLE_KEY_RE, names(flat)))
   m <- Filter(function(x) length(x) == 3, m)
   if (!length(m)) return(list())
-  idx <- sort(unique(as.integer(vapply(m, `[`, "", 3))))
-  idx <- idx[is.finite(idx) & idx >= 1L]          # finding 34: "color_0" is not a sample position
+  idx <- sort(unique(suppressWarnings(as.integer(vapply(m, `[`, "", 3)))))
+  idx <- idx[is.finite(idx) & idx >= 1L & idx <= 2000L]          # finding 34: "color_0" is not a sample position; > 2000 samples is no plate
   if (!length(idx)) return(list())
   out <- lapply(idx, function(i) {
     g <- function(k) settings_unbox(flat[[paste0(k, "_", i)]])
@@ -7357,26 +7477,50 @@ count_sample_settings <- function(samples) {
 #   kind, s (list(global_settings, sample_aesthetics) in this app's structure), unselect (samples the old file hid),
 #   positional (when no data), ignored (named character: key -> reason), notes (character), n_global (keys kept),
 #   n_sample_settings.
+settings_invalid <- function(msg) stop(structure(class = c("kc_settings_invalid", "error", "condition"), list(message = msg, call = NULL)))
+# A parsed settings file must be a named list; its global_settings / sample_aesthetics / samples, when present, must be named
+# lists too (round 2: {"global_settings": 5} used to reach the loader as a raw R error).
+validate_settings_object <- function(s) {
+  if (!is.list(s) || !length(s) || is.null(names(s)))
+    settings_invalid(paste0("This is not a settings file: it holds ", if (!is.list(s)) "a single value" else if (!length(s)) "nothing" else "a list without names",
+                            ", not the named settings that the app saves."))
+  for (k in c("global_settings", "sample_aesthetics", "samples")) {
+    v <- s[[k]]
+    if (!is.null(v) && !(is.list(v) && (!length(v) || !is.null(names(v)))))
+      settings_invalid(paste0("This is not a settings file: '", k, "' is not a list of named settings"))
+  }
+  invisible(TRUE)
+}
 translate_old_settings <- function(s, od_vars = NULL, known_ids = NULL) {
   # finding 34: a file that parses to a scalar / array / nothing is not a settings object (indexing it with [[ crashed)
-  if (!is.list(s) || !length(s) || is.null(names(s)))
-    stop("This is not a settings file: it holds ", if (!is.list(s)) "a single value" else if (!length(s)) "nothing" else "a list without names",
-         ", not the named settings that the app saves.", call. = FALSE)
+  validate_settings_object(s)
   kind <- legacy_settings_kind(s)
   if (identical(kind, "current"))
     return(list(kind = kind, s = s, unselect = character(0), positional = NULL, ignored = character(0), notes = character(0),
                 n_global = length(s[["global_settings"]] %||% list()), n_sample_settings = NA_integer_))
-  ignored <- character(0); notes <- character(0)
-  ign <- function(key, why) ignored[[key]] <<- why
-  keep_id <- function(id) is.null(known_ids) || id %in% known_ids
+  notes <- character(0)
+  # Round 2 (#45): the accumulators grow by doubling, never by appending to a named list one key at a time, and the keys are
+  # read by position (raw[[nm]] is a linear name search): 50 000 keys take a fraction of a second.
+  ign_k <- character(64); ign_v <- character(64); ign_n <- 0L
+  ign <- function(key, why) {
+    if (ign_n == length(ign_k)) { ign_k <<- c(ign_k, character(ign_n)); ign_v <<- c(ign_v, character(ign_n)) }
+    ign_n <<- ign_n + 1L; ign_k[ign_n] <<- key; ign_v[ign_n] <<- why
+  }
+  keep_set <- if (is.null(known_ids)) NULL else new.env(hash = TRUE, parent = emptyenv())
+  if (!is.null(known_ids)) for (k in unique(as.character(known_ids))) if (!is.na(k) && nzchar(k)) assign(k, TRUE, envir = keep_set)
+  keep_id <- function(id) is.null(keep_set) || (!is.na(id) && nzchar(id) && exists(id, envir = keep_set, inherits = FALSE))
   # ---- global settings -----------------------------------------------------------------------------------
   raw <- if (identical(kind, "n4")) s else (s[["global_settings"]] %||% list())
-  g <- list(); positional_flat <- list()
-  for (nm in names(raw)) {
-    if (nm %in% c("global_settings", "sample_aesthetics", "samples", "version", "saved_at")) next
-    if (grepl(OLD_SAMPLE_KEY_RE, nm)) { positional_flat[[nm]] <- raw[[nm]]; next }
+  g_k <- character(max(16L, length(raw))); g_v <- vector("list", length(g_k)); g_n <- 0L
+  raw_names <- names(raw); if (is.null(raw_names)) raw_names <- character(length(raw))
+  never <- c("global_settings", "sample_aesthetics", "samples", "version", "saved_at")
+  is_pos <- grepl(OLD_SAMPLE_KEY_RE, raw_names)
+  for (i in seq_along(raw)) {
+    nm <- raw_names[i]
+    if (nm %in% never) next
+    if (is_pos[i]) next
     if (nm %in% OLD_NEVER_GLOBAL) next
-    v <- settings_unbox(raw[[nm]])
+    v <- settings_unbox(raw[[i]])
     if (is.null(v)) next
     id <- if (nm %in% names(OLD_ID_RENAMES)) OLD_ID_RENAMES[[nm]]
           else if (grepl("^notes_", nm) && sub("^notes_", "", nm) %in% names(OLD_NOTES_MAP)) OLD_NOTES_MAP[[sub("^notes_", "", nm)]]
@@ -7389,8 +7533,15 @@ translate_old_settings <- function(s, od_vars = NULL, known_ids = NULL) {
     if (identical(id, "legend_position") && !(as.character(v) %in% LEGEND_POSITIONS_OK)) { ign(nm, paste0("legend position '", v, "' is not available")); next }
     if (identical(id, "error_display_mode") && !(as.character(v) %in% unname(ERROR_DISPLAY_CHOICES))) { ign(nm, paste0("error display '", v, "' is not available")); next }
     if (!keep_id(id)) { ign(nm, "not a control in this version"); next }
-    g[[id]] <- v
+    g_n <- g_n + 1L; g_k[g_n] <- id; g_v[[g_n]] <- v
   }
+  pos_idx <- which(is_pos & !(raw_names %in% never)); pos_k <- raw_names[pos_idx]
+  positional_flat <- if (length(pos_idx)) raw[pos_idx] else list()
+  g <- if (g_n) setNames(g_v[seq_len(g_n)], g_k[seq_len(g_n)]) else list()
+  if (anyDuplicated(names(g))) g <- g[!duplicated(names(g), fromLast = TRUE)]     # a later key wins, as list assignment did
+  # "color_0" (an old app that counted samples from 0) names no sample here: say so instead of dropping it silently
+  zero_keys <- pos_k[grepl("_0+$", pos_k)]
+  for (zk in zero_keys) ign(zk, "samples are numbered from 1; this per-sample key names no sample")
   if (identical(kind, "lca") && !is.null(s[["experiment_notes"]])) {
     for (k in names(s[["experiment_notes"]])) {
       id <- OLD_NOTES_MAP[k]
@@ -7436,6 +7587,7 @@ translate_old_settings <- function(s, od_vars = NULL, known_ids = NULL) {
     }
     if (!is.null(s[["floating_labels"]])) ign("floating_labels", OLD_IGNORED_REASONS[["floating_labels"]])
   }
+  ignored <- if (ign_n) setNames(ign_v[seq_len(ign_n)], ign_k[seq_len(ign_n)]) else character(0)
   list(kind = kind, s = list(global_settings = g, sample_aesthetics = samples), unselect = unselect, positional = positional,
        ignored = ignored, notes = notes, n_global = length(g),
        n_sample_settings = count_sample_settings(samples))
@@ -7635,18 +7787,37 @@ theme_list <- function(dir = themes_dir_path()) {
 }
 # aes_map: sample name -> list(color, shape, shape_filled, line_type, legend_label). The quick-edit colours and display
 # names ride along (sample name -> value) so a theme restores what the strip shows.
+# The display name stored inside a theme file (NULL for a file written before names were stored, or an unreadable one).
+theme_stored_name <- function(path) {
+  s <- tryCatch(jsonlite::fromJSON(path, simplifyVector = FALSE), error = function(e) NULL)
+  n <- if (is.list(s)) s[["name"]] else NULL
+  if (is.character(n) && length(n) == 1L && !is.na(n) && nzchar(trimws(n))) trimws(n) else NULL
+}
+# Round 2 (#37): "a b" and "a_b" sanitise to the same file name. The second one gets a short hash of its display name so it
+# no longer overwrites the first; the display name is stored inside the JSON and shown by theme_display_names().
 theme_write <- function(name, aes_map, qe_colors = NULL, display_names = NULL, dir = themes_dir_path()) {
   key <- theme_key(name)
   if (!nzchar(key)) stop("Enter a theme name.")
   if (!dir.exists(dir)) dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+  disp <- trimws(name)
+  if (file.exists(theme_path(key, dir))) {
+    prior <- theme_stored_name(theme_path(key, dir))
+    if (!is.null(prior) && !identical(prior, disp)) key <- paste0(key, "_", safe_id_hash(disp))
+  }
   aes_map <- lapply(aes_map, function(a) a[intersect(names(a), c("color", "shape", "shape_filled", "line_type", "legend_label"))])
   qc <- qe_colors[intersect(names(aes_map), names(qe_colors))]
   dn <- if (length(display_names)) as.list(display_names[intersect(names(aes_map), names(display_names))]) else list()
-  jsonlite::write_json(list(version = "1.0", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = name,
+  jsonlite::write_json(list(version = "1.0", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = disp,
                             sample_aesthetics = aes_map, qe_colors = as.list(qc), display_names = dn),
                        theme_path(key, dir), pretty = TRUE, auto_unbox = TRUE)
   invisible(key)
 }
+# why a theme could not be applied: the file is there but is not a theme (a bare value, no samples), or it is gone
+theme_problem_message <- function(key, dir = themes_dir_path())
+  if (file.exists(theme_path(key, dir))) sprintf("Theme file '%s' is not a valid theme.", key) else sprintf("Theme '%s' is missing or unreadable.", key)
+# the label the theme list shows for each key (the display name stored in the file, else the key)
+theme_display_names <- function(keys, dir = themes_dir_path())
+  vapply(keys, function(k) theme_stored_name(file.path(dir, paste0(k, ".json"))) %||% k, "")
 # the theme as list(sample_aesthetics, qe_colors, display_names), or NULL when missing / unreadable / empty
 theme_read <- function(name, dir = themes_dir_path()) {
   f <- theme_path(name, dir)
@@ -7654,7 +7825,7 @@ theme_read <- function(name, dir = themes_dir_path()) {
   s <- tryCatch(jsonlite::fromJSON(f, simplifyVector = FALSE), error = function(e) NULL)
   if (!is.list(s)) return(NULL)            # finding 37: a file holding a bare value is not a theme
   sa <- s[["sample_aesthetics"]] %||% s[["samples"]]
-  if (is.null(sa) || !length(sa)) return(NULL)
+  if (is.null(sa) || !length(sa) || !is.list(sa) || is.null(names(sa))) return(NULL)   # round 2: a bare value / unnamed list is not a theme
   list(sample_aesthetics = sa, qe_colors = s$qe_colors %||% list(), display_names = s$display_names %||% list())
 }
 theme_delete <- function(name, dir = themes_dir_path()) {
@@ -7740,6 +7911,7 @@ build_parity_frames <- function(plots, panel_w_mm, panel_h_mm, fit_w_in = NULL, 
     sz <- attr(gf, "size_mm")
     list(grobs = gs, w_mm = sz[1], h_mm = sz[2], fallback = fallback)
   }
+  PANEL_MIN_MM <- 5; at_floor <- FALSE
   pw <- panel_w_mm; ph <- panel_h_mm
   res <- once(pw, ph); fitted <- FALSE
   if (!is.null(fit_w_in) && !is.null(fit_h_in)) {
@@ -7748,9 +7920,12 @@ build_parity_frames <- function(plots, panel_w_mm, panel_h_mm, fit_w_in = NULL, 
       # the margins (axis text, titles, legend) do not shrink with the panel: take the excess off the panel, same factor on both sides
       ew <- max(0, res$w_mm - fit_w_in * 25.4); eh <- max(0, res$h_mm - fit_h_in * 25.4)
       s  <- max(min((pw - ew - 0.3) / pw, (ph - eh - 0.3) / ph, 0.999), 0.1)
-      pw <- pw * s; ph <- ph * s
+      pw <- max(pw * s, PANEL_MIN_MM); ph <- max(ph * s, PANEL_MIN_MM)     # round 2 (#44): never a panel below 5 mm
       res <- once(pw, ph); fitted <- TRUE; it <- it + 1L
+      if (pw <= PANEL_MIN_MM && ph <= PANEL_MIN_MM) { at_floor <- TRUE; break }
     }
+    # a box too small for even 5 mm panels cannot be fitted: say so (fitted = FALSE) and keep the 5 mm panels
+    if (at_floor) fitted <- FALSE
   }
   c(res, list(w_in = res$w_mm / 25.4, h_in = res$h_mm / 25.4, panel_w_mm = pw, panel_h_mm = ph, fitted = fitted))
 }
@@ -10546,32 +10721,132 @@ INPUT_SANE <- list(
   line_thickness = c(APP_DEFAULTS$line_thickness, 0, 10), error_bar_thickness = c(APP_DEFAULTS$error_bar_thickness, 0, 10),
   axis_line_pt = c(APP_DEFAULTS$axis_line_pt, 0, 10), tick_length_mm = c(APP_DEFAULTS$tick_length_mm, 0, 50))
 
-# Declared min / max of every static numericInput, read off the UI tree: input id -> c(min, max) (NA = no bound).
-# A settings file can carry any number; the loader clamps it to these bounds before it reaches the box.
-collect_numeric_ranges <- function(node) {
-  out <- list()
+# Declared min / max of every static numericInput and sliderInput, read off the UI tree: input id -> c(min, max) (NA = no
+# bound). A settings file can carry any number; the loader clamps it to these bounds before it reaches the box.
+# Round 2: also the kind of every static input (number / checkbox / select / text / file), so a value of the wrong type is
+# recognised and ignored instead of being dispatched on its own class.
+walk_ui_inputs <- function(node, on_input) {
   walk <- function(x) {
     if (inherits(x, "shiny.tag")) {
       a <- x$attribs
-      if (identical(x$name, "input") && identical(a$type, "number") && !is.null(a$id)) {
-        num <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
-        out[[a$id]] <<- c(min = num(a$min), max = num(a$max))
-      }
+      if (!is.null(a$id) && length(a$id) == 1L && x$name %in% c("input", "select")) on_input(x$name, a)
       for (ch in x$children) walk(ch)
     } else if (is.list(x)) for (ch in x) walk(ch)
   }
   walk(node)
+}
+collect_numeric_ranges <- function(node) {
+  out <- list()
+  num <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
+  walk_ui_inputs(node, function(tag, a) {
+    if (identical(tag, "input") && identical(a$type, "number")) out[[a$id]] <<- c(min = num(a$min), max = num(a$max))
+    else if (identical(tag, "input") && any(grepl("js-range-slider", a$class))) out[[a$id]] <<- c(min = num(a[["data-min"]]), max = num(a[["data-max"]]))
+  })
+  out
+}
+collect_input_kinds <- function(node) {
+  out <- list()
+  walk_ui_inputs(node, function(tag, a) {
+    out[[a$id]] <<- if (identical(tag, "select")) { if (!is.null(a$multiple)) "multi" else "text" }
+                    else if (identical(a$type, "number") || any(grepl("js-range-slider", a$class))) "number"
+                    else if (identical(a$type, "checkbox")) "checkbox"
+                    else if (identical(a$type, "text")) "text"
+                    else "other"
+  })
   out
 }
 NUMERIC_INPUT_RANGES <- tryCatch(collect_numeric_ranges(ui), error = function(e) list())
-# `val` clamped to the bounds declared for input `id`; non-finite and non-numeric values come back NA (-> skipped).
+INPUT_KINDS          <- tryCatch(collect_input_kinds(ui),   error = function(e) list())
+# Round 2 (NUM03-NUM07): a static range for EVERY numeric key, used where the UI declares no bound (y_log exponents, the
+# axis limits, tick intervals ...) and as the guard for numeric-looking select values (axis_text_angle). Exact ids first,
+# then name patterns, then a last-resort +-1e9: no settings file can send an absurd number (1e308) into a figure builder.
+NUMERIC_KEY_RANGES <- list(
+  y_log_min_exponent = c(-12, 12), y_log_max_exponent = c(-12, 12), axis_text_angle = c(0, 360),
+  x_min = c(-1e9, 1e9), x_max = c(-1e9, 1e9), y_min = c(-1e9, 1e9), y_max = c(-1e9, 1e9),
+  x_tick_interval = c(0, 1e9), y_tick_interval = c(0, 1e9), x_minor_interval = c(0, 1e9), y_minor_interval = c(0, 1e9),
+  boot_seed = c(-2147483647, 2147483647), boot_n = c(1, 100000), blank_k = c(0, 1000), rep_qc_flag = c(1, 1000))
+numeric_key_range <- function(id) {
+  r <- NUMERIC_KEY_RANGES[[id]]; if (!is.null(r)) return(r)
+  if (grepl("angle", id)) return(c(0, 360))
+  if (grepl("exponent", id)) return(c(-12, 12))
+  if (grepl("expand", id)) return(c(0, 1))
+  if (grepl("alpha", id)) return(c(0, 1))
+  if (grepl("stroke", id)) return(c(0, 10))
+  if (grepl("(_mm|_pt|_size|_width|_height|_thickness|_length|_gap|_len|_cm|_in)$", id)) return(c(0, 200))
+  if (grepl("(_count|_ncol|_nrow|_n|_k|_points|_window|_digits)$", id)) return(c(0, 1000))
+  c(-1e9, 1e9)
+}
+# Automatic x tick spacing (major, minor) for a time axis ending at mt2 (minutes): 10 / 30 / 60 as ever; only when 60 would
+# need more breaks than TICK_MAX_BREAKS (a 36 000-minute axis from a 3601-point file) does it widen, to a round step that
+# gives about 20 major ticks. Axes that were drawn before are unchanged.
+auto_x_interval <- function(mt2) {
+  if (!is.finite(mt2) || mt2 <= 60) return(c(10, 5))
+  if (mt2 <= 120) return(c(30, 10))
+  if (mt2 / 30 + 1 <= TICK_MAX_BREAKS) return(c(60, 30))
+  steps <- c(120, 180, 240, 300, 600, 1200, 1800, 3600, 7200, 14400, 28800, 43200, 86400, 172800, 604800, 2592000)
+  ok <- steps[mt2 / steps <= 24]
+  iv <- if (length(ok)) ok[1] else 10^ceiling(log10(mt2 / 24))
+  c(iv, iv / 2)
+}
+# `val` clamped to the bounds declared for input `id` (UI first, the static table for the sides the UI leaves open);
+# non-finite and non-numeric values come back NA (-> skipped).
 clamp_numeric_setting <- function(id, val) {
-  v <- suppressWarnings(as.numeric(val)); if (length(v) != 1L || is.na(v)) return(NA_real_)
-  r <- NUMERIC_INPUT_RANGES[[id]]
-  if (is.null(r)) return(v)
-  if (is.finite(r[["min"]]) && v < r[["min"]]) v <- r[["min"]]
-  if (is.finite(r[["max"]]) && v > r[["max"]]) v <- r[["max"]]
+  v <- suppressWarnings(as.numeric(val)); if (length(v) != 1L || is.na(v) || !is.finite(v)) return(NA_real_)
+  r <- NUMERIC_INPUT_RANGES[[id]]; t <- numeric_key_range(id)
+  lo <- if (!is.null(r) && is.finite(r[["min"]])) r[["min"]] else t[1]
+  hi <- if (!is.null(r) && is.finite(r[["max"]])) r[["max"]] else t[2]
+  if (v < lo) v <- lo
+  if (v > hi) v <- hi
   v
+}
+SETTINGS_MAX_CHARS <- 10000L
+MULTI_SETTING_KEYS <- c("pheno_metrics", "boot_metrics", "s22_metrics", "compose_panels", "fit_models", "batch_outputs",
+                        "notes_caption_fields", "lysis_models", "analysis_metrics")
+# One value of a settings file against the control it is meant for (round 2, NUM03-NUM07 / JSON01): the type is checked
+# against the control (the UI tree, else the class of its APP_DEFAULTS entry), numbers are clamped, strings are capped at
+# 10 000 characters. Returns list(ok, value, clamped, why): ok = FALSE -> ignore the key and say `why`.
+check_setting_value <- function(nm, val) {
+  bad <- function(why) list(ok = FALSE, value = NULL, clamped = FALSE, why = why)
+  val <- settings_unbox(val)
+  if (is.null(val)) return(bad("an empty or nested value"))
+  def <- APP_DEFAULTS[[nm]]
+  kind <- INPUT_KINDS[[nm]]
+  if (is.null(kind) || identical(kind, "other")) kind <- if (is.null(def)) "any" else if (is.logical(def)) "checkbox" else if (is.numeric(def)) "number" else "text"
+  if (nm %in% MULTI_SETTING_KEYS || length(def) > 1L || identical(kind, "multi")) kind <- "multi"
+  if (!is.atomic(val)) return(bad("not a plain value"))
+  cap <- function(x) { long <- !is.na(x) & nchar(x, type = "chars", allowNA = TRUE) > SETTINGS_MAX_CHARS; x[long] <- substr(x[long], 1L, SETTINGS_MAX_CHARS); list(x = x, cut = any(long)) }
+  if (kind == "any") kind <- if (is.logical(val)) "checkbox" else if (is.numeric(val)) "number" else if (length(val) > 1L) "multi" else "text"
+  if (kind == "number") {
+    if (length(val) != 1L || is.logical(val)) return(bad("expected a number"))
+    v <- suppressWarnings(as.numeric(val))
+    if (is.na(v) || !is.finite(v)) return(bad("not a finite number"))
+    cv <- clamp_numeric_setting(nm, v)
+    return(list(ok = TRUE, value = cv, clamped = !isTRUE(all.equal(cv, v)), why = NULL))
+  }
+  if (kind == "checkbox") {
+    if (length(val) != 1L || !is.logical(val) || is.na(val)) return(bad("expected true or false"))
+    return(list(ok = TRUE, value = val, clamped = FALSE, why = NULL))
+  }
+  if (kind == "multi") {
+    if (!is.character(val)) return(bad("expected a list of names"))
+    if (length(val) > 1000L) val <- val[seq_len(1000L)]
+    cc <- cap(val)
+    return(list(ok = TRUE, value = cc$x, clamped = cc$cut, why = NULL))
+  }
+  # a single text / select value
+  if (length(val) != 1L) return(bad("expected a single value"))
+  if (is.logical(val)) return(bad("expected text"))
+  if (is.numeric(val)) { if (!is.finite(val)) return(bad("not a finite number")); val <- format(val, digits = 15, scientific = FALSE, trim = TRUE) }
+  if (is.na(val)) return(bad("an empty value"))
+  num_default <- is.character(def) && length(def) == 1L && !is.na(suppressWarnings(as.numeric(def)))
+  if (num_default || nm %in% names(NUMERIC_KEY_RANGES)) {          # a numeric-looking select (axis_text_angle): the value must be a sane number
+    v <- suppressWarnings(as.numeric(val))
+    if (is.na(v) || !is.finite(v)) return(bad("expected a number"))
+    cv <- clamp_numeric_setting(nm, v)
+    return(list(ok = TRUE, value = format(cv, digits = 15, scientific = FALSE, trim = TRUE), clamped = !isTRUE(all.equal(cv, v)), why = NULL))
+  }
+  cc <- cap(val)
+  list(ok = TRUE, value = cc$x, clamped = cc$cut, why = NULL)
 }
 
 server <- function(input, output, session) {
@@ -10586,6 +10861,26 @@ server <- function(input, output, session) {
     v <- input[[id]]; if (is.null(v)) return(d)
     r <- INPUT_SANE[[id]]; num_or(v, r[1], r[2], r[3])
   }
+  # Round 2 (live probe): the X-axis text angle is a select (0 / 45 / 90), but a settings file or a scripted client can send
+  # any number, and a huge angle kept grid busy for minutes. Every read goes through here: finite, and inside one turn.
+  x_angle_in <- function() {
+    v <- suppressWarnings(as.numeric(input$axis_text_angle %||% "0"))
+    if (length(v) != 1L || !is.finite(v) || abs(v) > 360) return(0)     # (a modulus of 1e308 is noise, not an angle)
+    v
+  }
+  # Round 2 (NUM01-NUM03): the other typed numbers a figure or a table reads. A log exponent is NA (automatic ticks) when cleared /
+  # non-finite and held to -12..12 otherwise (10^1e308 and 10^-400 broke the tick code); a smoothing window is a whole number in the
+  # box's range, the default when cleared or NaN.
+  ylog_exp <- function(id) {
+    v <- suppressWarnings(as.numeric(input[[id]])); if (length(v) != 1L || !is.finite(v)) NA_real_ else min(max(v, -12), 12)
+  }
+  ylog_min_or <- function() { v <- ylog_exp("y_log_min_exponent"); if (is.finite(v)) v else -2 }
+  win_in <- function(id, default, lo, hi) {
+    v <- suppressWarnings(as.numeric(input[[id]])); if (length(v) != 1L || !is.finite(v)) return(default)
+    min(max(round(v), lo), hi)
+  }
+  smooth_win <- function() win_in("metrics_smooth_window", 5, 3, 15)
+  peak_win   <- function() win_in("metrics_peak_smooth_window", 1, 1, 15)
   
   # v2.14.1: every download in this server fails with a readable message (and a notification)
   # instead of an opaque error; memory errors get a hint. Shadows shiny::downloadHandler locally.
@@ -10727,6 +11022,7 @@ server <- function(input, output, session) {
     if (nrow(data) == 0) return(FALSE)
     potential <- LONG_GROUP_NAMES      # v2.22: + strain / Strain
     if (any(potential %in% colnames(data))) return(TRUE)
+    if (!is.na(long_numeric_group_col(data, tc))) return(TRUE)     # round 2 (L08): Time, MOI, OD
     if (ncol(data) <= 4) {
       # Only NON-NUMERIC columns can be grouping candidates: a numeric OD
       # column with repeated values (e.g. a flat/constant control) must not
@@ -10780,6 +11076,7 @@ server <- function(input, output, session) {
   detect_long_group <- function(data, tc, group_names = LONG_GROUP_NAMES) {
     found <- group_names[group_names %in% colnames(data)]
     if (length(found) > 0) return(found[1])
+    ng <- long_numeric_group_col(data, tc); if (!is.na(ng)) return(ng)       # round 2 (L08)
     rep_col0 <- detect_replicate_column(data, tc, NULL, NULL)
     others   <- setdiff(colnames(data), tc)
     nonnum   <- others[!vapply(others, function(cn) is.numeric(data[[cn]]), logical(1))]
@@ -10787,7 +11084,10 @@ server <- function(input, output, session) {
     cands    <- nonnum[nd / nrow(data) < 0.3 & nd > 0]
     pref     <- setdiff(cands, rep_col0)
     pref     <- pref[vapply(pref, function(cn) length(unique(data[[cn]])) >= 2L, logical(1))]
-    if (length(pref)) return(pref[1])
+    if (length(pref)) {                       # round 2 (ING08): the most distinct candidate wins (Plate x2 / Isolate x10 -> Isolate), ties keep column order
+      nd_p <- vapply(pref, function(cn) length(unique(data[[cn]])), integer(1))
+      return(pref[order(-nd_p, seq_along(pref))][1])
+    }
     if (!is.null(rep_col0) && rep_col0 %in% nonnum) return(rep_col0)
     if (length(cands)) return(cands[1])
     dv    <- sapply(data, function(x) length(unique(x)) / nrow(data))      # (the earlier rule, for numeric groups)
@@ -10834,7 +11134,7 @@ server <- function(input, output, session) {
     }
     # Elapsed time as 0:15:00 (Gen5 / i-control), a full date-time, "30 min" ...: convert to minutes so the numeric
     # time handling downstream (filters, axis range) just works.
-    pt <- parse_time_column(data[[tc]])
+    pt <- parse_time_column(data[[tc]], name = tc)
     if (isTRUE(pt$converted)) {
       data[[tc]] <- pt$values
       notes <- c(notes, if (!is.null(pt$note)) pt$note else
@@ -10844,6 +11144,13 @@ server <- function(input, output, session) {
       tv <- suppressWarnings(as.numeric(as.character(data[[tc]])))
       if (!any(is.finite(tv))) ingest_refused(sprintf("Could not read any time value from column '%s'", tc))
       if (any(!is.finite(tv))) {                                 # rows with no readable time: repeated headers, blanks, footers
+        # round 2 (ING03): say how many rows went (a row that is blank in every cell is padding, not data), and refuse a column
+        # that is mostly unreadable (one typo in ten is a note, 1 readable value of 6 is the wrong column)
+        filled <- Reduce(`|`, lapply(data, function(v) { x <- trimws(as.character(v)); !is.na(x) & nzchar(x) }), rep(FALSE, nrow(data)))
+        n_bad  <- sum(!is.finite(tv) & filled); n_use <- sum(is.finite(tv)); n_all <- sum(filled | is.finite(tv))
+        if (n_all > 0 && n_use < 0.5 * n_all)
+          ingest_refused(sprintf("Only %d of %d rows have a readable time in column '%s'; it does not look like the time column", n_use, n_all, tc))
+        if (n_bad > 0) notes <- c(notes, sprintf("%d row%s had no readable time and %s dropped.", n_bad, if (n_bad == 1L) "" else "s", if (n_bad == 1L) "was" else "were"))
         data <- data[is.finite(tv), , drop = FALSE]
         data[[tc]] <- tv[is.finite(tv)]
         rownames(data) <- NULL
@@ -10868,6 +11175,34 @@ server <- function(input, output, session) {
                n_blocks = NULL, block_id = NULL, all_timepoints = NULL, dropped = NULL, sentinel_report = cs$report, notes = notes)
     if (ds$is_long_format) {
       group_col <- detect_long_group(data, tc, group_names)
+      # Round 2 (L04): two or more text columns that name a group (Strain + Treatment) together make the sample: "WT phage".
+      # The replicate / well column is never one of them. The combined label is a new column; the originals stay.
+      combo_cols <- colnames(data)[colnames(data) %in% group_names & !(tolower(colnames(data)) %in% c("replicate", "rep", "rep_id", "replicate_id", "well", "well_id", "wellid", "technical_replicate", "biological_replicate", "repeat")) &
+                                   !vapply(data, is.numeric, logical(1)) & colnames(data) != tc]
+      combo_cols <- combo_cols[!duplicated(combo_cols)]
+      lab <- NULL
+      if (length(combo_cols) >= 2L && group_col %in% combo_cols) {
+        lab <- do.call(paste, c(lapply(combo_cols, function(cn) trimws(as.character(data[[cn]]))), sep = " "))
+        # only CROSSED factors make a sample (Strain x Treatment: 4 combinations from 2 + 2 values); a column that is nested in
+        # another (Strain says which Condition it is) is metadata for the panels, and the sample column stays as it was detected
+        if (length(unique(lab)) <= max(vapply(combo_cols, function(cn) length(unique(data[[cn]])), integer(1)))) lab <- NULL
+      }
+      if (!is.null(lab)) {
+        gname <- paste(combo_cols, collapse = " + ")
+        data[[gname]] <- lab; ds$data <- data; group_col <- gname
+        ds$notes <- c(ds$notes, sprintf("Sample names combine the columns %s (for example '%s').",
+                                        paste0("'", combo_cols, "'", collapse = " and "), lab[1]))
+      } else if (is.numeric(data[[group_col]]) && !(group_col %in% group_names)) {      # round 2 (L08): a numeric dose-like column becomes "MOI 0", "MOI 0.1" (a named Sample / Group column keeps its numbers: L09)
+        data[[group_col]] <- paste(group_col, as.character(data[[group_col]])); ds$data <- data
+        ds$notes <- c(ds$notes, sprintf("Column '%s' (a few numeric values, each at every time point) names the samples: %s.", group_col,
+                                        paste(utils::head(unique(data[[group_col]]), 4), collapse = ", ")))
+      }
+      # round 2 (ING08): rows with no sample name (blank cells in the group column) are dropped, with a count
+      gv <- as.character(data[[group_col]]); blank_g <- is.na(gv) | !nzchar(trimws(gv))
+      if (strict && any(blank_g) && !all(blank_g)) {
+        data <- data[!blank_g, , drop = FALSE]; rownames(data) <- NULL; ds$data <- data
+        ds$notes <- c(ds$notes, sprintf("%d row%s had no value in the sample column '%s' and %s dropped.", sum(blank_g), if (sum(blank_g) == 1L) "" else "s", group_col, if (sum(blank_g) == 1L) "was" else "were"))
+      }
       # the replicate column must never be taken for the value column (a numeric "rep"
       # column would win the is.numeric() fallback)
       rep_col <- detect_replicate_column(data, tc, group_col, NULL)
@@ -10926,6 +11261,9 @@ server <- function(input, output, session) {
     if (strict && !length(ds$od_vars)) ingest_refused("No samples were found in the file")
     all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[tc]])))))
     ds$all_timepoints <- all_t[is.finite(all_t)]
+    # round 2 (PERF01): the analyses are linear in the number of samples; no structural fix, but the user is told before the first slow change
+    if (length(ds$od_vars) > 48L)
+      ds$notes <- c(ds$notes, sprintf("Large plate (%d samples): analyses may take a minute per change; consider selecting fewer samples.", length(ds$od_vars)))
     ds
   }
 
@@ -11020,7 +11358,13 @@ server <- function(input, output, session) {
       if (is_excel_file(fname)) {
         wb <- read_workbook_data(input$file$datapath, fname)
         label <- if (length(wb$sheets) > 1) paste0(fname, " [", wb$sheet, "]") else fname
-        ingest_data(wb$data, label)
+        # round 2 (ING06b): the workbook's sheets are known BEFORE the ingest, so the sheet box is reachable even when the sheet
+        # that was tried holds no table (a summary sheet first, the data on sheet 2)
+        if (length(wb$sheets) > 1) { rv$xlsx_path <- input$file$datapath; rv$xlsx_name <- fname; rv$xlsx_sheets <- wb$sheets; rv$xlsx_sheet <- wb$sheet }
+        tryCatch(ingest_data(wb$data, label), error = function(e) {
+          if (length(wb$sheets) > 1 && inherits(e, "ingest_refused")) stop(structure(class = c("kc_sheet_refused", "error", "condition"), list(message = sprintf("Sheet '%s' has no table; pick another sheet.", wb$sheet), call = NULL)))
+          stop(e)
+        })
         rv$xlsx_path <- input$file$datapath; rv$xlsx_name <- fname
         rv$xlsx_sheets <- wb$sheets; rv$xlsx_sheet <- wb$sheet
         if (length(wb$skipped))
@@ -11028,11 +11372,11 @@ server <- function(input, output, session) {
                                                 if (length(wb$skipped) > 1) "s" else "", paste0("'", wb$skipped, "'", collapse = ", "),
                                                 if (length(wb$skipped) > 1) "ve" else "s", wb$sheet), "message")
       } else {
-        data <- read_csv_locale_aware(input$file$datapath, input$csv_locale %||% "auto")
+        data <- fill_blank_headers(read_csv_locale_aware(input$file$datapath, input$csv_locale %||% "auto"))   # round 2 (ING07): "Time,WT,,,Mut,," is WT x3, Mut x3
         ingest_data(data, fname)
         rv$xlsx_path <- NULL; rv$xlsx_sheets <- NULL; rv$xlsx_sheet <- NULL
       }
-    }, error = function(e) guard_notify("file_read", load_failed_message(e, fname), "error"))
+    }, error = function(e) guard_notify("file_read", if (inherits(e, "kc_sheet_refused")) conditionMessage(e) else load_failed_message(e, fname), "error"))
     invisible(NULL)
   })
 
@@ -11050,7 +11394,8 @@ server <- function(input, output, session) {
       data <- read_data_file(rv$xlsx_path, rv$xlsx_name, sheet = sh)
       ingest_data(data, paste0(rv$xlsx_name, " [", sh, "]"))
       rv$xlsx_sheet <- sh
-    }, error = function(e) guard_notify("file_read", load_failed_message(e, paste0(rv$xlsx_name, " [", sh, "]")), "error"))
+    }, error = function(e) guard_notify("file_read", if (inherits(e, "ingest_refused")) sprintf("Sheet '%s' has no table; pick another sheet.", sh)
+                                                    else load_failed_message(e, paste0(rv$xlsx_name, " [", sh, "]")), "error"))
   }, ignoreInit = TRUE)
 
   # v2.22: the Time column box (under the file picker): re-runs the detection that follows from the time column on the
@@ -11059,7 +11404,7 @@ server <- function(input, output, session) {
     req(rv$data, input$time_col_choice)
     tc <- input$time_col_choice
     if (identical(tc, rv$time_col) || !tc %in% colnames(rv$data)) return(invisible(NULL))
-    pt <- parse_time_column(rv$data[[tc]])
+    pt <- parse_time_column(rv$data[[tc]], name = tc)
     if (sum(is.finite(pt$values)) < 2) {
       guard_notify("time_col", sprintf("'%s' has no usable numbers to serve as the time column; keeping '%s'.", tc, rv$time_col))
       updateSelectInput(session, "time_col_choice", selected = rv$time_col)
@@ -11152,7 +11497,7 @@ server <- function(input, output, session) {
   })
   output$download_current_data_csv <- downloadHandler(
     filename = function() paste0("data_current_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content  = function(file) { req(rv$data); utils::write.csv(rv$data, file, row.names = FALSE, na = "") })
+    content  = function(file) { req(rv$data); write_csv_safe(rv$data, file, row.names = FALSE, na = "") })
 
   # Enter data: pasted text -> the same ingest as a file
   entry_msg <- reactiveVal(NULL)
@@ -11228,7 +11573,7 @@ server <- function(input, output, session) {
     ov  <- t_stat_override_current()
     ref <- input$metrics_ref_sample %||% ""
     auto <- if (is.null(ov) && nzchar(ref) && !is.null(rv$data))
-      tryCatch({ lv <- calculate_local_virulence(prepare_plot_data(), ref, input$metrics_smooth_window %||% 5, NULL)
+      tryCatch({ lv <- calculate_local_virulence(prepare_plot_data(), ref, smooth_win(), NULL)
                  if (is.null(lv)) NA_real_ else lv$t_stat_used[1] }, error = function(e) NA_real_) else NA_real_
     val <- if (!is.null(ov)) ov else auto
     p(style = "font-size:.78em;color:#777;margin-top:-6px;",
@@ -11257,6 +11602,8 @@ server <- function(input, output, session) {
   output$rep_qc_replicates <- renderTable(rep_qc_show(rep_qc_current()$replicates), striped = TRUE, spacing = "xs", na = "")
   output$rep_qc_note <- renderUI({
     tab <- tryCatch(rep_qc_current(), error = function(e) NULL)
+    if (!is.null(rv$data) && length(input$selected_samples) && (is.null(tab) || !nrow(tab$samples)))
+      return(p(style = "font-size:.82em;color:#856404;", "No readings are left after the current filters and time windows, so there is no replicate QC. Relax the time windows / OD window / replicate exclusions."))   # round 2 (EMP02)
     if (is.null(tab) || !nrow(tab$samples)) return(p(style = "font-size:.82em;color:#999;", "Load data and select samples to see the replicate QC."))
     hi <- tab$samples$sample[tab$samples$high_cv %in% TRUE]
     if (all(tab$samples$n_replicates < 2))
@@ -11266,10 +11613,10 @@ server <- function(input, output, session) {
   })
   output$downloadRepQCCSV <- downloadHandler(
     filename = function() paste0("replicate_qc_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content  = function(file) utils::write.csv(present(replicate_qc_csv_frame(rep_qc_current()), "sample"), file, row.names = FALSE))
+    content  = function(file) { refuse_if_empty(); write_csv_safe(present(replicate_qc_csv_frame(rep_qc_current()), "sample"), file, row.names = FALSE) })
   output$downloadRepQCSamplesCSV <- downloadHandler(
     filename = function() paste0("replicate_cv_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content  = function(file) utils::write.csv(present(rep_qc_current()$samples, "sample"), file, row.names = FALSE))
+    content  = function(file) { refuse_if_empty(); write_csv_safe(present(rep_qc_current()$samples, "sample"), file, row.names = FALSE) })
 
   # ── Data summary (what the app detected) ─────────────────────────────────────
   # v2.14.1: how big the loaded data is (time points, samples, replicates per sample)
@@ -11420,15 +11767,28 @@ server <- function(input, output, session) {
     # Hardening round 1 (finding 34): the whole body is guarded. A settings file that parses to a scalar, an array or
     # something this app cannot read used to raise an error in the observer, which ENDS the Shiny session.
     tryCatch({
+    # Round 2: every way a settings file can be unreadable ends in ONE plain notification and no change at all.
+    read_fail <- function(reason) {
+      msg <- paste0("Could not read the settings file: ", reason, ". Nothing was changed.")
+      rv$settings_status <- list(type = "warn", msg = msg, details = NULL)
+      tryCatch(showNotification(msg, type = "error", duration = 12), error = function(e2) invisible(NULL))
+    }
+    sf <- input$loadSettings$datapath
+    if (!is.character(sf) || !length(sf) || !file.exists(sf)) return(read_fail("the file could not be opened"))
+    if (is.na(file.size(sf)) || file.size(sf) == 0L) return(read_fail("the file is empty"))
     s <- tryCatch(
-      fromJSON(input$loadSettings$datapath, simplifyVector = FALSE),
+      fromJSON(sf, simplifyVector = FALSE),
       error = function(e) {
-        rv$settings_status <- list(type = "warn",
-                                   msg = paste("Could not parse settings file:", e$message), details = NULL)
-        NULL
+        raw_txt <- tryCatch(readLines(sf, n = 50L, warn = FALSE, encoding = "UTF-8"), error = function(e2) character(0))
+        if (!any(nzchar(trimws(raw_txt)))) return(structure(list(reason = "the file is empty"), class = "kc_read_fail"))
+        why <- trimws(gsub("[\r\n]+.*", "", conditionMessage(e)))
+        why <- gsub(sf, "the file", why, fixed = TRUE)
+        structure(list(reason = paste0("it is not valid JSON", if (nzchar(why)) paste0(" (", substr(why, 1L, 80L), ")") else "")), class = "kc_read_fail")
       }
     )
-    if (is.null(s)) return()
+    if (inherits(s, "kc_read_fail")) return(read_fail(s$reason))
+    if (is.null(s)) return(read_fail("the file holds null, not settings"))
+    validate_settings_object(s)
     
     # v2.22: an old file (the N4 app's flat JSON, the lysis-curve-app structure) is translated into this structure first:
     # ids renamed, notes_* -> nb_*, positional per-sample keys mapped onto the loaded samples, inch sizes marked as inches
@@ -11446,6 +11806,7 @@ server <- function(input, output, session) {
     else list()
     
     global <- migrate_styling_settings(global, s$styling_schema)   # v2.22: palette names of a pre-v2.22 file
+    sample_aes <- lapply(sample_aes, sanitize_sample_aes)          # round 2 (F07): only values the widgets can take reach the sidebar rows
     rv$imported_settings <- list(global = global, samples = sample_aes)
 
     # ── Apply global visual settings ──────────────────────────────────────────
@@ -11481,12 +11842,24 @@ server <- function(input, output, session) {
       rv$units_seen <- "in"
       updateRadioButtons(session, "export_units", selected = "in")
     }
-    n_global <- 0L; n_clamped <- 0L
-    for (nm in names(global)) {
-      if (nm %in% data_inputs || is_sample_inp(nm) || startsWith(nm, "data_view_table_")) next
-      if (!(nm %in% names(input)))                  { ignored_unknown <- c(ignored_unknown, nm); next }
+    n_global <- 0L; n_clamped <- 0L; bad_type <- character(0)
+    # Round 2 (JSON01): the per-key screening is vectorised and names(input) is read once, so a file with 100 000 keys costs
+    # one pass; only the keys that are real controls are looped over.
+    gkeys <- names(global); if (is.null(gkeys)) gkeys <- character(length(global))
+    inp_names <- names(input)
+    is_sample_key <- rep(FALSE, length(gkeys))
+    for (pfx in sample_prefixes) is_sample_key <- is_sample_key | startsWith(gkeys, pfx)
+    is_sample_key <- is_sample_key & !(gkeys %in% global_exceptions)
+    skip_key <- gkeys %in% data_inputs | is_sample_key | startsWith(gkeys, "data_view_table_")
+    unk_key  <- !skip_key & !(gkeys %in% inp_names)
+    ignored_unknown <- gkeys[unk_key]
+    for (gi in which(!skip_key & !unk_key)) {
+      nm <- gkeys[gi]
+      chk <- check_setting_value(nm, global[[gi]])
+      if (!isTRUE(chk$ok)) { bad_type <- c(bad_type, paste0(nm, " (", chk$why, ")")); next }
+      val <- chk$value
+      if (isTRUE(chk$clamped)) n_clamped <- n_clamped + 1L
       tryCatch({
-        val <- global[[nm]]
         if (nm %in% c("pheno_metrics", "boot_metrics", "s22_metrics")) {
           updateSelectInput(session, nm, selected = val)            # v2.19: a multi-select, not a checkbox group
         } else if (identical(nm, "nb_date") && is.character(val) && length(val) == 1) {
@@ -11496,10 +11869,7 @@ server <- function(input, output, session) {
         } else if (is.logical(val) && length(val) == 1) {
           updateCheckboxInput(session, nm, value = val)
         } else if (is.numeric(val) && length(val) == 1) {
-          cv <- clamp_numeric_setting(nm, val)          # hardening: out-of-range numbers are clamped to the box's min / max
-          if (is.na(cv) && !is.na(val)) cv <- NULL      # Inf / NaN: leave the box alone
-          if (!is.null(cv) && !is.na(val) && !isTRUE(all.equal(cv, val))) n_clamped <- n_clamped + 1L
-          if (!is.null(cv)) updateNumericInput(session, nm, value = cv)
+          updateNumericInput(session, nm, value = val)              # (check_setting_value clamped it to the control's range)
         } else if (is.character(val) && length(val) == 1) {
           updateSelectInput(session, nm, selected = val)
           updateTextInput(session,   nm, value    = val)
@@ -11550,10 +11920,15 @@ server <- function(input, output, session) {
                              samples = names(conv$s$sample_aesthetics), message = legacy_msg)
       tryCatch(showNotification(legacy_msg, type = "message", duration = 10), error = function(e) invisible(NULL))
     }
-    if (n_clamped > 0L) {      # hardening: numbers outside a box's declared min / max were pulled back into range
-      clamp_msg <- sprintf("%d setting%s %s out of range and clamped.", n_clamped, if (n_clamped == 1L) "" else "s", if (n_clamped == 1L) "was" else "were")
-      tryCatch(showNotification(clamp_msg, type = "warning", duration = 10), error = function(e) invisible(NULL))
-      details_html <- paste0(details_html %||% "", "<ul class='match-list'><li style='color:#856404'>", clamp_msg, "</li></ul>")
+    if (n_clamped > 0L || length(bad_type)) {      # hardening / round 2: ONE notification for the values that were pulled into range or ignored
+      adj_msg <- paste0(c(if (n_clamped > 0L) sprintf("%d setting%s %s out of range and clamped", n_clamped, if (n_clamped == 1L) "" else "s", if (n_clamped == 1L) "was" else "were"),
+                          if (length(bad_type)) sprintf("%d setting%s the wrong type and %s ignored", length(bad_type), if (length(bad_type) == 1L) " had" else "s had", if (length(bad_type) == 1L) "was" else "were")),
+                        collapse = "; ")
+      adj_msg <- paste0(adj_msg, ".")
+      tryCatch(showNotification(adj_msg, type = "warning", duration = 10), error = function(e) invisible(NULL))
+      details_html <- paste0(details_html %||% "", "<ul class='match-list'><li style='color:#856404'>", html_escape(adj_msg), "</li>",
+                             if (length(bad_type)) paste0("<li style='color:#856404'>Ignored: ", html_escape(paste(utils::head(bad_type, 12), collapse = ", ")), if (length(bad_type) > 12) ", ..." else "", "</li>") else "",
+                             "</ul>")
     }
     rv$settings_status <- list(
       type    = "ok",
@@ -11563,6 +11938,11 @@ server <- function(input, output, session) {
     rv$last_clamped <- n_clamped
     }, error = function(e) {
       reraise_time_limit(e)
+      if (inherits(e, "kc_settings_invalid")) {       # round 2: one plain message for every unreadable file
+        msg <- paste0("Could not read the settings file: ", sub("\\.$", "", sub("^This is not a settings file: ", "", conditionMessage(e))), ". Nothing was changed.")
+        rv$settings_status <- list(type = "warn", msg = msg, details = NULL)
+        return(tryCatch(showNotification(msg, type = "error", duration = 12), error = function(e2) invisible(NULL)))
+      }
       msg <- paste("The settings file could not be applied:", friendly_error_message(e))
       rv$settings_status <- list(type = "warn", msg = msg, details = NULL)
       tryCatch(showNotification(msg, type = "error", duration = 12), error = function(e2) invisible(NULL))
@@ -12243,7 +12623,7 @@ server <- function(input, output, session) {
   curate_replicates_post <- function(out, samps, which = "kept") {
     if (!data_curation_active()) {
       if (identical(which, "excluded")) return(out[0, , drop = FALSE])
-      if (identical(which, "all")) out$excluded <- FALSE
+      if (identical(which, "all")) out$excluded <- rep(FALSE, nrow(out))
       return(out)
     }
     res <- transform_frame(out, blank_mode_current(), blank_sample_current(), input$blank_k %||% 3,
@@ -12467,7 +12847,7 @@ server <- function(input, output, session) {
     # v2.10: theme spacing (margins, gaps) follows the theme's base_size, which
     # defaults to 14 (prism) / 12 (pubr) and looks oversized next to 6-7 pt text.
     # 0 keeps each theme's own default, so existing figures do not change.
-    bs      <- input$theme_base_pt %||% 0
+    bs      <- num_or(input$theme_base_pt, 0, 0, 30)
     base_t  <- if (isTRUE(input$use_advanced_ticks)) {
       if (is.numeric(bs) && is.finite(bs) && bs > 0) theme_prism(border = TRUE, base_size = bs)
       else theme_prism(border = TRUE)
@@ -12478,7 +12858,7 @@ server <- function(input, output, session) {
       input$major_gridline_color_custom else input$major_gridline_color
     min_col <- if (!is.null(input$minor_gridline_color) && input$minor_gridline_color == "custom")
       input$minor_gridline_color_custom else input$minor_gridline_color
-    x_ang   <- as.numeric(input$axis_text_angle %||% "0")
+    x_ang   <- x_angle_in()
     
     # v2.10 figure-layout inputs. Defaults equal the previous hard-coded values
     # (1.07 pt == linewidth 0.5; 1.5 mm == 0.15 cm; legend right, grey border).
@@ -12486,7 +12866,7 @@ server <- function(input, output, session) {
     tick_cm  <- (nin("tick_length_mm", 1.5)) / 10
     leg_pos  <- input$legend_position %||% "right"
     leg_bord <- if (isTRUE(input$legend_box_border %||% TRUE)) "gray80" else NA
-    leg_key  <- input$legend_key_mm %||% 0
+    leg_key  <- num_or(input$legend_key_mm, 0, 0, 20)
     leg_face <- { f <- input$legend_text_face %||% "plain"; if (f %in% c("bold", "italic", "bold.italic")) f else NULL }   # v2.22 (NULL = the theme's own plain)
     # v2.22: "Direct labels at line ends" and the matrix legend replace the legend box; a figure without end labels
     # (the analysis figures) keeps an ordinary key on the right
@@ -12700,7 +13080,7 @@ server <- function(input, output, session) {
     num1 <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
     lo <- num1(input[[paste0(axis, "_min")]]); hi <- num1(input[[paste0(axis, "_max")]])
     if (log_ax) {
-      floor_v <- if (identical(axis, "y") && isTRUE(input$use_advanced_ticks) && is.finite(num1(input$y_log_min_exponent))) 10^num1(input$y_log_min_exponent)
+      floor_v <- if (identical(axis, "y") && isTRUE(input$use_advanced_ticks) && is.finite(ylog_exp("y_log_min_exponent"))) 10^ylog_exp("y_log_min_exponent")
                  else if (length(pos)) min(pos) / 2 else 1e-9
       if (!is.na(lo) && lo <= 0) lo <- floor_v
       if (!is.na(hi) && hi <= 0) hi <- NA_real_
@@ -12724,7 +13104,7 @@ server <- function(input, output, session) {
     if (isTRUE(input$custom_y_limits)) return(eff_limits("y", plot_data))
     yr <- suppressWarnings(range(c(plot_data$mean_value, plot_data$err_lo, plot_data$err_hi), na.rm = TRUE))
     if (identical(input$y_scale_type, "log") && isTRUE(input$use_advanced_ticks)) {
-      mn <- suppressWarnings(as.numeric(input$y_log_min_exponent))[1]; mx <- suppressWarnings(as.numeric(input$y_log_max_exponent))[1]
+      mn <- ylog_exp("y_log_min_exponent"); mx <- ylog_exp("y_log_max_exponent")
       if (is.finite(mn) && is.finite(mx)) return(c(10^mn, if (mx >= 0) 10^(mx + 1) else 10^mx))
     }
     yr
@@ -12869,7 +13249,7 @@ server <- function(input, output, session) {
       lo_val <- if (input$y_scale_type == "log") {
         if (isTRUE(input$error_log_floor %||% TRUE)) {
           y_floor <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1]
-                     else if (isTRUE(input$use_advanced_ticks)) 10^num_or(input$y_log_min_exponent, -2, -300, 300)
+                     else if (isTRUE(input$use_advanced_ticks)) 10^ylog_min_or()
                      else min(plot_data$mean_value[plot_data$mean_value > 0], na.rm = TRUE) / 2
           pmax(plot_data$mean_value - err_vals * em, y_floor)
         } else pmax(plot_data$mean_value - err_vals * em, 1e-9)
@@ -12887,7 +13267,7 @@ server <- function(input, output, session) {
         if (identical(input$y_scale_type, "log")) {
           y_fl <- if (!isTRUE(input$error_log_floor %||% TRUE)) 1e-9
                   else if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1]
-                  else if (isTRUE(input$use_advanced_ticks)) 10^num_or(input$y_log_min_exponent, -2, -300, 300)
+                  else if (isTRUE(input$use_advanced_ticks)) 10^ylog_min_or()
                   else min(plot_data$mean_value[plot_data$mean_value > 0], na.rm = TRUE) / 2
           lo_a <- pmax(lo_a, y_fl)
         } else if (isTRUE(input$asymmetric_error)) lo_a <- pmax(lo_a, 0)
@@ -12944,7 +13324,7 @@ server <- function(input, output, session) {
       if (!is.null(qb) && nrow(qb) > 0) {
         if (!is.null(grp_map)) qb$group <- factor(unname(grp_map[qb$variable]), levels = attr(grp_map, "levels"))
         if (identical(input$y_scale_type, "log")) {
-          y_fq <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1] else if (isTRUE(input$use_advanced_ticks)) 10^num_or(input$y_log_min_exponent, -2, -300, 300) else 1e-9
+          y_fq <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1] else if (isTRUE(input$use_advanced_ticks)) 10^ylog_min_or() else 1e-9
           qb$q025 <- pmax(qb$q025, y_fq); qb$q975 <- pmax(qb$q975, y_fq); qb$q25 <- pmax(qb$q25, y_fq); qb$q75 <- pmax(qb$q75, y_fq)
         }
         using_shadow <- TRUE
@@ -13125,8 +13505,9 @@ server <- function(input, output, session) {
       
       # v2.14.1: count the breaks BEFORE building them: an interval of 0.0001 over a 6-hour axis
       # (or a huge time range) would otherwise allocate millions of break positions.
-      iv_est   <- if (use_manual) manual_interval else if (mt2 <= 60) 10 else if (mt2 <= 120) 30 else 60
-      minor_st <- if (use_manual) manual_interval / 2 else if (mt2 <= 60) 5 else if (mt2 <= 120) 10 else 30
+      auto_iv  <- auto_x_interval(mt2)          # round 2: the automatic spacing widens for a very long time axis instead of tripping the guard
+      iv_est   <- if (use_manual) manual_interval else auto_iv[1]
+      minor_st <- if (use_manual) manual_interval / 2 else auto_iv[2]
       n_major_est <- (mt2 - x0) / iv_est + 1; n_minor_est <- (mt2 - x0) / minor_st + 1
       ticks_ok <- all(is.finite(c(n_major_est, n_minor_est))) && max(n_major_est, n_minor_est) <= TICK_MAX_BREAKS
       if (!ticks_ok) {
@@ -13148,7 +13529,7 @@ server <- function(input, output, session) {
         }
         else if (mt2 <= 60)  { iv <- 10;  mjb <- seq(0, ceiling(mt2/10)*10,  10);  mnb <- seq(0, ceiling(mt2/10)*10,  5) }
         else if (mt2 <= 120) { iv <- 30;  mjb <- seq(0, ceiling(mt2/30)*30,  30);  mnb <- seq(0, ceiling(mt2/30)*30, 10) }
-        else                 { iv <- 60;  mjb <- seq(0, ceiling(mt2/60)*60,  60);  mnb <- seq(0, ceiling(mt2/60)*60, 30) }
+        else                 { iv <- auto_iv[1];  mjb <- seq(0, ceiling(mt2/iv)*iv,  iv);  mnb <- seq(0, ceiling(mt2/iv)*iv, auto_iv[2]) }
         # Always include the actual data endpoint even in auto mode
         if (!isTRUE(input$custom_x_limits) && !mt2 %in% mjb)
           mjb <- sort(unique(c(mjb, mt2)))
@@ -13176,9 +13557,9 @@ server <- function(input, output, session) {
     y_oob <- y_oob_fn()   # v2.17: readings outside the axis limits are clipped to them ("squish") or dropped ("censor")
     if (input$y_scale_type == "log") {
       y_labs <- y_tick_labels()
-      if (isTRUE(input$use_advanced_ticks) && is.finite(suppressWarnings(as.numeric(input$y_log_min_exponent))[1]) &&
-          is.finite(suppressWarnings(as.numeric(input$y_log_max_exponent))[1])) {   # hardening: a cleared exponent box = automatic ticks
-        minE <- input$y_log_min_exponent; maxE <- input$y_log_max_exponent
+      if (isTRUE(input$use_advanced_ticks) && is.finite(ylog_exp("y_log_min_exponent")) &&
+          is.finite(ylog_exp("y_log_max_exponent"))) {   # hardening: a cleared exponent box = automatic ticks
+        minE <- ylog_exp("y_log_min_exponent"); maxE <- ylog_exp("y_log_max_exponent")
         if (is.null(y_lims)) y_lims <- c(10^minE, if (maxE >= 0) 10^(maxE+1) else 10^maxE)
         if (!is.finite(maxE - minE) || maxE < minE || maxE - minE > 20) {
           # v2.14.1: a nonsensical or enormous exponent range: default minor breaks
@@ -13204,7 +13585,7 @@ server <- function(input, output, session) {
       p <- p + do.call(scale_y_continuous, c(list(limits = y_lims, expand = y_exp, oob = y_oob), yb))
     }
     
-    bs     <- input$theme_base_pt %||% 0
+    bs     <- num_or(input$theme_base_pt, 0, 0, 30)
     pl_lab <- trimws(input$panel_label %||% "")
     p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value, g = plot_data$variable),
                                  n_entries = n_vars, log_y = identical(input$y_scale_type, "log"),
@@ -13333,8 +13714,16 @@ server <- function(input, output, session) {
   # journal preset given in mm cannot drift from what the reports embed.
   # v2.14.1: a notification that replaces its predecessor with the same id (so a render that
   # repeats does not stack banners); never lets a notification failure break a render.
-  guard_notify <- function(id, msg, type = "warning")
+  # Round 2: one notification per message per render cycle. A figure is built several times per flush (preview, size, compose
+  # info ...); the same guard message used to be shown once per build. A repeat of the same id + text within 5 s is dropped
+  # (the notification is still on screen, and showNotification(id =) would only replace it).
+  guard_seen <- new.env()
+  guard_notify <- function(id, msg, type = "warning") {
+    key <- paste(id, msg, sep = "\r"); now <- as.numeric(Sys.time()); last <- guard_seen[[key]]
+    if (!is.null(last) && now - last < 5) return(invisible(NULL))
+    guard_seen[[key]] <- now
     tryCatch(showNotification(msg, id = id, type = type, duration = 10), error = function(e) invisible(NULL))
+  }
   # v2.14.1: every raster render goes through this: the requested dpi, reduced when the pixel
   # count would exceed 40 megapixels (with a notification saying so).
   raster_dpi <- function(width_in, height_in, dpi) {
@@ -13838,8 +14227,8 @@ server <- function(input, output, session) {
   }
   replicate_metric_rows_current <- function() {
     compute_replicate_metric_rows(prepare_replicate_data(),
-                                  smooth_window      = input$metrics_smooth_window %||% 5,
-                                  peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
+                                  smooth_window      = smooth_win(),
+                                  peak_smooth_window = peak_win(),
                                   ref_sample         = input$metrics_ref_sample,
                                   peak_mode          = input$metrics_peak_mode %||% "global",
                                   lysis_threshold    = lysis_threshold_current(),
@@ -13936,7 +14325,7 @@ server <- function(input, output, session) {
         if (mlarge) ptsz <- ptsz * 1.4
         long$sample <- factor(long$sample, levels = s_lv, labels = unname(labs_v[s_lv]))
         x_guide <- if (mflip) waiver()
-          else if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+          else if (x_angle_in() != 0) waiver()
           else if (nlevels(long$sample) >= 5 || max(nchar(levels(long$sample))) > 16)
             guide_axis(angle = 45)      # 5+ samples (or names too long for two rows in a 44 mm facet): angle, not stagger
           else if (max(nchar(levels(long$sample))) > 6) guide_axis(n.dodge = 2)   # 3-4 long names: two staggered rows
@@ -14069,7 +14458,7 @@ server <- function(input, output, session) {
         g
       },
       growth_rate = {
-        gr <- compute_growth_rate_curves(prepare_replicate_data(), window = input$metrics_smooth_window %||% 5)
+        gr <- compute_growth_rate_curves(prepare_replicate_data(), window = smooth_win())
         if (is.null(gr)) stop("Growth rate needs at least 3 positive OD points per curve.")
         gr$variable <- factor(gr$variable, levels = sample_levels(samps))
         # band = the main figure's error measure (compute_growth_rate_curves gives SD and n)
@@ -14091,7 +14480,7 @@ server <- function(input, output, session) {
         # v2.22: dOD/dt per replicate (centred rolling regression of OD on time, the mu_max window; base R, no zoo),
         # then mean +/- SD across the replicates at each time. The dashed zero line: above it the culture grows, below it
         # lyses; a zero crossing marks the peak.
-        gr <- compute_od_rate_curves(prepare_replicate_data(), window = input$metrics_smooth_window %||% 5)
+        gr <- compute_od_rate_curves(prepare_replicate_data(), window = smooth_win())
         if (is.null(gr)) stop("The rate of OD change needs at least 3 readings per replicate curve.")
         gr$variable <- factor(gr$variable, levels = sample_levels(samps))
         leg_xy <- list(x = gr$time, y = gr$rate_mean, g = gr$variable)
@@ -14217,7 +14606,7 @@ server <- function(input, output, session) {
         # trough. Makes every number in the Curve Metrics CSV auditable by eye.
         pd <- prepare_plot_data(); m <- curve_metrics_current()
         if (is.null(m) || nrow(m) == 0) stop("No metrics available.")
-        win <- input$metrics_smooth_window %||% 5
+        win <- smooth_win()
         lm_df <- do.call(rbind, lapply(seq_len(nrow(m)), function(i) {
           s <- m$sample[i]; g <- pd[pd$variable == s, , drop = FALSE]; g <- g[order(g$time), ]
           od_at <- function(t) if (is.finite(t) && nrow(g)) g$mean_value[which.min(abs(g$time - t))] else NA_real_
@@ -14512,7 +14901,7 @@ server <- function(input, output, session) {
                              family = if (nzchar(input$font_family %||% "")) input$font_family else "") +
             scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "black"), guide = "none")
         g + scale_x_discrete(labels = scales::label_wrap(12), expand = c(0, 0),
-                             guide = if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+                             guide = if (x_angle_in() != 0) waiver()
                                      else if (n_met > 4) guide_axis(angle = 45) else waiver()) +
           scale_y_discrete(expand = c(0, 0)) + labs(x = NULL, y = NULL)
       },
@@ -14575,7 +14964,7 @@ server <- function(input, output, session) {
                        size = ptsz * 0.6, stroke = pt2lw(0.5), position = pjit, show.legend = FALSE)
         if (sty == "dot")
           g <- g + geom_point(data = summ, aes(x = xpos, y = mean, color = sample, shape = sample), size = ptsz)
-        x_ang_ok <- as.numeric(input$axis_text_angle %||% "0") == 0
+        x_ang_ok <- x_angle_in() == 0
         g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
           scale_x_continuous(breaks = seq_along(tms), labels = as.character(tms), expand = expansion(add = 0.5),
                              guide = if (x_ang_ok && length(tms) >= 6) guide_axis(angle = 45) else waiver()) +
@@ -14620,7 +15009,7 @@ server <- function(input, output, session) {
                      mean = if (length(v)) mean(v) else NA_real_, sd = if (length(v)) ehw(v) else NA_real_, n = length(v),
                      stringsAsFactors = FALSE) }))
         summ$lo <- summ$mean - summ$sd; summ$hi <- summ$mean + summ$sd
-        x_guide <- if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+        x_guide <- if (x_angle_in() != 0) waiver()
           else if (nlevels(long$sample) >= 5 || max(nchar(levels(long$sample))) > 16) guide_axis(angle = 45)
           else if (max(nchar(levels(long$sample))) > 6) guide_axis(n.dodge = 2)
           else waiver()
@@ -14747,7 +15136,7 @@ server <- function(input, output, session) {
           data.frame(metric = "AUC", sample = factor(s, levels = levels(long$sample)), mean = if (length(v)) mean(v) else NA_real_,
                      sd = if (length(v)) ehw(v) else NA_real_, n = length(v), stringsAsFactors = FALSE) }))
         summ$lo <- summ$mean - summ$sd; summ$hi <- summ$mean + summ$sd
-        x_guide <- if (as.numeric(input$axis_text_angle %||% "0") != 0) waiver()
+        x_guide <- if (x_angle_in() != 0) waiver()
           else if (nlevels(long$sample) >= 5 || max(nchar(levels(long$sample))) > 16) guide_axis(angle = 45)
           else if (max(nchar(levels(long$sample))) > 6) guide_axis(n.dodge = 2)
           else waiver()
@@ -14876,6 +15265,7 @@ server <- function(input, output, session) {
   # The composed figure and its geometry, built once per input change and shared by
   # the preview, the note, the download and the reports. Panels whose figure is
   # "not available" (the placeholder) are skipped and listed in $skipped.
+  compose_clamp_seen <- new.env()
   compose_info <- reactive({
     req(rv$data, input$selected_samples)
     sel   <- input$compose_panels %||% character(0)
@@ -14909,6 +15299,17 @@ server <- function(input, output, session) {
                      tags_on = isTRUE(input$compose_tags %||% TRUE))
     else NULL
     sz_mm <- safe_figure_size_mm(w_mm, h_mm)       # hardening: the one size the preview, the note and the download use
+    # round 2: a size the clamp changed is said once (per distinct bad size), not on every render
+    tw <- suppressWarnings(as.numeric(input$compose_width_mm)); th <- suppressWarnings(as.numeric(input$compose_panel_height_mm))
+    typed_bad <- (identical(input$compose_width %||% "double", "custom") && !is.null(input$compose_width_mm) && !(length(tw) == 1L && is.finite(tw) && tw > 0)) ||
+                 (!is.null(input$compose_panel_height_mm) && !(length(th) == 1L && is.finite(th) && th >= 20 && th <= 250))
+    bad_key <- if (typed_bad || isTRUE(attr(sz_mm, "clamped"))) paste(format(input$compose_width_mm), format(input$compose_panel_height_mm), format(w_mm), format(h_mm)) else NA_character_
+    if (!identical(bad_key, compose_clamp_seen$key)) {
+      compose_clamp_seen$key <- bad_key
+      if (!is.na(bad_key))
+        tryCatch(showNotification(sprintf("Figure size was out of range and reset to %s x %s mm", format(round(sz_mm[1], 1), trim = TRUE), format(round(sz_mm[2], 1), trim = TRUE)),
+                                  type = "warning", duration = 8), error = function(e) invisible(NULL))
+    }
     list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
          types = unique(sub(":.*$", "", names(plots))), width_mm = sz_mm[1], height_mm = sz_mm[2],
          size_clamped = isTRUE(attr(sz_mm, "clamped")))
@@ -14992,7 +15393,7 @@ server <- function(input, output, session) {
                             info = c(paste0("reference: ", dname(input$metrics_ref_sample %||% "")), paste0("reference_raw: ", input$metrics_ref_sample %||% ""),
                                     paste0("method: ", input$stats_method %||% "welch")),
                             method = input$stats_method %||% "welch")
-    utils::write.csv(out, file, row.names = FALSE, fileEncoding = "UTF-8")
+    write_csv_safe(out, file, row.names = FALSE, fileEncoding = "UTF-8")
   }
   output$downloadAnalysisStatsCSV     <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
   output$downloadAnalysisStatsCSV_tab <- downloadHandler(filename = analysis_stats_csv_name, content = analysis_stats_csv_content)
@@ -15121,8 +15522,8 @@ server <- function(input, output, session) {
   # Statistics tab button (a Shiny output id can only be bound once, so each has a second id).
   stats_csv_name   <- function() paste0("summary_stats_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
   stats_csv_content <- function(file) {
-    req(rv$data, input$selected_samples)
-    write.csv(stats_table_display(), file, row.names = FALSE)
+    req(rv$data, input$selected_samples); refuse_if_empty()      # round 2 (A4): no 69-byte header-only file when no data is left
+    write_csv_safe(stats_table_display(), file, row.names = FALSE)
   }
   output$downloadStatsCSV     <- downloadHandler(filename = stats_csv_name, content = stats_csv_content)
   output$downloadStatsCSV_tab <- downloadHandler(filename = stats_csv_name, content = stats_csv_content)
@@ -15132,9 +15533,9 @@ server <- function(input, output, session) {
   # (sample = display name, sample_raw = column name), which is what the screen, the CSV files and the reports use.
   curve_metrics_current <- function() {
     m <- compute_curve_metrics(prepare_plot_data(),
-                          smooth_window       = input$metrics_smooth_window %||% 5,
+                          smooth_window       = smooth_win(),
                           ref_sample          = input$metrics_ref_sample,
-                          peak_smooth_window  = input$metrics_peak_smooth_window %||% 1,
+                          peak_smooth_window  = peak_win(),
                           peak_mode           = input$metrics_peak_mode %||% "global",
                           lysis_threshold     = lysis_threshold_current(),
                           extinction_threshold = extinction_current(),            # v2.22: Stats & Reports boxes
@@ -15189,8 +15590,8 @@ server <- function(input, output, session) {
 
   metrics_csv_name <- function() paste0("curve_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
   metrics_csv_content <- function(file) {
-    req(rv$data, input$selected_samples)
-    write.csv(present(curve_metrics_current(), "sample"), file, row.names = FALSE)
+    req(rv$data, input$selected_samples); refuse_if_empty()
+    write_csv_safe(present(curve_metrics_current(), "sample"), file, row.names = FALSE)
   }
   output$downloadMetricsCSV     <- downloadHandler(filename = metrics_csv_name, content = metrics_csv_content)
   output$downloadMetricsCSV_tab <- downloadHandler(filename = metrics_csv_name, content = metrics_csv_content)
@@ -15199,8 +15600,8 @@ server <- function(input, output, session) {
   # alongside curve_metrics_current() above.
   replicate_metrics_current <- function() {
     compute_replicate_metrics(prepare_replicate_data(),
-                              smooth_window      = input$metrics_smooth_window %||% 5,
-                              peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
+                              smooth_window      = smooth_win(),
+                              peak_smooth_window = peak_win(),
                               peak_mode          = input$metrics_peak_mode %||% "global",
                               lysis_threshold    = lysis_threshold_current(),
                               extinction_threshold = extinction_current(), t_stat_override = t_stat_override_current())   # v2.22
@@ -15208,8 +15609,8 @@ server <- function(input, output, session) {
 
   repmetrics_csv_name <- function() paste0("replicate_metrics_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
   repmetrics_csv_content <- function(file) {
-    req(rv$data, input$selected_samples)
-    write.csv(present(replicate_metrics_current(), "sample"), file, row.names = FALSE)
+    req(rv$data, input$selected_samples); refuse_if_empty()
+    write_csv_safe(present(replicate_metrics_current(), "sample"), file, row.names = FALSE)
   }
   output$downloadReplicateMetricsCSV     <- downloadHandler(filename = repmetrics_csv_name, content = repmetrics_csv_content)
   output$downloadReplicateMetricsCSV_tab <- downloadHandler(filename = repmetrics_csv_name, content = repmetrics_csv_content)
@@ -15312,6 +15713,7 @@ server <- function(input, output, session) {
   output$downloadFitFigure <- downloadHandler(
     filename = function() paste0(analysis_file_stem("fit_overlay", if (fixed_mode()) fit_size_in()), ".", input$export_format %||% "svg"),
     content  = function(file) {
+      refuse_if_empty()          # round 2 (EMP01): like downloadPlot, an empty state is refused, never written as a placeholder
       sz   <- fit_size_in(); fmt <- input$export_format
       args <- list(filename = file, plot = fit_plot_obj(), device = export_device(fmt),
                    width = sz[1], height = sz[2], units = "in", dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
@@ -15325,14 +15727,14 @@ server <- function(input, output, session) {
     content  = function(file) {
       req(rv$data, input$selected_samples)
       tab <- fit_table_current(); req(tab)
-      utils::write.csv(present(tab, "sample"), file, row.names = FALSE)
+      write_csv_safe(present(tab, "sample"), file, row.names = FALSE)
     })
   output$downloadFitsSummaryCSV <- downloadHandler(
     filename = function() paste0("curve_fits_replicate_summary_", fit_csv_stamp(), ".csv"),
     content  = function(file) {
       req(rv$data, input$selected_samples)
       sm <- fit_replicate_summary(fit_table_current()); req(sm)
-      utils::write.csv(present(sm, "sample"), file, row.names = FALSE)
+      write_csv_safe(present(sm, "sample"), file, row.names = FALSE)
     })
 
   # what a fit table says about its own reliability: the engine's `message` for every row that has one
@@ -15489,6 +15891,14 @@ server <- function(input, output, session) {
     res <- compare_all_metrics(rm, metrics = mets, ref_sample = input$metrics_ref_sample, method = input$stats_method %||% "welch")
     if (!is.null(res$table) && nrow(res$table) == 0) res$table <- NULL
     if (!is.null(res$table)) res$table$metric_label <- as.character(pheno_metric_label(res$table$metric))   # readable names for the extra columns too
+    if (!is.null(res$table)) {        # round 2 (EXT01): an extinction-time row says when a sample's NA is "starts below floor", not "never went extinct"
+      below <- function(s) { g <- rm[rm$sample == s, , drop = FALSE]; k <- if ("extinction_note" %in% names(g)) sum(!is.na(g$extinction_note)) else 0L
+                             if (k > 0L) sprintf("%s starts below floor (%d of %d replicates)", s, k, nrow(g)) else NA_character_ }
+      res$table$note <- vapply(seq_len(nrow(res$table)), function(i) {
+        if (!identical(res$table$metric[i], "extinction_time")) return("")
+        paste(stats::na.omit(c(below(as.character(res$table$sample[i])), below(as.character(res$table$versus[i])))), collapse = "; ")
+      }, character(1))
+    }
     res
   }
   # the extraction tables as {file name -> unformatted data frame}, only those the user has configured (times typed;
@@ -15528,10 +15938,10 @@ server <- function(input, output, session) {
   extract_stamp <- function() format(Sys.time(), "%Y%m%d_%H%M%S")
   output$downloadExtractODSummaryCSV <- downloadHandler(
     filename = function() paste0("od_at_times_summary_", extract_stamp(), ".csv"),
-    content  = function(file) { req(rv$data, input$selected_samples); s <- od_at_times_summary_current(); req(s); utils::write.csv(present(s, "sample"), file, row.names = FALSE) })
+    content  = function(file) { req(rv$data, input$selected_samples); s <- od_at_times_summary_current(); req(s); write_csv_safe(present(s, "sample"), file, row.names = FALSE) })
   output$downloadExtractODCSV <- downloadHandler(
     filename = function() paste0("od_at_times_per_replicate_", extract_stamp(), ".csv"),
-    content  = function(file) { req(rv$data, input$selected_samples); x <- od_at_times_rep_current(); req(x); utils::write.csv(present(x, "sample"), file, row.names = FALSE) })
+    content  = function(file) { req(rv$data, input$selected_samples); x <- od_at_times_rep_current(); req(x); write_csv_safe(present(x, "sample"), file, row.names = FALSE) })
 
   output$extract_tt_note <- renderUI({
     req(rv$data, input$selected_samples)
@@ -15552,10 +15962,10 @@ server <- function(input, output, session) {
   }, striped = TRUE, spacing = "xs")
   output$downloadExtractTTSummaryCSV <- downloadHandler(
     filename = function() paste0("time_to_threshold_summary_", extract_stamp(), ".csv"),
-    content  = function(file) { req(rv$data, input$selected_samples); s <- time_to_od_summary_current(); req(s); utils::write.csv(present(s, "sample"), file, row.names = FALSE) })
+    content  = function(file) { req(rv$data, input$selected_samples); s <- time_to_od_summary_current(); req(s); write_csv_safe(present(s, "sample"), file, row.names = FALSE) })
   output$downloadExtractTTCSV <- downloadHandler(
     filename = function() paste0("time_to_threshold_per_replicate_", extract_stamp(), ".csv"),
-    content  = function(file) { req(rv$data, input$selected_samples); x <- time_to_od_rep_current(); req(x); utils::write.csv(present(x, "sample"), file, row.names = FALSE) })
+    content  = function(file) { req(rv$data, input$selected_samples); x <- time_to_od_rep_current(); req(x); write_csv_safe(present(x, "sample"), file, row.names = FALSE) })
 
   output$allmetrics_notes <- renderUI({
     req(rv$data, input$selected_samples)
@@ -15574,7 +15984,7 @@ server <- function(input, output, session) {
   }, striped = TRUE, spacing = "xs")
   output$downloadAllMetricsCSV <- downloadHandler(
     filename = function() paste0("all_metrics_comparison_", extract_stamp(), ".csv"),
-    content  = function(file) { req(rv$data, input$selected_samples); res <- all_metrics_current(); req(res$table); utils::write.csv(with_stats_caveat(present(res$table)), file, row.names = FALSE) })
+    content  = function(file) { req(rv$data, input$selected_samples); res <- all_metrics_current(); req(res$table); write_csv_safe(with_stats_caveat(present(res$table)), file, row.names = FALSE) })
 
   # ── Curve phases, bootstrap intervals and separation from the reference (v2.20) ───────────────────────────
   # Engine: curve_phases_by_sample(), bootstrap_metrics(), curve_difference(), first_separation_time(); see
@@ -15582,7 +15992,7 @@ server <- function(input, output, session) {
   phases_current <- reactive({
     req(rv$data, input$selected_samples)
     ph <- curve_phases_by_sample(prepare_plot_data(),
-                                 smooth_window   = input$metrics_smooth_window %||% 5,
+                                 smooth_window   = smooth_win(),
                                  peak_mode       = input$metrics_peak_mode %||% "global",
                                  lysis_threshold = lysis_threshold_current())
     if (is.null(ph)) return(NULL)
@@ -15605,7 +16015,7 @@ server <- function(input, output, session) {
   }, striped = TRUE, spacing = "xs")
   output$downloadPhasesCSV <- downloadHandler(
     filename = function() paste0("curve_phases_", extract_stamp(), ".csv"),
-    content  = function(file) { req(rv$data, input$selected_samples); ph <- phases_current(); req(ph); utils::write.csv(present(ph, "sample"), file, row.names = FALSE) })
+    content  = function(file) { req(rv$data, input$selected_samples); ph <- phases_current(); req(ph); write_csv_safe(present(ph, "sample"), file, row.names = FALSE) })
 
   # separation from the reference: the per-time difference (with Welch p) and the first time it is significant
   difference_current <- reactive({
@@ -15651,7 +16061,7 @@ server <- function(input, output, session) {
   boot_signature <- function() {
     rp <- prepare_replicate_data()
     list(source = rv$data_source %||% "", samples = sort(as.character(input$selected_samples)),
-         smooth = input$metrics_smooth_window %||% 5, peak_smooth = input$metrics_peak_smooth_window %||% 1,
+         smooth = smooth_win(), peak_smooth = peak_win(),
          peak_mode = input$metrics_peak_mode %||% "global", thr = lysis_threshold_current(),
          n = nrow(rp), sum_value = signif(sum(rp$value), 10), sum_time = signif(sum(rp$time), 10),
          sum_rep = sum(as.numeric(rp$replicate)), sum_var = sum(match(as.character(rp$variable), as.character(input$selected_samples))))
@@ -15679,19 +16089,24 @@ server <- function(input, output, session) {
                                else "Choose at least one metric to bootstrap.")
       return(invisible(NULL))
     }
-    nb <- suppressWarnings(as.numeric(input$boot_n %||% 1000))
-    nb <- if (length(nb) != 1L || is.na(nb)) 1000L else as.integer(round(min(max(nb, -1), BOOT_N_MAX)))   # Inf -> the ceiling
+    nb_typed <- suppressWarnings(as.numeric(input$boot_n %||% 1000))
+    nb <- if (length(nb_typed) != 1L || is.na(nb_typed)) 1000L else as.integer(round(min(max(nb_typed, -1), BOOT_N_MAX)))   # Inf -> the ceiling
     nb <- min(max(nb, BOOT_N_MIN), BOOT_N_MAX)
+    # round 2 (BOOT01): a typed number outside the allowed range is clamped, and the note says so
+    boot_n_note <- if (length(nb_typed) == 1L && !is.na(nb_typed) && !isTRUE(all.equal(as.numeric(nb), nb_typed)))
+      sprintf("%s draws were typed; the allowed range is %d to %d, so %d were used.", format(nb_typed, scientific = FALSE, trim = TRUE), BOOT_N_MIN, BOOT_N_MAX, nb) else NULL
     sd <- suppressWarnings(as.integer(round(as.numeric(input$boot_seed %||% 1))))
     if (!length(sd) || is.na(sd)) sd <- 1L
     bt <- tryCatch(
       bootstrap_metrics(prepare_replicate_data(), mets, n_boot = nb, seed = sd,
-                        smooth_window = input$metrics_smooth_window %||% 5,
-                        peak_smooth_window = input$metrics_peak_smooth_window %||% 1,
+                        smooth_window = smooth_win(),
+                        peak_smooth_window = peak_win(),
                         peak_mode = input$metrics_peak_mode %||% "global", lysis_threshold = lysis_threshold_current()),
       error = function(e) { guard_notify("boot_run", paste("Bootstrap failed:", friendly_error_message(e)), "error"); NULL })
     if (is.null(bt)) return(invisible(NULL))
     nb_used <- attr(bt, "n_boot_used") %||% nb
+    bt_note <- paste(c(boot_n_note, attr(bt, "note")), collapse = " "); if (!nzchar(bt_note)) bt_note <- NULL
+    attr(bt, "note") <- bt_note
     boot_cache(list(table = bt, metrics = mets, dropped = dropped, n_boot = nb_used, seed = sd, note = attr(bt, "note"),
                     signature = boot_signature(), time = format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
     guard_notify("boot_run", paste0(sprintf("Bootstrap done: %d draws per sample for %d metric%s.", nb_used, length(mets),
@@ -15724,7 +16139,7 @@ server <- function(input, output, session) {
   }, striped = TRUE, spacing = "xs")
   output$downloadBootCSV <- downloadHandler(
     filename = function() paste0("bootstrap_intervals_", extract_stamp(), ".csv"),
-    content  = function(file) { b <- boot_cache(); req(b, b$table); utils::write.csv(present(b$table, "sample"), file, row.names = FALSE) })
+    content  = function(file) { b <- boot_cache(); req(b, b$table); write_csv_safe(present(b$table, "sample"), file, row.names = FALSE) })
   # the sentence the methods draft gains once a (current) bootstrap exists
   boot_methods_sentence <- function() {
     st <- tryCatch(boot_state(), error = function(e) NULL)
@@ -15759,7 +16174,7 @@ server <- function(input, output, session) {
   s22_dl <- function(id, stem, fun) {            # a CSV download of fun() (NULL: nothing to write)
     output[[id]] <- downloadHandler(
       filename = function() paste0(stem, "_", s22_stamp(), ".csv"),
-      content  = function(file) { req(rv$data, input$selected_samples); d <- fun(); req(d); utils::write.csv(d, file, row.names = FALSE) })
+      content  = function(file) { req(rv$data, input$selected_samples); d <- fun(); req(d); write_csv_safe(d, file, row.names = FALSE) })
   }
   s22_metrics_sel <- function(rm) {
     m <- intersect(as.character(input$s22_metrics %||% character(0)), names(rm))
@@ -15788,6 +16203,7 @@ server <- function(input, output, session) {
     output[[download_id]] <- downloadHandler(
       filename = function() paste0(stem, "_", file_label(input$analysis_panel_label, stem), "_", export_size_tag(if (fixed_mode()) size()), ".", input$export_format %||% "svg"),
       content  = function(file) {
+        refuse_if_empty()        # round 2 (EMP01)
         sz <- size(); fmt <- input$export_format
         args <- list(filename = file, plot = obj(), device = export_device(fmt), width = sz[1], height = sz[2], units = "in",
                      dpi = export_dpi_for(fmt, sz[1], sz[2]), bg = "white", limitsize = FALSE)
@@ -15920,7 +16336,7 @@ server <- function(input, output, session) {
                                               posthoc = if (!is.null(ph$posthoc)) s22_display(ph$posthoc, rv$display_names, c("group1", "group2"), keep_raw = TRUE)),
                               notes = c(as.character(unlist(ph$notes)), as.character(technical_rep_caveat())),
                               info = c(paste0("reference: ", dname(ph$reference)), paste0("reference_raw: ", ph$reference), paste0("method: ", ph$method)), method = ph$method)
-      utils::write.csv(out, file, row.names = FALSE, fileEncoding = "UTF-8")
+      write_csv_safe(out, file, row.names = FALSE, fileEncoding = "UTF-8")
     })
 
   # ── Time-course ANOVA ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -16435,7 +16851,7 @@ server <- function(input, output, session) {
       tmp <- tempfile("stats22_"); dir.create(tmp); on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
       fold <- "statistics_v222"; dir <- file.path(tmp, fold); dir.create(dir)
       ents <- stats22_tables_current(force = TRUE)    # the archive is explicit: both tabs' tables, whether or not the tabs were visited
-      for (e in ents) utils::write.csv(e$csv, file.path(dir, e$file), row.names = FALSE)
+      for (e in ents) write_csv_safe(e$csv, file.path(dir, e$file), row.names = FALSE)
       sents <- tryCatch(stats22_methods_sentences(force = TRUE), error = function(e) character(0))
       writeLines(enc2utf8(c("STATISTICS (v2.22)", paste0("Lysis Curve OD Visualization App v", APP_VERSION), paste0("Created: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
                             paste0("Data source: ", rv$data_source %||% "(unknown)"), "", "Tables:", paste0("  ", vapply(ents, function(e) e$file, "")),
@@ -16563,8 +16979,8 @@ server <- function(input, output, session) {
       if (isTRUE(input$enable_time_filter) || nzchar(time_windows_text())) "Only the displayed time window was analysed. " else "",
       if (nzchar(time_windows_text())) paste0("Per-sample time windows: ", time_windows_text(), ". ") else "",
       "At each time point the mean of the replicates was plotted. ", err)
-    win <- input$metrics_smooth_window %||% 5
-    pw  <- input$metrics_peak_smooth_window %||% 1
+    win <- smooth_win()
+    pw  <- peak_win()
     thr <- lysis_threshold_current() * 100
     first_local <- identical(input$metrics_peak_mode %||% "global", "first_local")
     s3 <- paste0(
@@ -16682,7 +17098,7 @@ server <- function(input, output, session) {
   }
   output$download_notebook_csv <- downloadHandler(
     filename = function() paste0(notebook_file_stem(), ".csv"),
-    content  = function(file) utils::write.csv(notebook_row_df(), file, row.names = FALSE, fileEncoding = "UTF-8")
+    content  = function(file) write_csv_safe(notebook_row_df(), file, row.names = FALSE, fileEncoding = "UTF-8")
   )
 
   # ── Figure bundle (v2.17) ────────────────────────────────────────────────────
@@ -16717,32 +17133,32 @@ server <- function(input, output, session) {
       rp <- prepare_replicate_data()
       src <- data.frame(time = rp$time, sample = as.character(rp$variable), replicate = rp$replicate,   # the source data keeps the file's own names
                         value = rp$value, stringsAsFactors = FALSE)
-      utils::write.csv(src, file.path(dir, "source_data_tidy.csv"), row.names = FALSE)
-      utils::write.csv(stats_table_display(), file.path(dir, "summary_statistics.csv"), row.names = FALSE)
+      write_csv_safe(src, file.path(dir, "source_data_tidy.csv"), row.names = FALSE)
+      write_csv_safe(stats_table_display(), file.path(dir, "summary_statistics.csv"), row.names = FALSE)
       cm <- tryCatch(present(curve_metrics_current(), "sample"), error = function(e) NULL)
-      if (!is.null(cm)) utils::write.csv(cm, file.path(dir, "curve_metrics.csv"), row.names = FALSE)
+      if (!is.null(cm)) write_csv_safe(cm, file.path(dir, "curve_metrics.csv"), row.names = FALSE)
       # v2.19: the fit parameters (current Curve fitting tab settings) and the configured extraction tables
       extra_csv <- character(0)
       ft <- tryCatch(fit_table_current(), error = function(e) NULL)
       if (!is.null(ft) && nrow(ft) > 0) {
-        utils::write.csv(present(ft, "sample"), file.path(dir, "fits.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "fits.csv")
+        write_csv_safe(present(ft, "sample"), file.path(dir, "fits.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "fits.csv")
       }
       # v2.20: the curve phases (every sample, phase, edges, duration, OD at the edges) and, when a current one is cached,
       # the bootstrap intervals
       ph <- tryCatch(phases_current(), error = function(e) NULL)
       if (!is.null(ph) && nrow(ph) > 0) {
-        utils::write.csv(present(ph, "sample"), file.path(dir, "phases.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "phases.csv")
+        write_csv_safe(present(ph, "sample"), file.path(dir, "phases.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "phases.csv")
       }
       bt <- tryCatch(boot_valid(), error = function(e) NULL)
       if (!is.null(bt)) {
-        utils::write.csv(present(bt, "sample"), file.path(dir, "bootstrap.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "bootstrap.csv")
+        write_csv_safe(present(bt, "sample"), file.path(dir, "bootstrap.csv"), row.names = FALSE); extra_csv <- c(extra_csv, "bootstrap.csv")
       }
       for (nm in names(ex_tabs <- tryCatch(extraction_tables_current(), error = function(e) list()))) {
-        utils::write.csv(ex_tabs[[nm]], file.path(dir, nm), row.names = FALSE); extra_csv <- c(extra_csv, nm)
+        write_csv_safe(ex_tabs[[nm]], file.path(dir, nm), row.names = FALSE); extra_csv <- c(extra_csv, nm)
       }
       # v2.22: the Statistics-tab and Curve-fitting tables the user has used (the "All v2.22 tables" archive has them all)
       for (e22 in tryCatch(stats22_tables_current(), error = function(e) list())) {
-        utils::write.csv(e22$csv, file.path(dir, e22$file), row.names = FALSE); extra_csv <- c(extra_csv, e22$file)
+        write_csv_safe(e22$csv, file.path(dir, e22$file), row.names = FALSE); extra_csv <- c(extra_csv, e22$file)
       }
       leg <- trimws(figure_legend_string())
       writeLines(enc2utf8(leg), file.path(dir, "figure_legend.txt"), useBytes = TRUE)
@@ -16875,9 +17291,9 @@ server <- function(input, output, session) {
                 input$export_dpi,
                 { b <- blank_od_effective(); if (is.na(b) || b == 0) "none (off)" else b },
                 { ct <- curation_text(); if (nzchar(ct)) ct else "none" },
-                input$metrics_smooth_window %||% 5,
-                paste0(input$metrics_peak_smooth_window %||% 1,
-                       if (identical(input$metrics_peak_smooth_window %||% 1, 1)) " (off)" else ""),
+                smooth_win(),
+                paste0(peak_win(),
+                       if (identical(peak_win(), 1)) " (off)" else ""),
                 if (identical(input$metrics_peak_mode %||% "global", "first_local"))
                   "first peak before a > 10 % decline" else "global maximum",
                 input$metrics_lysis_threshold_pct %||% 5,
@@ -17027,7 +17443,7 @@ server <- function(input, output, session) {
     ylab  <- input$y_axis_label %||% "OD"
     mets  <- input$analysis_metrics %||% c("lysis_time", "od_drop")
     moi   <- moi_map(samps, input$moi_override)
-    win   <- input$metrics_smooth_window %||% 5
+    win   <- smooth_win()
     norm_mode <- input$analysis_norm_mode %||% "reference"
     types <- c("metric_summary", "growth_rate", "od_rate",          # v2.22: dOD/dt after the specific growth rate
                if (nzchar(ref)) "normalized" else "replicate_overlay",
@@ -17305,7 +17721,7 @@ server <- function(input, output, session) {
     imp <- isolate(rv$imported_settings) %||% list(global = list(), samples = list())
     hide <- character(0)
     for (vn in hit) {
-      aes <- aes_map[[vn]]; vid <- safe_id(vn)
+      aes <- sanitize_sample_aes(aes_map[[vn]]); vid <- safe_id(vn)
       imp$samples[[vn]] <- modifyList(imp$samples[[vn]] %||% list(), aes)
       if (!is.null(aes$color)) {
         hex <- tryCatch(normalize_hex_color(as.character(aes$color)), error = function(e) as.character(aes$color))
@@ -17352,7 +17768,7 @@ server <- function(input, output, session) {
     nms <- theme_list()
     sel <- selected %||% isolate(input$active_theme) %||% ""
     if (!(sel %in% nms)) sel <- ""
-    updateSelectInput(session, "active_theme", choices = c("None" = "", setNames(nms, nms)), selected = sel)
+    updateSelectInput(session, "active_theme", choices = c("None" = "", setNames(nms, theme_display_names(nms))), selected = sel)
     invisible(nms)
   }
   refresh_theme_choices()
@@ -17384,7 +17800,7 @@ server <- function(input, output, session) {
     if (!isTRUE(isolate(input$theme_autoapply)) || !nzchar(key)) return(invisible(NULL))
     tryCatch({
       k <- theme_apply_named(key, rv$od_vars)
-      if (is.na(k)) showNotification(sprintf("Theme '%s' could not be read: styles not applied.", key), type = "warning")
+      if (is.na(k)) showNotification(theme_problem_message(key), type = "warning")
       else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
     }, error = function(e) invisible(NULL))
     invisible(NULL)
@@ -17401,7 +17817,7 @@ server <- function(input, output, session) {
     key <- input$active_theme %||% ""
     if (!nzchar(key)) { showNotification("Select a theme first.", type = "warning"); return() }
     k <- theme_apply_named(key, rv$od_vars)
-    if (is.na(k)) showNotification(sprintf("Theme '%s' is missing or unreadable.", key), type = "warning")
+    if (is.na(k)) showNotification(theme_problem_message(key), type = "warning")
     else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
   })
   observeEvent(input$delete_theme, {
@@ -17435,7 +17851,7 @@ server <- function(input, output, session) {
   rv_cmp <- reactiveValues(ds = NULL, error = NULL)
   compare_read_file <- function(path, name = path) {
     if (is_excel_file(name)) read_workbook_data(path, name)$data      # the same reader as the main path: the first sheet with data
-    else read_csv_locale_aware(path, input$csv_locale %||% "auto")
+    else fill_blank_headers(read_csv_locale_aware(path, input$csv_locale %||% "auto"))
   }
   compare_load <- function(path, name = path) {
     ds <- ingest_frame(compare_read_file(path, name), name)
@@ -17561,6 +17977,13 @@ server <- function(input, output, session) {
     filename = function() paste0(compare_file_stem(), ".", input$export_format %||% "svg"),
     content  = function(file) {
       req(rv$data, rv_cmp$ds)
+      refuse_if_empty()          # round 2 (EMP01): neither dataset may be an empty state
+      cp <- tryCatch(generate_compare_plot(), error = function(e) NULL)
+      if (!is.null(cp) && is_placeholder_plot(cp)) {
+        msg <- paste("Nothing to export.", "The second dataset has no data left after the current filters, or the comparison is not available.")
+        guard_notify("download_refused", msg, "warning")
+        stop(structure(class = c("kc_refused", "error", "condition"), list(message = msg, call = NULL)))
+      }
       sz <- compare_size_in(); fmt <- input$export_format %||% "svg"
       save_figure(compare_plot_obj(), file, sz[1], sz[2], fmt, input$export_dpi)
     })
@@ -17617,7 +18040,7 @@ server <- function(input, output, session) {
     put  <- function(obj, stem, w_in, h_in) {
       f <- file.path(dir, paste0(stem, ".", fmt)); save_figure(obj, f, w_in, h_in, fmt, dpi); written <<- c(written, basename(f))
     }
-    csv  <- function(df, name) { utils::write.csv(df, file.path(dir, name), row.names = FALSE, fileEncoding = "UTF-8"); written <<- c(written, name) }
+    csv  <- function(df, name) { write_csv_safe(df, file.path(dir, name), row.names = FALSE, fileEncoding = "UTF-8"); written <<- c(written, name) }
     attempt <- function(label, expr) tryCatch(expr, error = function(e) skip(label, friendly_error_message(e)))
     sz_custom <- if (!is.null(size_mm)) size_mm / 25.4 else NULL
     # one figure: p = the ggplot, kind = its panel kind, stem = the file stem

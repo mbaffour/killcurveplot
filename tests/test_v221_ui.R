@@ -318,7 +318,7 @@ check("a link from one guide to another jumps to that guide's section; the READM
       !grepl('href="kc_docs/USER_GUIDE.md"', hh, fixed = TRUE))
 check("the guide's own h1 is dropped (the section summary carries the title)",
       !grepl("<h1>How to label a figure</h1>", hh, fixed = TRUE))
-check("a missing guide is skipped, not an error", !grepl("Could not read", hh, fixed = TRUE))
+check("a missing guide is skipped, not an error", !grepl("<p><em>Could not read ", hh, fixed = TRUE))   # (the README itself says "Could not read ..." in its troubleshooting)
 old_opt <- options(killcurve.docs_dir = tempfile("nodocs_")); hh_none <- htmltools::renderTags(env$help_guides_ui())$html; options(old_opt)
 check("without a docs/ folder the tab says so instead of failing", grepl("was not found next to the app", hh_none, fixed = TRUE))
 old_opt <- options(killcurve.docs_dir = "/tmp/x"); dd_opt <- env$docs_dir_path(); options(old_opt)

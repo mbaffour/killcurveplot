@@ -815,5 +815,227 @@ check("R2-REG01: the sizes are identical with options(device = 'pdf') forced", i
 check("R2-REG01: rendering the startup figures leaves no Rplots.pdf behind", had_rplots || !file.exists("Rplots.pdf"))
 check("R2-REG01: no 'font family Arial not found' (or any) warning while measuring", !any(grepl("Arial|font family|PostScript", c(st_default$warn, st_pdf$warn))))
 
+# ── round 2 ── (settings, ingest, statistics, exports)
+# ── round 2: helpers ─────────────────────────────────────────────────────────
+R2 <- "tests/fixtures/round2"
+r2f <- function(f) file.path(R2, f)
+jf2 <- function(txt) { f <- tempfile(fileext = ".json"); writeLines(txt, f, useBytes = TRUE); f }
+# run `fn()` (which drives a testServer) with showNotification captured
+with_notes <- function(fn) {
+  got <- character(0); old <- env$showNotification
+  env$showNotification <- function(ui, ..., type = "default") { got <<- c(got, paste0("[", type, "] ", as.character(ui))); invisible(NULL) }
+  on.exit(env$showNotification <- old)
+  val <- fn(); list(value = val, notes = got)
+}
+demo_d <- env$make_demo_data("lysis")
+cat("\n--- round 2, section A: settings and theme files (A1, A2, A7, NUM03-NUM07, JSON01) ---\n")
+th_dir2 <- tempfile("themes2"); dir.create(th_dir2); writeLines("5", file.path(th_dir2, "Scalar.json")); writeLines('{"sample_aesthetics":5}', file.path(th_dir2, "Garbage.json"))
+old_th <- getOption("killcurve.themes_dir"); options(killcurve.themes_dir = th_dir2)
+errs_a1 <- character(0)
+na1 <- with_notes(function() { testServer(app, {
+  session$onUnhandledError(function(e) errs_a1 <<- c(errs_a1, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  session$setInputs(loadSettings = list(name = "s.json", datapath = jf2('{"global_settings":{},"sample_aesthetics":{"Uninfected":{"color":"#111111","shape":{},"line_type":{},"shape_filled":{}}}}'), size = 1, type = "x"))
+  session$setInputs(active_theme = "Scalar", apply_theme = 1); session$setInputs(active_theme = "Garbage", apply_theme = 2)
+}) })
+options(killcurve.themes_dir = old_th)
+check("A1/F07: a scalar theme file gives 'Theme file 'Scalar' is not a valid theme' and no unhandled observer error",
+      any(grepl("Theme file 'Scalar' is not a valid theme", na1$notes)) && length(errs_a1) == 0)
+check("A1/F07: a theme file whose sample_aesthetics is a scalar is refused the same way", any(grepl("Theme file 'Garbage' is not a valid theme", na1$notes)))
+sa <- env$sanitize_sample_aes(list(color = "#112233", shape_filled = list(), shape = "17", line_type = list(a = 1), legend_label = 5, hidden = "yes"))
+check("A1/F07: sanitize_sample_aes keeps usable values (colour, numeric shape, label) and drops a list / text where a checkbox is needed",
+      identical(sa$color, "#112233") && identical(sa$shape, 17) && identical(sa$legend_label, "5") && is.null(sa$shape_filled) && is.null(sa$line_type) && is.null(sa$hidden))
+
+read_case <- function(txt) {
+  msg <- NULL
+  r <- with_notes(function() { testServer(app, {
+    ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS)
+    session$setInputs(loadSettings = list(name = "s.json", datapath = jf2(txt), size = 1, type = "x"))
+    msg <<- rv$settings_status$msg }); msg })
+  r
+}
+bad_cases <- list(null = "null", empty = "", truncated = '{"global_settings":{"shape_size":3', text = "hello world", gs5 = '{"global_settings":5}', scalar = "5")
+for (nm in names(bad_cases)) { r <- read_case(bad_cases[[nm]])
+  check(sprintf("A2: a settings file that is %s gives ONE notification 'Could not read the settings file: ... Nothing was changed.'", nm),
+        length(r$notes) == 1L && grepl("^\\[error\\] Could not read the settings file: .+\\. Nothing was changed\\.$", r$notes) && !grepl("\\$ operator|atomic", r$notes)) }
+cz <- env$translate_old_settings(list(x_scale_type = "log", color_0 = "#ff0000"), NULL, c("x_scale_type"))
+check("A2: an old-app 'color_0' key is listed under the ignored keys with a reason (not dropped silently)", "color_0" %in% names(cz$ignored) && nzchar(cz$ignored[["color_0"]]))
+
+cat("\n--- NUM03-NUM07 / JSON01: every numeric key is type-checked and clamped (the hang proofs are run in separate processes under a 90 s alarm during hardening; here the clamped values are checked) ---\n")
+chk <- env$check_setting_value
+check("NUM05/NUM06: shape_size 1e308 is clamped into its slider range (0.5-8); axis_text_angle 1e308 to 360",
+      near(chk("shape_size", 1e308)$value, 8) && isTRUE(chk("shape_size", 1e308)$clamped) && identical(chk("axis_text_angle", 1e308)$value, "360"))
+check("NUM03: y_log exponents (no declared box range) are clamped to -12..12 from the static table", near(chk("y_log_min_exponent", 1e308)$value, 12) && near(chk("y_log_max_exponent", -400)$value, -12))
+check("NUM04: x_expand_* = -1 and point_stroke = -1 are clamped to 0", near(chk("x_expand_left", -1)$value, 0) && near(chk("point_stroke", -1)$value, 0))
+check("NUM07: a wrong-type value is ignored with a reason (text for a number, a number for a checkbox, a list for a select)",
+      !chk("shape_size", "abc")$ok && !chk("show_points", 5)$ok && !chk("color_palette", list())$ok && !chk("shape_size", NA)$ok && !chk("shape_size", Inf)$ok)
+check("NUM07: a numeric value for a text select is read as its text; a string longer than 10 000 characters is cut",
+      identical(chk("compose_ncol", 2)$value, "2") && nchar(chk("x_axis_label", strrep("B", 5e6))$value) == 10000L && isTRUE(chk("x_axis_label", strrep("B", 5e6))$clamped))
+check("NUM07: NUMERIC_KEY_RANGES covers the keys the UI leaves open, and every numeric APP_DEFAULTS key has a finite clamp",
+      all(c("y_log_min_exponent", "x_tick_interval", "axis_text_angle") %in% names(env$NUMERIC_KEY_RANGES)) &&
+        all(vapply(names(env$APP_DEFAULTS)[vapply(env$APP_DEFAULTS, is.numeric, NA)], function(k) is.finite(env$clamp_numeric_setting(k, 1e308)), NA)))
+# live probe (round 2): the same angle sent straight to the input (a scripted client; no settings file, so no clamp) kept grid busy
+# for minutes. Every read of the angle goes through x_angle_in(): finite and inside one turn.
+t0 <- Sys.time(); ang_ok <- FALSE; ang_val <- NA_real_
+testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  session$setInputs(axis_text_angle = 1e308)
+  setTimeLimit(elapsed = 120, transient = TRUE); on.exit(setTimeLimit(elapsed = Inf), add = TRUE)
+  g <- main_plot_obj(); f <- tempfile(fileext = ".png")
+  ang_ok <<- tryCatch({ ggplot2::ggsave(f, g, device = env$export_device("png"), width = 3, height = 2, dpi = 40); file.exists(f) }, error = function(e) FALSE)
+  ang_val <<- x_angle_in()
+})
+el_ang <- as.numeric(Sys.time() - t0, units = "secs")
+check("NUM06 (typed): axis_text_angle = 1e308 sent straight to the input renders in under 30 s (it hung) and is read as a finite angle inside one turn",
+      ang_ok && el_ang < 30 && is.finite(ang_val) && abs(ang_val) <= 360)
+nb <- with_notes(function() read_case('{"global_settings":{"shape_size":1e308,"axis_text_angle":1e308,"point_stroke":-1,"line_thickness":"abc","show_points":5,"color_palette":[]}}'))
+check("NUM04-07: one notification counts the clamped and the ignored keys", length(nb$value$notes) == 1L && grepl("3 settings were out of range and clamped; 3 settings had the wrong type", nb$value$notes))
+t0 <- Sys.time(); big <- read_case(paste0('{"global_settings":{', paste(sprintf('"k%d":%d', 1:50000, 1:50000), collapse = ","), '}}')); el_big <- as.numeric(Sys.time() - t0, units = "secs")
+check("JSON01: a settings file with 50 000 unknown keys loads in well under 20 s (was quadratic: 100 000 keys took 28 s)", el_big < 20 && grepl("global setting", big$value))
+t0 <- Sys.time(); tr <- env$translate_old_settings(list(global_settings = as.list(setNames(rep(1, 20000), paste0("notes_k", 1:20000)))), NULL, "a"); el_tr <- as.numeric(Sys.time() - t0, units = "secs")
+check("A7/#45: translate_old_settings on 20 000 keys takes under 2 s (was 5 s; 50 000 keys 24 s)", el_tr < 2 && tr$kind == "lca" && length(tr$ignored) == 20000L)
+
+cat("\n--- A3 / A4 / A5: notifications and refusals ---\n")
+ca3 <- with_notes(function() { w3 <- NA_real_; testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+  session$setInputs(panel_size_mode = "fit", compose_width = "custom", compose_width_mm = -5, compose_panel_height_mm = 60, compose_panels = "main")
+  a <- compose_info(); a2 <- compose_info(); a3 <- compose_info()
+  w3 <<- a$width_mm }); w3 })
+check("A3: an out-of-range compose size is reset to the default (183 mm) and the notification 'Figure size was out of range and reset to ...' appears once, not per render",
+      near(ca3$value, 183) && sum(grepl("Figure size was out of range and reset to 183", ca3$notes)) == 1L)
+ca4 <- with_notes(function() { out <- list(); testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+  session$setInputs(enable_time_filter = TRUE, exclude_timepoints = paste(rv$all_timepoints, collapse = ","))
+  for (h in c("downloadMetricsCSV_tab", "downloadStatsCSV_tab", "downloadMetricsCSV", "downloadReplicateMetricsCSV_tab", "downloadRepQCCSV", "downloadRepQCSamplesCSV", "downloadFitFigure", "downloadQQFigure", "downloadFitResidFigure"))
+    out[[h]] <<- tryCatch({ f <- output[[h]]; paste("FILE", file.size(f)) }, error = function(e) conditionMessage(e)) })
+  out })
+check("A4: with no data left the Metrics CSV and Stats CSV downloads refuse ('Nothing to export') instead of writing a 3 / 69 byte file",
+      grepl("^Nothing to export", ca4$value$downloadMetricsCSV_tab) && grepl("^Nothing to export", ca4$value$downloadStatsCSV_tab) && grepl("^Nothing to export", ca4$value$downloadMetricsCSV) && grepl("^Nothing to export", ca4$value$downloadReplicateMetricsCSV_tab))
+check("EMP01: the Fit, Q-Q and residual figure downloads refuse in an empty state like downloadPlot (no placeholder file)",
+      all(grepl("^Nothing to export", unlist(ca4$value[c("downloadFitFigure", "downloadQQFigure", "downloadFitResidFigure")]))))
+check("EMP02: replicate-QC downloads with no rows refuse; the QC table does not raise 'replacement has 1 row'", all(grepl("^Nothing to export", unlist(ca4$value[c("downloadRepQCCSV", "downloadRepQCSamplesCSV")]))))
+cmp0 <- NULL; testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1], export_format = "svg")
+  rv_cmp$ds <- ingest_frame(data.frame(Time = numeric(0), A = numeric(0), B = numeric(0)), "zero rows", strict = FALSE)
+  cmp0 <<- tryCatch({ f <- output$downloadCompare; paste("FILE", file.size(f)) }, error = function(e) conditionMessage(e)) })
+check("EMP01: the Compare download with a zero-row second dataset refuses instead of writing a placeholder figure", grepl("^Nothing to export", cmp0))
+w3601 <- data.frame(Time = seq(0, by = 10, length.out = 3601), A = round(0.05 + 0.4 * (1 - exp(-seq(0, 3600) / 600)), 4), B = round(0.06 + 0.3 * (1 - exp(-seq(0, 3600) / 800)), 4))
+ca5 <- with_notes(function() { testServer(app, {
+  ingest_data(w3601, "W1"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  p <- main_plot_obj(); ggplot2::ggsave(tempfile(fileext = ".png"), p, device = env$export_device("png"), width = 3, height = 2, dpi = 40); p2 <- main_plot_obj()
+  TRUE }) })
+check("A5: a 3601-point file at default settings raises no tick-guard notification at all (the auto interval widens for a 36 000-minute axis)", !any(grepl("tick interval", ca5$notes)))
+check("A5: auto_x_interval keeps 10 / 30 / 60 where it always did and widens only past the guard (axis end 36 000 -> <= 500 ticks)",
+      identical(env$auto_x_interval(50), c(10, 5)) && identical(env$auto_x_interval(100), c(30, 10)) && identical(env$auto_x_interval(600), c(60, 30)) && 36000 / env$auto_x_interval(36000)[1] <= 24)
+cg <- with_notes(function() { testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  session$setInputs(use_advanced_ticks = TRUE, x_tick_interval = 0.00001)
+  for (i in 1:3) invisible(generate_plot()); TRUE }) })
+check("A5: the same tick-guard message raised by three builds in one cycle is shown ONCE", sum(grepl("tick interval would draw", cg$notes)) == 1L)
+
+cat("\n--- A6: engine details (#8, #41, #28, #37, #44) ---\n")
+check("A6/#8: parse_time_column on one date-time value gives 0 (not NA)", identical(env$parse_time_column("2024-01-01 10:00:00")$values, 0))
+d41 <- data.frame(time = c(0, 10, NA, 20), variable = "Phage", v = 1:4)
+w1 <- env$apply_sample_time_windows(d41, list(Phage = c(NA, NA)))
+w2 <- env$apply_sample_time_windows(d41[c(1, 2, 4), ], list(Phage = c(100, 10)))
+w3 <- env$apply_sample_time_windows(data.frame(time = c(0, 10, 20, 30), variable = "P", v = 1:4), list(P = c(25, 5)))
+check("A6/#41: an NA time row with an open window is dropped (no all-NA row); a reversed window is swapped, with a note",
+      nrow(w1) == 3 && !anyNA(w1$time) && nrow(w3) == 2 && all(w3$time == c(10, 20)) && any(grepl("swapped", attr(w3, "curation_notes"))))
+check("A6/#28: parse_moi 'MOI 1e400' and 'MOI 1_000' are NA; 'MOI 0.1' still 0.1", all(is.na(env$parse_moi(c("MOI 1e400", "MOI 1_000")))) && near(env$parse_moi("MOI 0.1"), 0.1))
+td37 <- tempfile("th37"); dir.create(td37)
+k1 <- env$theme_write("a b", list(S = list(color = "#111111")), dir = td37); k2 <- env$theme_write("a_b", list(S = list(color = "#222222")), dir = td37)
+check("A6/#37: theme_write('a b') then theme_write('a_b') keep two files (the second gets a hash suffix) and the display names are kept",
+      k1 == "a_b" && k2 != k1 && grepl("^a_b_", k2) && length(env$theme_list(td37)) == 2 && setequal(unname(env$theme_display_names(env$theme_list(td37), td37)), c("a b", "a_b")) &&
+        env$theme_read("a b", td37)$sample_aesthetics$S$color == "#111111")
+gg44 <- ggplot2::ggplot(data.frame(x = 1:3, y = 1:3), ggplot2::aes(x, y)) + ggplot2::geom_point()
+bp <- env$build_parity_frames(list(gg44), 60, 50, fit_w_in = 0.1, fit_h_in = 0.1)
+check("A6/#44: build_parity_frames in an impossible box keeps panels >= 5 mm and reports fitted = FALSE", bp$panel_w_mm >= 5 && bp$panel_h_mm >= 5 && isFALSE(bp$fitted))
+
+cat("\n--- A8 / A9 / ING01-ING08: ingest ---\n")
+r <- drive(r2f("L08_long_numeric_group.csv"))
+check("A8/L08: Time, MOI, OD (numeric MOI 0 / 0.1 / 1 at every time point) is LONG with samples 'MOI 0', 'MOI 0.1', 'MOI 1'", isTRUE(r$loaded) && isTRUE(r$long) && setequal(r$samples, c("MOI 0", "MOI 0.1", "MOI 1")) && identical(r$group, "MOI"))
+wide3 <- data.frame(Time = 0:5 * 10, WT = round(runif(6), 3), Mut = round(runif(6), 3)); f3 <- tempfile(fileext = ".csv"); write.csv(wide3, f3, row.names = FALSE)
+w4 <- data.frame(Time = 0:5 * 10, dose = c(1, 1, 1, 2, 2, 2), OD = round(runif(6), 3)); f4 <- tempfile(fileext = ".csv"); write.csv(w4, f4, row.names = FALSE)
+check("A8: a 3-column WIDE file (Time, WT, Mut) and a 'dose' column whose values are not present at every time point stay wide",
+      !isTRUE(drive(f3)$long) && !isTRUE(drive(f4)$long))
+r <- drive(r2f("L04_extra_factors.csv"))
+check("A9/L04: Strain + Treatment give samples 'WT phage', 'Mut none' ... (columns joined in column order) and the summary names the combined columns",
+      isTRUE(r$loaded) && setequal(r$samples, c("WT phage", "Mut phage", "WT none", "Mut none")) && any(grepl("combine the columns 'Strain' and 'Treatment'", r$notes)))
+r <- drive(r2f("L02_time_strain_rep_od.csv")); r5 <- drive(r2f("L05_rep_ids_rep1.csv"))
+check("A9: strain + replicate (L02) and Sample + Replicate (L05) are unchanged: the replicate column is never combined", setequal(r$samples, c("WT", "MutA", "Ctrl")) && setequal(r5$samples, c("WT", "MutA", "Ctrl")))
+r <- drive(r2f("ing07_blank_replicate_headers.csv"))
+check("ING07: CSV 'Time,WT,,,Mut,,' loads WT (3 columns) and Mut (3 columns)", isTRUE(r$loaded) && identical(r$dim[2], 7L) && setequal(r$samples, c("WT", "Mut")) && !any(grepl("no numeric readings", r$notes)))
+cmp7 <- NULL; testServer(app, { cmp7 <<- names(compare_read_file(r2f("ing07_blank_replicate_headers.csv"), "x.csv")) })
+check("ING07: the Compare reader fills blank replicate headers too", identical(cmp7, c("Time", "WT", "WT", "WT", "Mut", "Mut", "Mut")))
+r <- drive(r2f("ing02_clock_0030_start_midnight.csv")); ra <- drive(r2f("ing02_ampm_1205am.csv"))
+check("ING02: a clock column starting 00:30 and running through midnight is time of day: 0..1770, ONE block, 60 distinct times", isTRUE(r$loaded) && identical(as.integer(r$blocks), 1L) && length(r$tp) == 60 && near(min(r$tp), 0) && near(max(r$tp), 1770))
+check("ING02: '12:05 AM' gives 0, 15, 30, 45, 60", identical(ra$tp, c(0, 15, 30, 45, 60)))
+check("ING02: a Gen5 elapsed clock starting at 0:00:00 is still left alone", identical(env$parse_time_column(c("0:00:00", "10:00:00", "20:00:00", "1:00:00", "11:00:00"))$values, c(0, 600, 1200, 60, 660)))
+r3 <- drive(r2f("ing03_unreadable_time_3_of_6.csv")); r1 <- drive(r2f("ing03_unreadable_time_1_of_6.csv")); rt <- drive(r2f("ing03_one_typo_in_ten.csv"))
+check("ING03: dropped rows are counted ('3 rows had no readable time and were dropped'); one typo in ten says '1 row'", any(grepl("^3 rows had no readable time and were dropped", r3$notes)) && any(grepl("^1 row had no readable time and was dropped", rt$notes)))
+check("ING03: a time column with fewer than half readable cells (1 of 6) is refused, nothing loaded", !isTRUE(r1$loaded) && any(grepl("Only 1 of 6 rows have a readable time", r1$notes)))
+r <- drive(r2f("ing04_quoted_decimal_comma_mixed_cols.csv"))
+check("ING04: quoted decimal commas are decided once per file: '1,234' next to '0,123' reads as 1.234, not 1234", isTRUE(r$loaded) && near(r$pd$mean_value[r$pd$variable == "Mut"][1], 1.234) && near(r$pd$mean_value[r$pd$variable == "WT"][1], 0.123))
+r2 <- drive(r2f("ing05_one_preamble_line_2fields.csv")); r3f <- drive(r2f("ing05_one_preamble_line_3fields.csv"))
+check("ING05: a ONE-line preamble (2 or 3 fields) above the table is skipped: header kept, no false European-decimal refusal",
+      isTRUE(r2$loaded) && identical(r2$time_col, "Time") && setequal(r2$samples, c("WT", "Mut", "Ctrl")) && isTRUE(r3f$loaded) && identical(r3f$time_col, "Time") && setequal(r3f$samples, c("WT", "Mut", "Ctrl")))
+r <- drive(r2f("ing08_long_plate_vs_isolate.csv")); rb <- drive(r2f("ing08_blank_group_cells.csv"))
+check("ING08: long file Time, Plate (2 values), Isolate (4 values), OD: the MOST distinct candidate (Isolate) is the sample column", isTRUE(r$long) && identical(r$group, "Isolate") && length(r$samples) == 4)
+check("ING08: blank group cells are dropped with a count, not a sample called ''", !("" %in% rb$samples) && any(grepl("2 rows had no value in the sample column 'Isolate' and were dropped", rb$notes)))
+r <- drive(r2f("ing01_utf16le_odd_byte.csv"))
+check("ING01: UTF-16LE with a stray trailing byte loads", isTRUE(r$loaded) && setequal(r$samples, c("WT", "Mut")))
+if (has_pkg("openxlsx")) {
+  wbf <- tempfile(fileext = ".xlsx"); wbk <- openxlsx::createWorkbook(); openxlsx::addWorksheet(wbk, "Summary"); openxlsx::writeData(wbk, 1, data.frame(Metric = c("a", "b"), Value = c("x", "y")))
+  openxlsx::addWorksheet(wbk, "Data"); openxlsx::writeData(wbk, 2, data.frame(Time = 0:5 * 10, WT = runif(6), Mut = runif(6))); openxlsx::saveWorkbook(wbk, wbf, overwrite = TRUE)
+  sh <- NULL; nn <- with_notes(function() { testServer(app, { session$setInputs(file = list(name = "wb.xlsx", datapath = wbf, size = 1, type = "")); sh <<- rv$xlsx_sheets }) })
+  check("ING06b: a workbook whose first sheet has no table still exposes the sheet list, and says 'Sheet 'Summary' has no table; pick another sheet.'", identical(sh, c("Summary", "Data")) && any(grepl("Sheet 'Summary' has no table; pick another sheet", nn$notes)))
+} else skipit("ING06b: openxlsx not installed")
+r <- drive("L16_long_strain_only_small.csv", want_plot = FALSE)
+check("PERF01: a plate above 48 samples gets the 'Large plate' load note; 3 samples do not",
+      { big <- as.data.frame(matrix(round(runif(5 * 60), 3), 5, 60)); names(big) <- paste0("S", 1:60); big <- cbind(Time = 0:4 * 10, big); fb <- tempfile(fileext = ".csv"); write.csv(big, fb, row.names = FALSE)
+        rb <- drive(fb, want_plot = FALSE); any(grepl("Large plate \\(60 samples\\)", rb$notes)) && !any(grepl("Large plate", r$notes)) })
+
+cat("\n--- NUM01 / NUM02 / EXT01 / STAT01 / CSV01 / BOOT01 / rolling_slope ---\n")
+cn1 <- with_notes(function() { out <- list(); testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+  session$setInputs(metrics_smooth_window = NA, metrics_peak_smooth_window = NaN)
+  out$cm <<- tryCatch(nrow(curve_metrics_current()), error = function(e) conditionMessage(e))
+  session$setInputs(metrics_smooth_window = 0, metrics_peak_smooth_window = -1)
+  out$cm0 <<- tryCatch(nrow(curve_metrics_current()), error = function(e) conditionMessage(e))
+  session$setInputs(theme_base_pt = 1e308, legend_key_mm = 1e308)
+  out$fig <<- tryCatch({ ggplot2::ggsave(tempfile(fileext = ".png"), main_plot_obj(), device = env$export_device("png"), width = 3, height = 2, dpi = 40); "ok" }, error = function(e) conditionMessage(e))
+  session$setInputs(use_advanced_ticks = TRUE, y_scale_type = "log", y_log_min_exponent = 1e308, y_log_max_exponent = -400)
+  out$log <<- tryCatch({ ggplot2::ggsave(tempfile(fileext = ".png"), generate_plot(), device = env$export_device("png"), width = 3, height = 2, dpi = 40); "ok" }, error = function(e) conditionMessage(e))
+  }); out })
+check("NUM01: a cleared / NaN / 0 / negative smoothing window gives the curve-metrics table (default window), not 'missing value where TRUE/FALSE needed'", is.numeric(cn1$value$cm) && cn1$value$cm > 0 && is.numeric(cn1$value$cm0) && cn1$value$cm0 > 0)
+check("NUM02: theme_base_pt and legend_key_mm typed 1e308 still render (num_or guard)", identical(cn1$value$fig, "ok"))
+check("NUM03: y_log exponents typed 1e308 / -400 on a log axis still render", identical(cn1$value$log, "ok"))
+lo <- data.frame(time = rep(c(0, 10, 20, 30), 2), variable = rep(c("Low", "High"), each = 4), mean_value = c(.04, .03, .03, .02, .3, .5, .2, .02))
+rp <- data.frame(time = rep(c(0, 10, 20, 30), 4), variable = rep(c("Low", "High"), each = 8), replicate = rep(rep(1:2, each = 4), 2), value = c(.04, .03, .03, .02, .04, .03, .03, .02, .3, .5, .2, .02, .31, .5, .2, .02))
+rm2 <- env$compute_replicate_metrics(rp); am <- env$compare_all_metrics(env$compute_replicate_metric_rows(rp), metrics = "extinction_time")
+check("EXT01: the replicate-metrics table carries extinction_note ('starts below floor (2 of 2 replicates)')", "extinction_note" %in% names(rm2) && grepl("starts below floor \\(2 of 2", rm2$extinction_note[rm2$sample == "Low"]) && is.na(rm2$extinction_note[rm2$sample == "High"]))
+ex_all <- NULL; testServer(app, { d_low <- demo_d; d_low[[5]] <- d_low[[5]] * 0.02
+  ingest_data(d_low, "low"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+  ex_all <<- tryCatch(all_metrics_current()$table, error = function(e) NULL) })
+check("EXT01: the all-metrics table has a 'note' column that says so on the extinction_time rows", is.data.frame(ex_all) && "note" %in% names(ex_all) && any(grepl("starts below floor", ex_all$note[ex_all$metric == "extinction_time"])))
+tw <- env$two_way_time_anova; mk_tc <- function(reps) { set.seed(2); rows <- list(); for (s in 1:3) for (r in seq_len(reps)) rows[[length(rows) + 1]] <- data.frame(sample = paste0("S", s), well = paste0("w", r), time = seq(0, 120, by = 15), od = 0.1 + 0.01 * s * seq(0, 120, by = 15) / 15 + rnorm(9, 0, 0.01), stringsAsFactors = FALSE); do.call(rbind, rows) }
+check("STAT01: the time-course ANOVA note names the real n (2 and 8 wells), not a fixed 3", grepl("n = 2 wells per sample", tw(mk_tc(2))$note) && grepl("n = 8 wells per sample", tw(mk_tc(8))$note))
+csvd <- data.frame(sample = c("=1+1", "-ve control", "+x", "@y", "WT", "-0.5"), n = 1:6, time = 6:1, replicate = 1:6, stringsAsFactors = FALSE); fcs <- tempfile(fileext = ".csv"); env$write_csv_safe(csvd, fcs, row.names = FALSE); back <- utils::read.csv(fcs, stringsAsFactors = FALSE)
+check("CSV01: cells starting with = + - @ get a leading space in every CSV (a plain 'WT' and the number-like '-0.5' are untouched)",
+      identical(back$sample, c(" =1+1", " -ve control", " +x", " @y", "WT", "-0.5")) && identical(back$n, 1:6) && identical(names(back), c("sample", "n", "time", "replicate")))
+csv_dl <- NULL; testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+  rv$display_names <- setNames(c("-ve control", rv$od_vars[-1]), rv$od_vars); csv_dl <<- tryCatch(utils::read.csv(output$downloadMetricsCSV_tab, stringsAsFactors = FALSE), error = function(e) NULL) })
+check("CSV01: the Metrics CSV download escapes a sample display name that starts with '-'", is.data.frame(csv_dl) && any(grepl("^ -ve control", csv_dl$sample)))
+bm <- env$bootstrap_metrics(rp[rp$variable == "High", ], "max_od", n_boot = 200, seed = 1)
+bud <- { set.seed(3); rr <- do.call(rbind, lapply(c("A", "B", "C"), function(s) do.call(rbind, lapply(1:6, function(k) data.frame(time = 0:30 * 10, variable = s, replicate = k, value = 0.1 + 0.8 / (1 + exp(-(0:30 - 12) / 3)) + rnorm(31, 0, 0.02)))))); env$bootstrap_metrics(rr, c("max_od", "mu_max"), n_boot = 400, seed = 1, budget_s = 0.001) }
+nu <- tapply(bud$n_boot_ok, bud$sample, max)
+check("BOOT01: when the time budget stops a run, every sample is summarised from the SAME number of draws and the note says 'not reproducible'", length(unique(nu)) == 1L && grepl("not reproducible", attr(bud, "note")) && grepl("same number for every sample", attr(bud, "note")))
+bn <- with_notes(function() { bnote <- NULL; testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1], boot_metrics = "max_od", boot_n = 10000, boot_run = 1); bnote <<- boot_cache()$note }); bnote })
+check("BOOT01: a boot_n outside the allowed range is clamped with a note", grepl("10000 draws were typed; the allowed range is", bn$value) )
+rs <- env$rolling_slope(c(5, 5, 5, 5, 5), c(1, 2, 3, 4, 5), 3)
+check("rolling_slope: a window of all-equal times has no slope (NA), a normal window is unchanged", all(is.na(rs)) && near(env$rolling_slope(0:4, c(1, 3, 5, 7, 9), 3)[2], 2))
+
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (fail > 0) quit(status = 1)
