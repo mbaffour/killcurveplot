@@ -10722,7 +10722,7 @@ INPUT_SANE <- list(
   line_thickness = c(APP_DEFAULTS$line_thickness, 0, 10), error_bar_thickness = c(APP_DEFAULTS$error_bar_thickness, 0, 10),
   axis_line_pt = c(APP_DEFAULTS$axis_line_pt, 0, 10), tick_length_mm = c(APP_DEFAULTS$tick_length_mm, 0, 50),
   # round 3: the two point sliders (a scripted client sends 1e308 / -1; 1e308 as a point size kept grid busy for minutes)
-  shape_size = c(APP_DEFAULTS$shape_size, 0, 50), point_stroke = c(APP_DEFAULTS$point_stroke, 0, 10),
+  shape_size = c(APP_DEFAULTS$shape_size, 0, 8), point_stroke = c(APP_DEFAULTS$point_stroke, 0, 2),      # the sliders' own ranges (a 50 mm point is a blob)
   compose_tag_size = c(8, 4, 20))
 
 # Declared min / max of every static numericInput and sliderInput, read off the UI tree: input id -> c(min, max) (NA = no

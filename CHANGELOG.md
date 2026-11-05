@@ -4,8 +4,9 @@
 
 **One tool instead of three, and a hardening pass.** The features of the N4-paper lysis-curve app and of the older
 lysis-curve-app are now in this app (data tab, transforms, compare, presets, themes, notes, batch export, markup, error
-modes, panels, matrix legend), with a statistics and curve-fitting layer comparable to GraphPad Prism. Then two rounds
-of adversarial testing (about 20 000 server cells, 190 ingest files, 46 engine probes) and four fixing passes. The
+modes, panels, matrix legend), with a statistics and curve-fitting layer comparable to GraphPad Prism. Then three rounds
+of adversarial testing (about 20 000 server cells, 190 ingest files, 46 engine probes, 3 434 direct-input cells) and five
+fixing passes. The
 journal startup figure (Nature single column, 89 x 65 mm) is unchanged; see *Result changes* below for the four
 numbers that moved on purpose.
 
@@ -75,7 +76,7 @@ numbers that moved on purpose.
 ### Click-to-edit labels on the figure (v2.22.0) and Help tab (v2.22.1)
 - See the two entries below; both are part of this release.
 
-### Hardening (`tests/test_v222_hardening.R`, 300+ checks, fixtures in `tests/fixtures/`)
+### Hardening (`tests/test_v222_hardening.R`, 320+ checks, fixtures in `tests/fixtures/`)
 - **File load never ends the session.** The CSV branch of the file observer is wrapped like the Excel branch; empty,
   binary, UTF-16 (Excel "Unicode Text", SoftMax Pro), Latin-1 / cp1252 and gzip-renamed files either load (UTF-16,
   Latin-1) or refuse with a plain sentence ending "The file was not loaded." Header-only, time-only, one-column,
@@ -116,6 +117,15 @@ numbers that moved on purpose.
   under the time budget and a clamped `boot_n` is noted, reversed per-sample windows are swapped, `MOI 1e400` is NA,
   no panel below 5 mm, one notification per distinct bad size, a one-time "may take a minute" note for large plates,
   and CSV cells that start with `=`, `+`, `-`, `@` or a tab are prefixed with a space (spreadsheet formula injection).
+- **Round 3 (every input driven directly, 3 434 cells).** A scripted client or a settings file can send a select a value
+  that is not one of its choices, a number box a word, a slider 1e308, or a custom-message handler a bare string; 31 of
+  those ended the session (an unhandled observer error), one hung (a 1e308 point size) and 131 reached the figure area as
+  raw R text. Now: the settings loader checks every static select and radio value against the control's choices (counted
+  with the wrong-type keys); typed numbers are read through one clamp (the control's own range, the default when the box
+  is empty or not a number); the point-size and stroke sliders are held to their ranges; the cell-edit, quick-edit and file
+  observers ignore a malformed message; the sample selection keeps only samples of the loaded file; single selects are read
+  as one string among the choices, else the default. A re-run of the 178 failing cells shows none left. The guard-message
+  window is 20 s so a slow machine still shows a repeated guard once per cycle.
 
 ### Result changes (on purpose; all are visible in the tables and methods text)
 - `extinction_time` is a crossing **from above** the floor. A curve that starts below 0.05 and never rises above it is

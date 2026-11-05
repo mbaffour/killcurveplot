@@ -216,14 +216,17 @@ testServer(app, {
   session$setInputs(selected_samples = "no such sample", exclude_timepoints = "", metrics_ref_sample = "")
   rp <- tryCatch(prepare_replicate_data(), error = function(e) e)
   pp <- tryCatch(prepare_plot_data(), error = function(e) e)
-  check("prepare_replicate_data(): zero rows, the four columns, no error",
-        is.data.frame(rp) && nrow(rp) == 0 && identical(names(rp), c("time", "variable", "replicate", "value")))
-  check("prepare_plot_data(): zero rows with its usual columns, no error",
-        is.data.frame(pp) && nrow(pp) == 0 &&
-        identical(names(pp), c("time", "variable", "mean_value", "sd_value", "n", "sem_value", "ci95_value")))
+  # round 3: names that are not in the loaded file are not a selection, so the builders stop with a silent req() and the figure
+  # says "Select at least one sample."; a zero-row frame (the pre-round-3 answer) is accepted too
+  silent <- function(x) inherits(x, "shiny.silent.error")
+  check("prepare_replicate_data(): zero rows with the four columns, or a silent req; no R error",
+        silent(rp) || (is.data.frame(rp) && nrow(rp) == 0 && identical(names(rp), c("time", "variable", "replicate", "value"))))
+  check("prepare_plot_data(): zero rows with its usual columns, or a silent req; no R error",
+        silent(pp) || (is.data.frame(pp) && nrow(pp) == 0 &&
+        identical(names(pp), c("time", "variable", "mean_value", "sd_value", "n", "sem_value", "ci95_value"))))
   st <- tryCatch(analysis_stats_current(), error = function(e) e)
-  check("analysis_stats_current(): the empty structure, no error",
-        is.list(st) && !inherits(st, "error") && is.null(st$pairwise) && is.null(st$omnibus) && is.null(st$posthoc))
+  check("analysis_stats_current(): the empty structure or a silent req; no R error",
+        silent(st) || (is.list(st) && !inherits(st, "error") && is.null(st$pairwise) && is.null(st$omnibus) && is.null(st$posthoc)))
   ok_out <- function(id) tryCatch({ output[[id]]; TRUE }, error = function(e) inherits(e, "shiny.silent.error"))
   check("Statistics-tab outputs tolerate it (value or a silent req)",
         all(vapply(c("stats_tab_summary", "stats_tab_metrics", "stats_tab_repmetrics", "stats_tab_notes",
@@ -234,7 +237,7 @@ testServer(app, {
   lg <- data.frame(Time = rep(c(0, 10, 20), each = 2), Group = "A", Val = c(.1, .1, .2, .2, .4, .4), stringsAsFactors = FALSE)
   ingest_data(lg, "long.csv")
   session$setInputs(selected_samples = "zzz")
-  check("long format: zero-row frames as well", tryCatch(nrow(prepare_replicate_data()) == 0 && nrow(prepare_plot_data()) == 0, error = function(e) FALSE))
+  check("long format: zero-row frames or a silent req as well", tryCatch(nrow(prepare_replicate_data()) == 0 && nrow(prepare_plot_data()) == 0, error = function(e) silent(e)))
 })
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))

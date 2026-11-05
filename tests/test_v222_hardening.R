@@ -1076,8 +1076,8 @@ check("R3-NIN01: a cleared box (NA), text, a list and NaN fall back to the defau
       identical(unname(nn$na["em"]), env$APP_DEFAULTS$error_multiplier) && identical(unname(nn$na["pl"]), env$APP_DEFAULTS$panel_label_size) && identical(unname(nn$na["ts"]), 8) &&
         identical(unname(nn$na["ebw"]), env$APP_DEFAULTS$error_bar_width) && identical(unname(nn$na["ss"]), env$APP_DEFAULTS$shape_size) &&
         identical(unname(nn$na["ps"]), env$APP_DEFAULTS$point_stroke) && identical(unname(nn$na["xr"]), env$APP_DEFAULTS$x_expand_right))
-check("R3-NIN01: 1e308 is held to the UI range (error_multiplier 5, panel label 20, cap width 50, point size 50) and a negative stroke / expand / tag size to the default",
-      identical(unname(nn$big["em"]), 5) && identical(unname(nn$big["pl"]), 20) && identical(unname(nn$big["ebw"]), 50) && identical(unname(nn$big["ss"]), 50) &&
+check("R3-NIN01: 1e308 is held to the UI range (error_multiplier 5, panel label 20, cap width 50, point size 8 = the slider max) and a negative stroke / expand / tag size to the default",
+      identical(unname(nn$big["em"]), 5) && identical(unname(nn$big["pl"]), 20) && identical(unname(nn$big["ebw"]), 50) && identical(unname(nn$big["ss"]), 8) &&
         identical(unname(nn$big["ps"]), env$APP_DEFAULTS$point_stroke) && identical(unname(nn$big["ts"]), 8) && identical(unname(nn$big["xr"]), env$APP_DEFAULTS$x_expand_right))
 check("R3-NIN01: none of this raised an unhandled observer error", length(errs3) == 0)
 
@@ -1096,7 +1096,7 @@ testServer(app, {
 })
 el_p <- as.numeric(Sys.time() - t0, units = "secs")
 check(sprintf("R3-NIN02: shape_size = 1e308 and point_stroke = -1 sent straight to the inputs render in under 30 s (%.0f s; the point size hung for minutes)", el_p), isTRUE(r3p$ok) && el_p < 30 && length(errs_p) == 0)
-check(sprintf("R3-NIN02: the largest plotted point size is the clamped 50 and no stroke is negative or huge (size %s, strokes %s)", format(r3p$size), paste(format(r3p$stroke), collapse = ",")), identical(r3p$size, 50) && length(r3p$stroke) > 0 && all(r3p$stroke >= 0 & r3p$stroke <= 10))
+check(sprintf("R3-NIN02: the largest plotted point size is the clamped 8 (the slider max) and no stroke is negative or huge (size %s, strokes %s)", format(r3p$size), paste(format(r3p$stroke), collapse = ",")), identical(r3p$size, 8) && length(r3p$stroke) > 0 && all(r3p$stroke >= 0 & r3p$stroke <= 10))
 
 cat("\n--- round 3: observers fed a scalar instead of a message ---\n")
 errs_o <- character(0); ob <- list()

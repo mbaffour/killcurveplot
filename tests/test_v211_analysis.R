@@ -241,7 +241,8 @@ testServer(app, {
   eb <- p_bk$layers[[which(layer_names(p_bk) == "GeomErrorbar")[1]]]
   check("black error bars carry a fixed colour, not the sample colour", identical(eb$aes_params$colour, "black"))
   session$setInputs(error_bar_color = "sample", error_cap_relative = FALSE, error_bar_width = 1)
-  session$setInputs(error_type = "sd", error_multiplier = 15)  # SD x 15 crosses zero on the log axis (x 5 does not for the demo data)
+  # SD x 5 with 0.02 of blank subtracted crosses zero on the log axis (round 3: a typed multiplier is held to the box maximum of 5)
+  session$setInputs(error_type = "sd", error_multiplier = 5, blank_od = 0.02)
   p_fl <- generate_plot(); real_plot("log-floor bars render", p_fl)
   eb_d <- layer_data(p_fl, which(layer_names(p_fl) == "GeomErrorbar")[1])
   check("bars that cross zero are floored at the axis minimum (10^-2), not dropped",
@@ -254,7 +255,7 @@ testServer(app, {
   eb_d3 <- layer_data(generate_plot(), which(layer_names(generate_plot()) == "GeomErrorbar")[1])
   check("v2.17: with 'clip to the floor' even those bars are kept (drawn down to the floor)",
         sum(is.finite(eb_d3$ymin)) == sum(is.finite(eb_d$ymin)))
-  session$setInputs(error_log_floor = TRUE, error_multiplier = 1, error_type = "sem")
+  session$setInputs(error_log_floor = TRUE, error_multiplier = 1, error_type = "sem", blank_od = 0)
   session$setInputs(legend_order = "selected")
   p_ord <- generate_plot()
   check("sample order 'selected' keeps the file order in the main figure (Uninfected first)",

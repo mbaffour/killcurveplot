@@ -602,8 +602,9 @@ no readable time value, every reading OVER). Fix the file, or pick another sheet
 the per-sample time windows or the replicate exclusions (Data tab). Relax one of them; downloads are refused until data are back.
 
 **"Could not read the settings file ..." / "This is not a settings file ..." / "N settings were out of range and clamped."** — A
-settings or theme file is checked key by key (v2.23): a value of the wrong type is ignored and a number outside its box's range is
-pulled into range, with one notification; a file that is not JSON or not a settings object is refused and nothing changes.
+settings or theme file is checked key by key (v2.23): a value of the wrong type, or a choice that the control does not offer, is
+ignored and a number outside its box's range is pulled into range, with one notification; a file that is not JSON or not a
+settings object is refused and nothing changes.
 
 **The app is slow or laggy.** — If you have a very large number of samples, the app may take a moment to update. The app debounces inputs (waits 400ms after you stop adjusting before redrawing), so slight delays are intentional.
 
