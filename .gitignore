@@ -2,3 +2,5 @@ docs/gallery/*
 !docs/gallery/gallery.png
 Rplots.pdf
 .claude/
+!docs/gallery/main.png
+!docs/gallery/metric_summary.png

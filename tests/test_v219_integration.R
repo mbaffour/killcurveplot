@@ -440,8 +440,8 @@ testServer(app, {
           grepl("<h2>Curve fits</h2>", html, fixed = TRUE) && grepl("<h3>Fitted growth curves</h3>", html, fixed = TRUE) &&
           grepl("<h3>Fitted parameters</h3>", html, fixed = TRUE) && grepl("<th>Lag (time units)</th>", html, fixed = TRUE) &&
           grepl("&#10003;|✓", html))
-  check("the fit figure is an image (main, metric summary, growth rate, normalized, landmarks, phases, separation, dose-response, heatmap, composed = 10 + the fit figure; v2.20 added phases and separation)",
-          n_img(html) == 11)
+  check("the fit figure is an image (main, metric summary, growth rate, normalized, landmarks, phases, separation, dose-response, heatmap, composed = 10 + the fit figure; v2.20 added phases and separation; v2.22 the dOD/dt figure)",
+          n_img(html) == 12)
     check("the section comes after the analysis figures and before the replicate statistics",
           regexpr("<h3>Curve landmarks</h3>", html, fixed = TRUE) < regexpr("<h2>Curve fits</h2>", html, fixed = TRUE) &&
           regexpr("<h2>Curve fits</h2>", html, fixed = TRUE) < regexpr("<h2>Replicate statistics</h2>", html, fixed = TRUE))

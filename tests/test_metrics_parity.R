@@ -168,6 +168,14 @@ if (isTRUE(ref_ok)) {
     cols <- if (nm == "flat")
       setdiff(shared_cols, c("mu_max", "doubling_time", "lag_phase"))
     else shared_cols
+    # deliberate deviation (hardening round 1, finding 12): extinction is a crossing FROM ABOVE the floor. The reference
+    # reports the first time point for a curve that starts below it; ours reports the first later crossing from above
+    # (the curve grew, then fell back below the floor) or NA when there is none.
+    if (is.finite(pd$mean_value[1]) && pd$mean_value[1] < 0.05) {
+      cols <- setdiff(cols, "extinction_time")
+      check(paste0("extinction_time: ref = t_start; ours = a later crossing or NA for a curve that starts below the floor: ", nm),
+            both_equal(ref$extinction_time, pd$time[1]) && (is.na(new$extinction_time) || new$extinction_time > pd$time[1]))
+    }
     ok  <- TRUE
     for (cc in cols) {
       if (!both_equal(ref[[cc]], new[[cc]])) {

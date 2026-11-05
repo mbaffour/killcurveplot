@@ -53,11 +53,11 @@ check("the toggle is client-side: the page script flips kc-sticky on shiny:input
 secs <- regmatches(ui_html, gregexpr('<details class="kc-section" id="sec_[a-z_]+"><summary>[^<]*</summary>', ui_html))[[1]]
 sec_titles <- sub('.*<summary>(.*)</summary>', "\\1", secs)
 sec_ids    <- sub('.*id="sec_([a-z_]+)".*', "\\1", secs)
-check("13 sidebar sections are accordion sections, one per SIDEBAR_SECTIONS entry, in order",
-      length(secs) == 13 && identical(sec_ids, unname(env$SIDEBAR_SECTIONS)) &&
+check("every sidebar section (13 + the v2.22 Panels section) is an accordion section, one per SIDEBAR_SECTIONS entry, in order",
+      length(secs) == length(env$SIDEBAR_SECTIONS) && length(secs) == 14 && identical(sec_ids, unname(env$SIDEBAR_SECTIONS)) &&
       identical(sec_titles, htmltools::htmlEscape(names(env$SIDEBAR_SECTIONS))))
 check("every sidebar <summary> is an accordion section (none left behind as a plain <details>)",
-      length(gregexpr("<summary>", sub('(?s)<div id="main_panel".*', "", ui_html, perl = TRUE), fixed = TRUE)[[1]]) == 13)
+      length(gregexpr("<summary>", sub('(?s)<div id="main_panel".*', "", ui_html, perl = TRUE), fixed = TRUE)[[1]]) == 14)
 check("the Statistics tab's sections stay independent (no kc-section class)",
       grepl('<details class="stats-section">', ui_html, fixed = TRUE) && !grepl('class="stats-section kc-section"', ui_html, fixed = TRUE))
 blk  <- regmatches(ui_html, regexpr('<select[^>]*id="sidebar_jump".*?</select>', ui_html))
@@ -69,7 +69,8 @@ check("the jump menu is a native select (keyboard friendly) with a Collapse all 
       !grepl("selectized", blk, fixed = TRUE) && grepl('class="btn btn-link btn-xs kc-collapse-all"', ui_html, fixed = TRUE))
 check("accordion script: closes the other sections when one opens (toggle event, native keyboard behaviour kept)",
       grepl("addEventListener('toggle'", ui_html, fixed = TRUE) && grepl("closeOthers(d)", ui_html, fixed = TRUE) &&
-      grepl("scrollIntoView({block: 'start'})", ui_html, fixed = TRUE) && !grepl("preventDefault", ui_html, fixed = TRUE))
+      grepl("scrollIntoView({block: 'start'})", ui_html, fixed = TRUE) &&
+      !grepl("preventDefault", sub("(?s).*?(function sections\\(\\).*?closeOthers\\(d\\).*?\\}\\)\\(\\);).*", "\\1", ui_html, perl = TRUE), fixed = TRUE))   # v2.22: the markup buttons' script (a separate block) uses preventDefault on purpose
 check("no section is open at the start", !grepl("<details class=\"kc-section\"[^>]* open", ui_html))
 check("the three moved widgets are static inputs in the Lysis curve tab, after the figure",
       all(vapply(c("x_axis_label", "y_axis_label", "legend_position", "quick_edit_open", "quick_edit_rows"),
@@ -176,8 +177,8 @@ testServer(app, {
   rc <- csv_of(repmetrics_csv_content)
   check("per-replicate metrics CSV: sample + sample_raw", identical(names(rc)[1:2], c("sample", "sample_raw")) && "Wild type" %in% rc$sample)
   ac <- readLines({ tf <- tempfile(fileext = ".csv"); analysis_stats_csv_content(tf); tf })
-  check("replicate statistics CSV: the reference in both forms, versus_raw next to versus",
-        any(grepl(paste0("reference,Wild type ; reference_raw,", ref), ac, fixed = TRUE)))
+  check("replicate statistics CSV (one rectangular long table): the reference in both forms, in info rows",
+        any(grepl("reference: Wild type", ac, fixed = TRUE)) && any(grepl(paste0("reference_raw: ", ref), ac, fixed = TRUE)))
   ex <- extraction_tables_current()
   check("extraction tables: sample + sample_raw in the summary and the per-replicate table",
         length(ex) == 4 && all(vapply(ex, function(x) identical(names(x)[names(x) %in% c("sample", "sample_raw")], c("sample", "sample_raw")), logical(1))) &&
@@ -288,6 +289,48 @@ testServer(app, {
   si(setNames(list(FALSE, FALSE), paste0("qe_show_", sid(smp[1:2]))))
   check("several boxes at once", identical(quick_edit_selection(), smp[3]))
 })
+
+cat("\n--- v2.22.1: Help tab (the docs/ guides rendered in the app) ---\n")
+tabs <- sub('data-value="(.*)"', "\\1", regmatches(ui_html, gregexpr('data-value="[^"]+"', ui_html))[[1]])
+check("the Help tab is the last main tab, after Curve fitting",
+      "Help" %in% tabs && match("Help", tabs) > match("Curve fitting", tabs))
+check("it opens with the labelling summary", grepl("How to label a figure", ui_html, fixed = TRUE) &&
+      grepl("Sample names", ui_html, fixed = TRUE) && grepl("Panel letters", ui_html, fixed = TRUE))
+check("the guides are a server output, so no document text sits in the static page",
+      grepl('id="help_guides"', ui_html, fixed = TRUE) && !grepl("kc-help-doc", ui_html, fixed = TRUE))
+hh <- gsub("[ \t\r\n]+", " ", htmltools::renderTags(env$help_guides_ui())$html)
+testServer(app, {
+  session$setInputs(main_tabs = "Help")
+  check("output help_guides renders the same sections", identical(gsub("[ \t\r\n]+", " ", output$help_guides$html), hh))
+})
+check("the labelling tutorial is rendered from docs/LABELLING_HOWTO.md and open by default",
+      grepl('<details class="kc-help-doc" id="help_LABELLING_HOWTO" open>', hh, fixed = TRUE) &&
+      grepl("ten-minute walkthrough", hh, fixed = TRUE) && grepl("Common mistakes", hh, fixed = TRUE))
+check("the user guide, figure standards, metrics reference, README and changelog are sections too (closed)",
+      all(vapply(c("help_USER_GUIDE", "help_FIGURE_STANDARDS", "help_METRICS_REFERENCE", "help_README", "help_CHANGELOG"),
+                 function(id) grepl(paste0('<details class="kc-help-doc" id="', id, '">'), hh, fixed = TRUE), logical(1))))
+check("tables of the tutorial are rendered as HTML tables (commonmark GitHub extension)",
+      !requireNamespace("commonmark", quietly = TRUE) || grepl("<th>Symptom</th>", hh, fixed = TRUE))
+check("images under docs/ are served from the kc_docs resource path",
+      grepl('src="kc_docs/gallery/main.png"', hh, fixed = TRUE) && !grepl('src="gallery/', hh, fixed = TRUE))
+check("a link from one guide to another jumps to that guide's section; the README link too",
+      grepl('href="#help_USER_GUIDE"', hh, fixed = TRUE) && grepl('href="#help_README"', hh, fixed = TRUE) &&
+      !grepl('href="kc_docs/USER_GUIDE.md"', hh, fixed = TRUE))
+check("the guide's own h1 is dropped (the section summary carries the title)",
+      !grepl("<h1>How to label a figure</h1>", hh, fixed = TRUE))
+check("a missing guide is skipped, not an error", !grepl("<p><em>Could not read ", hh, fixed = TRUE))   # (the README itself says "Could not read ..." in its troubleshooting)
+old_opt <- options(killcurve.docs_dir = tempfile("nodocs_")); hh_none <- htmltools::renderTags(env$help_guides_ui())$html; options(old_opt)
+check("without a docs/ folder the tab says so instead of failing", grepl("was not found next to the app", hh_none, fixed = TRUE))
+old_opt <- options(killcurve.docs_dir = "/tmp/x"); dd_opt <- env$docs_dir_path(); options(old_opt)
+check("docs_dir_path(): the option wins, else docs/ under the working directory",
+      identical(dd_opt, "/tmp/x") && identical(env$docs_dir_path(), file.path(getwd(), "docs")))
+tmpd <- tempfile("help_"); dir.create(file.path(tmpd, "docs"), recursive = TRUE)
+writeLines(c("# T", "", "See [the guide](USER_GUIDE.md#x) and ![i](gallery/p.png).", "", "| a | b |", "|---|---|", "| 1 | 2 |"),
+           file.path(tmpd, "docs", "LABELLING_HOWTO.md"))
+h <- env$render_help_doc(file.path(tmpd, "docs", "LABELLING_HOWTO.md"), list("USER_GUIDE.md" = "help_USER_GUIDE"), "docs")
+check("render_help_doc: anchors (with a fragment) rewritten, images prefixed, h1 dropped",
+      grepl('href="#help_USER_GUIDE"', h, fixed = TRUE) && grepl('src="kc_docs/gallery/p.png"', h, fixed = TRUE) &&
+      !grepl("<h1>", h, fixed = TRUE))
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (fail > 0) quit(status = 1)
