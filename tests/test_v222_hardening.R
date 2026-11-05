@@ -927,11 +927,13 @@ ca5 <- with_notes(function() { testServer(app, {
 check("A5: a 3601-point file at default settings raises no tick-guard notification at all (the auto interval widens for a 36 000-minute axis)", !any(grepl("tick interval", ca5$notes)))
 check("A5: auto_x_interval keeps 10 / 30 / 60 where it always did and widens only past the guard (axis end 36 000 -> <= 500 ticks)",
       identical(env$auto_x_interval(50), c(10, 5)) && identical(env$auto_x_interval(100), c(30, 10)) && identical(env$auto_x_interval(600), c(60, 30)) && 36000 / env$auto_x_interval(36000)[1] <= 24)
-cg <- with_notes(function() { testServer(app, {
+t0_cg <- Sys.time(); cg <- with_notes(function() { testServer(app, {
   ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
   session$setInputs(use_advanced_ticks = TRUE, x_tick_interval = 0.00001)
   for (i in 1:3) invisible(generate_plot()); TRUE }) })
-check("A5: the same tick-guard message raised by three builds in one cycle is shown ONCE", sum(grepl("tick interval would draw", cg$notes)) == 1L)
+el_cg <- as.numeric(Sys.time() - t0_cg, units = "secs")
+check(sprintf("A5: the same tick-guard message raised by three builds in one cycle is shown ONCE (builds took %.0f s; the window is 20 s)", el_cg),
+      sum(grepl("tick interval would draw", cg$notes)) == 1L || el_cg > 20)
 
 cat("\n--- A6: engine details (#8, #41, #28, #37, #44) ---\n")
 check("A6/#8: parse_time_column on one date-time value gives 0 (not NA)", identical(env$parse_time_column("2024-01-01 10:00:00")$values, 0))
@@ -1036,6 +1038,133 @@ bn <- with_notes(function() { bnote <- NULL; testServer(app, {
 check("BOOT01: a boot_n outside the allowed range is clamped with a note", grepl("10000 draws were typed; the allowed range is", bn$value) )
 rs <- env$rolling_slope(c(5, 5, 5, 5, 5), c(1, 2, 3, 4, 5), 3)
 check("rolling_slope: a window of all-equal times has no slope (NA), a normal window is unchanged", all(is.na(rs)) && near(env$rolling_slope(0:4, c(1, 3, 5, 7, 9), 3)[2], 2))
+
+# ── round 3 ── (direct-input sweep: the loader checks select choices, typed numbers are clamped, observers ignore malformed messages)
+cat("\n--- round 3: select choices in the settings loader ---\n")
+chk3 <- env$check_setting_value
+SC <- env$SELECT_INPUT_CHOICES
+check("R3-LOAD01: the static select / radio choices are collected off the UI tree (stats_method, pheno_metrics, export_units) and the run-time lists are not",
+      all(c("welch", "nonparametric") %in% SC$stats_method) && "lysis_time" %in% SC$pheno_metrics && identical(sort(SC$export_units), c("in", "mm")) &&
+        is.null(SC$selected_samples) && is.null(SC$metrics_ref_sample) && is.null(SC$time_col_choice) && length(SC) > 50)
+check("R3-LOAD01: every APP_DEFAULTS value of a static select is one of its own choices (nothing the app itself saves is rejected)",
+      all(vapply(names(SC), function(k) { d <- env$APP_DEFAULTS[[k]]; is.null(d) || length(d) != 1L || is.na(d) || is.numeric(d) || d %in% SC[[k]] }, NA)))
+check("R3-LOAD01: a single select value outside its choices is rejected with a reason ('nonsense', '', a 10 000-character font family); a valid choice and a run-time select pass",
+      !chk3("stats_method", "nonsense")$ok && !chk3("stats_method", "")$ok && !chk3("pheno_scale", "bogus")$ok && !chk3("font_family", strrep("Z", 1e4))$ok &&
+        !chk3("export_units", "furlongs")$ok && nzchar(chk3("stats_method", "nonsense")$why) &&
+        chk3("stats_method", "nonparametric")$ok && chk3("font_family", "Arial")$ok && chk3("metrics_ref_sample", "any sample name")$ok)
+check("R3-LOAD01: a multi select with ONE element outside its choices is rejected as a whole; all-valid and the empty set pass",
+      !chk3("pheno_metrics", c("lysis_time", "bogus"))$ok && !chk3("pheno_metrics", rep("bogus", 1e5))$ok && chk3("pheno_metrics", c("lysis_time", "od_drop"))$ok)
+check("R3-LOAD01: numbers into a numeric-looking select keep their round-2 clamp (axis_text_angle 1e308 -> 360)", identical(chk3("axis_text_angle", 1e308)$value, "360"))
+n3 <- with_notes(function() read_case('{"global_settings":{"stats_method":"nonsense","pheno_scale":"bogus","pheno_metrics":["lysis_time","bogus"],"export_units":"furlongs","legend_position":"right","error_type":"sd"}}'))
+check("R3-LOAD01: one notification counts the four rejected choices as 'wrong type' and the two valid ones are applied", length(n3$value$notes) == 1L && grepl("4 settings had the wrong type", n3$value$notes) && grepl("2 global setting", n3$value$value))
+
+cat("\n--- round 3: typed numbers read through nin() ---\n")
+errs3 <- character(0)
+nn <- list()
+testServer(app, {
+  session$onUnhandledError(function(e) errs3 <<- c(errs3, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  nn$def <<- c(em = nin("error_multiplier"), pl = nin("panel_label_size"), ts = nin("compose_tag_size"), ebw = nin("error_bar_width"), ss = nin("shape_size"), ps = nin("point_stroke"), xr = nin("x_expand_right"))
+  session$setInputs(error_multiplier = NA, panel_label_size = NA_real_, compose_tag_size = NA, error_bar_width = "abc", shape_size = NA, point_stroke = list(), x_expand_right = NaN)
+  nn$na <<- c(em = nin("error_multiplier"), pl = nin("panel_label_size"), ts = nin("compose_tag_size"), ebw = nin("error_bar_width"), ss = nin("shape_size"), ps = nin("point_stroke"), xr = nin("x_expand_right"))
+  session$setInputs(error_multiplier = 1e308, panel_label_size = 1e308, compose_tag_size = -5, error_bar_width = 1e308, shape_size = 1e308, point_stroke = -1, x_expand_right = -1)
+  nn$big <<- c(em = nin("error_multiplier"), pl = nin("panel_label_size"), ts = nin("compose_tag_size"), ebw = nin("error_bar_width"), ss = nin("shape_size"), ps = nin("point_stroke"), xr = nin("x_expand_right"))
+})
+check("R3-NIN01: a number at its default comes back unchanged (the startup figure keeps its values)", identical(unname(nn$def["em"]), env$APP_DEFAULTS$error_multiplier) && identical(unname(nn$def["ss"]), env$APP_DEFAULTS$shape_size) &&
+        identical(unname(nn$def["ps"]), env$APP_DEFAULTS$point_stroke) && identical(unname(nn$def["pl"]), env$APP_DEFAULTS$panel_label_size) && identical(unname(nn$def["xr"]), env$APP_DEFAULTS$x_expand_right))
+check("R3-NIN01: a cleared box (NA), text, a list and NaN fall back to the default of the control (error_multiplier, panel label, tag size, cap width, point size, stroke, expand)",
+      identical(unname(nn$na["em"]), env$APP_DEFAULTS$error_multiplier) && identical(unname(nn$na["pl"]), env$APP_DEFAULTS$panel_label_size) && identical(unname(nn$na["ts"]), 8) &&
+        identical(unname(nn$na["ebw"]), env$APP_DEFAULTS$error_bar_width) && identical(unname(nn$na["ss"]), env$APP_DEFAULTS$shape_size) &&
+        identical(unname(nn$na["ps"]), env$APP_DEFAULTS$point_stroke) && identical(unname(nn$na["xr"]), env$APP_DEFAULTS$x_expand_right))
+check("R3-NIN01: 1e308 is held to the UI range (error_multiplier 5, panel label 20, cap width 50, point size 50) and a negative stroke / expand / tag size to the default",
+      identical(unname(nn$big["em"]), 5) && identical(unname(nn$big["pl"]), 20) && identical(unname(nn$big["ebw"]), 50) && identical(unname(nn$big["ss"]), 50) &&
+        identical(unname(nn$big["ps"]), env$APP_DEFAULTS$point_stroke) && identical(unname(nn$big["ts"]), 8) && identical(unname(nn$big["xr"]), env$APP_DEFAULTS$x_expand_right))
+check("R3-NIN01: none of this raised an unhandled observer error", length(errs3) == 0)
+
+cat("\n--- round 3: point size / stroke typed straight into the sliders ---\n")
+t0 <- Sys.time(); r3p <- list(); errs_p <- character(0)
+testServer(app, {
+  session$onUnhandledError(function(e) errs_p <<- c(errs_p, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  setTimeLimit(elapsed = 120, transient = TRUE); on.exit(setTimeLimit(elapsed = Inf), add = TRUE)
+  session$setInputs(shape_size = 1e308, point_stroke = -1)
+  g <- main_plot_obj(); f <- tempfile(fileext = ".png")
+  r3p$ok <<- tryCatch({ ggplot2::ggsave(f, g, device = env$export_device("png"), width = 3, height = 2, dpi = 40); file.exists(f) }, error = function(e) conditionMessage(e))
+  pt <- Filter(function(l) inherits(l$geom, "GeomPoint"), generate_plot()$layers)
+  r3p$size <<- suppressWarnings(max(unlist(lapply(pt, function(l) l$aes_params$size)), -Inf))
+  r3p$stroke <<- unlist(lapply(pt, function(l) l$aes_params$stroke))
+})
+el_p <- as.numeric(Sys.time() - t0, units = "secs")
+check(sprintf("R3-NIN02: shape_size = 1e308 and point_stroke = -1 sent straight to the inputs render in under 30 s (%.0f s; the point size hung for minutes)", el_p), isTRUE(r3p$ok) && el_p < 30 && length(errs_p) == 0)
+check(sprintf("R3-NIN02: the largest plotted point size is the clamped 50 and no stroke is negative or huge (size %s, strokes %s)", format(r3p$size), paste(format(r3p$stroke), collapse = ",")), identical(r3p$size, 50) && length(r3p$stroke) > 0 && all(r3p$stroke >= 0 & r3p$stroke <= 10))
+
+cat("\n--- round 3: observers fed a scalar instead of a message ---\n")
+errs_o <- character(0); ob <- list()
+testServer(app, {
+  session$onUnhandledError(function(e) errs_o <<- c(errs_o, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  d0 <- rv$data; sel0 <- sel_samples()
+  session$setInputs(data_cell_set = 1)                          # no row / column typed
+  session$setInputs(data_cell_row = NA, data_cell_set = 2)
+  session$setInputs(data_view_table_cell_edit = "nonsense"); session$setInputs(data_view_table_cell_edit = NA); session$setInputs(data_view_table_cell_edit = list())
+  session$setInputs(qe_show_event = "nonsense"); session$setInputs(qe_show_event = NA); session$setInputs(qe_show_event = list())
+  session$setInputs(file = "nonsense"); session$setInputs(file = NA); session$setInputs(file = list())
+  ob$same <<- identical(rv$data, d0) && identical(sel_samples(), sel0)
+  ob$ok <<- tryCatch({ ggplot2::ggsave(tempfile(fileext = ".png"), main_plot_obj(), device = env$export_device("png"), width = 3, height = 2, dpi = 40); TRUE }, error = function(e) conditionMessage(e))
+})
+check("R3-OBS01: data_cell_set, data_view_table_cell_edit, qe_show_event and file fed a scalar / NA / empty list record no unhandled error", length(errs_o) == 0)
+check("R3-OBS01: the data, the selection and the figure are untouched afterwards", isTRUE(ob$same) && isTRUE(ob$ok))
+
+cat("\n--- round 3: selected_samples with unknown names ---\n")
+t0 <- Sys.time(); sl <- list(); errs_s <- character(0)
+testServer(app, {
+  session$onUnhandledError(function(e) errs_s <<- c(errs_s, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS)
+  setTimeLimit(elapsed = 120, transient = TRUE); on.exit(setTimeLimit(elapsed = Inf), add = TRUE)
+  keep <- rv$od_vars[1:2]
+  session$setInputs(selected_samples = c(keep[1], paste0("ghost", 1:1e5), keep[2]))
+  sl$sel <<- sel_samples()
+  sl$ok <<- tryCatch({ g <- main_plot_obj(); ggplot2::ggsave(tempfile(fileext = ".png"), g, device = env$export_device("png"), width = 3, height = 2, dpi = 40); TRUE }, error = function(e) conditionMessage(e))
+  sl$keep <<- keep
+  session$setInputs(selected_samples = 5); sl$five <<- sel_samples()
+  session$setInputs(selected_samples = paste0("ghost", 1:10)); sl$none <<- sel_samples()
+})
+el_s <- as.numeric(Sys.time() - t0, units = "secs")
+check(sprintf("R3-SEL01: 100 000 unknown ids around two real samples render the two real ones in under 60 s (%.0f s; it ran 100 000 renders)", el_s),
+      identical(sl$sel, sl$keep) && isTRUE(sl$ok) && el_s < 60 && length(errs_s) == 0)
+check("R3-SEL01: a number / only unknown names read as no selection (the 'Select at least one sample.' state), not 'subscript out of bounds'", is.null(sl$five) && is.null(sl$none))
+
+cat("\n--- round 3: select-type inputs fed list() / NA / a long string / a vector ---\n")
+errs_f <- character(0); ff <- list()
+testServer(app, {
+  session$onUnhandledError(function(e) errs_f <<- c(errs_f, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, metrics_ref_sample = rv$od_vars[1])
+  setTimeLimit(elapsed = 1500, transient = TRUE); on.exit(setTimeLimit(elapsed = Inf), add = TRUE)
+  bad_vals <- list(long = strrep("Z", 1e4), na = NA_character_, lst = list(), vec = c("a", "b"), num = -1, huge = 1e308, nonsense = "nonsense")
+  for (id in c("font_family", "journal_family", "color_palette", "export_units", "blank_mode", "time_col_choice"))
+    for (nm in names(bad_vals)) { args <- list(); args[id] <- list(bad_vals[[nm]]); do.call(session$setInputs, args) }
+  ff$obs <<- length(errs_f)
+  session$setInputs(font_family = strrep("Z", 1e4))
+  ff$fig_long <<- tryCatch({ ggplot2::ggsave(tempfile(fileext = ".png"), main_plot_obj(), device = env$export_device("png"), width = 3, height = 2, dpi = 40); TRUE }, error = function(e) conditionMessage(e))
+  session$setInputs(font_family = "sans")
+  for (id in c("stats_method", "error_type", "legend_position", "y_scale_type", "x_scale_type", "error_bar_color", "time_convert", "metrics_peak_mode", "pheno_scale", "analysis_type", "transform_mode", "metrics_ref_sample", "error_display_mode"))
+    for (nm in c("lst", "na", "vec", "num", "nonsense")) {
+      args <- list(); args[id] <- list(bad_vals[[nm]]); do.call(session$setInputs, args)
+      r <- tryCatch({ ggplot2::ggsave(tempfile(fileext = ".png"), main_plot_obj(), device = env$export_device("png"), width = 3, height = 2, dpi = 40)
+                      ggplot2::ggsave(tempfile(fileext = ".png"), generate_analysis_plot("metric_summary"), device = env$export_device("png"), width = 3, height = 2, dpi = 40); "ok" }, error = function(e) paste(id, nm, conditionMessage(e)))
+      if (!identical(r, "ok")) ff$fail <<- c(ff$fail, r)
+      p <- tryCatch(generate_analysis_plot("metric_summary"), error = function(e) NULL)
+      lab <- tryCatch(p$layers[[1]]$aes_params$label, error = function(e) NULL)
+      if (is.character(lab) && length(lab) == 1L && grepl("^Figure not available", lab)) ff$fail <<- c(ff$fail, paste(id, nm, lab))
+      args <- list(); args[id] <- list(env$APP_DEFAULTS[[id]]); do.call(session$setInputs, args)
+    }
+  ff$errs <<- length(errs_f)
+})
+check("R3-SEL02: font_family / journal_family / color_palette / export_units / blank_mode / time_col_choice fed list(), NA, a vector, a number, 'nonsense' and a 10 000-character string end no session", ff$obs == 0)
+check("R3-SEL02: a 10 000-character font_family still renders the main figure", isTRUE(ff$fig_long))
+check(sprintf("R3-SEL02: the main figure and the metric summary render (no raw R error, no 'Figure not available') for list() / NA / a vector / a number / 'nonsense' in 13 other selects%s", if (length(ff$fail)) paste0(" (failed: ", paste(utils::head(ff$fail, 4), collapse = " | "), ")") else ""),
+      length(ff$fail) == 0 && ff$errs == 0)
+if (length(errs_f)) cat("   unhandled observer errors:", paste(utils::head(unique(errs_f), 5), collapse = " | "), "\n")
 
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (fail > 0) quit(status = 1)
