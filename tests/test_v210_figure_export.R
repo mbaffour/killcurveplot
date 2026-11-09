@@ -204,7 +204,8 @@ testServer(app, {
   check("legend text has no doubled period", !grepl("..", lt, fixed = TRUE))
   check("legend text notes the log axis", grepl("log10", lt))
   check("legend text starts with the panel label", startsWith(lt, "(a) "))
-  check("legend lists the curves", grepl("Curves: Uninfected; Phage MOI 10; Phage MOI 0.1", lt))
+  # v2.23.1: each curve with its colour in words and its marker
+  check("legend lists the curves with their colour and marker", grepl("Curves: Uninfected (black, filled circles); Phage MOI 10 (orange, filled squares); Phage MOI 0.1 (blue, filled triangles)", lt, fixed = TRUE))
   session$setInputs(error_type = "none")
   check("no error bars -> no error sentence", !grepl("error bars", output$figure_legend_text))
   session$setInputs(error_type = "sem")
