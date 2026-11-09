@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.2"
+APP_VERSION <- "2.23.5"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -2870,11 +2870,14 @@ journal_width_mm <- function(family, columns, custom_mm = 89) {
 # ── v2.12.2: inside legends ──────────────────────────────────────────────────
 # Theme for a legend anchored just inside a panel corner. Compact key (tight
 # vertical spacing and margin) so it covers as little of the panel as possible.
-inside_legend_theme <- function(corner = "top-left") {
+# v2.23.4: corner = "custom" with x, y (fractions of the panel, 0 = left / bottom) is a legend dragged on the figure;
+# the justification equals the position, so the key hugs the panel edge at 0 / 1 and is centred at 0.5.
+inside_legend_theme <- function(corner = "top-left", x = 0.98, y = 0.98) {
   just <- switch(corner,
                  "top-left" = c(0, 1), "top-right" = c(1, 1),
-                 "bottom-left" = c(0, 0), "bottom-right" = c(1, 0), c(1, 1))
-  pos  <- ifelse(just == 1, 0.98, 0.02)
+                 "bottom-left" = c(0, 0), "bottom-right" = c(1, 0),
+                 "custom" = c(x, y), c(1, 1))
+  pos  <- if (identical(corner, "custom")) just else ifelse(just == 1, 0.98, 0.02)
   theme(legend.position = "inside",
         legend.position.inside = pos, legend.justification.inside = just,
         legend.key.spacing.y = unit(1, "pt"), legend.margin = margin(1, 3, 1, 3))
@@ -3732,7 +3735,8 @@ n4_preset_settings <- function()
                   error_log_floor = FALSE, error_cap_relative = FALSE, error_bar_color = "sample", error_display_mode = "bars",
                   error_bar_width = 1, error_bar_thickness = 0.8,
                   font_family = "sans", color_palette = "custom", x_tick_interval = 30))
-APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65))   # v2.16: no panel letter unless the user sets one
+APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # v2.16: no panel letter unless the user sets one
+                  list(legend_inside_x = 0.98, legend_inside_y = 0.98))        # v2.23.4: appended at the end (the dragged legend, top-right)
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -7382,7 +7386,7 @@ OLD_SAMPLE_KEY_RE <- "^(color_selector|color|shape|shape_filled|line_type|legend
 OLD_NEVER_GLOBAL <- c("file", "loadSettings", "selected_samples", "time_filter_range", "exclude_timepoints", "samples_select_all",
                       "samples_deselect_all", "saveSettings", "clearSettings", "load_demo", "compare_file")
 LEGEND_POSITIONS_OK <- c("right", "left", "top", "bottom", "none", "inside-auto", "inside-top-left", "inside-top-right",
-                         "inside-bottom-left", "inside-bottom-right", "direct", "matrix")   # v2.22 styling: direct labels, matrix legend
+                         "inside-bottom-left", "inside-bottom-right", "inside-custom", "direct", "matrix")   # v2.23.4 inside-custom; v2.22 styling: direct labels, matrix legend
 
 # one JSON value as an R scalar / vector: a one-element array (list) becomes its element, NULL / empty -> NULL
 settings_unbox <- function(v) {
@@ -7779,6 +7783,62 @@ themes_dir_path <- function() {
   if (is.character(o) && length(o) == 1 && nzchar(o)) return(o)
   ad <- if (exists("APP_DIR", inherits = TRUE)) get("APP_DIR", inherits = TRUE) else NULL
   file.path(if (is.character(ad) && length(ad) == 1 && nzchar(ad)) ad else getwd(), "themes")
+}
+# ── Paper style (v2.23.4): paper_style.json written by CFU Plot Studio, read here, never written ──────────────────
+# The file sits beside the app (the app folder, as the themes do) or wherever the environment variable CFU_PAPER_STYLE
+# points; read at call time so the variable can be set after the app is sourced.
+paper_style_path <- function() {
+  env <- Sys.getenv("CFU_PAPER_STYLE", "")
+  if (nzchar(env)) return(path.expand(env))
+  ad <- if (exists("APP_DIR", inherits = TRUE)) get("APP_DIR", inherits = TRUE) else NULL
+  file.path(if (is.character(ad) && length(ad) == 1 && nzchar(ad)) ad else getwd(), "paper_style.json")
+}
+PAPER_FONT_MENU <- c("sans", "Arial", "Helvetica", "serif", "mono", "Helvetica Neue", "Garamond", "Palatino")
+# What a paper style may set here, and nothing else (an explicit allowlist: the file's figure-specific keys never reach
+# an input). Returns list(inputs = input id -> value to send, palette = sample name -> upper-case hex, ignored = keys
+# not used, notes = what was mapped approximately). Every value is type-checked and range-clamped; a list or a vector
+# where one value is expected is ignored. Never routed through loadSettings / translate_old_settings.
+paper_style_updates <- function(settings) {
+  settings <- if (is.list(settings)) settings else list()
+  inputs <- list(); used <- character(0); notes <- character(0)
+  one <- function(v) if (is.atomic(v) && !is.null(v) && length(v) == 1L && !is.na(v)) v else NULL
+  num1 <- function(v, lo, hi) { v <- one(v); if (is.null(v) || is.logical(v)) return(NA_real_)
+    v <- suppressWarnings(as.numeric(v)); if (!is.finite(v)) NA_real_ else min(max(v, lo), hi) }
+  str1 <- function(v) { v <- one(v); if (is.null(v) || !is.character(v)) NULL else trimws(substr(v, 1L, 200L)) }
+  # font_family (+ font_family_custom): the menu has no free-text box, so a family that is not in it goes to the
+  # nearest menu entry (serif-like -> serif, monospace-like -> mono, anything else -> sans) and the note says so
+  ff <- str1(settings$font_family)
+  if (!is.null(ff) && identical(ff, "custom")) ff <- str1(settings$font_family_custom)
+  if (!is.null(ff) && nzchar(ff)) {
+    hit <- PAPER_FONT_MENU[match(tolower(ff), tolower(PAPER_FONT_MENU))]
+    if (is.na(hit) && grepl("^times|^georgia|^cambria|garamond|palatino|^minion|^baskerville", ff, ignore.case = TRUE)) hit <- "serif"
+    if (is.na(hit) && grepl("courier|mono|consolas|menlo|^lucida console", ff, ignore.case = TRUE)) hit <- "mono"
+    if (grepl("^times new roman$", ff, ignore.case = TRUE)) hit <- "serif"
+    if (is.na(hit)) { hit <- "sans"; notes <- c(notes, paste0("font_family '", ff, "' is not in this app's font menu; Sans Serif was used")) }
+    inputs$font_family <- hit; used <- c(used, "font_family", "font_family_custom")
+  }
+  ts <- num1(settings$title_size, 5, 48)
+  if (is.finite(ts)) { inputs$title_font_size <- round(ts); used <- c(used, "title_size") }
+  fs <- num1(settings$font_size, 5, 40)
+  if (is.finite(fs)) {
+    inputs$axis_label_font_size <- min(36, round(fs))
+    inputs$axis_text_font_size  <- min(32, max(5, round(0.8 * fs)))
+    inputs$legend_font_size     <- min(32, max(5, round(0.8 * fs)))
+    used <- c(used, "font_size")
+  }
+  # sample_palette -> colour registry by name
+  pal <- settings$sample_palette
+  palette <- stats::setNames(character(0), character(0))
+  if (is.list(pal) && length(pal) > 0 && !is.null(names(pal))) {
+    pal <- pal[seq_len(min(length(pal), 2000L))]
+    ok <- vapply(seq_along(pal), function(i) { v <- one(pal[[i]]); !is.null(v) && is.character(v) && nzchar(names(pal)[i]) &&
+                                               grepl("^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$", trimws(v)) }, logical(1))
+    if (any(ok)) palette <- stats::setNames(toupper(trimws(vapply(pal[ok], function(v) as.character(v), ""))), names(pal)[ok])
+  }
+  if (!is.null(settings$sample_palette)) used <- c(used, "sample_palette")
+  # axis_color and axis_line_width have no counterpart here (no axis colour box; the axis line is in points, the file's
+  # is in ggplot units): they stay in `ignored`
+  list(inputs = inputs, palette = palette, ignored = setdiff(names(settings), used), notes = notes)
 }
 theme_key  <- function(nm) gsub("^_+|_+$", "", gsub("[^A-Za-z0-9]+", "_", trimws(nm %||% "")))
 theme_path <- function(nm, dir = themes_dir_path()) file.path(dir, paste0(theme_key(nm), ".json"))
@@ -8766,6 +8826,11 @@ build_help_tab <- function() {
 }
 help_tab_ui <- build_help_tab()
 
+# v2.23.2: a "Copy figure" button; kind is main / analysis / fit / compose / compare / legend_key (page script kcCopyFigure)
+kc_copy_button <- function(kind, label = " Copy figure", style = NULL)
+  tags$button(class = "btn btn-default", type = "button", style = style,
+              onclick = sprintf("kcCopyFigure('%s')", kind), icon("copy"), label)
+
 # v2.21: the quick-edit strip under the main figure. The rows (name, colour, show) are rendered by the server for
 # every loaded sample (output quick_edit_rows); the axis labels and the legend position live here (same input ids as
 # before, moved out of the sidebar so one edit and one look at the figure is all it takes).
@@ -8793,18 +8858,20 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
                                   "Inside: bottom-left"  = "inside-bottom-left",
                                   "Inside: bottom-right" = "inside-bottom-right",
                                   "Inside: emptiest corner (auto)" = "inside-auto",
+                                  "Inside: custom (drag it on the figure)" = "inside-custom",   # v2.23.4
                                   "Direct labels at line ends"     = "direct",   # v2.22: no legend box, each line named in its colour
                                   "Matrix (grid) legend"           = "matrix",   # v2.22: rows x columns (set under Figure Layout)
                                   "None"                 = "none"),
-                      selected = APP_DEFAULTS$legend_position))),
+                      selected = APP_DEFAULTS$legend_position)),
+      conditionalPanel("input.legend_position == 'inside-custom'",
+        div(class = "kc-qe-field",
+            tags$label(class = "control-label", "Legend x / y (fraction of the panel, 0 = left/bottom, 1 = right/top)"),
+            div(style = "display:flex; gap:6px;",
+                numericInput("legend_inside_x", NULL, APP_DEFAULTS$legend_inside_x, 0, 1, 0.01),
+                numericInput("legend_inside_y", NULL, APP_DEFAULTS$legend_inside_y, 0, 1, 0.01))))),
     p(class = "kc-qe-note",
       "The name is what figures, legends, tables, CSV files and reports show; the file's own column name stays the key ",
       "(the CSV files carry it in a sample_raw column). Untick show to leave a sample out of the figure.")))
-
-# v2.23.2: a "Copy figure" button; kind is main / analysis / fit / compose / compare / legend_key (page script kcCopyFigure)
-kc_copy_button <- function(kind, label = " Copy figure", style = NULL)
-  tags$button(class = "btn btn-default", type = "button", style = style,
-              onclick = sprintf("kcCopyFigure('%s')", kind), icon("copy"), label)
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- fluidPage(
@@ -9006,9 +9073,107 @@ ui <- fluidPage(
            if (kcPop && kcPop.style.display !== 'none' && !kcPop.contains(ev.target)) kcClose();
          });
          document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape' && kcCur) kcClose(); });
+         // v2.23.4: drag the legend. A transparent overlay over the legend entries (+ the key glyphs); dropping it sets
+         // legend_inside_x / legend_inside_y from the drop point relative to the panel (the biggest clipPath rect that is
+         // not the whole figure) and switches Legend position to inside-custom; dropped outside the panel it snaps to the
+         // nearest outside side. A click without a drag still opens the rename popover of the entry under it.
+         function kcPanelRect(svg, vb) {
+           var best = null, ba = 0;
+           svg.querySelectorAll('clipPath rect').forEach(function(r) {
+             var w = parseFloat(r.getAttribute('width')), h = parseFloat(r.getAttribute('height'));
+             if (!(w > 0 && h > 0) || w * h >= 0.98 * vb.width * vb.height || w * h <= ba) return;
+             ba = w * h; best = {x: parseFloat(r.getAttribute('x')) || 0, y: parseFloat(r.getAttribute('y')) || 0, w: w, h: h};
+           });
+           if (best) return best;
+           // v2.23.5: the journal figure clips nothing (its clip paths cover the whole canvas), so the panel is read from the
+           // axis lines instead: the longest horizontal segment is the x axis (panel left/right/bottom), the longest vertical
+           // one the y axis (panel top/bottom/left). svglite writes them as <polyline points=...> or <line x1 y1 x2 y2>.
+           var segs = [];
+           svg.querySelectorAll('polyline, line').forEach(function(e) {
+             var pts = [];
+             if (e.tagName.toLowerCase() === 'line') pts = [[+e.getAttribute('x1'), +e.getAttribute('y1')], [+e.getAttribute('x2'), +e.getAttribute('y2')]];
+             else (e.getAttribute('points') || '').trim().split(/\\s+/).forEach(function(s) { var a = s.split(','); if (a.length === 2) pts.push([+a[0], +a[1]]); });
+             for (var i = 1; i < pts.length; i++) {
+               var dx = Math.abs(pts[i][0] - pts[i - 1][0]), dy = Math.abs(pts[i][1] - pts[i - 1][1]);
+               if (dx > 0.5 && dy < 0.05) segs.push({h: true, len: dx, a: Math.min(pts[i][0], pts[i - 1][0]), b: Math.max(pts[i][0], pts[i - 1][0]), at: pts[i][1]});
+               if (dy > 0.5 && dx < 0.05) segs.push({h: false, len: dy, a: Math.min(pts[i][1], pts[i - 1][1]), b: Math.max(pts[i][1], pts[i - 1][1]), at: pts[i][0]});
+             }
+           });
+           var hx = null, vy = null;
+           segs.forEach(function(s) { if (s.h && (!hx || s.len > hx.len)) hx = s; if (!s.h && (!vy || s.len > vy.len)) vy = s; });
+           if (hx && vy && hx.len > 0.2 * vb.width && vy.len > 0.2 * vb.height)
+             return {x: hx.a, y: vy.a, w: hx.b - hx.a, h: vy.b - vy.a};
+           return {x: vb.x + 0.12 * vb.width, y: vb.y + 0.08 * vb.height, w: 0.8 * vb.width, h: 0.8 * vb.height};   // last resort: the middle of the canvas
+         }
+         function kcSetPos(v) {
+           var el = document.getElementById('legend_position'); if (!el) return;
+           if (el.selectize) el.selectize.setValue(v); else { el.value = v; el.dispatchEvent(new Event('change', {bubbles: true})); }
+         }
+         function kcLegDrag() {
+           var host = document.getElementById('od_plot_svg'); if (!host) return;
+           host.querySelectorAll('.kc-leg-drag').forEach(function(e) { e.remove(); });
+           var svg = host.querySelector('svg'), pos = kcVal('legend_position');
+           if (!svg || pos === 'none' || pos === 'direct' || pos === 'matrix') return;
+           var texts = host.querySelectorAll('svg text.kc-ed[data-kc=sample]'); if (!texts.length) return;
+           var hr = host.getBoundingClientRect(), r = svg.getBoundingClientRect();
+           var l = 1e9, t = 1e9, rr = -1e9, b = -1e9, fs = 0;
+           texts.forEach(function(e) {
+             var q = e.getBoundingClientRect(); if (!(q.width > 0)) return;
+             l = Math.min(l, q.left); t = Math.min(t, q.top); rr = Math.max(rr, q.right); b = Math.max(b, q.bottom);
+             fs = Math.max(fs, q.height);
+           });
+           if (!(rr > l)) return;
+           l -= 2.2 * fs; l -= 4; t -= 4; rr += 4; b += 4;
+           var ov = document.createElement('div'); ov.className = 'kc-leg-drag'; ov.title = 'Drag to move the legend';
+           ov.style.left = (l - hr.left + (host.scrollLeft || 0)) + 'px'; ov.style.top = (t - hr.top + (host.scrollTop || 0)) + 'px';
+           ov.style.width = (rr - l) + 'px'; ov.style.height = (b - t) + 'px';
+           host.appendChild(ov);
+           ov.addEventListener('mousedown', function(ev) {
+             if (ev.button !== 0) return; document.body.classList.add('kc-nosel');   /* no text selection while dragging; the event itself is left alone */
+             var sx = ev.clientX, sy = ev.clientY, moved = false;
+             function mv(e) {
+               var dx = e.clientX - sx, dy = e.clientY - sy;
+               if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+               moved = true; ov.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+             }
+             function up(e) {
+               document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+               document.body.classList.remove('kc-nosel');
+               if (!moved) {
+                 ov.style.pointerEvents = 'none';
+                 var under = document.elementFromPoint(e.clientX, e.clientY);
+                 ov.style.pointerEvents = '';
+                 var tx = under && under.closest ? under.closest('#od_plot_svg text.kc-ed') : null;
+                 if (tx) kcOpen(tx);
+                 return;
+               }
+               var q = ov.getBoundingClientRect(), vbb = svg.viewBox && svg.viewBox.baseVal;
+               var vb = vbb && vbb.width ? {x: vbb.x, y: vbb.y, width: vbb.width, height: vbb.height}
+                                         : {x: 0, y: 0, width: parseFloat(svg.getAttribute('width')) || r.width, height: parseFloat(svg.getAttribute('height')) || r.height};
+               var k = vb.width / r.width, rect = r;
+               rect = svg.getBoundingClientRect();
+               var P = kcPanelRect(svg, vb); if (!P) { ov.style.transform = ''; return; }
+               var cx = vb.x + (q.left + q.width / 2 - rect.left) * k, cy = vb.y + (q.top + q.height / 2 - rect.top) * k;
+               var lw = q.width * k, lh = q.height * k;
+               if (cx >= P.x && cx <= P.x + P.w && cy >= P.y && cy <= P.y + P.h) {
+                 var fx = P.w - lw > 1 ? (cx - P.x - lw / 2) / (P.w - lw) : 0.5;
+                 var fy = P.h - lh > 1 ? 1 - ((cy - P.y - lh / 2) / (P.h - lh)) : 0.5;
+                 fx = Math.round(Math.max(0, Math.min(1, fx)) * 100) / 100; fy = Math.round(Math.max(0, Math.min(1, fy)) * 100) / 100;
+                 kcSetText('legend_inside_x', fx); kcSetText('legend_inside_y', fy);
+                 if (window.Shiny && Shiny.setInputValue) { Shiny.setInputValue('legend_inside_x', fx); Shiny.setInputValue('legend_inside_y', fy); }
+                 if (pos !== 'inside-custom') kcSetPos('inside-custom');
+               } else {
+                 var d = {left: P.x - cx, right: cx - P.x - P.w, top: P.y - cy, bottom: cy - P.y - P.h}, side = 'right', m = -1e9;
+                 for (var n in d) if (d[n] > m) { m = d[n]; side = n; }
+                 kcSetPos(side);
+               }
+             }
+             document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+           });
+         }
          // after the SVG is replaced: tag its labels again; the popover stays only while its label still exists
          function kcAfterRender() {
-           kcMark();
+           kcMark(); kcLegDrag();
            if (!kcCur || !kcPop) return;
            var hit = null;
            document.querySelectorAll('#od_plot_svg text.kc-ed').forEach(function(t) {
@@ -9087,6 +9252,18 @@ ui <- fluidPage(
            try { done = navigator.clipboard.write([new ClipboardItem({'image/png': p})]); }
            catch (e) { done = p.then(function(b) { return navigator.clipboard.write([new ClipboardItem({'image/png': b})]); }); }
            done.then(function() { report(kind, true, dims.w, dims.h); }, function(e) { report(kind, false, 0, 0, why(e)); });
+         };
+         // v2.23.3: Copy text -- the legend text draft (output figure_legend_text) as plain text
+         window.kcCopyLegendText = function() {
+           var el = document.getElementById('figure_legend_text'), txt = el ? (el.innerText || el.textContent || '').trim() : '';
+           function sel() { if (el && window.getSelection) { var r = document.createRange(); r.selectNodeContents(el); var g = window.getSelection(); g.removeAllRanges(); g.addRange(r); } }
+           function res(ok, why) {
+             if (window.Shiny && Shiny.setInputValue)
+               Shiny.setInputValue('kc_copy_result', ok ? {kind: 'legend_text', ok: true} : {kind: 'legend_text', ok: false, reason: why}, {priority: 'event'});
+           }
+           if (!txt) { res(false, 'there is no legend text yet'); return; }
+           if (!navigator.clipboard || !navigator.clipboard.writeText) { sel(); res(false, 'no clipboard access; the text is selected, press Ctrl/Cmd+C'); return; }
+           navigator.clipboard.writeText(txt).then(function() { res(true); }, function(e) { sel(); res(false, why(e)); });
          };
          var hov = null;
          document.addEventListener('mouseover', function(ev) {
@@ -9232,8 +9409,19 @@ ui <- fluidPage(
       .kc-qe-field label { font-size:.9em; margin-bottom:1px; }
       .kc-qe-field .form-control { height:26px; padding:2px 6px; font-size:1em; }
       .kc-qe-note { font-size:.78em; color:#777; margin:0 0 4px; }
+      .kc-legtab { max-width:900px; }
+      .kc-legtab h4 { margin:16px 0 6px; }
+      .kc-legtab pre { max-height:260px; overflow:auto; margin-bottom:6px; }
+      .kc-legtab img { max-width:100%; }
+      .kc-legtab .kc-leg-help { font-size:.82em; color:#777; margin-top:14px; }
+      table.kc-leg-samples { border-collapse:collapse; font-size:.92em; }
+      table.kc-leg-samples th, table.kc-leg-samples td { padding:3px 14px 3px 0; text-align:left; border-bottom:1px solid #eee; }
+      .kc-leg-sw { display:inline-block; width:14px; height:14px; border:1px solid #888; vertical-align:-2px; margin-right:6px; }
       .kc-qe-canvas .checkbox { margin:2px 0; font-weight:normal; }
       .kc-canvas { position:relative; }
+      .kc-leg-drag { position:absolute; z-index:40; cursor:move; background:transparent; }
+      .kc-nosel, .kc-nosel * { user-select:none !important; -webkit-user-select:none !important; }
+      .kc-leg-drag:hover { outline:1px dashed #0069d9; }
       .kc-canvas-svg text.kc-ed { cursor:pointer; }
       .kc-canvas-svg text.kc-ed:hover { fill:#0069d9; text-decoration:underline; }
       #kc_canvas_pop { position:absolute; z-index:50; display:none; min-width:220px; background:#fff; border:1px solid #ccc;
@@ -9349,7 +9537,11 @@ ui <- fluidPage(
                      br(),
                      fileInput("loadSettings", "Load Settings File",
                                accept = c("application/json", ".json")),
-                     uiOutput("settings_status_ui")
+                     uiOutput("settings_status_ui"),
+                     # v2.23.4: the paper style read at start (paper_style.json beside the app, or CFU_PAPER_STYLE)
+                     div(style = "font-size:.8em;color:#555;margin-top:8px;",
+                         textOutput("paper_style_status", inline = TRUE)),
+                     actionButton("reload_paper_style", "Reload paper style", class = "btn-xs", style = "margin-top:4px;")
                  ),
                  
                  # ── Axis Settings ─────────────────────────────────────────────────────────
@@ -9870,16 +10062,7 @@ ui <- fluidPage(
                    div(class = "panel-section",
                        h4("Figure Legend Text", class = "panel-title"),
                        p(style = "font-size:.8em;color:#777;margin-top:-4px;",
-                         "Drafted from the current plot and the Experiment Notebook: measure, replicate n, ",
-                         "error type, MOI / host / phage / medium. Copy into the manuscript and edit."),
-                       verbatimTextOutput("figure_legend_text", placeholder = TRUE),
-                       # v2.23.1: the legend key, cut from the figure's own legend
-                       p(style = "font-size:.8em;color:#777;margin:8px 0 4px;",
-                         "Legend key: the figure's own legend (every sample's colour, marker, fill, line type and name) as a separate ",
-                         "image in the export format, to place beside the figure or to start a legend from."),
-                       plotOutput("legend_key_preview", height = "auto"),
-                       downloadButton("downloadLegendKey", "Download legend key", style = "width:100%;margin-top:6px;"),
-                       kc_copy_button("legend_key", " Copy key", style = "width:100%;margin-top:6px;")
+                         "Legend text and key: the Legend text tab, beside Lysis curve.")
                    )
                  ),
                  
@@ -10195,6 +10378,20 @@ ui <- fluidPage(
       uiOutput("figure_standard_bar"),
       tabsetPanel(id = "main_tabs",
         tabPanel("Lysis curve", br(), uiOutput("plot_container"), quick_edit_ui),
+        # v2.23.3: the legend text, the samples as drawn (colour / marker / line words) and the legend key, one place for writing a figure legend
+        tabPanel("Legend text", br(),
+          div(class = "kc-legtab",
+            h4("Figure legend draft (for the manuscript)"),
+            verbatimTextOutput("figure_legend_text", placeholder = TRUE),
+            tags$button(type = "button", class = "btn btn-default btn-sm", id = "kc_copy_legend_text",
+                        onclick = "kcCopyLegendText()", icon("copy"), " Copy text"),
+            h4("Samples as drawn"),
+            uiOutput("legend_samples_table"),
+            h4("Legend key"),
+            plotOutput("legend_key_preview", height = "auto"),
+            downloadButton("downloadLegendKey", "Download legend key", style = "margin-top:6px;"),
+            kc_copy_button("legend_key", " Copy key", style = "margin-top:6px;"),
+            p(class = "kc-leg-help", "The text follows the Experiment Notebook fields and the current styling; edit it in the manuscript."))),
         # ── Data (v2.22): view and edit the working data, or enter it by hand ──
         tabPanel("Data", br(),
           tabsetPanel(id = "data_subtabs",
@@ -11199,6 +11396,8 @@ server <- function(input, output, session) {
     #   $samples — named list keyed by SAMPLE NAME, each a list of per-sample aesthetics
     imported_settings = NULL,
     settings_status   = NULL,
+    paper_palette     = NULL,   # v2.23.4: sample name -> hex from paper_style.json (named character)
+    paper_style_applied = NULL,
     style_page        = 1L,     # current page in Variable Styling panel (pagination)
     # v2.21: what the user typed in the quick-edit strip. display_names: raw column name -> name shown in figures,
     # legends, tables, CSV files and reports (the raw name stays the key everywhere else); qe_colors: raw name -> the
@@ -12391,6 +12590,9 @@ server <- function(input, output, session) {
       } else if (!is.null(imp_aes)) {
         color_def <- imp_aes$color %||% default_colors[1]
         sel_def   <- "custom"
+      } else if (!is.null(pp <- isolate(paper_colour_of(vn)))) {   # v2.23.4: the paper style's colour for this name
+        color_def <- pp
+        sel_def   <- "custom"
       } else if (!is.null(rv$palette_colors) && palette_in() != "custom") {
         idx       <- match(vn, rv$od_vars)
         color_def <- if (!is.na(idx)) rv$palette_colors[idx] else default_colors[1]
@@ -13076,6 +13278,15 @@ server <- function(input, output, session) {
   }
 
   # ── Aesthetics resolver ──────────────────────────────────────────────────────
+  # v2.23.4: the paper style's colour for a sample (raw or display name, exact match), else NULL
+  paper_colour_of <- function(vn) {
+    pal <- rv$paper_palette
+    if (is.null(pal) || !length(pal) || is.null(names(pal))) return(NULL)
+    for (k in unique(c(vn, display_name_of(vn, rv$display_names)))) {
+      j <- match(k, names(pal)); if (!is.na(j)) return(unname(pal[[j]]))
+    }
+    NULL
+  }
   resolve_aesthetics <- function(samples) {
     n          <- length(samples)
     shapes     <- setNames(numeric(n),   samples)
@@ -13103,6 +13314,8 @@ server <- function(input, output, session) {
         colors[i] <- normalize_hex_color(input[[paste0("color_", vid)]])
       else if (!is.null(sel))
         colors[i] <- sel
+      else if (!is.null(paper_colour_of(vn)))      # v2.23.4: the paper style's colour for this sample name
+        colors[i] <- paper_colour_of(vn)
       else if (!is.null(rv$palette_colors)) {
         idx       <- match(vn, rv$od_vars)
         colors[i] <- if (!is.na(idx)) rv$palette_colors[idx]
@@ -13125,6 +13338,57 @@ server <- function(input, output, session) {
          leg_labels = leg_labels, filled_map = filled_map, groups = groups)
   }
   
+  # ── Paper style (v2.23.4) ────────────────────────────────────────────────────
+  # paper_style.json from CFU Plot Studio, read once after the first flush (so the inputs exist) and on the Reload button.
+  # The allowlist is paper_style_updates(); the sample colours go into rv$paper_palette, which resolve_aesthetics() uses
+  # beneath any colour picked by hand. A missing or unreadable file changes nothing.
+  paper_style_status <- reactiveVal(NULL)
+  output$paper_style_status <- renderText(
+    paper_style_status() %||% paste0("No paper style (looked for ", paper_style_path(), ")"))
+  apply_paper_palette <- function(loaded) {
+    pal <- isolate(rv$paper_palette)
+    if (is.null(pal) || !length(pal)) return(invisible(0L))
+    for (nm in intersect(names(pal), loaded %||% character(0))) {
+      if (!is.null(isolate(rv$qe_colors[[nm]]))) next                      # a colour picked in the quick-edit strip stays
+      vid <- safe_id(nm)
+      tryCatch({
+        updateSelectInput(session, paste0("color_selector_", vid), selected = "custom")
+        updateTextInput(session,   paste0("color_",          vid), value    = unname(pal[[nm]]))
+        updateTextInput(session,   paste0("hex_color_",      vid), value    = unname(pal[[nm]]))
+      }, error = function(e) invisible(NULL))
+    }
+    invisible(NULL)
+  }
+  load_paper_style <- function() {
+    path <- paper_style_path()
+    unreadable <- function() paper_style_status(paste0("Paper style at ", path, " could not be read; nothing was applied."))
+    if (!file.exists(path) || dir.exists(path)) {
+      paper_style_status(paste0("No paper style (looked for ", path, ")"))
+      return(invisible(NULL))
+    }
+    sz <- suppressWarnings(file.size(path))
+    style <- if (is.finite(sz) && sz <= 16e6) tryCatch(jsonlite::fromJSON(path, simplifyVector = TRUE), error = function(e) NULL) else NULL
+    if (is.null(style) || !is.list(style)) { unreadable(); return(invisible(NULL)) }
+    settings <- if (is.list(style$settings)) style$settings else style
+    up <- tryCatch(paper_style_updates(settings), error = function(e) NULL)
+    if (is.null(up)) { unreadable(); return(invisible(NULL)) }
+    for (id in names(up$inputs)) {
+      val <- up$inputs[[id]]
+      tryCatch({
+        if (identical(id, "font_family")) updateSelectInput(session, id, selected = val)
+        else                              updateNumericInput(session, id, value = val)
+      }, error = function(e) invisible(NULL))
+    }
+    rv$paper_palette <- if (length(up$palette) > 0) up$palette else NULL
+    apply_paper_palette(isolate(rv$od_vars))
+    rv$paper_style_applied <- list(inputs = up$inputs, palette = up$palette, ignored = up$ignored, notes = up$notes, path = path)
+    created <- if (is.character(style$created_at) && length(style$created_at) == 1L && !is.na(style$created_at)) substr(style$created_at, 1L, 60L) else "an unknown time"
+    paper_style_status(paste0("Paper style: ", path, ", saved ", created, "; colours for ", length(up$palette), " samples"))
+    invisible(up)
+  }
+  session$onFlushed(function() isolate(load_paper_style()), once = TRUE)
+  observeEvent(input$reload_paper_style, load_paper_style(), ignoreInit = TRUE)
+
   # ── Shared figure theme (v2.11) ─────────────────────────────────────────────
   # Everything that makes the main lysis curve look the way it does, as a list
   # of theme layers, so the analysis figures and the dashboard panels use the
@@ -13206,6 +13470,8 @@ server <- function(input, output, session) {
       } else {
         layers <- c(layers, list(inside_legend_theme(names(cnt)[which.min(cnt)])))
       }
+    } else if (identical(leg_pos, "inside-custom")) {       # v2.23.4: dragged on the figure
+      layers <- c(layers, list(inside_legend_theme("custom", nin("legend_inside_x", 0.98), nin("legend_inside_y", 0.98))))
     } else if (startsWith(leg_pos, "inside-")) {
       layers <- c(layers, list(inside_legend_theme(sub("^inside-", "", leg_pos))))
     } else {
@@ -14361,7 +14627,12 @@ server <- function(input, output, session) {
     x <- input$kc_copy_result
     req(is.list(x), is.logical(x$ok), length(x$ok) == 1L, !is.na(x$ok))
     px <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1L && is.finite(v) && v > 0) format(round(v), scientific = FALSE) else "?" }
-    if (isTRUE(x$ok)) {
+    if (isTRUE(x$ok) && identical(x$kind, "legend_text")) {
+      showNotification("Legend text copied.", type = "message", duration = 3)
+    } else if (!isTRUE(x$ok) && identical(x$kind, "legend_text")) {
+      why <- if (is.character(x$reason) && length(x$reason) == 1L && !is.na(x$reason) && nzchar(x$reason)) substr(x$reason, 1, 120) else "unknown reason"
+      showNotification(paste0("Could not copy the text: ", why, "."), type = "warning")
+    } else if (isTRUE(x$ok)) {
       showNotification(sprintf("Figure copied to the clipboard (%s x %s px). For print use Download Image.", px(x$w), px(x$h)),
                        type = "message", duration = 4)
     } else {
@@ -14528,6 +14799,27 @@ server <- function(input, output, session) {
   output$figure_legend_text <- renderText({
     txt <- figure_legend_string()
     if (nzchar(txt)) txt else "Load data and select samples to draft a legend."
+  })
+
+  # v2.23.3: one row per plotted sample: name, colour (swatch, word, hex), marker, line type, as drawn in the figure
+  legend_samples_df <- function() {
+    ss <- sel_samples(); if (is.null(rv$data) || !length(ss)) return(NULL)
+    aes_v <- resolve_aesthetics(ss); hex <- toupper(unname(aes_v$colors[ss]))
+    sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
+    mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
+    lt <- vapply(ss, function(s) if (!sl) NA_character_ else { w <- legend_line_words(aes_v$line_types[[s]]); if (is.na(w)) "solid line" else w }, "", USE.NAMES = FALSE)
+    data.frame(name = markup_to_plain(unname(aes_v$leg_labels[ss])), hex = hex, colour = colour_word(hex), marker = ifelse(is.na(mk), "none", mk),
+               line = ifelse(is.na(lt), "none", lt), stringsAsFactors = FALSE)
+  }
+  output$legend_samples_table <- renderUI({
+    plot_inputs_debounced()
+    d <- legend_samples_df()
+    if (is.null(d)) return(p(class = "kc-leg-help", "Load data and select samples to list them."))
+    rows <- lapply(seq_len(nrow(d)), function(i) tags$tr(
+      tags$td(d$name[i]),
+      tags$td(tags$span(class = "kc-leg-sw", style = paste0("background:", d$hex[i], ";")), paste0(d$colour[i], " ", d$hex[i])),
+      tags$td(d$marker[i]), tags$td(d$line[i])))
+    tags$table(class = "kc-leg-samples", tags$thead(tags$tr(tags$th("Name"), tags$th("Colour"), tags$th("Marker"), tags$th("Line"))), tags$tbody(rows))
   })
 
   # ── v2.23.1: the legend key of every figure ─────────────────────────────────
