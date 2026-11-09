@@ -9084,7 +9084,26 @@ ui <- fluidPage(
              if (!(w > 0 && h > 0) || w * h >= 0.98 * vb.width * vb.height || w * h <= ba) return;
              ba = w * h; best = {x: parseFloat(r.getAttribute('x')) || 0, y: parseFloat(r.getAttribute('y')) || 0, w: w, h: h};
            });
-           return best;
+           if (best) return best;
+           // v2.23.5: the journal figure clips nothing (its clip paths cover the whole canvas), so the panel is read from the
+           // axis lines instead: the longest horizontal segment is the x axis (panel left/right/bottom), the longest vertical
+           // one the y axis (panel top/bottom/left). svglite writes them as <polyline points=...> or <line x1 y1 x2 y2>.
+           var segs = [];
+           svg.querySelectorAll('polyline, line').forEach(function(e) {
+             var pts = [];
+             if (e.tagName.toLowerCase() === 'line') pts = [[+e.getAttribute('x1'), +e.getAttribute('y1')], [+e.getAttribute('x2'), +e.getAttribute('y2')]];
+             else (e.getAttribute('points') || '').trim().split(/\\s+/).forEach(function(s) { var a = s.split(','); if (a.length === 2) pts.push([+a[0], +a[1]]); });
+             for (var i = 1; i < pts.length; i++) {
+               var dx = Math.abs(pts[i][0] - pts[i - 1][0]), dy = Math.abs(pts[i][1] - pts[i - 1][1]);
+               if (dx > 0.5 && dy < 0.05) segs.push({h: true, len: dx, a: Math.min(pts[i][0], pts[i - 1][0]), b: Math.max(pts[i][0], pts[i - 1][0]), at: pts[i][1]});
+               if (dy > 0.5 && dx < 0.05) segs.push({h: false, len: dy, a: Math.min(pts[i][1], pts[i - 1][1]), b: Math.max(pts[i][1], pts[i - 1][1]), at: pts[i][0]});
+             }
+           });
+           var hx = null, vy = null;
+           segs.forEach(function(s) { if (s.h && (!hx || s.len > hx.len)) hx = s; if (!s.h && (!vy || s.len > vy.len)) vy = s; });
+           if (hx && vy && hx.len > 0.2 * vb.width && vy.len > 0.2 * vb.height)
+             return {x: hx.a, y: vy.a, w: hx.b - hx.a, h: vy.b - vy.a};
+           return {x: vb.x + 0.12 * vb.width, y: vb.y + 0.08 * vb.height, w: 0.8 * vb.width, h: 0.8 * vb.height};   // last resort: the middle of the canvas
          }
          function kcSetPos(v) {
            var el = document.getElementById('legend_position'); if (!el) return;

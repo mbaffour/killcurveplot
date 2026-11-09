@@ -66,6 +66,7 @@ check("inside_legend_theme('custom') positions and justifies at (x, y); corners 
       identical(env$inside_legend_theme("top-right")$legend.position.inside, c(0.98, 0.98)))
 src <- paste(readLines("Lysis_Curve_App_v28.R", warn = FALSE), collapse = "\n")
 check("the page script has the drag code", grepl("kc-leg-drag", src, fixed = TRUE) && grepl("legend_inside_x", src, fixed = TRUE) && grepl("kcLegDrag", src, fixed = TRUE))
+check("the panel finder falls back to the axis lines when the figure has no panel clip rect (the journal default)", grepl("the panel is read from the", src, fixed = TRUE) && grepl("querySelectorAll('polyline, line')", src, fixed = TRUE))
 testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "Demo")
   do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, export_format = "svg")
