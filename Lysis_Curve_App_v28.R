@@ -9129,7 +9129,7 @@ ui <- fluidPage(
            ov.style.width = (rr - l) + 'px'; ov.style.height = (b - t) + 'px';
            host.appendChild(ov);
            ov.addEventListener('mousedown', function(ev) {
-             if (ev.button !== 0) return; ev.preventDefault();
+             if (ev.button !== 0) return; document.body.classList.add('kc-nosel');   /* no text selection while dragging; the event itself is left alone */
              var sx = ev.clientX, sy = ev.clientY, moved = false;
              function mv(e) {
                var dx = e.clientX - sx, dy = e.clientY - sy;
@@ -9138,6 +9138,7 @@ ui <- fluidPage(
              }
              function up(e) {
                document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+               document.body.classList.remove('kc-nosel');
                if (!moved) {
                  ov.style.pointerEvents = 'none';
                  var under = document.elementFromPoint(e.clientX, e.clientY);
@@ -9419,6 +9420,7 @@ ui <- fluidPage(
       .kc-qe-canvas .checkbox { margin:2px 0; font-weight:normal; }
       .kc-canvas { position:relative; }
       .kc-leg-drag { position:absolute; z-index:40; cursor:move; background:transparent; }
+      .kc-nosel, .kc-nosel * { user-select:none !important; -webkit-user-select:none !important; }
       .kc-leg-drag:hover { outline:1px dashed #0069d9; }
       .kc-canvas-svg text.kc-ed { cursor:pointer; }
       .kc-canvas-svg text.kc-ed:hover { fill:#0069d9; text-decoration:underline; }
