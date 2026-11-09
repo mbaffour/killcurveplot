@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.23.3 — 2026-11-09
+
+**A "Legend text" tab.** The drafted figure-legend text (with the colour words) and the legend key were in a sidebar section
+about 3000 px down the page. They now have their own main tab beside Lysis curve: the legend draft with a **Copy text**
+button, a **Samples as drawn** table (name, colour swatch with its word and hex, marker, line type, one row per plotted
+sample, always as the figure is drawn), and the legend key with **Download legend key** and **Copy key**. The sidebar
+section keeps a one-line pointer. Same outputs and files as before.
+
 ## v2.23.2 — 2026-11-09
 
 **Copy figure to the clipboard.** Since v2.22.0 the Lysis curve preview is the export SVG drawn inline (so its labels
