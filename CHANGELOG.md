@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.23.4 — 2026-11-09
+
+**Drag the legend on the figure.** New **Legend position: Inside: custom (drag it on the figure)** with **Legend x / y**
+boxes (fractions of the panel, 0 = left/bottom, 1 = right/top). On the inline figure preview a faint dashed box appears
+over the legend when you hover it: drag it where you want it. Dropped inside the panel it switches to the custom position
+and fills x / y; dropped outside the panel it snaps to the nearest side (right / left / top / bottom). Clicking a legend
+entry still renames it. The export uses the same theme, so the file matches the preview. The startup figure is unchanged.
+
 ## v2.23.3 — 2026-11-09
 
 **A "Legend text" tab.** The drafted figure-legend text (with the colour words) and the legend key were in a sidebar section

@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.3"
+APP_VERSION <- "2.23.4"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -2870,11 +2870,14 @@ journal_width_mm <- function(family, columns, custom_mm = 89) {
 # ── v2.12.2: inside legends ──────────────────────────────────────────────────
 # Theme for a legend anchored just inside a panel corner. Compact key (tight
 # vertical spacing and margin) so it covers as little of the panel as possible.
-inside_legend_theme <- function(corner = "top-left") {
+# v2.23.4: corner = "custom" with x, y (fractions of the panel, 0 = left / bottom) is a legend dragged on the figure;
+# the justification equals the position, so the key hugs the panel edge at 0 / 1 and is centred at 0.5.
+inside_legend_theme <- function(corner = "top-left", x = 0.98, y = 0.98) {
   just <- switch(corner,
                  "top-left" = c(0, 1), "top-right" = c(1, 1),
-                 "bottom-left" = c(0, 0), "bottom-right" = c(1, 0), c(1, 1))
-  pos  <- ifelse(just == 1, 0.98, 0.02)
+                 "bottom-left" = c(0, 0), "bottom-right" = c(1, 0),
+                 "custom" = c(x, y), c(1, 1))
+  pos  <- if (identical(corner, "custom")) just else ifelse(just == 1, 0.98, 0.02)
   theme(legend.position = "inside",
         legend.position.inside = pos, legend.justification.inside = just,
         legend.key.spacing.y = unit(1, "pt"), legend.margin = margin(1, 3, 1, 3))
@@ -3732,7 +3735,8 @@ n4_preset_settings <- function()
                   error_log_floor = FALSE, error_cap_relative = FALSE, error_bar_color = "sample", error_display_mode = "bars",
                   error_bar_width = 1, error_bar_thickness = 0.8,
                   font_family = "sans", color_palette = "custom", x_tick_interval = 30))
-APP_DEFAULTS <- modifyList(LEGACY_BASE, journal_preset_settings(89, 65))   # v2.16: no panel letter unless the user sets one
+APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # v2.16: no panel letter unless the user sets one
+                  list(legend_inside_x = 0.98, legend_inside_y = 0.98))        # v2.23.4: appended at the end (the dragged legend, top-right)
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -7382,7 +7386,7 @@ OLD_SAMPLE_KEY_RE <- "^(color_selector|color|shape|shape_filled|line_type|legend
 OLD_NEVER_GLOBAL <- c("file", "loadSettings", "selected_samples", "time_filter_range", "exclude_timepoints", "samples_select_all",
                       "samples_deselect_all", "saveSettings", "clearSettings", "load_demo", "compare_file")
 LEGEND_POSITIONS_OK <- c("right", "left", "top", "bottom", "none", "inside-auto", "inside-top-left", "inside-top-right",
-                         "inside-bottom-left", "inside-bottom-right", "direct", "matrix")   # v2.22 styling: direct labels, matrix legend
+                         "inside-bottom-left", "inside-bottom-right", "inside-custom", "direct", "matrix")   # v2.23.4 inside-custom; v2.22 styling: direct labels, matrix legend
 
 # one JSON value as an R scalar / vector: a one-element array (list) becomes its element, NULL / empty -> NULL
 settings_unbox <- function(v) {
@@ -8798,10 +8802,17 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
                                   "Inside: bottom-left"  = "inside-bottom-left",
                                   "Inside: bottom-right" = "inside-bottom-right",
                                   "Inside: emptiest corner (auto)" = "inside-auto",
+                                  "Inside: custom (drag it on the figure)" = "inside-custom",   # v2.23.4
                                   "Direct labels at line ends"     = "direct",   # v2.22: no legend box, each line named in its colour
                                   "Matrix (grid) legend"           = "matrix",   # v2.22: rows x columns (set under Figure Layout)
                                   "None"                 = "none"),
-                      selected = APP_DEFAULTS$legend_position))),
+                      selected = APP_DEFAULTS$legend_position)),
+      conditionalPanel("input.legend_position == 'inside-custom'",
+        div(class = "kc-qe-field",
+            tags$label(class = "control-label", "Legend x / y (fraction of the panel, 0 = left/bottom, 1 = right/top)"),
+            div(style = "display:flex; gap:6px;",
+                numericInput("legend_inside_x", NULL, APP_DEFAULTS$legend_inside_x, 0, 1, 0.01),
+                numericInput("legend_inside_y", NULL, APP_DEFAULTS$legend_inside_y, 0, 1, 0.01))))),
     p(class = "kc-qe-note",
       "The name is what figures, legends, tables, CSV files and reports show; the file's own column name stays the key ",
       "(the CSV files carry it in a sample_raw column). Untick show to leave a sample out of the figure.")))
@@ -9006,9 +9017,87 @@ ui <- fluidPage(
            if (kcPop && kcPop.style.display !== 'none' && !kcPop.contains(ev.target)) kcClose();
          });
          document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape' && kcCur) kcClose(); });
+         // v2.23.4: drag the legend. A transparent overlay over the legend entries (+ the key glyphs); dropping it sets
+         // legend_inside_x / legend_inside_y from the drop point relative to the panel (the biggest clipPath rect that is
+         // not the whole figure) and switches Legend position to inside-custom; dropped outside the panel it snaps to the
+         // nearest outside side. A click without a drag still opens the rename popover of the entry under it.
+         function kcPanelRect(svg, vb) {
+           var best = null, ba = 0;
+           svg.querySelectorAll('clipPath rect').forEach(function(r) {
+             var w = parseFloat(r.getAttribute('width')), h = parseFloat(r.getAttribute('height'));
+             if (!(w > 0 && h > 0) || w * h >= 0.98 * vb.width * vb.height || w * h <= ba) return;
+             ba = w * h; best = {x: parseFloat(r.getAttribute('x')) || 0, y: parseFloat(r.getAttribute('y')) || 0, w: w, h: h};
+           });
+           return best;
+         }
+         function kcSetPos(v) {
+           var el = document.getElementById('legend_position'); if (!el) return;
+           if (el.selectize) el.selectize.setValue(v); else { el.value = v; el.dispatchEvent(new Event('change', {bubbles: true})); }
+         }
+         function kcLegDrag() {
+           var host = document.getElementById('od_plot_svg'); if (!host) return;
+           host.querySelectorAll('.kc-leg-drag').forEach(function(e) { e.remove(); });
+           var svg = host.querySelector('svg'), pos = kcVal('legend_position');
+           if (!svg || pos === 'none' || pos === 'direct' || pos === 'matrix') return;
+           var texts = host.querySelectorAll('svg text.kc-ed[data-kc=sample]'); if (!texts.length) return;
+           var hr = host.getBoundingClientRect(), r = svg.getBoundingClientRect();
+           var l = 1e9, t = 1e9, rr = -1e9, b = -1e9, fs = 0;
+           texts.forEach(function(e) {
+             var q = e.getBoundingClientRect(); if (!(q.width > 0)) return;
+             l = Math.min(l, q.left); t = Math.min(t, q.top); rr = Math.max(rr, q.right); b = Math.max(b, q.bottom);
+             fs = Math.max(fs, q.height);
+           });
+           if (!(rr > l)) return;
+           l -= 2.2 * fs; l -= 4; t -= 4; rr += 4; b += 4;
+           var ov = document.createElement('div'); ov.className = 'kc-leg-drag'; ov.title = 'Drag to move the legend';
+           ov.style.left = (l - hr.left + (host.scrollLeft || 0)) + 'px'; ov.style.top = (t - hr.top + (host.scrollTop || 0)) + 'px';
+           ov.style.width = (rr - l) + 'px'; ov.style.height = (b - t) + 'px';
+           host.appendChild(ov);
+           ov.addEventListener('mousedown', function(ev) {
+             if (ev.button !== 0) return; ev.preventDefault();
+             var sx = ev.clientX, sy = ev.clientY, moved = false;
+             function mv(e) {
+               var dx = e.clientX - sx, dy = e.clientY - sy;
+               if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+               moved = true; ov.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+             }
+             function up(e) {
+               document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+               if (!moved) {
+                 ov.style.pointerEvents = 'none';
+                 var under = document.elementFromPoint(e.clientX, e.clientY);
+                 ov.style.pointerEvents = '';
+                 var tx = under && under.closest ? under.closest('#od_plot_svg text.kc-ed') : null;
+                 if (tx) kcOpen(tx);
+                 return;
+               }
+               var q = ov.getBoundingClientRect(), vbb = svg.viewBox && svg.viewBox.baseVal;
+               var vb = vbb && vbb.width ? {x: vbb.x, y: vbb.y, width: vbb.width, height: vbb.height}
+                                         : {x: 0, y: 0, width: parseFloat(svg.getAttribute('width')) || r.width, height: parseFloat(svg.getAttribute('height')) || r.height};
+               var k = vb.width / r.width, rect = r;
+               rect = svg.getBoundingClientRect();
+               var P = kcPanelRect(svg, vb); if (!P) { ov.style.transform = ''; return; }
+               var cx = vb.x + (q.left + q.width / 2 - rect.left) * k, cy = vb.y + (q.top + q.height / 2 - rect.top) * k;
+               var lw = q.width * k, lh = q.height * k;
+               if (cx >= P.x && cx <= P.x + P.w && cy >= P.y && cy <= P.y + P.h) {
+                 var fx = P.w - lw > 1 ? (cx - P.x - lw / 2) / (P.w - lw) : 0.5;
+                 var fy = P.h - lh > 1 ? 1 - ((cy - P.y - lh / 2) / (P.h - lh)) : 0.5;
+                 fx = Math.round(Math.max(0, Math.min(1, fx)) * 100) / 100; fy = Math.round(Math.max(0, Math.min(1, fy)) * 100) / 100;
+                 kcSetText('legend_inside_x', fx); kcSetText('legend_inside_y', fy);
+                 if (window.Shiny && Shiny.setInputValue) { Shiny.setInputValue('legend_inside_x', fx); Shiny.setInputValue('legend_inside_y', fy); }
+                 if (pos !== 'inside-custom') kcSetPos('inside-custom');
+               } else {
+                 var d = {left: P.x - cx, right: cx - P.x - P.w, top: P.y - cy, bottom: cy - P.y - P.h}, side = 'right', m = -1e9;
+                 for (var n in d) if (d[n] > m) { m = d[n]; side = n; }
+                 kcSetPos(side);
+               }
+             }
+             document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+           });
+         }
          // after the SVG is replaced: tag its labels again; the popover stays only while its label still exists
          function kcAfterRender() {
-           kcMark();
+           kcMark(); kcLegDrag();
            if (!kcCur || !kcPop) return;
            var hit = null;
            document.querySelectorAll('#od_plot_svg text.kc-ed').forEach(function(t) {
@@ -9254,6 +9343,8 @@ ui <- fluidPage(
       .kc-leg-sw { display:inline-block; width:14px; height:14px; border:1px solid #888; vertical-align:-2px; margin-right:6px; }
       .kc-qe-canvas .checkbox { margin:2px 0; font-weight:normal; }
       .kc-canvas { position:relative; }
+      .kc-leg-drag { position:absolute; z-index:40; cursor:move; background:transparent; }
+      .kc-leg-drag:hover { outline:1px dashed #0069d9; }
       .kc-canvas-svg text.kc-ed { cursor:pointer; }
       .kc-canvas-svg text.kc-ed:hover { fill:#0069d9; text-decoration:underline; }
       #kc_canvas_pop { position:absolute; z-index:50; display:none; min-width:220px; background:#fff; border:1px solid #ccc;
@@ -13231,6 +13322,8 @@ server <- function(input, output, session) {
       } else {
         layers <- c(layers, list(inside_legend_theme(names(cnt)[which.min(cnt)])))
       }
+    } else if (identical(leg_pos, "inside-custom")) {       # v2.23.4: dragged on the figure
+      layers <- c(layers, list(inside_legend_theme("custom", nin("legend_inside_x", 0.98), nin("legend_inside_y", 0.98))))
     } else if (startsWith(leg_pos, "inside-")) {
       layers <- c(layers, list(inside_legend_theme(sub("^inside-", "", leg_pos))))
     } else {

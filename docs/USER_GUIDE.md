@@ -33,7 +33,7 @@ The layout is detected automatically. Check the data summary box after every loa
 
 **Fits indicator.** The size bar gives the panel and figure size and says whether the figure fits a single column, two across a double column, or three across. With the legend inside, a 65 mm panel gives a figure of about 75 mm, which fits a single column, and two such figures fit across a 183 mm double column.
 
-**Legend inside or outside.** The preset selects **Inside: emptiest corner (auto)**, which places the key in the corner with the fewest plotted points. It moves to the right, outside the panel, when there are more than four entries or the corner still overlaps data. Other positions are under **Legend position:** in the Quick edit strip under the figure.
+**Legend inside or outside.** The preset selects **Inside: emptiest corner (auto)**, which places the key in the corner with the fewest plotted points. It moves to the right, outside the panel, when there are more than four entries or the corner still overlaps data. Other positions are under **Legend position:** in the Quick edit strip under the figure, or drag the legend on the figure (it becomes **Inside: custom**; the x / y boxes then fine-tune it).
 
 **Subscripts.** With **Typeset wavelength as subscript** ticked (the default), `A550` and `OD600` in the y label are drawn as A₅₅₀ and OD₆₀₀. Untick it for plain text.
 
