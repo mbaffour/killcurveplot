@@ -11,6 +11,7 @@ suppressPackageStartupMessages({
   library(ggrepel); library(ggprism); library(svglite); library(jsonlite)
 })
 if (!file.exists("Lysis_Curve_App_v28.R")) stop("Run from the repository root")
+Sys.setenv(CFU_PAPER_STYLE = file.path(tempdir(), "no_such_paper_style.json"))   # v2.23.4: never pick up a real paper_style.json
 
 pass <- 0L; fail <- 0L; skip <- 0L
 check <- function(desc, cond) {

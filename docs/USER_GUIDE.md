@@ -55,6 +55,9 @@ The layout is detected automatically. Check the data summary box after every loa
 4. Assemble multi-panel figures at 100 %, or use the Compose figure tab (section 4).
 5. Use **File > Save a Copy** as Plain SVG (Nature accepts plain SVG, not Inkscape SVG) or as PDF with fonts embedded. For ASM, export TIFF at 600 dpi. Paste the **Figure Legend Text** into the manuscript and edit it.
 
+### Using the paper style from CFU Plot Studio
+If CFU Plot Studio saved a paper style (`paper_style.json`) beside this app, the font and sizes and the colour of every sample it names are applied when the app starts, so a strain has the same colour in every tool. Press **Reload paper style** (Save / Load Settings) after saving a new one. A colour you pick by hand still wins; the status line under the button says what was read. The app only reads the file.
+
 ## 4. A multi-panel figure
 
 **In the app: the Compose figure tab** (after Dashboard).

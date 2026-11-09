@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.23.5 — 2026-11-09
+
+**Paper style shared with CFU Plot Studio.** CFU Plot Studio 0.4.0 writes a `paper_style.json` (font, sizes, and a sample
+name -> colour table); lysis-curve-app and plaque-toolkit already read it, and now this app does too, so one strain keeps
+one colour and one font across the tools. Only CFU Plot Studio writes the file; this app only reads it.
+- **Where it is looked for:** `CFU_PAPER_STYLE` (a path) if that environment variable is set, else `paper_style.json` in
+  the app folder. It is read once at start (after the first page flush) and again on **Reload paper style** (Save / Load
+  Settings section, under a status line: "Paper style: <path>, saved <date>; colours for N samples" or "No paper style").
+- **Allowlist (nothing else is read):** `font_family` (+ `font_family_custom`) -> Font Family (a family not in the menu
+  goes to the nearest entry, Sans Serif if nothing is close, and the style's `ignored` / `notes` record it);
+  `title_size` -> Title Font Size; `font_size` -> Axis Label Size, and 0.8 x (rounded) -> Axis Text Size and Legend Font
+  Size; `sample_palette` -> the colour of each sample by its name. `axis_color` and `axis_line_width` have no matching
+  control here (no axis colour box; the axis line is in points) and are ignored, as are plot titles, legend position,
+  angles, sizes, axis limits and every other key. The file never goes through Load Settings.
+- **Colour precedence for a sample:** quick-edit colour > the colour picked in its own Variable Styling box > the paper
+  style's colour for that name (raw or display name, exact match) > the colour palette > the default cycle. A colour set
+  by hand always wins; legend keys, the legend text and every figure follow.
+- A missing file changes nothing (the figure is byte-identical); an unreadable one (bad JSON, not an object, over 16 MB)
+  says so in the status line and applies nothing. Values are type-checked and clamped to the controls' ranges.
+
 ## v2.23.4 — 2026-11-09
 
 **Drag the legend on the figure.** New **Legend position: Inside: custom (drag it on the figure)** with **Legend x / y**
@@ -7,7 +27,6 @@ boxes (fractions of the panel, 0 = left/bottom, 1 = right/top). On the inline fi
 over the legend when you hover it: drag it where you want it. Dropped inside the panel it switches to the custom position
 and fills x / y; dropped outside the panel it snaps to the nearest side (right / left / top / bottom). Clicking a legend
 entry still renames it. The export uses the same theme, so the file matches the preview. The startup figure is unchanged.
-
 ## v2.23.3 — 2026-11-09
 
 **A "Legend text" tab.** The drafted figure-legend text (with the colour words) and the legend key were in a sidebar section
