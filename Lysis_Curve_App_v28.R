@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.1"
+APP_VERSION <- "2.23.2"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -8801,6 +8801,11 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
       "The name is what figures, legends, tables, CSV files and reports show; the file's own column name stays the key ",
       "(the CSV files carry it in a sample_raw column). Untick show to leave a sample out of the figure.")))
 
+# v2.23.2: a "Copy figure" button; kind is main / analysis / fit / compose / compare / legend_key (page script kcCopyFigure)
+kc_copy_button <- function(kind, label = " Copy figure", style = NULL)
+  tags$button(class = "btn btn-default", type = "button", style = style,
+              onclick = sprintf("kcCopyFigure('%s')", kind), icon("copy"), label)
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- fluidPage(
   titlePanel("Optical Density (OD) Time-Series Visualization"),
@@ -9018,6 +9023,82 @@ ui <- fluidPage(
            jQuery(document).on('shiny:idle', kcMark);
            jQuery(document).on('shiny:inputchanged', function(ev) { if (ev.name === 'canvas_edit' && !ev.value) kcClose(); });
          }
+       })();"
+    )),
+    # v2.23.2: Copy figure -- the preview (inline SVG or PNG) is drawn to a PNG in the browser and put on the clipboard
+    tags$script(HTML(
+      "(function() {
+         var SEL = {main: ['#od_plot_svg svg', '#od_plot_img img', '#od_plot img'], analysis: ['#analysis_img img', '#analysis_plot img'],
+                    fit: ['#fit_img img', '#fit_plot img'], compose: ['#compose_img img', '#compose_plot img'],
+                    compare: ['#compare_img img', '#compare_plot img'], legend_key: ['#legend_key_preview img']};
+         var BOX = {main: '#od_plot_svg, #od_plot_img, #od_plot', analysis: '#analysis_img, #analysis_plot', fit: '#fit_img, #fit_plot',
+                    compose: '#compose_img, #compose_plot', compare: '#compare_img, #compare_plot', legend_key: '#legend_key_preview'};
+         function figEl(kind) {
+           var l = SEL[kind] || [];
+           for (var i = 0; i < l.length; i++) { var e = document.querySelector(l[i]); if (e) return e; }
+           return null;
+         }
+         function report(kind, ok, w, h, why) {
+           if (window.Shiny && Shiny.setInputValue)
+             Shiny.setInputValue('kc_copy_result', ok ? {kind: kind, ok: true, w: w, h: h} : {kind: kind, ok: false, reason: why}, {priority: 'event'});
+         }
+         function toPng(el, dims) {
+           return new Promise(function(resolve, reject) {
+             var isSvg = el.tagName.toLowerCase() === 'svg', cw, ch, scale, src, revoke = null, img;
+             function draw(source) {
+               var c = document.createElement('canvas'); c.width = Math.max(1, Math.round(cw * scale)); c.height = Math.max(1, Math.round(ch * scale));
+               var g = c.getContext('2d'); g.fillStyle = '#ffffff'; g.fillRect(0, 0, c.width, c.height);
+               g.drawImage(source, 0, 0, c.width, c.height);
+               dims.w = c.width; dims.h = c.height;
+               c.toBlob(function(b) { if (b) resolve(b); else reject(new Error('the browser could not make a PNG')); }, 'image/png');
+             }
+             if (isSvg) {
+               var r = el.getBoundingClientRect(); cw = r.width; ch = r.height;
+               if (!(cw > 0 && ch > 0)) { reject(new Error('the figure has no size on the page')); return; }
+               scale = Math.min((window.devicePixelRatio || 1) * 3, 4000 / Math.max(cw, ch));
+               var cl = el.cloneNode(true);
+               cl.setAttribute('width', Math.round(cw * scale)); cl.setAttribute('height', Math.round(ch * scale));
+               if (!cl.getAttribute('xmlns')) cl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+               var url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(cl)], {type: 'image/svg+xml;charset=utf-8'}));
+               img = new Image();
+               img.onload = function() { try { draw(img); } catch (e) { reject(e); } URL.revokeObjectURL(url); };
+               img.onerror = function() { URL.revokeObjectURL(url); reject(new Error('the figure could not be drawn')); };
+               img.src = url;
+             } else {
+               if (!el.complete || !(el.naturalWidth > 0)) { reject(new Error('the figure is still loading')); return; }
+               cw = el.naturalWidth; ch = el.naturalHeight; scale = Math.min(3, 4000 / Math.max(cw, ch));
+               try { draw(el); } catch (e) { reject(e); }
+             }
+           });
+         }
+         function why(e) {
+           if (e && e.name === 'NotAllowedError') return 'the browser refused clipboard access';
+           var m = e && (e.message || e.name); return m ? String(m).slice(0, 100) : 'unknown error';
+         }
+         window.kcCopyFigure = function(kind) {
+           var el = figEl(kind);
+           if (!el) { report(kind, false, 0, 0, 'no figure on the page'); return; }
+           if (!navigator.clipboard || !navigator.clipboard.write || !window.ClipboardItem) {
+             report(kind, false, 0, 0, 'this browser or page (needs https or localhost) has no clipboard image support'); return;
+           }
+           var dims = {w: 0, h: 0}, done, p;
+           try { p = toPng(el, dims); } catch (e) { report(kind, false, 0, 0, why(e)); return; }
+           p.catch(function() {});
+           try { done = navigator.clipboard.write([new ClipboardItem({'image/png': p})]); }
+           catch (e) { done = p.then(function(b) { return navigator.clipboard.write([new ClipboardItem({'image/png': b})]); }); }
+           done.then(function() { report(kind, true, dims.w, dims.h); }, function(e) { report(kind, false, 0, 0, why(e)); });
+         };
+         var hov = null;
+         document.addEventListener('mouseover', function(ev) {
+           hov = null; if (!ev.target || !ev.target.closest) return;
+           for (var k in BOX) { if (ev.target.closest(BOX[k])) { hov = k; break; } }
+         });
+         document.addEventListener('keydown', function(ev) {
+           if (!hov || ev.altKey || ev.shiftKey || !(ev.metaKey || ev.ctrlKey) || String(ev.key).toLowerCase() !== 'c') return;
+           var a = document.activeElement, sel = window.getSelection ? String(window.getSelection()) : '';
+           if (sel || (a && /^(input|textarea|select)$/i.test(a.tagName))) return;
+           ev.preventDefault(); window.kcCopyFigure(hov);
+         });
        })();"
     )),
     # v2.14: the main panel's pixel width, so true-size previews can pick the zoom that fits it
@@ -9797,7 +9878,8 @@ ui <- fluidPage(
                          "Legend key: the figure's own legend (every sample's colour, marker, fill, line type and name) as a separate ",
                          "image in the export format, to place beside the figure or to start a legend from."),
                        plotOutput("legend_key_preview", height = "auto"),
-                       downloadButton("downloadLegendKey", "Download legend key", style = "width:100%;margin-top:6px;")
+                       downloadButton("downloadLegendKey", "Download legend key", style = "width:100%;margin-top:6px;"),
+                       kc_copy_button("legend_key", " Copy key", style = "width:100%;margin-top:6px;")
                    )
                  ),
                  
@@ -9846,6 +9928,7 @@ ui <- fluidPage(
                        uiOutput("export_size_note"),
                        numericInput("export_dpi", "DPI (raster formats):", APP_DEFAULTS$export_dpi, 72, 1200),
                        downloadButton("downloadPlot", "Download Image"),
+                       kc_copy_button("main"),
                        br(), br(),
                        downloadButton("downloadFigureBundle", "Download figure bundle (.zip)", style = "width:100%;"),
                        p(style = "font-size:.78em;color:#777;margin-top:4px;",
@@ -10327,6 +10410,7 @@ ui <- fluidPage(
                 p(style = "font-size:.82em;color:#555;",
                   "Same fonts, line weights, legend, colours and export size as the main figure ",
                   "(journal preset included), so panels assemble without rescaling."),
+                kc_copy_button("analysis", style = "width:100%;margin-bottom:6px;"),
                 downloadButton("downloadAnalysisPlot", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadAnalysisLegendKey", "Download legend key", style = "width:100%;"),
@@ -10383,6 +10467,7 @@ ui <- fluidPage(
                 numericInput("compose_tag_size", "Panel label size (pt):", 8, 4, 20, 0.5),
                 radioButtons("compose_tag_case", "Panel labels:",
                              choices = c("a, b, c" = "a", "A, B, C" = "A"), selected = "a", inline = TRUE),
+                kc_copy_button("compose", style = "width:100%;margin-bottom:6px;"),
                 downloadButton("downloadComposedFigure", "Download composed figure",
                                style = "background:#2C3E50;color:white;border:none;width:100%;"),
                 br(), br(),
@@ -10421,6 +10506,7 @@ ui <- fluidPage(
                 p(style = "font-size:.82em;color:#555;",
                   "Same colours (by sample), display names, fonts, axes, error bars and size as the main figure. In the facet layout every ",
                   "panel keeps the fixed panel size. The figure is also a panel of the Compose tab and part of Download all figures."),
+                kc_copy_button("compare", style = "width:100%;margin-bottom:6px;"),
                 downloadButton("downloadCompare", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadCompareLegendKey", "Download legend key", style = "width:100%;"),
@@ -10741,6 +10827,7 @@ ui <- fluidPage(
                 p(style = "font-size:.82em;color:#555;",
                   "Same colours, fonts and export size as the main figure; the figure is also the 'Fitted growth ",
                   "curves' choice of the Analysis figures and the composer."),
+                kc_copy_button("fit", style = "width:100%;margin-bottom:6px;"),
                 downloadButton("downloadFitFigure", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadFitLegendKey", "Download legend key", style = "width:100%;"),
@@ -11891,7 +11978,7 @@ server <- function(input, output, session) {
       data_inputs     <- c("file", "loadSettings", "selected_samples",
                            "time_filter_range", "exclude_timepoints",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                           "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump",
+                           "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
                            "time_col_choice", "sheet_choice", "excluded_reps", "excluded_reps_clear", "samples_all", "samples_none",
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
@@ -12017,7 +12104,7 @@ server <- function(input, output, session) {
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
-                         "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump",
+                         "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
                            "time_col_choice", "sheet_choice", "excluded_reps", "excluded_reps_clear", "samples_all", "samples_none",
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
@@ -14121,6 +14208,7 @@ server <- function(input, output, session) {
       # v2.22: the main figure as the inline export SVG, so its labels can be clicked (checkbox canvas_edit)
       if (isTRUE(input$canvas_edit %||% TRUE) && identical(img_id, "od_plot_img"))
         return(uiOutput("od_plot_svg", class = "kc-canvas",
+                        title = "Use Copy figure (or Cmd/Ctrl+C while hovering) to copy; Download Image for a file.",
                         style = paste0("width:", round(sz[1] * 96 * z), "px;height:", round(sz[2] * 96 * z), "px;")))
       imageOutput(img_id,
                   width  = paste0(round(sz[1] * 96 * z), "px"),
@@ -14268,6 +14356,19 @@ server <- function(input, output, session) {
              actionButton("apply_journal_preset_bar", "Apply journal preset", class = "btn btn-default btn-xs"))
   })
 
+  # v2.23.2: the page script (kcCopyFigure) reports how a Copy figure click went
+  observeEvent(input$kc_copy_result, {
+    x <- input$kc_copy_result
+    req(is.list(x), is.logical(x$ok), length(x$ok) == 1L, !is.na(x$ok))
+    px <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1L && is.finite(v) && v > 0) format(round(v), scientific = FALSE) else "?" }
+    if (isTRUE(x$ok)) {
+      showNotification(sprintf("Figure copied to the clipboard (%s x %s px). For print use Download Image.", px(x$w), px(x$h)),
+                       type = "message", duration = 4)
+    } else {
+      why <- if (is.character(x$reason) && length(x$reason) == 1L && !is.na(x$reason) && nzchar(x$reason)) substr(x$reason, 1, 120) else "unknown reason"
+      showNotification(paste0("Could not copy: ", why, ". Use Download Image instead."), type = "warning")
+    }
+  })
   output$plot_container <- renderUI(preview_container("od_plot", "od_plot_img"))
   register_preview("od_plot", "od_plot_img", main_plot_obj)
   # v2.22: the same figure as the export SVG, inline (svg_inline_for_preview); the page script makes the legend
