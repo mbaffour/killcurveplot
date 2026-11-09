@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.23.2 — 2026-11-09
+
+**Copy figure to the clipboard.** Since v2.22.0 the Lysis curve preview is the export SVG drawn inline (so its labels
+are clickable), and a browser offers no right-click "Copy image" on an inline SVG: the figure could no longer be copied
+from the page.
+- **Copy figure** button beside every figure's download button (Lysis curve, Analysis figures, Curve fitting, Compose,
+  Compare) and **Copy key** by the legend key preview. The page draws the current preview to a PNG in the browser (the
+  inline SVG through a canvas, the PNG previews redrawn) and writes it to the clipboard; a notification says it worked
+  (with the size) or why it did not (no clipboard support, permission refused, no figure on the page).
+- **Cmd/Ctrl+C** while the mouse is over a figure preview copies that figure (nothing happens while text is selected or a
+  field has focus, so ordinary copying is untouched).
+- The clipboard holds a screen-resolution PNG (at most 4000 px on the longer side); **Download Image** stays the path
+  for print and journal files. No export path, the figure or the inlined SVG changed.
+- The Lysis curve figure box shows a hint on hover pointing to Copy figure.
+
 ## v2.23.1 — 2026-11-08
 
 **Legend key for every figure.** A one-click, colour-exact key to place beside a figure, and colour words in the legend
