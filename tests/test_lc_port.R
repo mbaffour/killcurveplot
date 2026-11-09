@@ -126,8 +126,11 @@ check("smooth3_raw_edges keeps raw values at both edges and averages inside",
 cat("\n--- extinction_time ---\n")
 check("extinction_time interpolates the crossing of 0.05 (0.15 at t=10 -> 0.03 at t=20 -> 10 + 10 * 0.10/0.12)",
       near(env$curve_extinction_time(c(0, 10, 20), c(0.5, 0.15, 0.03)), 10 + 10 * 0.10 / 0.12, 1e-9))
-check("extinction_time: a curve that starts below the floor reports its first time point",
-      near(env$curve_extinction_time(c(5, 10, 20), c(0.04, 0.03, 0.02)), 5))
+# hardening round 1 (finding 12): extinction is a crossing FROM ABOVE; a curve that starts below the floor is NA
+# (with attr "reason"), no longer its first time point
+check("extinction_time: a curve that starts below the floor is NA (no crossing from above), reason attached",
+      is.na(env$curve_extinction_time(c(5, 10, 20), c(0.04, 0.03, 0.02))) &&
+      identical(attr(env$curve_extinction_time(c(5, 10, 20), c(0.04, 0.03, 0.02)), "reason"), "starts_below_floor"))
 check("extinction_time: NA when the curve never falls below the floor",
       is.na(env$curve_extinction_time(c(0, 10, 20), c(0.1, 0.5, 0.9))))
 check("extinction_time: NA for non-finite floor / single point above it",

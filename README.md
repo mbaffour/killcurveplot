@@ -1,6 +1,6 @@
 # Lysis Curve OD Visualization App — User Guide
 
-> **Docs:** [Metrics reference (formulas + sources)](docs/METRICS_REFERENCE.md) · [Changelog](CHANGELOG.md) · [Audit (2026-09)](AUDIT-2026-09.md) · Tests: `Rscript tests/test_v28.R` (101 checks), `Rscript tests/test_metrics_parity.R` (reference-free checks always run; reference-comparison checks need a compatible sibling clone of [lysis-curve-app](https://github.com/mbaffour/lysis-curve-app) — see [docs/METRICS_REFERENCE.md](docs/METRICS_REFERENCE.md#tests))
+> **Docs:** [How to label a figure (tutorial)](docs/LABELLING_HOWTO.md) · [Metrics reference (formulas + sources)](docs/METRICS_REFERENCE.md) · [Changelog](CHANGELOG.md) · [Audit (2026-09)](AUDIT-2026-09.md) · Tests: `Rscript tests/test_v28.R` (101 checks), `Rscript tests/test_metrics_parity.R` (reference-free checks always run; reference-comparison checks need a compatible sibling clone of [lysis-curve-app](https://github.com/mbaffour/lysis-curve-app) — see [docs/METRICS_REFERENCE.md](docs/METRICS_REFERENCE.md#tests))
 >
 > **Looking for the full analysis platform** (Analysis tab, 30+ metrics, statistics, heatmaps, curve fitting, virulence metrics)? That's the companion app: [mbaffour/lysis-curve-app](https://github.com/mbaffour/lysis-curve-app). This repo is the lightweight plotter.
 
@@ -159,11 +159,17 @@ picker — Auto-detect (the default, sniffed from the header line), US/UK, or Eu
 
 The **figure stays in view** while you scroll the settings: the figure column (size bar, tabs and the figure) is pinned to the top of the window, so you change a setting and see the effect without scrolling back up (untick **Keep the figure in view while I scroll the settings** at the top of the sidebar to get the old, scrolling layout; on a narrow window the columns stack and nothing is pinned). While the column is pinned the auto-fit preview also fits the window height, so the figure and the strip below it are in view together. The sidebar is an **accordion**: opening a section closes the other one, so only one is ever open; the **Jump to a section...** menu above them opens any section and scrolls it to the top (it takes keyboard focus too), and **Collapse all** closes them. Under the figure, the **Quick edit** strip has one row per loaded sample: a colour swatch and picker, the **name** shown in figures and tables, and a **show** box that adds or removes the sample from the figure; below the rows are the **X-axis label**, **Y-axis label** and **Legend position** (moved here from the sidebar, same settings). *Hide quick edit* collapses the strip.
 
+**Edit on the figure (v2.22).** The preview of the main figure is the export SVG drawn inline, so you can **click a legend entry** to rename it, recolour it or hide it, and **click the x-axis title, the y-axis title, the title or the subtitle** to edit the text; Apply writes into the quick-edit strip and the sidebar boxes, so everything stays in step. Untick **Edit labels on the figure** (in the strip) for the PNG preview of earlier versions. The exported files are the same either way.
+
 **Renaming a sample** (the name box in the strip) changes the name everywhere the sample is shown: the legends and labels of every figure, the tables of the Statistics tab and the Dashboard, the curve-metrics, per-replicate-metrics, statistics, extraction, phases, bootstrap and fit tables and their CSV downloads, the reports, the Figure Legend Text and the drafted methods text. The CSV files keep the file's own column name in a `sample_raw` column next to the display `sample` column (and `versus_raw` where a table has a `versus` column), the reports list the mapping "raw column name → display name" in the data provenance, and Save Settings stores the name per sample (the existing `legend_label` entry). The column name stays the key: Select Samples, the reference sample and the MOI override box use it (a sample whose column name carries no MOI but whose display name does, for example "Phage MOI 10", counts as that MOI). The raw source-data CSV in the figure bundle keeps the file's own names. A colour picked in the strip is the sample's colour; picking another colour for that sample in Variable Styling replaces it, and the strip's swatch follows the sidebar.
 
 ### Loading Data
 
-Click **"Browse..."** next to "Choose CSV File" and select your file. The plot will appear automatically on the right side.
+Click **"Browse..."** next to "Choose CSV or Excel file" and select your file. The plot will appear automatically on the right side.
+CSV / TSV / TXT and `.xlsx` / `.xls` (with a sheet selector) are accepted, and the **Data** tab has an *Enter data* box for text
+pasted from Excel. The reader copes with UTF-8 / UTF-16 / Latin-1 encodings, plate-reader preambles, quoted thousands and
+decimal commas, AM/PM and clock times, stacked replicate blocks and repeated header rows (v2.23). A file the app cannot use is
+refused with one sentence that ends "The file was not loaded." and the previous data stay in place.
 
 ### Selecting Samples
 
@@ -186,6 +192,17 @@ All settings are in the left sidebar, organized into collapsible sections. Click
 **Line & Point Settings** — Control line thickness and point appearance. Toggle points on/off and adjust their size.
 
 **Label Options** — Add labels at the end of each line to identify samples without needing the legend.
+
+### How to label a figure
+
+Every label on a figure has one place to set it; the tutorial [docs/LABELLING_HOWTO.md](docs/LABELLING_HOWTO.md) walks through all of them on the demo data. In short:
+
+- **Sample names** (legend entries, tables, reports): the **name** box in the Quick edit strip, or click the legend entry on the figure. Name MOI samples `Phage MOI 10` so the dose-response can read the MOI.
+- **Axis titles**: **X-axis label** and **Y-axis label** in the strip, or click the axis title. The unit word in the x label (`min`, `h`) sets the time unit of every metric label; `A550` and `OD600` are typeset as subscripts.
+- **Legend**: **Legend position** in the strip (inside corners, automatic corner, outside, or **None** with **Show End-of-Line Labels** under *Label Options*).
+- **Panel letters**: **Panel label** under *Figure Layout* or in the *Journal Figure Preset*; the Analysis figures tab and the Compose figure tab have their own.
+- **Events and thresholds**: a labelled marker under *Time Point Markers*, and the threshold line's **Label**.
+- **Significance marks and the caption**: stars on the metric summary vs the reference sample, and the drafted **Figure Legend Text** for everything that belongs under the figure rather than on it.
 
 **Error Bars / Shadow** — Display variability as error bars (T-shaped or lines) or as a shaded ribbon around each line. Choose between SD, SEM, or 95% CI. If you only have one replicate per sample per time point, error bars will simply not appear (there's no variability to show).
 
@@ -578,6 +595,17 @@ All of this is live: change the Y-axis label (Quick edit strip under the figure)
 
 **Error bars / shadow ribbon doesn't show.** — If you have only one replicate per sample per time point, the standard deviation is **undefined** (not zero — you cannot measure spread from a single value), so no bar is drawn at that point and the Summary Statistics CSV / report tables show `NA` for SD, SEM, and the 95% CI at that time point. This is expected behavior. You need at least two replicates for error bars — and for the exported statistics — to be meaningful.
 
+**"... The file was not loaded."** — The app refused the file and says why (empty, binary, no data rows, only one column,
+no readable time value, every reading OVER). Fix the file, or pick another sheet / time column, and load it again.
+
+**"Figure not available: No data left after the current filters."** — Every row was removed by the time filter, the OD window,
+the per-sample time windows or the replicate exclusions (Data tab). Relax one of them; downloads are refused until data are back.
+
+**"Could not read the settings file ..." / "This is not a settings file ..." / "N settings were out of range and clamped."** — A
+settings or theme file is checked key by key (v2.23): a value of the wrong type, or a choice that the control does not offer, is
+ignored and a number outside its box's range is pulled into range, with one notification; a file that is not JSON or not a
+settings object is refused and nothing changes.
+
 **The app is slow or laggy.** — If you have a very large number of samples, the app may take a moment to update. The app debounces inputs (waits 400ms after you stop adjusting before redrawing), so slight delays are intentional.
 
 **"Run App" button doesn't appear.** — Make sure the `.R` file is open and is the active tab in the editor. Also confirm that the `shiny` package is installed.
@@ -608,4 +636,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.20.0 (2026-11-01) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.23.0 (2026-11-04) — Michael Baffour Awuah / Ramsey Lab*

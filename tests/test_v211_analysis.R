@@ -241,7 +241,8 @@ testServer(app, {
   eb <- p_bk$layers[[which(layer_names(p_bk) == "GeomErrorbar")[1]]]
   check("black error bars carry a fixed colour, not the sample colour", identical(eb$aes_params$colour, "black"))
   session$setInputs(error_bar_color = "sample", error_cap_relative = FALSE, error_bar_width = 1)
-  session$setInputs(error_type = "sd", error_multiplier = 15)  # SD x 15 crosses zero on the log axis (x 5 does not for the demo data)
+  # SD x 5 with 0.02 of blank subtracted crosses zero on the log axis (round 3: a typed multiplier is held to the box maximum of 5)
+  session$setInputs(error_type = "sd", error_multiplier = 5, blank_od = 0.02)
   p_fl <- generate_plot(); real_plot("log-floor bars render", p_fl)
   eb_d <- layer_data(p_fl, which(layer_names(p_fl) == "GeomErrorbar")[1])
   check("bars that cross zero are floored at the axis minimum (10^-2), not dropped",
@@ -254,7 +255,7 @@ testServer(app, {
   eb_d3 <- layer_data(generate_plot(), which(layer_names(generate_plot()) == "GeomErrorbar")[1])
   check("v2.17: with 'clip to the floor' even those bars are kept (drawn down to the floor)",
         sum(is.finite(eb_d3$ymin)) == sum(is.finite(eb_d$ymin)))
-  session$setInputs(error_log_floor = TRUE, error_multiplier = 1, error_type = "sem")
+  session$setInputs(error_log_floor = TRUE, error_multiplier = 1, error_type = "sem", blank_od = 0)
   session$setInputs(legend_order = "selected")
   p_ord <- generate_plot()
   check("sample order 'selected' keeps the file order in the main figure (Uninfected first)",
@@ -317,9 +318,9 @@ testServer(app, {
     # lysis demo (MOI 10 and 0.1 = two distinct positive levels, reference set): main figure + metric summary +
     # growth rate + normalized + landmarks (v2.12.4, always) + dose-response = 6 images, plus the composed figure
     # (v2.13.0: the default compose_panels selection has four panels) = 7; v2.19 adds the phenotype heatmap and the
-    # Curve fits figure = 9; v2.20 adds the phases and the separation figure (a reference is set) = 11.
-    check("HTML report (on): exactly 11 <img> (main, metric summary, growth rate, normalized, landmarks, phases, separation, dose-response, phenotype heatmap, composed, fit figure)",
-          n_img(html_on) == 11 && grepl("<h3>Curve landmarks</h3>", html_on, fixed = TRUE) &&
+    # Curve fits figure = 9; v2.20 adds the phases and the separation figure (a reference is set) = 11; v2.22 adds the dOD/dt figure = 12.
+    check("HTML report (on): exactly 12 <img> (main, metric summary, growth rate, dOD/dt, normalized, landmarks, phases, separation, dose-response, phenotype heatmap, composed, fit figure)",
+          n_img(html_on) == 12 && grepl("<h3>Curve landmarks</h3>", html_on, fixed = TRUE) &&
           grepl("<h3>Composed figure</h3>", html_on, fixed = TRUE))
     check("HTML report (on): every analysis figure rendered (no 'Figure not available')",
           !grepl("Figure not available", html_on, fixed = TRUE))
@@ -395,9 +396,9 @@ testServer(app, {
     n_img <- function(h) lengths(regmatches(h, gregexpr("<img ", h, fixed = TRUE)))
     # resistance: both infected samples are MOI 1 = ONE positive level, so no dose-response; images =
     # main + metric summary + growth rate + normalized + landmarks = 5, plus the composed figure (v2.13.0) = 6;
-    # v2.19 adds the phenotype heatmap and the Curve fits figure = 8; v2.20 adds phases and separation = 10
-    check("resistance report: exactly 10 <img> (landmarks, phases, separation, heatmap, fit figure and the composed figure; dose-response skipped for one MOI level)",
-          n_img(h_r) == 10 && grepl("<h3>Curve landmarks</h3>", h_r, fixed = TRUE))
+    # v2.19 adds the phenotype heatmap and the Curve fits figure = 8; v2.20 adds phases and separation = 10; v2.22 adds dOD/dt = 11
+    check("resistance report: exactly 11 <img> (dOD/dt, landmarks, phases, separation, heatmap, fit figure and the composed figure; dose-response skipped for one MOI level)",
+          n_img(h_r) == 11 && grepl("<h3>Curve landmarks</h3>", h_r, fixed = TRUE))
     check("resistance report: no 'MOI dose-response' heading and no 'Figure not available' placeholder",
           !grepl("MOI dose-response", h_r, fixed = TRUE) && !grepl("Figure not available", h_r, fixed = TRUE))
   }
@@ -657,7 +658,8 @@ check("compose inputs have APP_DEFAULTS entries (compose_panels is a character v
       env$APP_DEFAULTS$compose_panel_height_mm == 60 && env$APP_DEFAULTS$compose_tag_size == 8 &&
       identical(env$APP_DEFAULTS$compose_tag_case, "a") && is.numeric(env$APP_DEFAULTS$compose_width_mm))
 check("compose panel choices: main first, v2.18's one-panel-per-group, then the analysis figures with the Analysis tab's labels",
-      identical(unname(env$COMPOSE_PANEL_CHOICES), c("main", "main_by_group", unname(env$ANALYSIS_FIGURE_CHOICES))) &&
+      identical(head(unname(env$COMPOSE_PANEL_CHOICES), 2 + length(env$ANALYSIS_FIGURE_CHOICES)),    # later versions append panels (v2.22: compare)
+                c("main", "main_by_group", unname(env$ANALYSIS_FIGURE_CHOICES))) &&
       identical(names(env$COMPOSE_PANEL_CHOICES)[1], "Lysis curve (main)"))
 testServer(app, {
   ingest_data(env$make_demo_data("lysis"), "demo")

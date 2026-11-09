@@ -1,5 +1,184 @@
 # Changelog
 
+## v2.23.0 — 2026-11-04
+
+**One tool instead of three, and a hardening pass.** The features of the N4-paper lysis-curve app and of the older
+lysis-curve-app are now in this app (data tab, transforms, compare, presets, themes, notes, batch export, markup, error
+modes, panels, matrix legend), with a statistics and curve-fitting layer comparable to GraphPad Prism. Then three rounds
+of adversarial testing (about 20 000 server cells, 190 ingest files, 46 engine probes, 3 434 direct-input cells) and five
+fixing passes. The
+journal startup figure (Nature single column, 89 x 65 mm) is unchanged; see *Result changes* below for the four
+numbers that moved on purpose.
+
+### Data tab and ingest (`docs/DATA_TAB_AND_TRANSFORMS.md`, `tests/test_v222_data.R`)
+- Detection: every non-time numeric column is a sample by position (replicate columns that share a name are pooled);
+  only a temperature column (`T°`, `temp`, `°C`, whole-word match) or a non-numeric column is dropped, and the data
+  summary names what was dropped and why. Long format recognises `strain` / `Strain`; wells are the samples when no
+  other group column exists. `time_col_choice` overrides the time column without re-reading the file.
+- *View & edit* (editable DT table, every edit goes through the ingest path, *Revert to loaded*, *Download current
+  data*); *Enter data* (paste Excel / CSV text, separator auto-detected); `.xlsx` / `.xls` upload with a sheet selector.
+- Exclusions that filter: OD-range exclusion on the raw readings; per-replicate exclusion (`excluded_reps`, drawn as
+  hollow grey circles), applied in every mean, statistic, metric, fit and export and named in the provenance.
+- Blank / baseline (`blank_mode`: constant, a blank sample, mean of the first k points) and transforms
+  (`transform_mode`: t0, control sample, 0-100 % of own maximum, ln(OD)) in one place, `transform_frame()`.
+- Replicate QC table (median / max CV %, high-CV flag), n = 1 warning, Samples All / None, extinction floor and
+  t_stat override inputs. `run_app.R` installs `DT` and `readxl`.
+
+### Statistics engine (`docs/STATISTICS_REFERENCE.md`, `tests/test_v222_stats.R`)
+- Pure-function block `v2.22 stats engine`: column statistics (Prism-style skewness and kurtosis, geometric mean),
+  `normality_table()`, `qq_frame()`, `variance_check()` (Brown-Forsythe, Bartlett), `omnibus_table()` (ANOVA with
+  eta squared, Welch ANOVA, Kruskal-Wallis), `posthoc_table()` (Tukey, Holm-Welch, Games-Howell, Dunn, Dunnett,
+  Bonferroni, Sidak), `two_way_time_anova()` (sample x time with wells as repeated-measures subject: `nlme::lme`
+  with AR(1) errors, else `aov` with `Error(well)`), `per_time_comparisons()`, `outlier_tests()` (Grubbs, MAD, IQR;
+  flags only), `auc_table()` / `auc_compare()` (trapezoid AUC above a baseline, relative AUC with a log-delta CI),
+  `one_sample_tests()`, `correlation_table()`, `linear_fit_table()`, `stats_method_sentence()`.
+- Every table carries a `note` column that is honest at n = 3; bad input returns NA rows with a note, never an error.
+  `rstatix`, `car`, `nlme`, `mvtnorm` are optional (Dunnett falls back to Holm-Welch without `mvtnorm`, and says so).
+
+### Fitting engine (`docs/FITS_V222.md`, `tests/test_v222_fits.R`)
+- Block `v2.22 fits engine`: `fit_lysis_models()` (post-peak one-phase decay and decreasing 4PL: k, half-life, t50,
+  plateau with profile / Wald intervals), `fit_quality()` (R2, adjusted R2, RMSE, AIC, AICc, BIC, runs test,
+  Shapiro-Wilk), `akaike_weights()`, `fit_bands()` (delta-method confidence and prediction bands), `fit_growth_object()`,
+  `fit_exponential_window()` (log-linear exponential phase, automatic window; vectorised, 5 000 points in 0.05 s),
+  `compare_fits()` (Prism-style extra-sum-of-squares F test between samples), `fit_dose_response()` (4PL on log10 MOI,
+  EC50 with interval), `fit_weights()`, `fit_residual_frame()`.
+
+### Statistics and Curve fitting tabs (`docs/STATISTICS_AND_FITTING_UI.md`, `tests/test_v222_integration.R`)
+- Statistics tab sections: column statistics, assumption checks with a Q-Q figure, post-hoc method selector with the
+  omnibus table, time-course ANOVA with per-time comparisons, AUC, outliers, one-sample tests, an archive of all
+  tables and a rectangular CSV for each (one long table per file, so `read.csv` and Excel open them).
+- Analysis figures: *Per-time comparisons vs reference (stars)*, *AUC per sample*; metric-explorer correlation and
+  straight-line fit with a band; MOI dose-response 4PL with its EC50.
+- Curve fitting: fit statistics and Akaike weights for the growth fits, confidence / prediction bands, lysis models
+  per sample or replicate with a weighting scheme, exponential-growth window, compare fits; a residual figure.
+- Reports gain a "Statistics (v2.22)" section; the methods draft gains one sentence per section used; the dashboard
+  gains AUC and exponential-window doubling-time cards.
+
+### Figure styling (`docs/STYLING_AND_MARKUP.md`, `tests/test_v222_styling.R`)
+- Text markup everywhere (`_{sub}`, `^{sup}`, `*italic*`, `**bold**`, `\*`) with buttons and Ctrl+= / Ctrl+Shift+= /
+  Ctrl+I / Ctrl+B; the wavelength auto-subscript stays.
+- Error display modes spaghetti, quantile bands, jitter, combo; error types Range and IQR (asymmetric).
+- Panels section (panel source, panels per row, axis scales, header style), axis frame (Automatic / Box / L / None),
+  legend title / style / wrap, direct labels at line ends, matrix (strain x MOI) legend, hide lines, open shapes.
+- Linear / sqrt major and minor tick intervals with a guard against the zero-length-unit crash; minutes <-> hours
+  conversion of plotted times and time metrics; `publication` palette is now Okabe-Ito (the old ColorBrewer set is
+  `set1`; older settings files are migrated, `styling_schema`); Rate of OD change (dOD/dt) figure; metric-summary
+  sort / horizontal / custom colours; heatmap colour scales; Band / Presentation / PDF-vector one-click looks.
+
+### Compare, presets, themes, notes, batch export (`docs/COMPARE_PRESETS_EXPORTS.md`, `tests/test_v222_compare.R`)
+- Compare tab: a second file through the same ingest code, overlay or facet, true-size preview, every export format,
+  a composer panel.
+- *N4 paper look* preset; the loader reads the N4 app's flat JSON and the lysis-curve-app structure and reports
+  "N global, M sample settings applied, K ignored" with reasons.
+- Project themes (named per-sample styles in `themes/`, auto-apply on load), notes caption and notes pages, batch
+  export of any set of outputs with parity frames for PowerPoint and GIF, *Welch + Wilcoxon side by side*, night mode.
+
+### Click-to-edit labels on the figure (v2.22.0) and Help tab (v2.22.1)
+- See the two entries below; both are part of this release.
+
+### Hardening (`tests/test_v222_hardening.R`, 320+ checks, fixtures in `tests/fixtures/`)
+- **File load never ends the session.** The CSV branch of the file observer is wrapped like the Excel branch; empty,
+  binary, UTF-16 (Excel "Unicode Text", SoftMax Pro), Latin-1 / cp1252 and gzip-renamed files either load (UTF-16,
+  Latin-1) or refuse with a plain sentence ending "The file was not loaded." Header-only, time-only, one-column,
+  all-OVER and no-readable-time files are refused with a specific message. Long files with `Time, Well, OD` load with
+  the wells as samples. Quoted thousands / decimal commas, padded preambles, Excel merged titles and metadata blocks,
+  empty first sheets, `write.csv` index columns, `Cycle` columns, AM/PM times, time-of-day clocks that cross midnight
+  and Excel time cells that start at midnight are read correctly. A blank time cell between stacked blocks no longer
+  hides the restart. The upload cap is 50 MB.
+- **Nothing kills the R process.** Every export and preview size and dpi goes through one clamp (`safe_figure_size_in`),
+  so a negative, zero or NA Compose size can no longer reach ragg / libjpeg; typed font sizes, thicknesses, tick length
+  and counts are read through `num_or`; settings files are clamped to each box's range with a count in a notification.
+- **No raw R text in the figure area.** Filters that leave no data show "No data left after the current filters ..."
+  and every download refuses with a notification instead of writing the placeholder; cleared or reversed axis limits,
+  log floors, single time points and non-finite tick intervals draw; deselecting every sample says so.
+- **Right numbers.** Time-point exclusion matches within half the minimum time step (it used to swallow seven points on
+  a seconds-scale run) and follows the displayed time unit; sample keys are exact (`A` and `A.4` no longer merge);
+  Tukey with a reference reports group minus reference; Grubbs with ties gives NA with a note; zero within-group
+  variance is "undefined", not p = 1e-61; MOI parsing needs the whole word; `safe_id` collisions get a hash suffix;
+  the all-NA sample is dropped at load with a note; batch export of notes alone produces an archive.
+- **No hangs.** `fit_exponential_window` is vectorised; the bootstrap has a run budget and a time budget
+  (`n_boot_used` is shown); two-way ANOVA and post-hoc tables return a note above a size instead of running for
+  minutes; `rolling_slope` is closed-form (a 96 x 150 plate select-all went from 98 s to 31 s CPU); time-limit stops are
+  re-raised instead of swallowed.
+- **Headless rendering** uses a null raster device: no "Arial not found" warning spam, no `Rplots.pdf`, no duplicated
+  `override.aes` or "No shared levels" warnings. `shiny::validate` is called explicitly (jsonlite masks it).
+- **Round 2 (after a second adversarial pass over the round-1 code).** Figure sizes are measured on an explicit
+  `pdf(NULL)` device, so the journal startup figure is 217.94 x 210.21 pt whatever `options(device)` is (the null raster
+  device had moved every figure by 1-3 pt; a golden-size test now pins all 20). Settings and theme files: every numeric
+  key is type-checked and clamped to its own control's range (the ranges are collected from the UI), strings are capped
+  at 10 000 characters, unknown keys are linear, and an unreadable or non-settings file is one plain sentence; `1e308`
+  shape sizes / axis angles, 5 MB labels and 100 000-key files no longer hang. Ingest: odd-byte UTF-16, clocks before
+  01:00 and "12:05 AM", a count of unreadable-time rows (a column that cannot be read is refused), one number
+  convention per file, a one-line preamble, the Excel sheet selector before the first ingest, blank replicate headers
+  filled from the left in upload and compare, blank group cells dropped with a count, the most distinct group column,
+  a numeric dose-like long column labelled "MOI 0.1" and so on. Empty states: fit, QQ, residual, compare and analysis
+  downloads refuse; replicate QC shows a sentence; no header-only CSV. Statistics and exports: the methods sentence
+  gives the real wells per sample, extinction notes in every metrics table, bootstrap draws are equal across samples
+  under the time budget and a clamped `boot_n` is noted, reversed per-sample windows are swapped, `MOI 1e400` is NA,
+  no panel below 5 mm, one notification per distinct bad size, a one-time "may take a minute" note for large plates,
+  and CSV cells that start with `=`, `+`, `-`, `@` or a tab are prefixed with a space (spreadsheet formula injection).
+- **Round 3 (every input driven directly, 3 434 cells).** A scripted client or a settings file can send a select a value
+  that is not one of its choices, a number box a word, a slider 1e308, or a custom-message handler a bare string; 31 of
+  those ended the session (an unhandled observer error), one hung (a 1e308 point size) and 131 reached the figure area as
+  raw R text. Now: the settings loader checks every static select and radio value against the control's choices (counted
+  with the wrong-type keys); typed numbers are read through one clamp (the control's own range, the default when the box
+  is empty or not a number); the point-size and stroke sliders are held to their ranges; the cell-edit, quick-edit and file
+  observers ignore a malformed message; the sample selection keeps only samples of the loaded file; single selects are read
+  as one string among the choices, else the default. A re-run of the 178 failing cells shows none left. The guard-message
+  window is 20 s so a slow machine still shows a repeated guard once per cycle.
+
+### Result changes (on purpose; all are visible in the tables and methods text)
+- `extinction_time` is a crossing **from above** the floor. A curve that starts below 0.05 and never rises above it is
+  NA with the note "starts below floor" (it used to report its first time point).
+- Two-way time-course ANOVA uses `aov` with `Error(well)` above 12 samples or 1 500 readings (the AR(1) mixed model
+  needs minutes there); the method text names the model actually used (`model_used`).
+- Tukey with a reference sample reports group minus reference (the sign was reversed).
+- Post-hoc and replicate-statistics CSVs are one rectangular long table per file (they were multi-section).
+- A long-format file whose group column is numeric (`Time, MOI, OD`) now labels the samples `MOI 0`, `MOI 0.1`, ...
+  instead of the bare numbers (a column named Sample / Group keeps its values).
+
+## v2.22.1 — 2026-11-03
+
+**A labelling tutorial and a Help tab.** Figures are unchanged.
+
+- **How to label a figure** (`docs/LABELLING_HOWTO.md`): a ten-minute walkthrough on the demo data, then one
+  section per kind of label: sample names and legend entries (and naming samples so the MOI is read), axis titles
+  and the time unit taken from the x label, title and subtitle, legend position, end-of-line labels, panel letters
+  (the four places that set one), marker / threshold / region labels, significance marks, point and dataset labels,
+  the Figure Legend Text, a checklist before export and a table of common mistakes. The README gains a "How to label
+  a figure" subsection under *Using the App*, and the user guide points to the tutorial. The two gallery renders it
+  embeds (`docs/gallery/main.png`, `metric_summary.png`) are now tracked next to `gallery.png`, so they are there in
+  a fresh clone (`tools/render_gallery.R` still regenerates them).
+- **Help tab** (last main tab): the labelling summary, then every guide of `docs/` (the tutorial open by default,
+  the user guide, figure standards, styling and markup, data tab, statistics and fitting, the references, phases
+  and bootstrap, compare and presets) plus the README and the changelog, each a collapsible section. The files are
+  read when a session first opens the tab (server output `help_guides`; `docs_dir_path()`: option
+  `killcurve.docs_dir`, else `APP_DIR`, else `docs/` in the working directory) and rendered with commonmark (a
+  plain `<pre>` without it), so no document text sits in the static page; images are served from the `kc_docs`
+  resource path and a link between guides jumps to the other guide's section. A guide whose file is missing is
+  skipped.
+- Tests: `tests/test_v221_ui.R` checks the tab, its contents, the rewritten links and images.
+
+## v2.22.0 — 2026-11-02
+
+**Click-to-edit labels on the figure.** Renaming a legend entry or an axis title meant finding the box in the
+quick-edit strip or the sidebar. The true-size preview of the main figure now is the export SVG, inline, and its
+labels are clickable. The exported files are byte-for-byte unchanged (the export path is untouched).
+
+- **Inline SVG preview.** With *Edit labels on the figure* ticked (`canvas_edit`, default on, saved with the
+  settings, in the quick-edit strip's header) the Lysis curve preview is `output$od_plot_svg`: the file svglite
+  writes for the export, with the `<?xml?>` prolog removed and the root width / height set to the preview size
+  (`svg_inline_for_preview()`; the viewBox stays). It is literally the file Inkscape opens. Unticked, or in the
+  pixel-canvas mode, the preview is the PNG as before; the Analysis, Compose and Curve fitting previews are
+  unchanged. An SVG over 6 MB shows a note instead of the figure.
+- **Click a label.** A legend entry opens a small popover with the name, a colour picker and a *show* box; the
+  x-axis title, y-axis title, title and subtitle open a text box. Apply (or Enter) writes into the existing
+  quick-edit / sidebar inputs (`qe_name_<id>`, `qe_color_<id>`, `x_axis_label`, ...), so renaming, recolouring
+  and hiding behave exactly as in v2.21. Esc, a click outside or Close leaves everything as it was.
+- **Limits.** Only the samples in the quick-edit strip (the first 96) are clickable; a hidden sample is
+  re-shown from its *show* box in the strip. Tick labels, facet strips and the legend title are not editable on
+  the figure. A label is matched by its text, so two samples with the same display name share the first match.
+
 ## v2.21.0 — 2026-11-01
 
 **Sticky figure, accordion sidebar with a jump menu, quick-edit strip, rename samples everywhere.**
