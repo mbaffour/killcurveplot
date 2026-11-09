@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.0"
+APP_VERSION <- "2.23.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -7887,6 +7887,107 @@ add_legend_pad <- function(g, pad) {
   g
 }
 expand_for_tall_legend <- function(g) add_legend_pad(g, legend_pad_pt(g))
+
+# ── v2.23.1: the legend key ──────────────────────────────────────────────────
+# A standalone image cut from a figure's own legend, so every sample's colour, marker, fill, line type and display name
+# are exactly as drawn: the starting point for a figure legend in a manuscript or a slide. legend_key_grob() returns the
+# key as a gtable (a 2 mm margin around it) with attr(, "width_in") / attr(, "height_in") measured on an explicit scratch
+# device (never the default device: Rplots.pdf and the R2-REG01 metric bug); write_legend_key() writes it in the export
+# format. The key is a separate object: the figure itself is not touched.
+# fn() on an explicit pdf(NULL) device; a legend with a plotmath title (the heatmap colour bar) cannot load the PDF font,
+# so that one is measured on a scratch svglite device (the same fallback as fixed_panel_grob).
+kc_with_scratch_device <- function(fn) {
+  tryCatch(kc_with_measure_device(fn()), error = function(e) {
+    if (!requireNamespace("svglite", quietly = TRUE)) stop(e)
+    f <- tempfile(fileext = ".svg"); on.exit(unlink(f), add = TRUE)
+    old <- grDevices::dev.cur()
+    svglite::svglite(f, width = 4, height = 4)
+    on.exit({ grDevices::dev.off(); if (old > 1) tryCatch(grDevices::dev.set(old), error = function(e3) NULL) }, add = TRUE)
+    fn()
+  })
+}
+# The legend boxes of a figure (a ggplot or a built gtable) that actually hold a legend; "guide-box-inside" is left out
+# (it is positioned in the panel, so a figure whose legend is inside is rebuilt with the legend on the right).
+legend_key_boxes <- function(p) {
+  g <- if (inherits(p, "ggplot")) kc_with_scratch_device(function() ggplot2::ggplotGrob(p)) else p
+  if (!inherits(g, "gtable")) return(list())
+  i <- which(grepl("guide-box", g$layout$name, fixed = TRUE) & g$layout$name != "guide-box-inside" &
+               !vapply(g$grobs, inherits, NA, "zeroGrob"))
+  g$grobs[i]
+}
+legend_key_grob <- function(plot, margin_mm = 2) {
+  bx <- legend_key_boxes(plot)
+  if (!length(bx) && inherits(plot, "ggplot"))              # no legend (hidden, direct labels, matrix, inside): the plain right-hand key
+    bx <- legend_key_boxes(plot + ggplot2::theme(legend.position = "right"))
+  if (!length(bx)) return(NULL)
+  key <- if (length(bx) == 1L) bx[[1]] else gtable::gtable_col("legend-key", bx)
+  key <- gtable::gtable_add_padding(key, grid::unit(rep(margin_mm, 4), "mm"))
+  dims <- kc_with_scratch_device(function()
+    c(grid::convertWidth(sum(key$widths), "in", valueOnly = TRUE), grid::convertHeight(sum(key$heights), "in", valueOnly = TRUE)))
+  if (length(dims) != 2L || !all(is.finite(dims)) || any(dims <= 0)) return(NULL)
+  attr(key, "width_in") <- dims[1]; attr(key, "height_in") <- dims[2]
+  key
+}
+# The text labels of a key, top to bottom (the legend title first, then one per entry).
+legend_key_labels <- function(key) {
+  out <- character(0)
+  walk <- function(x) {
+    if (inherits(x, "gtable")) { o <- order(x$layout$t, x$layout$l); for (g in x$grobs[o]) walk(g); return(invisible()) }
+    lab <- tryCatch(x$label, error = function(e) NULL)
+    if (!is.null(lab) && length(lab)) out <<- c(out, paste(as.character(lab), collapse = ""))
+    if (inherits(x, "gTree")) for (ch in x$children) walk(ch)
+  }
+  walk(key)
+  out
+}
+# `plot`: a ggplot, or a key from legend_key_grob(). The file is `format` (svg / pdf / png / tiff / jpeg), cut to the key's
+# own size on a white background; the size goes through the same choke point as every figure.
+write_legend_key <- function(plot, file, format = "svg", dpi = 300) {
+  key <- if (inherits(plot, "gtable") && !is.null(attr(plot, "width_in"))) plot else legend_key_grob(plot)
+  if (is.null(key)) stop("This figure has no legend to export.")
+  sz   <- safe_figure_size_in(attr(key, "width_in"), attr(key, "height_in"))
+  args <- list(filename = file, plot = key, device = export_device(format), width = sz[1], height = sz[2],
+               units = "in", bg = "white", limitsize = FALSE)
+  if (format %in% c("png", "tiff", "jpeg")) args$dpi <- as.numeric(safe_raster_dpi(sz[1], sz[2], safe_dpi(dpi)))
+  if (identical(format, "tiff")) args$compression <- "lzw"
+  do.call(ggsave, args)
+  invisible(file)
+}
+
+# ── v2.23.1: colour and marker words for the legend text starter ─────────────
+# The nearest of twelve named colours by RGB distance ("#E69F00" -> "orange"); NA for something that is not a colour.
+COLOUR_WORD_RGB <- list(black = c(0, 0, 0), white = c(255, 255, 255), grey = c(128, 128, 128), red = c(228, 26, 28),
+                        orange = c(255, 127, 0), yellow = c(255, 215, 0), green = c(60, 170, 60), teal = c(0, 150, 136),
+                        blue = c(40, 100, 200), purple = c(130, 60, 160), pink = c(240, 130, 190), brown = c(150, 80, 30))
+colour_word <- function(hex) {
+  ref <- do.call(rbind, COLOUR_WORD_RGB)
+  vapply(as.character(hex), function(h) {
+    rgb <- if (is.na(h) || !nzchar(h)) NULL else tryCatch(grDevices::col2rgb(h)[, 1], error = function(e) NULL)
+    if (is.null(rgb)) return(NA_character_)
+    rownames(ref)[which.min(rowSums(sweep(ref, 2, rgb)^2))]
+  }, "", USE.NAMES = FALSE)
+}
+# "filled circles" / "open squares" / "crosses" for a shape code and the Filled box, as the figure draws it (resolve_point_shape).
+legend_marker_words <- function(shape, filled = TRUE) {
+  pch <- suppressWarnings(as.integer(shape)); if (length(pch) != 1L || is.na(pch)) return(NA_character_)
+  rs <- resolve_point_shape(pch, filled, "black"); pch <- rs$shape
+  base <- switch(as.character(pch), "16" = , "19" = , "20" = , "21" = , "1" = "circles", "15" = , "22" = , "0" = , "12" = "squares",
+                 "17" = , "24" = , "2" = "triangles", "25" = , "6" = "inverted triangles", "18" = , "23" = , "5" = "diamonds",
+                 "4" = "crosses", "3" = "plus signs", "8" = "stars", "10" = "circled plus signs", NULL)
+  if (is.null(base)) return(NA_character_)
+  if (base %in% c("crosses", "plus signs", "stars", "circled plus signs")) return(base)      # line-drawn: neither filled nor open
+  paste(if (pch %in% c(0L, 1L, 2L, 5L, 6L) || identical(rs$fill, "white")) "open" else "filled", base)
+}
+legend_line_words <- function(line_type) {
+  switch(as.character(line_type), dashed = "dashed line", dotted = "dotted line", dotdash = "dot-dashed line",
+         longdash = "long-dashed line", twodash = "two-dashed line", NA_character_)
+}
+# "MG1655 (black, filled circles, dashed line)": the label, then its colour, marker (only with points) and line type (only when not solid)
+legend_sample_text <- function(label, colour, shape = NA, filled = TRUE, line_type = "solid", show_points = TRUE, show_lines = TRUE) {
+  parts <- c(colour_word(colour), if (isTRUE(show_points)) legend_marker_words(shape, filled), if (isTRUE(show_lines)) legend_line_words(line_type))
+  parts <- parts[!is.na(parts)]
+  if (length(parts)) paste0(label, " (", paste(parts, collapse = ", "), ")") else label
+}
 # plots: ggplots, frame 1 .. n (n = all samples). Returns list(grobs, w_in, h_in, w_mm, h_mm, panel_w_mm, panel_h_mm, fitted, fallback):
 # every grob is a gtable with the same panel and the same size. fit_w_in / fit_h_in (optional): a box the figure must fit
 # (a slide); the panel is shrunk, identically in every frame, until it does.
@@ -7962,7 +8063,7 @@ compare_overlay_aesthetics <- function(keys, aes_u, labels, disp, style = "linet
 }
 
 # ── Batch export ──────────────────────────────────────────────────────────────────────────────────
-BATCH_EXTRA_CHOICES <- c("Composed figure" = "composed", "Compare figure (needs a second dataset)" = "compare",
+BATCH_EXTRA_CHOICES <- c("Legend key (colours, markers and names of the main figure)" = "legend_key", "Composed figure" = "composed", "Compare figure (needs a second dataset)" = "compare",
                          "Summary statistics (CSV)" = "csv_summary", "Replicate statistics (CSV)" = "csv_replicate_stats",
                          "Curve metrics (CSV)" = "csv_metrics", "Raw data, wide (CSV)" = "csv_raw_wide", "Experiment notes (HTML + JSON)" = "notes")
 batch_output_choices <- function()
@@ -9690,7 +9791,13 @@ ui <- fluidPage(
                        p(style = "font-size:.8em;color:#777;margin-top:-4px;",
                          "Drafted from the current plot and the Experiment Notebook: measure, replicate n, ",
                          "error type, MOI / host / phage / medium. Copy into the manuscript and edit."),
-                       verbatimTextOutput("figure_legend_text", placeholder = TRUE)
+                       verbatimTextOutput("figure_legend_text", placeholder = TRUE),
+                       # v2.23.1: the legend key, cut from the figure's own legend
+                       p(style = "font-size:.8em;color:#777;margin:8px 0 4px;",
+                         "Legend key: the figure's own legend (every sample's colour, marker, fill, line type and name) as a separate ",
+                         "image in the export format, to place beside the figure or to start a legend from."),
+                       plotOutput("legend_key_preview", height = "auto"),
+                       downloadButton("downloadLegendKey", "Download legend key", style = "width:100%;margin-top:6px;")
                    )
                  ),
                  
@@ -10222,6 +10329,8 @@ ui <- fluidPage(
                   "(journal preset included), so panels assemble without rescaling."),
                 downloadButton("downloadAnalysisPlot", "Download figure", style = "width:100%;"),
                 br(), br(),
+                downloadButton("downloadAnalysisLegendKey", "Download legend key", style = "width:100%;"),
+                br(), br(),
                 downloadButton("downloadAnalysisStatsCSV", "Download statistics (CSV)", style = "width:100%;")
               )
             )
@@ -10275,7 +10384,9 @@ ui <- fluidPage(
                 radioButtons("compose_tag_case", "Panel labels:",
                              choices = c("a, b, c" = "a", "A, B, C" = "A"), selected = "a", inline = TRUE),
                 downloadButton("downloadComposedFigure", "Download composed figure",
-                               style = "background:#2C3E50;color:white;border:none;width:100%;"))),
+                               style = "background:#2C3E50;color:white;border:none;width:100%;"),
+                br(), br(),
+                downloadButton("downloadComposeLegendKey", "Download legend key", style = "width:100%;"))),
             uiOutput("compose_note"),
             p(style = "font-size:.8em;color:#777;",
               "Panels are rendered at their native single-column size, so text stays 6\u20138 pt ",
@@ -10311,6 +10422,8 @@ ui <- fluidPage(
                   "Same colours (by sample), display names, fonts, axes, error bars and size as the main figure. In the facet layout every ",
                   "panel keeps the fixed panel size. The figure is also a panel of the Compose tab and part of Download all figures."),
                 downloadButton("downloadCompare", "Download figure", style = "width:100%;"),
+                br(), br(),
+                downloadButton("downloadCompareLegendKey", "Download legend key", style = "width:100%;"),
                 uiOutput("compare_note")))),
           uiOutput("compare_container")),
         tabPanel("Dashboard", br(),
@@ -10629,6 +10742,8 @@ ui <- fluidPage(
                   "Same colours, fonts and export size as the main figure; the figure is also the 'Fitted growth ",
                   "curves' choice of the Analysis figures and the composer."),
                 downloadButton("downloadFitFigure", "Download figure", style = "width:100%;"),
+                br(), br(),
+                downloadButton("downloadFitLegendKey", "Download legend key", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadFitsCSV", "Parameters (CSV)", style = "width:100%;")))),
           # v2.22: what is drawn over the fitted figure, and how the fits are weighted / their intervals computed
@@ -14271,7 +14386,11 @@ server <- function(input, output, session) {
                  ", measured as ", ylab, " over time",
                  if (!is.null(med))   paste0(" in ", med) else "",
                  if (!is.null(temp))  paste0(" at ", temp, " °C") else "", ".")
-    s2 <- paste0("Curves: ", paste(markup_to_plain(unname(aes_v$leg_labels[sel_samples()])), collapse = "; "), ".")
+    # v2.23.1: each curve with its colour in words, its marker (only when points are drawn) and a non-solid line type
+    ss <- sel_samples(); lab_plain <- markup_to_plain(unname(aes_v$leg_labels[ss]))
+    s2 <- paste0("Curves: ", paste(vapply(seq_along(ss), function(i)
+            legend_sample_text(lab_plain[i], aes_v$colors[[ss[i]]], aes_v$shapes[[ss[i]]], aes_v$filled_map[[ss[i]]], aes_v$line_types[[ss[i]]],
+                               show_points = isTRUE(input$show_points), show_lines = !isTRUE(input$hide_lines)), ""), collapse = "; "), ".")
     n_rng <- suppressWarnings(range(pd$n, na.rm = TRUE))
     n_txt <- if (all(is.finite(n_rng)) && n_rng[1] == n_rng[2]) paste0("n = ", n_rng[1])
              else if (all(is.finite(n_rng))) paste0("n = ", n_rng[1], "–", n_rng[2])
@@ -14309,6 +14428,52 @@ server <- function(input, output, session) {
     txt <- figure_legend_string()
     if (nzchar(txt)) txt else "Load data and select samples to draft a legend."
   })
+
+  # ── v2.23.1: the legend key of every figure ─────────────────────────────────
+  # legend_key_grob() / write_legend_key() do the work; each figure tab has a thin download handler of the same two
+  # helpers. A figure with no legend of its own (the metric summary, the time-to-threshold bars ...) gets the main
+  # figure's key: the colours, markers and names are by sample, so the key is the same.
+  legend_key_for <- function(p) {
+    k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
+    if (is.null(k)) k <- legend_key_grob(generate_plot())
+    k
+  }
+  legend_key_main <- reactive({
+    plot_inputs_debounced(); req(rv$data, sel_samples())
+    tryCatch(legend_key_for(generate_plot()), error = function(e) NULL)
+  })
+  # height follows the key (drawn at 1.5 x its true size so 6-7 pt text is readable); 1 to 12 samples fit
+  output$legend_key_preview <- renderPlot({
+    k <- legend_key_main()
+    shiny::validate(shiny::need(!is.null(k), "No legend to show for the current figure."))
+    grid::grid.newpage()
+    grid::grid.draw(grid::grobTree(k, vp = grid::viewport(x = 0, y = 1, just = c("left", "top"),
+                                                          width = grid::unit(attr(k, "width_in"), "in"), height = grid::unit(attr(k, "height_in"), "in"))))
+  }, res = 144, height = function() {
+    k <- tryCatch(legend_key_main(), error = function(e) NULL)
+    if (is.null(k)) 60 else min(max(40, ceiling(attr(k, "height_in") * 144) + 4), 900)
+  })
+  legend_key_download <- function(figure, plot_fun) downloadHandler(
+    filename = function() paste0("legend_key_", figure(), ".", sel1("export_format", "svg")),
+    content  = function(file) {
+      refuse <- function(msg) {
+        guard_notify("download_refused", msg, "warning")
+        stop(structure(class = c("kc_refused", "error", "condition"), list(message = msg, call = NULL)))
+      }
+      # like downloadPlot: no data, or an empty state, is refused with a notification, never written as a placeholder
+      if (is.null(rv$data) || !length(sel_samples())) refuse("Nothing to export. Load data and select at least one sample first.")
+      refuse_if_empty()
+      k <- legend_key_for(plot_fun())
+      if (is.null(k)) refuse("Nothing to export. This figure has no legend to cut a key from.")
+      fmt <- sel1("export_format", "svg")
+      write_legend_key(k, file, fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
+    })
+  output$downloadLegendKey         <- legend_key_download(function() "main", function() generate_plot())
+  output$downloadAnalysisLegendKey <- legend_key_download(function() sel1("analysis_type", "figure"),
+                                                          function() generate_analysis_plot(sel1("analysis_type", "metric_summary")))
+  output$downloadFitLegendKey      <- legend_key_download(function() "fit", function() generate_analysis_plot("fit_overlay"))
+  output$downloadComposeLegendKey  <- legend_key_download(function() "compose", function() generate_plot())   # the composed panels share the main figure's colours and names
+  output$downloadCompareLegendKey  <- legend_key_download(function() "compare", function() { req(rv_cmp$ds); generate_compare_plot() })
 
   # ── Analysis figures (v2.11) ─────────────────────────────────────────────────
   # v2.12.4: lysis-onset threshold as a fraction (input is a percentage; default 5 %)
@@ -17209,11 +17374,15 @@ server <- function(input, output, session) {
       fold <- bundle_folder_name(); dir <- file.path(tmp, fold); dir.create(dir)
       made <- character(0)
       main_obj <- main_plot_obj()
+      main_key <- tryCatch(legend_key_for(generate_plot()), error = function(e) NULL)    # v2.23.1: the legend key, in the figure's formats
       for (fmt in c("svg", "pdf")) {
         fn <- paste0("figure_main.", fmt)
         ggsave(file.path(dir, fn), plot = main_obj, device = export_device(fmt), width = sz[1], height = sz[2],
                units = "in", bg = "white", limitsize = FALSE)
         made <- c(made, fn)
+        if (!is.null(main_key)) tryCatch({
+          kn <- paste0("legend_key.", fmt); write_legend_key(main_key, file.path(dir, kn), fmt); made <- c(made, kn)
+        }, error = function(e) NULL)
       }
       comp <- if (has_patchwork) tryCatch(compose_info(), error = function(e) NULL) else NULL
       if (!is.null(comp) && !is.null(comp$plot) && comp$n >= 2) {
@@ -18149,6 +18318,11 @@ server <- function(input, output, session) {
       lab <- names(ANALYSIS_FIGURE_CHOICES)[match(ty, ANALYSIS_FIGURE_CHOICES)]
       attempt(lab, one_figure(lab, generate_analysis_plot(ty), ty, function(s) analysis_file_stem(ty, if (!is.null(s) && (fixed_mode() || !is.null(sz_custom))) s)))
     }
+    if ("legend_key" %in% sel) attempt("Legend key", {      # v2.23.1
+      k <- legend_key_for(generate_plot())
+      if (is.null(k)) skip("Legend key", "the main figure has no legend.")
+      else { f <- file.path(dir, paste0("legend_key_main.", fmt)); write_legend_key(k, f, fmt, dpi); written <- c(written, basename(f)) }
+    })
     if ("composed" %in% sel) {
       if (!has_patchwork) skip("Composed figure", "the 'patchwork' package is not installed.")
       else attempt("Composed figure", {

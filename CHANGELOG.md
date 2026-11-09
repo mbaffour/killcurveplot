@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.23.1 — 2026-11-08
+
+**Legend key for every figure.** A one-click, colour-exact key to place beside a figure, and colour words in the legend
+text, for the figure-preparation step: the legend you start writing from.
+- **Legend key**: a separate image cut from the figure's own legend, so every plotted sample's colour, marker, fill, line
+  type and display name are exactly as drawn, in the figure's font, white background, in the Export format (SVG, PDF,
+  PNG, TIFF or JPEG). `legend_key_grob()` takes the legend of the figure (a hidden, inside or direct-label legend is
+  rebuilt on the right) and `write_legend_key()` writes it, measured on an explicit `pdf(NULL)` device. A figure with no
+  sample legend of its own (the metric summary, the time-to-threshold bars) gets the main figure's key: colours and names
+  are by sample.
+- **Where the buttons are**: *Lysis curve* tab, Figure Legend Text section, with a small preview under the legend text
+  (`legend_key_main.<ext>`); *Analysis figures* tab under Download figure
+  (`legend_key_<analysis type>.<ext>`); *Curve fitting* (`legend_key_fit`), *Compose* (`legend_key_compose`) and
+  *Compare* (`legend_key_compare`) next to their figure downloads. With no data, or every point filtered away, a
+  download is refused with a notification like the figure's own.
+- The **figure bundle** adds `legend_key.svg` and `legend_key.pdf` (the main figure's key) and lists them in its README;
+  **batch export** has a *Legend key* output (`legend_key_main.<format>`).
+- **Legend text starter with colours**: "Curves: MG1655 (black, filled circles); MG1655 + WT (orange, filled squares);
+  ..." from the colour, marker (only when points are drawn, filled or open as drawn) and line type (only when not solid)
+  of each sample; `colour_word()` picks the nearest of twelve colour names.
+- No new settings. The journal startup figure and the golden sizes are unchanged (`tests/test_v222_styling.R`,
+  R2-REG01); new suite `tests/test_v223_legend_key.R`; the legend-text check of `tests/test_v210_figure_export.R` has the
+  new sentence.
+
 ## v2.23.0 — 2026-11-04
 
 **One tool instead of three, and a hardening pass.** The features of the N4-paper lysis-curve app and of the older
