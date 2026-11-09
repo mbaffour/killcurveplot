@@ -45,7 +45,7 @@ testServer(app, {
   check("the samples table has one row per selected sample", !is.null(d) && nrow(d) == length(sel_samples()) && nrow(d) >= 3L)
   av <- resolve_aesthetics(sel_samples())
   check("each row carries the figure's own hex and its colour word", identical(d$hex, toupper(unname(av$colors[sel_samples()]))) &&
-        identical(d$colour, env$colour_word(d$hex)))
+        identical(d$colour, env$colour_words(d$hex)))
   check("each row has a marker and a line description", all(nzchar(d$marker)) && all(nzchar(d$line)))
   html <- as.character(output$legend_samples_table$html)
   check("the rendered table has a swatch in that hex per row", all(vapply(d$hex, function(h) grepl(paste0("background:", h), html, fixed = TRUE), logical(1))) &&

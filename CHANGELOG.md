@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.23.6 — 2026-11-09
+
+**Shades in the legend words.** When two curves share a colour word (the paper style's #0072B2 and the default #56B4E9 are
+both "blue"), the legend text and the Samples-as-drawn table now say "dark blue" and "light blue" (with three or more, the
+darkest and the lightest are qualified and the middle keeps the plain word). Identical colours keep identical words; a lone
+colour is unchanged (`colour_words()`; `colour_word()` for one colour is as before).
+
 ## v2.23.5 — 2026-11-09
 
 **Paper style shared with CFU Plot Studio.** CFU Plot Studio 0.4.0 writes a `paper_style.json` (font, sizes, and a sample
