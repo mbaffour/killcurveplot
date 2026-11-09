@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.2"
+APP_VERSION <- "2.23.4"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -7780,6 +7780,62 @@ themes_dir_path <- function() {
   ad <- if (exists("APP_DIR", inherits = TRUE)) get("APP_DIR", inherits = TRUE) else NULL
   file.path(if (is.character(ad) && length(ad) == 1 && nzchar(ad)) ad else getwd(), "themes")
 }
+# ── Paper style (v2.23.4): paper_style.json written by CFU Plot Studio, read here, never written ──────────────────
+# The file sits beside the app (the app folder, as the themes do) or wherever the environment variable CFU_PAPER_STYLE
+# points; read at call time so the variable can be set after the app is sourced.
+paper_style_path <- function() {
+  env <- Sys.getenv("CFU_PAPER_STYLE", "")
+  if (nzchar(env)) return(path.expand(env))
+  ad <- if (exists("APP_DIR", inherits = TRUE)) get("APP_DIR", inherits = TRUE) else NULL
+  file.path(if (is.character(ad) && length(ad) == 1 && nzchar(ad)) ad else getwd(), "paper_style.json")
+}
+PAPER_FONT_MENU <- c("sans", "Arial", "Helvetica", "serif", "mono", "Helvetica Neue", "Garamond", "Palatino")
+# What a paper style may set here, and nothing else (an explicit allowlist: the file's figure-specific keys never reach
+# an input). Returns list(inputs = input id -> value to send, palette = sample name -> upper-case hex, ignored = keys
+# not used, notes = what was mapped approximately). Every value is type-checked and range-clamped; a list or a vector
+# where one value is expected is ignored. Never routed through loadSettings / translate_old_settings.
+paper_style_updates <- function(settings) {
+  settings <- if (is.list(settings)) settings else list()
+  inputs <- list(); used <- character(0); notes <- character(0)
+  one <- function(v) if (is.atomic(v) && !is.null(v) && length(v) == 1L && !is.na(v)) v else NULL
+  num1 <- function(v, lo, hi) { v <- one(v); if (is.null(v) || is.logical(v)) return(NA_real_)
+    v <- suppressWarnings(as.numeric(v)); if (!is.finite(v)) NA_real_ else min(max(v, lo), hi) }
+  str1 <- function(v) { v <- one(v); if (is.null(v) || !is.character(v)) NULL else trimws(substr(v, 1L, 200L)) }
+  # font_family (+ font_family_custom): the menu has no free-text box, so a family that is not in it goes to the
+  # nearest menu entry (serif-like -> serif, monospace-like -> mono, anything else -> sans) and the note says so
+  ff <- str1(settings$font_family)
+  if (!is.null(ff) && identical(ff, "custom")) ff <- str1(settings$font_family_custom)
+  if (!is.null(ff) && nzchar(ff)) {
+    hit <- PAPER_FONT_MENU[match(tolower(ff), tolower(PAPER_FONT_MENU))]
+    if (is.na(hit) && grepl("^times|^georgia|^cambria|garamond|palatino|^minion|^baskerville", ff, ignore.case = TRUE)) hit <- "serif"
+    if (is.na(hit) && grepl("courier|mono|consolas|menlo|^lucida console", ff, ignore.case = TRUE)) hit <- "mono"
+    if (grepl("^times new roman$", ff, ignore.case = TRUE)) hit <- "serif"
+    if (is.na(hit)) { hit <- "sans"; notes <- c(notes, paste0("font_family '", ff, "' is not in this app's font menu; Sans Serif was used")) }
+    inputs$font_family <- hit; used <- c(used, "font_family", "font_family_custom")
+  }
+  ts <- num1(settings$title_size, 5, 48)
+  if (is.finite(ts)) { inputs$title_font_size <- round(ts); used <- c(used, "title_size") }
+  fs <- num1(settings$font_size, 5, 40)
+  if (is.finite(fs)) {
+    inputs$axis_label_font_size <- min(36, round(fs))
+    inputs$axis_text_font_size  <- min(32, max(5, round(0.8 * fs)))
+    inputs$legend_font_size     <- min(32, max(5, round(0.8 * fs)))
+    used <- c(used, "font_size")
+  }
+  # sample_palette -> colour registry by name
+  pal <- settings$sample_palette
+  palette <- stats::setNames(character(0), character(0))
+  if (is.list(pal) && length(pal) > 0 && !is.null(names(pal))) {
+    pal <- pal[seq_len(min(length(pal), 2000L))]
+    ok <- vapply(seq_along(pal), function(i) { v <- one(pal[[i]]); !is.null(v) && is.character(v) && nzchar(names(pal)[i]) &&
+                                               grepl("^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$", trimws(v)) }, logical(1))
+    if (any(ok)) palette <- stats::setNames(toupper(trimws(vapply(pal[ok], function(v) as.character(v), ""))), names(pal)[ok])
+  }
+  if (!is.null(settings$sample_palette)) used <- c(used, "sample_palette")
+  # axis_color and axis_line_width have no counterpart here (no axis colour box; the axis line is in points, the file's
+  # is in ggplot units): they stay in `ignored`
+  list(inputs = inputs, palette = palette, ignored = setdiff(names(settings), used), notes = notes)
+}
 theme_key  <- function(nm) gsub("^_+|_+$", "", gsub("[^A-Za-z0-9]+", "_", trimws(nm %||% "")))
 theme_path <- function(nm, dir = themes_dir_path()) file.path(dir, paste0(theme_key(nm), ".json"))
 theme_list <- function(dir = themes_dir_path()) {
@@ -9349,7 +9405,11 @@ ui <- fluidPage(
                      br(),
                      fileInput("loadSettings", "Load Settings File",
                                accept = c("application/json", ".json")),
-                     uiOutput("settings_status_ui")
+                     uiOutput("settings_status_ui"),
+                     # v2.23.4: the paper style read at start (paper_style.json beside the app, or CFU_PAPER_STYLE)
+                     div(style = "font-size:.8em;color:#555;margin-top:8px;",
+                         textOutput("paper_style_status", inline = TRUE)),
+                     actionButton("reload_paper_style", "Reload paper style", class = "btn-xs", style = "margin-top:4px;")
                  ),
                  
                  # ── Axis Settings ─────────────────────────────────────────────────────────
@@ -11199,6 +11259,8 @@ server <- function(input, output, session) {
     #   $samples — named list keyed by SAMPLE NAME, each a list of per-sample aesthetics
     imported_settings = NULL,
     settings_status   = NULL,
+    paper_palette     = NULL,   # v2.23.4: sample name -> hex from paper_style.json (named character)
+    paper_style_applied = NULL,
     style_page        = 1L,     # current page in Variable Styling panel (pagination)
     # v2.21: what the user typed in the quick-edit strip. display_names: raw column name -> name shown in figures,
     # legends, tables, CSV files and reports (the raw name stays the key everywhere else); qe_colors: raw name -> the
@@ -12391,6 +12453,9 @@ server <- function(input, output, session) {
       } else if (!is.null(imp_aes)) {
         color_def <- imp_aes$color %||% default_colors[1]
         sel_def   <- "custom"
+      } else if (!is.null(pp <- isolate(paper_colour_of(vn)))) {   # v2.23.4: the paper style's colour for this name
+        color_def <- pp
+        sel_def   <- "custom"
       } else if (!is.null(rv$palette_colors) && palette_in() != "custom") {
         idx       <- match(vn, rv$od_vars)
         color_def <- if (!is.na(idx)) rv$palette_colors[idx] else default_colors[1]
@@ -13076,6 +13141,15 @@ server <- function(input, output, session) {
   }
 
   # ── Aesthetics resolver ──────────────────────────────────────────────────────
+  # v2.23.4: the paper style's colour for a sample (raw or display name, exact match), else NULL
+  paper_colour_of <- function(vn) {
+    pal <- rv$paper_palette
+    if (is.null(pal) || !length(pal) || is.null(names(pal))) return(NULL)
+    for (k in unique(c(vn, display_name_of(vn, rv$display_names)))) {
+      j <- match(k, names(pal)); if (!is.na(j)) return(unname(pal[[j]]))
+    }
+    NULL
+  }
   resolve_aesthetics <- function(samples) {
     n          <- length(samples)
     shapes     <- setNames(numeric(n),   samples)
@@ -13103,6 +13177,8 @@ server <- function(input, output, session) {
         colors[i] <- normalize_hex_color(input[[paste0("color_", vid)]])
       else if (!is.null(sel))
         colors[i] <- sel
+      else if (!is.null(paper_colour_of(vn)))      # v2.23.4: the paper style's colour for this sample name
+        colors[i] <- paper_colour_of(vn)
       else if (!is.null(rv$palette_colors)) {
         idx       <- match(vn, rv$od_vars)
         colors[i] <- if (!is.na(idx)) rv$palette_colors[idx]
@@ -13125,6 +13201,57 @@ server <- function(input, output, session) {
          leg_labels = leg_labels, filled_map = filled_map, groups = groups)
   }
   
+  # ── Paper style (v2.23.4) ────────────────────────────────────────────────────
+  # paper_style.json from CFU Plot Studio, read once after the first flush (so the inputs exist) and on the Reload button.
+  # The allowlist is paper_style_updates(); the sample colours go into rv$paper_palette, which resolve_aesthetics() uses
+  # beneath any colour picked by hand. A missing or unreadable file changes nothing.
+  paper_style_status <- reactiveVal(NULL)
+  output$paper_style_status <- renderText(
+    paper_style_status() %||% paste0("No paper style (looked for ", paper_style_path(), ")"))
+  apply_paper_palette <- function(loaded) {
+    pal <- isolate(rv$paper_palette)
+    if (is.null(pal) || !length(pal)) return(invisible(0L))
+    for (nm in intersect(names(pal), loaded %||% character(0))) {
+      if (!is.null(isolate(rv$qe_colors[[nm]]))) next                      # a colour picked in the quick-edit strip stays
+      vid <- safe_id(nm)
+      tryCatch({
+        updateSelectInput(session, paste0("color_selector_", vid), selected = "custom")
+        updateTextInput(session,   paste0("color_",          vid), value    = unname(pal[[nm]]))
+        updateTextInput(session,   paste0("hex_color_",      vid), value    = unname(pal[[nm]]))
+      }, error = function(e) invisible(NULL))
+    }
+    invisible(NULL)
+  }
+  load_paper_style <- function() {
+    path <- paper_style_path()
+    unreadable <- function() paper_style_status(paste0("Paper style at ", path, " could not be read; nothing was applied."))
+    if (!file.exists(path) || dir.exists(path)) {
+      paper_style_status(paste0("No paper style (looked for ", path, ")"))
+      return(invisible(NULL))
+    }
+    sz <- suppressWarnings(file.size(path))
+    style <- if (is.finite(sz) && sz <= 16e6) tryCatch(jsonlite::fromJSON(path, simplifyVector = TRUE), error = function(e) NULL) else NULL
+    if (is.null(style) || !is.list(style)) { unreadable(); return(invisible(NULL)) }
+    settings <- if (is.list(style$settings)) style$settings else style
+    up <- tryCatch(paper_style_updates(settings), error = function(e) NULL)
+    if (is.null(up)) { unreadable(); return(invisible(NULL)) }
+    for (id in names(up$inputs)) {
+      val <- up$inputs[[id]]
+      tryCatch({
+        if (identical(id, "font_family")) updateSelectInput(session, id, selected = val)
+        else                              updateNumericInput(session, id, value = val)
+      }, error = function(e) invisible(NULL))
+    }
+    rv$paper_palette <- if (length(up$palette) > 0) up$palette else NULL
+    apply_paper_palette(isolate(rv$od_vars))
+    rv$paper_style_applied <- list(inputs = up$inputs, palette = up$palette, ignored = up$ignored, notes = up$notes, path = path)
+    created <- if (is.character(style$created_at) && length(style$created_at) == 1L && !is.na(style$created_at)) substr(style$created_at, 1L, 60L) else "an unknown time"
+    paper_style_status(paste0("Paper style: ", path, ", saved ", created, "; colours for ", length(up$palette), " samples"))
+    invisible(up)
+  }
+  session$onFlushed(function() isolate(load_paper_style()), once = TRUE)
+  observeEvent(input$reload_paper_style, load_paper_style(), ignoreInit = TRUE)
+
   # ── Shared figure theme (v2.11) ─────────────────────────────────────────────
   # Everything that makes the main lysis curve look the way it does, as a list
   # of theme layers, so the analysis figures and the dashboard panels use the
