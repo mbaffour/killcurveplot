@@ -8822,6 +8822,11 @@ build_help_tab <- function() {
 }
 help_tab_ui <- build_help_tab()
 
+# v2.23.2: a "Copy figure" button; kind is main / analysis / fit / compose / compare / legend_key (page script kcCopyFigure)
+kc_copy_button <- function(kind, label = " Copy figure", style = NULL)
+  tags$button(class = "btn btn-default", type = "button", style = style,
+              onclick = sprintf("kcCopyFigure('%s')", kind), icon("copy"), label)
+
 # v2.21: the quick-edit strip under the main figure. The rows (name, colour, show) are rendered by the server for
 # every loaded sample (output quick_edit_rows); the axis labels and the legend position live here (same input ids as
 # before, moved out of the sidebar so one edit and one look at the figure is all it takes).
@@ -8856,11 +8861,6 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
     p(class = "kc-qe-note",
       "The name is what figures, legends, tables, CSV files and reports show; the file's own column name stays the key ",
       "(the CSV files carry it in a sample_raw column). Untick show to leave a sample out of the figure.")))
-
-# v2.23.2: a "Copy figure" button; kind is main / analysis / fit / compose / compare / legend_key (page script kcCopyFigure)
-kc_copy_button <- function(kind, label = " Copy figure", style = NULL)
-  tags$button(class = "btn btn-default", type = "button", style = style,
-              onclick = sprintf("kcCopyFigure('%s')", kind), icon("copy"), label)
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 ui <- fluidPage(
@@ -9144,6 +9144,18 @@ ui <- fluidPage(
            catch (e) { done = p.then(function(b) { return navigator.clipboard.write([new ClipboardItem({'image/png': b})]); }); }
            done.then(function() { report(kind, true, dims.w, dims.h); }, function(e) { report(kind, false, 0, 0, why(e)); });
          };
+         // v2.23.3: Copy text -- the legend text draft (output figure_legend_text) as plain text
+         window.kcCopyLegendText = function() {
+           var el = document.getElementById('figure_legend_text'), txt = el ? (el.innerText || el.textContent || '').trim() : '';
+           function sel() { if (el && window.getSelection) { var r = document.createRange(); r.selectNodeContents(el); var g = window.getSelection(); g.removeAllRanges(); g.addRange(r); } }
+           function res(ok, why) {
+             if (window.Shiny && Shiny.setInputValue)
+               Shiny.setInputValue('kc_copy_result', ok ? {kind: 'legend_text', ok: true} : {kind: 'legend_text', ok: false, reason: why}, {priority: 'event'});
+           }
+           if (!txt) { res(false, 'there is no legend text yet'); return; }
+           if (!navigator.clipboard || !navigator.clipboard.writeText) { sel(); res(false, 'no clipboard access; the text is selected, press Ctrl/Cmd+C'); return; }
+           navigator.clipboard.writeText(txt).then(function() { res(true); }, function(e) { sel(); res(false, why(e)); });
+         };
          var hov = null;
          document.addEventListener('mouseover', function(ev) {
            hov = null; if (!ev.target || !ev.target.closest) return;
@@ -9288,6 +9300,14 @@ ui <- fluidPage(
       .kc-qe-field label { font-size:.9em; margin-bottom:1px; }
       .kc-qe-field .form-control { height:26px; padding:2px 6px; font-size:1em; }
       .kc-qe-note { font-size:.78em; color:#777; margin:0 0 4px; }
+      .kc-legtab { max-width:900px; }
+      .kc-legtab h4 { margin:16px 0 6px; }
+      .kc-legtab pre { max-height:260px; overflow:auto; margin-bottom:6px; }
+      .kc-legtab img { max-width:100%; }
+      .kc-legtab .kc-leg-help { font-size:.82em; color:#777; margin-top:14px; }
+      table.kc-leg-samples { border-collapse:collapse; font-size:.92em; }
+      table.kc-leg-samples th, table.kc-leg-samples td { padding:3px 14px 3px 0; text-align:left; border-bottom:1px solid #eee; }
+      .kc-leg-sw { display:inline-block; width:14px; height:14px; border:1px solid #888; vertical-align:-2px; margin-right:6px; }
       .kc-qe-canvas .checkbox { margin:2px 0; font-weight:normal; }
       .kc-canvas { position:relative; }
       .kc-canvas-svg text.kc-ed { cursor:pointer; }
@@ -9930,16 +9950,7 @@ ui <- fluidPage(
                    div(class = "panel-section",
                        h4("Figure Legend Text", class = "panel-title"),
                        p(style = "font-size:.8em;color:#777;margin-top:-4px;",
-                         "Drafted from the current plot and the Experiment Notebook: measure, replicate n, ",
-                         "error type, MOI / host / phage / medium. Copy into the manuscript and edit."),
-                       verbatimTextOutput("figure_legend_text", placeholder = TRUE),
-                       # v2.23.1: the legend key, cut from the figure's own legend
-                       p(style = "font-size:.8em;color:#777;margin:8px 0 4px;",
-                         "Legend key: the figure's own legend (every sample's colour, marker, fill, line type and name) as a separate ",
-                         "image in the export format, to place beside the figure or to start a legend from."),
-                       plotOutput("legend_key_preview", height = "auto"),
-                       downloadButton("downloadLegendKey", "Download legend key", style = "width:100%;margin-top:6px;"),
-                       kc_copy_button("legend_key", " Copy key", style = "width:100%;margin-top:6px;")
+                         "Legend text and key: the Legend text tab, beside Lysis curve.")
                    )
                  ),
                  
@@ -10255,6 +10266,20 @@ ui <- fluidPage(
       uiOutput("figure_standard_bar"),
       tabsetPanel(id = "main_tabs",
         tabPanel("Lysis curve", br(), uiOutput("plot_container"), quick_edit_ui),
+        # v2.23.3: the legend text, the samples as drawn (colour / marker / line words) and the legend key, one place for writing a figure legend
+        tabPanel("Legend text", br(),
+          div(class = "kc-legtab",
+            h4("Figure legend draft (for the manuscript)"),
+            verbatimTextOutput("figure_legend_text", placeholder = TRUE),
+            tags$button(type = "button", class = "btn btn-default btn-sm", id = "kc_copy_legend_text",
+                        onclick = "kcCopyLegendText()", icon("copy"), " Copy text"),
+            h4("Samples as drawn"),
+            uiOutput("legend_samples_table"),
+            h4("Legend key"),
+            plotOutput("legend_key_preview", height = "auto"),
+            downloadButton("downloadLegendKey", "Download legend key", style = "margin-top:6px;"),
+            kc_copy_button("legend_key", " Copy key", style = "margin-top:6px;"),
+            p(class = "kc-leg-help", "The text follows the Experiment Notebook fields and the current styling; edit it in the manuscript."))),
         # ── Data (v2.22): view and edit the working data, or enter it by hand ──
         tabPanel("Data", br(),
           tabsetPanel(id = "data_subtabs",
@@ -14488,7 +14513,12 @@ server <- function(input, output, session) {
     x <- input$kc_copy_result
     req(is.list(x), is.logical(x$ok), length(x$ok) == 1L, !is.na(x$ok))
     px <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1L && is.finite(v) && v > 0) format(round(v), scientific = FALSE) else "?" }
-    if (isTRUE(x$ok)) {
+    if (isTRUE(x$ok) && identical(x$kind, "legend_text")) {
+      showNotification("Legend text copied.", type = "message", duration = 3)
+    } else if (!isTRUE(x$ok) && identical(x$kind, "legend_text")) {
+      why <- if (is.character(x$reason) && length(x$reason) == 1L && !is.na(x$reason) && nzchar(x$reason)) substr(x$reason, 1, 120) else "unknown reason"
+      showNotification(paste0("Could not copy the text: ", why, "."), type = "warning")
+    } else if (isTRUE(x$ok)) {
       showNotification(sprintf("Figure copied to the clipboard (%s x %s px). For print use Download Image.", px(x$w), px(x$h)),
                        type = "message", duration = 4)
     } else {
@@ -14655,6 +14685,27 @@ server <- function(input, output, session) {
   output$figure_legend_text <- renderText({
     txt <- figure_legend_string()
     if (nzchar(txt)) txt else "Load data and select samples to draft a legend."
+  })
+
+  # v2.23.3: one row per plotted sample: name, colour (swatch, word, hex), marker, line type, as drawn in the figure
+  legend_samples_df <- function() {
+    ss <- sel_samples(); if (is.null(rv$data) || !length(ss)) return(NULL)
+    aes_v <- resolve_aesthetics(ss); hex <- toupper(unname(aes_v$colors[ss]))
+    sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
+    mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
+    lt <- vapply(ss, function(s) if (!sl) NA_character_ else { w <- legend_line_words(aes_v$line_types[[s]]); if (is.na(w)) "solid line" else w }, "", USE.NAMES = FALSE)
+    data.frame(name = markup_to_plain(unname(aes_v$leg_labels[ss])), hex = hex, colour = colour_word(hex), marker = ifelse(is.na(mk), "none", mk),
+               line = ifelse(is.na(lt), "none", lt), stringsAsFactors = FALSE)
+  }
+  output$legend_samples_table <- renderUI({
+    plot_inputs_debounced()
+    d <- legend_samples_df()
+    if (is.null(d)) return(p(class = "kc-leg-help", "Load data and select samples to list them."))
+    rows <- lapply(seq_len(nrow(d)), function(i) tags$tr(
+      tags$td(d$name[i]),
+      tags$td(tags$span(class = "kc-leg-sw", style = paste0("background:", d$hex[i], ";")), paste0(d$colour[i], " ", d$hex[i])),
+      tags$td(d$marker[i]), tags$td(d$line[i])))
+    tags$table(class = "kc-leg-samples", tags$thead(tags$tr(tags$th("Name"), tags$th("Colour"), tags$th("Marker"), tags$th("Line"))), tags$tbody(rows))
   })
 
   # ── v2.23.1: the legend key of every figure ─────────────────────────────────
