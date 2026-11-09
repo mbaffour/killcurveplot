@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.5"
+APP_VERSION <- "2.23.6"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -8027,6 +8027,23 @@ colour_word <- function(hex) {
     rownames(ref)[which.min(rowSums(sweep(ref, 2, rgb)^2))]
   }, "", USE.NAMES = FALSE)
 }
+# v2.23.6: the words for a SET of colours. When two different colours share a word ("#0072B2" and "#56B4E9" are both
+# "blue"), the darker one becomes "dark blue" and the lighter one "light blue" (three or more: the darkest and the lightest
+# are qualified, the middle keeps the plain word). Identical colours keep identical words; a single colour is colour_word().
+colour_words <- function(hex) {
+  hex <- as.character(hex); w <- colour_word(hex)
+  lum <- vapply(hex, function(h) { rgb <- if (is.na(h) || !nzchar(h)) NULL else tryCatch(grDevices::col2rgb(h)[, 1], error = function(e) NULL)
+                                   if (is.null(rgb)) NA_real_ else sum(c(0.2126, 0.7152, 0.0722) * rgb) }, 0, USE.NAMES = FALSE)
+  for (word in unique(w[!is.na(w)])) {
+    idx <- which(w == word); cols <- toupper(hex[idx]); u <- unique(cols[!is.na(lum[idx])])
+    if (length(u) < 2L) next
+    ul <- vapply(u, function(c0) lum[idx][match(c0, cols)], 0); o <- order(ul)
+    dark <- u[o[1]]; light <- u[o[length(o)]]
+    w[idx[cols == dark]]  <- paste("dark", word)
+    w[idx[cols == light]] <- paste("light", word)
+  }
+  w
+}
 # "filled circles" / "open squares" / "crosses" for a shape code and the Filled box, as the figure draws it (resolve_point_shape).
 legend_marker_words <- function(shape, filled = TRUE) {
   pch <- suppressWarnings(as.integer(shape)); if (length(pch) != 1L || is.na(pch)) return(NA_character_)
@@ -8043,8 +8060,8 @@ legend_line_words <- function(line_type) {
          longdash = "long-dashed line", twodash = "two-dashed line", NA_character_)
 }
 # "MG1655 (black, filled circles, dashed line)": the label, then its colour, marker (only with points) and line type (only when not solid)
-legend_sample_text <- function(label, colour, shape = NA, filled = TRUE, line_type = "solid", show_points = TRUE, show_lines = TRUE) {
-  parts <- c(colour_word(colour), if (isTRUE(show_points)) legend_marker_words(shape, filled), if (isTRUE(show_lines)) legend_line_words(line_type))
+legend_sample_text <- function(label, colour, shape = NA, filled = TRUE, line_type = "solid", show_points = TRUE, show_lines = TRUE, word = NULL) {
+  parts <- c(if (is.null(word)) colour_word(colour) else word, if (isTRUE(show_points)) legend_marker_words(shape, filled), if (isTRUE(show_lines)) legend_line_words(line_type))
   parts <- parts[!is.na(parts)]
   if (length(parts)) paste0(label, " (", paste(parts, collapse = ", "), ")") else label
 }
@@ -14760,9 +14777,10 @@ server <- function(input, output, session) {
                  if (!is.null(temp))  paste0(" at ", temp, " °C") else "", ".")
     # v2.23.1: each curve with its colour in words, its marker (only when points are drawn) and a non-solid line type
     ss <- sel_samples(); lab_plain <- markup_to_plain(unname(aes_v$leg_labels[ss]))
+    cw <- colour_words(unname(aes_v$colors[ss]))      # v2.23.6: "dark blue" / "light blue" when two curves share a colour word
     s2 <- paste0("Curves: ", paste(vapply(seq_along(ss), function(i)
             legend_sample_text(lab_plain[i], aes_v$colors[[ss[i]]], aes_v$shapes[[ss[i]]], aes_v$filled_map[[ss[i]]], aes_v$line_types[[ss[i]]],
-                               show_points = isTRUE(input$show_points), show_lines = !isTRUE(input$hide_lines)), ""), collapse = "; "), ".")
+                               show_points = isTRUE(input$show_points), show_lines = !isTRUE(input$hide_lines), word = cw[i]), ""), collapse = "; "), ".")
     n_rng <- suppressWarnings(range(pd$n, na.rm = TRUE))
     n_txt <- if (all(is.finite(n_rng)) && n_rng[1] == n_rng[2]) paste0("n = ", n_rng[1])
              else if (all(is.finite(n_rng))) paste0("n = ", n_rng[1], "–", n_rng[2])
@@ -14808,7 +14826,7 @@ server <- function(input, output, session) {
     sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
     mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
     lt <- vapply(ss, function(s) if (!sl) NA_character_ else { w <- legend_line_words(aes_v$line_types[[s]]); if (is.na(w)) "solid line" else w }, "", USE.NAMES = FALSE)
-    data.frame(name = markup_to_plain(unname(aes_v$leg_labels[ss])), hex = hex, colour = colour_word(hex), marker = ifelse(is.na(mk), "none", mk),
+    data.frame(name = markup_to_plain(unname(aes_v$leg_labels[ss])), hex = hex, colour = colour_words(hex), marker = ifelse(is.na(mk), "none", mk),
                line = ifelse(is.na(lt), "none", lt), stringsAsFactors = FALSE)
   }
   output$legend_samples_table <- renderUI({
