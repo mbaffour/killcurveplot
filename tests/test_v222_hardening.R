@@ -1407,9 +1407,9 @@ check("R4-CMP01: a refused second file leaves no second dataset (v2.22 rule) and
       identical(cf$good, "partial_common.csv") && isTRUE(cf$fig_good) && all(unlist(cf$kept)) && all(unlist(cf$fig_after)))
 check("R4-CMP01: a path that does not exist is a notification too ('gone.csv ... not loaded') and leaves no dataset", isTRUE(cf$kept$missing) && grepl("gone.csv", cf$status$missing) && any(grepl("gone.csv", cn$notes)))
 check("R4-CMP02: malformed upload messages (a scalar, NA, list(), no datapath, NA / 2 datapaths, 2 names) are ignored: no error, nothing loaded over the good dataset", cf$msg_errs == 0 && isTRUE(cf$msg_kept))
-check(sprintf("R4-CMP03: a second file with NO sample in common with the main data: one notification naming the file, the figure is the empty-state text (not two unrelated sets of curves), the status line says so, the download is refused with the 'Nothing to export' message%s",
-              sprintf(" [notes %d, placeholder %s, label '%s', status %s, download '%s']", sum(grepl("no_common_samples.csv.*no sample in common", cn$notes)), cf$nc_ph, substr(cf$nc_label, 1, 40), grepl("No sample in common", cf$nc_status), substr(cf$nc_dl, 1, 40))),
-      sum(grepl("no_common_samples.csv.*no sample in common", cn$notes)) == 1L && isTRUE(cf$nc_ph) && grepl("no sample in common", cf$nc_label) && grepl("No sample in common", cf$nc_status) && grepl("Nothing to export", cf$nc_dl))
+check(sprintf("R4-CMP03: a second file with NO sample name in common with the main data: one notification naming the file, the status line says so, and the figure still draws both datasets (two experiments with different strains is a supported comparison) and downloads%s",
+              sprintf(" [notes %d, placeholder %s, status %s, download '%s']", sum(grepl("no_common_samples.csv.*no sample name in common", cn$notes)), cf$nc_ph, grepl("No sample name in common", cf$nc_status), substr(cf$nc_dl, 1, 40))),
+      sum(grepl("no_common_samples.csv.*no sample name in common", cn$notes)) == 1L && isFALSE(cf$nc_ph) && grepl("No sample name in common", cf$nc_status) && identical(cf$nc_dl, "file"))
 check("R4-CMP04: sample names with regex metacharacters / quotes / a leading '-' / Unicode and a 500-sample second file load and draw (overlay and facet); the SAME file as the first dataset draws too",
       identical(cf$n[["many_samples_500.csv"]], 500L) && identical(cf$fig[["regex_names.csv"]], "ok") && identical(cf$fig[["many_samples_500.csv"]], "ok") &&
         isTRUE(cf$same$overlay) && isTRUE(cf$same$facet))

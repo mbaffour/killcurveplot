@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.6"
+APP_VERSION <- "2.23.7"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -18547,7 +18547,8 @@ server <- function(input, output, session) {
   # Round 4: the second file has the first file's guards. A malformed upload message is ignored; EVERY read error and every refusal
   # of ingest_frame() (an empty file, a binary file, a zero-column file, a workbook that will not open) is one notification
   # (the first file's own message) and a line under the picker, and no second dataset is left (v2.22: the figure says to load
-  # one); a file with no sample in common with the main data is loaded but says so once (the figure is then the empty-state text).
+  # one). A file with no sample name in common with the main data is loaded and drawn as before (comparing two experiments
+  # with different strains is a supported use) but says so once, because a sample is paired across the files by its exact name.
   compare_no_common <- function(ds = rv_cmp$ds) !is.null(ds) && !is.null(rv$od_vars) && !length(intersect(as.character(rv$od_vars), as.character(ds$od_vars)))
   compare_load <- function(path, name = path) {
     ds <- ingest_frame(compare_read_file(path, name), name)
@@ -18555,7 +18556,7 @@ server <- function(input, output, session) {
     updateSelectInput(session, "compare_samples_b", choices = ds$od_vars, selected = ds$od_vars)
     for (nt in ds$notes) tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)
     if (compare_no_common(ds))
-      guard_notify("compare_no_common", sprintf("'%s' has no sample in common with the main data (%s): the comparison is empty. Sample names must match.", name,
+      guard_notify("compare_no_common", sprintf("'%s' has no sample name in common with the main data (%s). Both datasets are drawn, each with its own samples; a sample is paired across the files by its exact name.", name,
                                                  if (length(ds$od_vars)) paste0("its samples: ", paste(utils::head(ds$od_vars, 5), collapse = ", "), if (length(ds$od_vars) > 5) ", ..." else "") else "it has none"), "warning")
     invisible(ds)
   }
@@ -18580,7 +18581,7 @@ server <- function(input, output, session) {
                                                   "Format: <b>", if (ds$is_long_format) "long" else "wide", "</b> &middot; time column: <b>",
                                                   html_escape(ds$time_col), "</b> &middot; ", length(ds$all_timepoints), " time points<br/>",
                                                   "Samples: ", html_escape(paste(ds$od_vars, collapse = ", ")))),
-                    if (compare_no_common(ds)) div(class = "settings-status warn", "No sample in common with the main data: nothing to compare.")))
+                    if (compare_no_common(ds)) div(class = "settings-status warn", "No sample name in common with the main data: each dataset is drawn with its own samples (a sample is paired across files by its exact name).")))
   })
   compare_labels_now <- function() {
     one <- function(x) if (is.atomic(x) && length(x) >= 1L && !is.na(x[1])) as.character(x[1]) else NULL      # round 4: a scripted vector / list / NA is the default label
@@ -18605,7 +18606,6 @@ server <- function(input, output, session) {
     ds <- rv_cmp$ds
     if (is.null(rv$data) || is.null(sel_samples())) return(compare_unavailable("load the main data first."))
     if (is.null(ds)) return(compare_unavailable("load a second dataset on the Compare tab."))
-    if (compare_no_common(ds) && isTRUE(nrow(ds$data) > 0)) return(compare_unavailable("the second file has no sample in common with the main data (the sample names must match)."))
     tryCatch({
       ss  <- compare_sample_sets()
       if (!length(ss$A) || !length(ss$B)) return(compare_unavailable("no samples selected in one of the datasets."))
