@@ -11179,7 +11179,8 @@ NUMERIC_INPUT_RANGES <- tryCatch(collect_numeric_ranges(ui), error = function(e)
 # Round 3: the choices of every STATIC select and radio group, read off the UI tree (a browser can only send one of them, so a
 # settings file may carry nothing else). The options of a selectInput are an HTML string inside the <select> tag, so the values
 # are read from the markup; a radio group is a <div id> with <input type="radio" value> children. Selects whose choices are
-# replaced at run time (updateSelectInput(choices = ...): the sample, column and theme lists) have no fixed choices: skipped.
+# replaced at run time (updateSelectInput(choices = ...): the sample, column and theme lists) have no fixed choices: skipped
+# here. Round 4: the server reads them through sel1() / sel_multi() against the choices of the moment (dyn_choices()).
 DYNAMIC_SELECT_IDS <- c("time_col_choice", "selected_samples", "metrics_ref_sample", "blank_sample", "transform_control", "data_cell_col",
                         "facet_source", "compose_width", "active_theme", "compare_samples_b", "sheet_choice", "cmp_samples", "excluded_reps")
 collect_select_choices <- function(node) {
@@ -11345,8 +11346,28 @@ server <- function(input, output, session) {
     v <- input[[id]]
     if (is.null(v) || !is.atomic(v) || !length(v)) return(d)
     v <- as.character(v[1]); if (is.na(v)) return(d)
-    ch <- SELECT_INPUT_CHOICES[[id]]                  # a static select / radio group: a value that is not one of its choices is not a choice
+    ch <- SELECT_INPUT_CHOICES[[id]] %||% dyn_choices(id)   # a static select / radio group: a value that is not one of its choices is not a choice
     if (!is.null(ch) && !(v %in% ch)) d else v
+  }
+  # Round 4: the selects whose choices are set at run time (DYNAMIC_SELECT_IDS) are checked the same way, against the choices of
+  # NOW (the loaded samples, columns, sheets, saved themes), so a stale or scripted value ("nope", a 100 kB string, a name of the
+  # previous file) reads as the default, never as a sample / column / theme that does not exist. NULL = not a run-time select.
+  dyn_choices <- function(id) switch(id,
+    metrics_ref_sample = , blank_sample = , transform_control = c("", as.character(rv$od_vars)),   # "" is the 'None' / 'Choose...' entry
+    time_col_choice = as.character(colnames(rv$data)),
+    sheet_choice    = as.character(rv$xlsx_sheets),
+    facet_source    = unname(facet_source_choices()),
+    active_theme    = c("", theme_list()),
+    compose_width   = c("double", "single", "custom"),
+    NULL)
+  # Round 4: a multi-select read as a character vector of its VALID choices only (the loaded samples / metrics / replicate ids).
+  # NULL (never touched) gives `d`; list(), NA, numbers, duplicates, unknown names and a 500-element vector all come back as a
+  # plain, de-duplicated subset of `valid` (character(0) when none is valid).
+  sel_multi <- function(id, valid = SELECT_INPUT_CHOICES[[id]], d = character(0)) {
+    v <- input[[id]]
+    if (is.null(v)) return(d)
+    v <- if (is.atomic(v)) as.character(v) else tryCatch(as.character(unlist(v, use.names = FALSE)), error = function(e) character(0))
+    intersect(v, as.character(valid))
   }
   palette_in <- function() { p <- sel1("color_palette"); if (is.null(p) || !(p %in% SELECT_INPUT_CHOICES$color_palette)) "custom" else p }
   jfam <- function() { f <- sel1("journal_family"); if (is.null(f) || !(f %in% names(JOURNAL_PRESETS))) "nature" else f }
@@ -11826,7 +11847,7 @@ server <- function(input, output, session) {
       updateNumericInput(session, "x_min", value = tr[1])
       updateNumericInput(session, "x_max", value = tr[2])
     }
-    keep_sel <- if (keep_state) intersect(isolate(input$selected_samples) %||% character(0), rv$od_vars) else character(0)
+    keep_sel <- if (keep_state) isolate(sel_multi("selected_samples", rv$od_vars)) else character(0)
     if (!length(keep_sel)) keep_sel <- rv$od_vars
     updateSelectInput(session, "selected_samples", choices = rv$od_vars, selected = keep_sel)
     keep_ref <- if (keep_state && isolate(sel1("metrics_ref_sample", "")) %in% rv$od_vars) isolate(sel1("metrics_ref_sample")) else ""
@@ -11835,9 +11856,9 @@ server <- function(input, output, session) {
                       selected = keep_ref)
     # v2.22: the blank-sample and control choices list the samples of the new data
     updateSelectInput(session, "blank_sample", choices = c("Choose..." = "", setNames(rv$od_vars, rv$od_vars)),
-                      selected = if (keep_state && isolate(input$blank_sample %||% "") %in% rv$od_vars) isolate(input$blank_sample) else "")
+                      selected = if (keep_state && isolate(sel1("blank_sample", "")) %in% rv$od_vars) isolate(sel1("blank_sample")) else "")
     updateSelectInput(session, "transform_control", choices = c("Choose..." = "", setNames(rv$od_vars, rv$od_vars)),
-                      selected = if (keep_state && isolate(input$transform_control %||% "") %in% rv$od_vars) isolate(input$transform_control) else "")
+                      selected = if (keep_state && isolate(sel1("transform_control", "")) %in% rv$od_vars) isolate(sel1("transform_control")) else "")
 
     all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[rv$time_col]])))))
     rv$all_timepoints <- all_t[is.finite(all_t)]
@@ -11892,8 +11913,8 @@ server <- function(input, output, session) {
     selectInput("sheet_choice", "Excel sheet:", choices = sh, selected = if (!is.null(rv$xlsx_sheet) && rv$xlsx_sheet %in% sh) rv$xlsx_sheet else sh[1])
   })
   observeEvent(input$sheet_choice, {
-    req(rv$xlsx_path, input$sheet_choice)
-    sh <- input$sheet_choice
+    sh <- sel1("sheet_choice")                                                   # round 4: one of the workbook's sheets, whatever was sent
+    req(rv$xlsx_path, sh)
     if (identical(paste0(rv$xlsx_name, " [", sh, "]"), rv$data_source)) return(invisible(NULL))
     tryCatch({
       data <- read_data_file(rv$xlsx_path, rv$xlsx_name, sheet = sh)
@@ -12043,7 +12064,7 @@ server <- function(input, output, session) {
     if (!nrow(ct)) return(p(style = "color:#999;font-size:.85em;", "Load data to list its replicates."))
     fresh <- !identical(n1_state$excl_ver, ver)          # a new load starts with nothing excluded; an edit keeps the ticks
     n1_state$excl_ver <- ver
-    sel <- if (fresh) character(0) else intersect(isolate(input$excluded_reps) %||% character(0), ct$key)
+    sel <- if (fresh) character(0) else isolate(sel_multi("excluded_reps", ct$key))
     ch  <- setNames(ct$key, paste0(dname(ct$sample), ": ", ct$label))
     tagList(
       if (all(table(ct$sample) < 2)) p(style = "font-size:.8em;color:#856404;", "Every sample has a single replicate: excluding it removes the sample."),
@@ -13088,9 +13109,7 @@ server <- function(input, output, session) {
   }
   # the excluded replicates ("Sample #id" keys) that exist in the loaded data
   excluded_rep_keys <- function() {
-    k <- input$excluded_reps
-    if (!length(k)) return(character(0))
-    intersect(as.character(k), replicate_catalog_current()$key)
+    sel_multi("excluded_reps", replicate_catalog_current()$key)        # round 4: only replicate ids of the loaded data
   }
   data_curation_active <- function()
     !is.null(od_filter_range()) || length(excluded_rep_keys()) > 0 ||
@@ -13541,12 +13560,12 @@ server <- function(input, output, session) {
   })
   observe({
     ch  <- facet_source_choices()
-    cur <- isolate(input$facet_source) %||% "group"
+    cur <- isolate(sel1("facet_source", "group"))
     updateSelectInput(session, "facet_source", choices = ch, selected = if (cur %in% ch) cur else "group")
   })
   # One text box per selected sample for the panel it belongs to (samples typed with the same name share a panel).
   output$facet_manual_ui <- renderUI({
-    if (!identical(input$facet_source %||% "group", "manual")) return(NULL)
+    if (!identical(sel1("facet_source", "group"), "manual")) return(NULL)
     samps <- sel_samples()
     if (is.null(samps) || length(samps) == 0) return(p(style = "font-size:.85em;color:#888;", "Select samples first."))
     tagList(
@@ -13579,7 +13598,7 @@ server <- function(input, output, session) {
   # The panel of each sample for facet_by_group: the typed Groups (default), a text box per sample (facet_source
   # "manual", the Panels section) or a metadata column of a long file. NULL = no assignment (no facets).
   panel_groups <- function(samples, aes_vals) {
-    src <- input$facet_source %||% "group"
+    src <- sel1("facet_source", "group")
     if (identical(src, "manual")) {
       man <- vapply(samples, function(vn) trimws(as.character(input[[paste0("facet_of_", safe_id(vn))]] %||% "")[1]), "")
       return(panel_assignment(samples, "manual", manual = man))
@@ -14329,7 +14348,7 @@ server <- function(input, output, session) {
     w  <- cl(input$panel_width_mm, 65)
     h  <- cl(input$panel_height_mm, w)
     if (kind %in% CURVE_KINDS && isTRUE(input$panel_square %||% TRUE)) h <- w
-    if (identical(kind, "metric_summary") && isTRUE(input$metric_single_large) && length(input$analysis_metrics %||% character(0)) == 1L) {
+    if (identical(kind, "metric_summary") && isTRUE(input$metric_single_large) && length(sel_multi("analysis_metrics")) == 1L) {
       w <- min(w * 1.5, 400); h <- min(h * 1.5, 400)   # v2.22: single-metric large mode
     }
     if (identical(kind, "phenotype_heatmap")) {   # v2.20.1: the height follows the rows so the tiles stay square-ish
@@ -14904,7 +14923,7 @@ server <- function(input, output, session) {
   }
   analysis_stat_metric <- function() {
     if (identical(sel1("analysis_type"), "dose_response")) sel1("analysis_dose_metric", "lysis_time")
-    else (input$analysis_metrics %||% "lysis_time")[1]
+    else sel_multi("analysis_metrics", d = "lysis_time")[1]
   }
   analysis_stats_current <- function() {
     compare_replicate_metric(replicate_metric_rows_current(), analysis_stat_metric(),
@@ -14970,7 +14989,7 @@ server <- function(input, output, session) {
     p <- switch(type,
       metric_summary = {
         rm   <- replicate_metric_rows_current()
-        mets <- intersect(input$analysis_metrics %||% c("lysis_time", "od_drop"), names(rm))
+        mets <- intersect(sel_multi("analysis_metrics", d = c("lysis_time", "od_drop")), names(rm))
         if (is.null(rm) || !length(mets)) stop("No per-replicate metrics for the selected samples.")
         long <- do.call(rbind, lapply(mets, function(m)
           data.frame(sample = rm$sample, replicate = rm$replicate, metric = m, value = rm[[m]],
@@ -16496,7 +16515,7 @@ server <- function(input, output, session) {
   # ── Phenotype heatmap (v2.19) ────────────────────────────────────────────────
   pheno_current <- function() {
     cm   <- curve_metrics_current()
-    mets <- input$pheno_metrics
+    mets <- sel_multi("pheno_metrics")
     n_s  <- if (is.null(cm)) 0L else length(unique(cm$sample))
     out  <- if (!length(mets) || is.null(cm)) list(matrix = matrix(numeric(0), 0, 0), raw = matrix(numeric(0), 0, 0),
                                                     dropped = character(0), metrics = character(0))
@@ -16749,7 +16768,7 @@ server <- function(input, output, session) {
       guard_notify("boot_run", "Load data and select samples first: the bootstrap resamples their replicates.")
       return(invisible(NULL))
     }
-    sel <- as.character(input$boot_metrics %||% character(0))
+    sel <- sel_multi("boot_metrics")
     mets <- sel[sel %in% BOOT_METRIC_NAMES]
     dropped <- setdiff(sel, mets)
     if (!length(mets)) {
@@ -16845,7 +16864,7 @@ server <- function(input, output, session) {
       content  = function(file) { req(rv$data, sel_samples()); d <- fun(); req(d); write_csv_safe(d, file, row.names = FALSE) })
   }
   s22_metrics_sel <- function(rm) {
-    m <- intersect(as.character(input$s22_metrics %||% character(0)), names(rm))
+    m <- sel_multi("s22_metrics", names(rm))
     m[vapply(m, function(k) any(is.finite(suppressWarnings(as.numeric(rm[[k]])))), logical(1))]
   }
   s22_note <- function(...) { x <- c(...); x <- x[!is.na(x) & nzchar(x)]; if (length(x)) div(lapply(x, function(n) div(class = "stats-note", n))) }
@@ -17231,10 +17250,10 @@ server <- function(input, output, session) {
   output$cmp_samples_ui <- renderUI({
     req(rv$data, sel_samples())
     smp <- sample_levels(sel_samples())
-    cur <- isolate(input$cmp_samples)
+    cur <- isolate(sel_multi("cmp_samples", smp))
     selectInput("cmp_samples", "Samples to compare:", choices = setNames(smp, dname(smp)), selected = if (length(cur)) intersect(cur, smp) else smp, multiple = TRUE, width = "100%")
   })
-  cmp_selected <- function() { s <- as.character(input$cmp_samples %||% character(0)); s <- intersect(s, sel_samples()); if (length(s)) s else as.character(sel_samples()) }
+  cmp_selected <- function() { s <- sel_multi("cmp_samples", sel_samples()); if (length(s)) s else as.character(sel_samples()) }
   cmp_current <- reactive({
     fs <- fit_settings()
     compare_fits_for_samples(s22_curves()$rp, cmp_selected(), input$cmp_model %||% "logistic", input$cmp_param %||% "mu", fs$until, fs$log)
@@ -18113,7 +18132,7 @@ server <- function(input, output, session) {
     ref_d <- dname(ref)     # v2.21: the reference as the user named it, for the captions
     tunit <- time_unit_from_label(xlab_now())
     ylab  <- input$y_axis_label %||% "OD"
-    mets  <- input$analysis_metrics %||% c("lysis_time", "od_drop")
+    mets  <- sel_multi("analysis_metrics", d = c("lysis_time", "od_drop"))
     moi   <- moi_map(samps, input$moi_override)
     win   <- smooth_win()
     norm_mode <- input$analysis_norm_mode %||% "reference"
@@ -18438,7 +18457,7 @@ server <- function(input, output, session) {
   # ── Project themes ──────────────────────────────────────────────────────────────────────────────
   refresh_theme_choices <- function(selected = NULL) {
     nms <- theme_list()
-    sel <- selected %||% isolate(input$active_theme) %||% ""
+    sel <- selected %||% isolate(sel1("active_theme", "")) %||% ""
     if (!(sel %in% nms)) sel <- ""
     updateSelectInput(session, "active_theme", choices = c("None" = "", setNames(nms, theme_display_names(nms))), selected = sel)
     invisible(nms)
@@ -18468,7 +18487,7 @@ server <- function(input, output, session) {
     apply_sample_aes(aes_map, samps, via_qe = TRUE)
   }
   theme_autoapply_on_load <- function() {
-    key <- isolate(input$active_theme) %||% ""
+    key <- isolate(sel1("active_theme", ""))
     if (!isTRUE(isolate(input$theme_autoapply)) || !nzchar(key)) return(invisible(NULL))
     tryCatch({
       k <- theme_apply_named(key, rv$od_vars)
@@ -18486,14 +18505,14 @@ server <- function(input, output, session) {
     showNotification(sprintf("Theme '%s' saved (%d samples).", key, length(rv$od_vars)), type = "message")
   })
   observeEvent(input$apply_theme, {
-    key <- input$active_theme %||% ""
+    key <- sel1("active_theme", "")          # round 4: a saved theme only ("../../x" or a list is not one: it used to reach another theme's file)
     if (!nzchar(key)) { showNotification("Select a theme first.", type = "warning"); return() }
     k <- theme_apply_named(key, rv$od_vars)
     if (is.na(k)) showNotification(theme_problem_message(key), type = "warning")
     else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
   })
   observeEvent(input$delete_theme, {
-    key <- input$active_theme %||% ""
+    key <- sel1("active_theme", "")
     if (!nzchar(key)) { showNotification("Select a theme to delete.", type = "warning"); return() }
     showModal(modalDialog(title = "Delete theme", size = "s", easyClose = TRUE,
                           p("Permanently delete the theme ", tags$b(key), " from the themes folder?"),
@@ -18501,7 +18520,7 @@ server <- function(input, output, session) {
                                            actionButton("delete_theme_confirm", "Delete", style = "background:#dc3545;color:white;border:none;"))))
   })
   observeEvent(input$delete_theme_confirm, {
-    key <- input$active_theme %||% ""; removeModal()
+    key <- sel1("active_theme", ""); removeModal()
     if (!nzchar(key)) return()
     ok <- tryCatch(theme_delete(key), error = function(e) FALSE)
     refresh_theme_choices(selected = "")
@@ -18525,35 +18544,54 @@ server <- function(input, output, session) {
     if (is_excel_file(name)) read_workbook_data(path, name)$data      # the same reader as the main path: the first sheet with data
     else fill_blank_headers(read_csv_locale_aware(path, input$csv_locale %||% "auto"))
   }
+  # Round 4: the second file has the first file's guards. A malformed upload message is ignored; EVERY read error and every refusal
+  # of ingest_frame() (an empty file, a binary file, a zero-column file, a workbook that will not open) is one notification
+  # (the first file's own message) and a line under the picker, and no second dataset is left (v2.22: the figure says to load
+  # one); a file with no sample in common with the main data is loaded but says so once (the figure is then the empty-state text).
+  compare_no_common <- function(ds = rv_cmp$ds) !is.null(ds) && !is.null(rv$od_vars) && !length(intersect(as.character(rv$od_vars), as.character(ds$od_vars)))
   compare_load <- function(path, name = path) {
     ds <- ingest_frame(compare_read_file(path, name), name)
     rv_cmp$ds <- ds; rv_cmp$error <- NULL
     updateSelectInput(session, "compare_samples_b", choices = ds$od_vars, selected = ds$od_vars)
     for (nt in ds$notes) tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)
+    if (compare_no_common(ds))
+      guard_notify("compare_no_common", sprintf("'%s' has no sample in common with the main data (%s): the comparison is empty. Sample names must match.", name,
+                                                 if (length(ds$od_vars)) paste0("its samples: ", paste(utils::head(ds$od_vars, 5), collapse = ", "), if (length(ds$od_vars) > 5) ", ..." else "") else "it has none"), "warning")
     invisible(ds)
   }
   observeEvent(input$compare_file, {
-    f <- input$compare_file; req(f)
-    tryCatch(compare_load(f$datapath, f$name), error = function(e) {
-      rv_cmp$ds <- NULL; rv_cmp$error <- conditionMessage(e)
+    f <- input$compare_file
+    req(is.list(f), all(c("name", "datapath") %in% names(f)))
+    fpath <- f$datapath; fname <- f$name
+    req(is.character(fpath), length(fpath) == 1L, !is.na(fpath))
+    fname <- if (is.character(fname) && length(fname) == 1L && !is.na(fname)) fname else basename(fpath)
+    tryCatch(compare_load(fpath, fname), error = function(e) {
+      msg <- load_failed_message(e, fname)
+      rv_cmp$ds <- NULL; rv_cmp$error <- msg
+      guard_notify("compare_file_read", msg, "error")
     })
+    invisible(NULL)
   })
   output$compare_status <- renderUI({
-    if (!is.null(rv_cmp$error)) return(div(class = "settings-status warn", paste("Could not read the file:", rv_cmp$error)))
     ds <- rv_cmp$ds
-    if (is.null(ds)) return(p(style = "font-size:.82em;color:#777;", "Load a second CSV (or Excel) file with the same layout as the main data."))
-    div(class = "settings-status ok", HTML(paste0("<b>", html_escape(ds$data_source), "</b><br/>",
+    err <- if (!is.null(rv_cmp$error)) div(class = "settings-status warn", rv_cmp$error)
+    if (is.null(ds)) return(tagList(err, if (is.null(err)) p(style = "font-size:.82em;color:#777;", "Load a second CSV (or Excel) file with the same layout as the main data.")))
+    tagList(err, div(class = "settings-status ok", HTML(paste0("<b>", html_escape(ds$data_source), "</b><br/>",
                                                   "Format: <b>", if (ds$is_long_format) "long" else "wide", "</b> &middot; time column: <b>",
                                                   html_escape(ds$time_col), "</b> &middot; ", length(ds$all_timepoints), " time points<br/>",
-                                                  "Samples: ", html_escape(paste(ds$od_vars, collapse = ", ")))))
+                                                  "Samples: ", html_escape(paste(ds$od_vars, collapse = ", ")))),
+                    if (compare_no_common(ds)) div(class = "settings-status warn", "No sample in common with the main data: nothing to compare.")))
   })
-  compare_labels_now <- function() compare_labels(input$compare_label_a, input$compare_label_b)
+  compare_labels_now <- function() {
+    one <- function(x) if (is.atomic(x) && length(x) >= 1L && !is.na(x[1])) as.character(x[1]) else NULL      # round 4: a scripted vector / list / NA is the default label
+    compare_labels(one(input$compare_label_a), one(input$compare_label_b))
+  }
   # the samples of each dataset: A = Select Samples, B = the chosen ones (all when none is chosen); common-only keeps the intersection
   compare_sample_sets <- function() {
     ds <- rv_cmp$ds
     sA <- sel_samples()
-    sB <- input$compare_samples_b
-    sB <- if (is.null(sB) || !length(sB)) ds$od_vars else intersect(sB, ds$od_vars)
+    sB <- sel_multi("compare_samples_b", ds$od_vars)               # round 4: only samples of the second file
+    if (is.null(input$compare_samples_b) || !length(input$compare_samples_b)) sB <- ds$od_vars
     if (isTRUE(input$compare_common_only)) { common <- intersect(sA, sB); sA <- common; sB <- common }
     list(A = sA, B = sB)
   }
@@ -18567,6 +18605,7 @@ server <- function(input, output, session) {
     ds <- rv_cmp$ds
     if (is.null(rv$data) || is.null(sel_samples())) return(compare_unavailable("load the main data first."))
     if (is.null(ds)) return(compare_unavailable("load a second dataset on the Compare tab."))
+    if (compare_no_common(ds) && isTRUE(nrow(ds$data) > 0)) return(compare_unavailable("the second file has no sample in common with the main data (the sample names must match)."))
     tryCatch({
       ss  <- compare_sample_sets()
       if (!length(ss$A) || !length(ss$B)) return(compare_unavailable("no samples selected in one of the datasets."))
