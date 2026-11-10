@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.8"
+APP_VERSION <- "2.23.9"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -7468,9 +7468,8 @@ legacy_settings_kind <- function(s) {
 n4_shape_decode <- function(code) {
   code <- suppressWarnings(as.numeric(code))
   if (length(code) != 1 || !is.finite(code)) return(list(shape = NULL, filled = NULL))
-  open <- c(`1` = 16, `0` = 15, `2` = 17, `5` = 18, `6` = 25)   # the N4 app's open shapes -> this app's shape + "Filled" off
-  if (as.character(code) %in% names(open)) list(shape = unname(open[[as.character(code)]]), filled = FALSE)
-  else list(shape = code, filled = NULL)
+  nm <- normalise_marker(code, TRUE)                         # the N4 app's open shapes (1 0 2 5 6) -> base form + "Filled" off
+  list(shape = nm$shape, filled = if (as.integer(code) %in% c(0L, 1L, 2L, 5L, 6L, 123L, 125L)) FALSE else NULL)
 }
 # The positional per-sample keys of an N4 flat file as list(i = list(color, shape, shape_filled, line_type, legend_label, hidden))
 n4_positional_samples <- function(flat) {
@@ -8072,6 +8071,7 @@ colour_words <- function(hex) {
 # "filled circles" / "open squares" / "crosses" for a shape code and the Filled box, as the figure draws it (resolve_point_shape).
 legend_marker_words <- function(shape, filled = TRUE) {
   pch <- suppressWarnings(as.integer(shape)); if (length(pch) != 1L || is.na(pch)) return(NA_character_)
+  if (!(pch %in% c(16L, 15L, 17L, 18L, 25L, 4L, 8L, 3L, 10L, 21L, 22L, 24L, 23L, 19L, 20L, 0L, 1L, 2L, 5L, 6L, 123L, 125L))) return(NA_character_)   # a code the menu never offered: no words
   rs <- resolve_point_shape(pch, filled, "black"); pch <- rs$shape
   base <- switch(as.character(pch), "16" = , "19" = , "20" = , "21" = , "1" = "circles", "15" = , "22" = , "0" = , "12" = "squares",
                  "17" = , "24" = , "2" = "triangles", "25" = , "6" = "inverted triangles", "18" = , "23" = , "5" = "diamonds",
@@ -8591,17 +8591,49 @@ attach_matrix_legend <- function(g, leg, placement = "right", pad_pt = 8, x = 0.
   gtable::gtable_add_grob(g, leg, t = lr, l = pl, b = lr, r = pr, clip = "off", z = Inf, name = "matrix-legend")
 }
 
-# ── Points: hollow variants ──────────────────────────────────────────────────
-# Shape codes >= 100 are the hollow versions (white fill whatever the Filled box says): 123 = open diamond, 125 = open
-# down-triangle. Returns list(shape, fill) for one sample: the plotted pch and the fill colour ("white" or `colour`).
+# ── Points: one rule for filled / open markers ───────────────────────────────
+# A marker is a BASE form (circle 16, square 15, triangle up 17, diamond 18, triangle down 25; plus the line-drawn cross 4,
+# X 8, plus 3, star 10 that are neither filled nor open) and a Filled flag. The legacy codes the app has written over the
+# years (21 / 22 / 24 / 23 = the "open" pch, 1 / 0 / 2 / 5 / 6 = the hollow forms, 123 / 125 = the v2.22 hollow diamond /
+# down-triangle) are mapped to a base form here, ONCE, so the figure, the legend keys and the legend words cannot disagree.
+# Returns list(shape = base code, filled = TRUE / FALSE).
+normalise_marker <- function(code, filled = TRUE) {
+  pt <- suppressWarnings(as.integer(code))
+  if (length(pt) != 1L || is.na(pt)) return(list(shape = 16L, filled = isTRUE(filled)))
+  fl <- if (length(filled) != 1L || is.na(filled)) TRUE else isTRUE(filled)
+  hollow <- c(`1` = 16L, `0` = 15L, `2` = 17L, `5` = 18L, `6` = 25L, `123` = 18L, `125` = 25L)   # always drawn hollow
+  alias  <- c(`21` = 16L, `22` = 15L, `24` = 17L, `23` = 18L, `19` = 16L, `20` = 16L)            # drawn filled or open by the box
+  key <- as.character(pt)
+  if (key %in% names(hollow)) return(list(shape = unname(hollow[[key]]), filled = FALSE))
+  if (key %in% names(alias))  return(list(shape = unname(alias[[key]]),  filled = fl))
+  if (pt %in% c(16L, 15L, 17L, 18L, 25L, 4L, 8L, 3L, 10L)) return(list(shape = pt, filled = fl))
+  list(shape = 16L, filled = isTRUE(filled))
+}
+# list(shape, fill) for one sample: the plotted pch and the fill colour ("white" for an open marker, else `colour`).
+# Filled = the solid pch (16 / 15 / 17 / 18; the down-triangle is pch 25 with the colour as fill); open = the stroke pch
+# (21 / 22 / 24 / 23 / 25) with a white fill. Line-drawn forms ignore the fill.
 resolve_point_shape <- function(shape, filled = TRUE, colour = "black") {
-  pt <- as.integer(shape)
-  if (!is.na(pt) && pt >= 100L) return(list(shape = pt - 100L, fill = "white"))
-  if (!isTRUE(filled)) {
-    pt <- switch(as.character(pt), "16" = 21L, "15" = 22L, "17" = 24L, "18" = 23L, pt)
-    return(list(shape = pt, fill = "white"))
-  }
-  list(shape = pt, fill = colour)
+  nm <- normalise_marker(shape, filled)
+  if (!nm$filled && nm$shape %in% c(16L, 15L, 17L, 18L, 25L))
+    return(list(shape = switch(as.character(nm$shape), "16" = 21L, "15" = 22L, "17" = 24L, "18" = 23L, 25L), fill = "white"))
+  list(shape = nm$shape, fill = colour)
+}
+
+# The ONE scale pair every figure uses to draw sample markers: shape = the resolved pch per sample, fill = white for an open
+# marker and the sample colour for a filled one. Identical labels / name / limits on both, so with the colour (and linetype)
+# scale they merge into the one legend, and the key shows exactly what the panel draws. `colours` defaults to aes_v$colors.
+# Every layer that maps `shape = <sample>` must map `fill = <sample>` too; layers that fill a band or a bar with the sample
+# colour use fill = I(<colour>) (an AsIs aesthetic bypasses the fill scale).
+marker_scales <- function(samps, aes_v, labels, name = NULL, limits = NULL, colours = NULL) {
+  colours <- colours %||% aes_v$colors
+  at <- function(x, i) if (!is.null(names(x)) && samps[i] %in% names(x)) x[[samps[i]]] else x[[i]]   # by sample name, else by position
+  rs <- lapply(seq_along(samps), function(i) resolve_point_shape(at(aes_v$shapes, i), at(aes_v$filled_map, i), unname(at(colours, i))))
+  pch  <- setNames(vapply(rs, function(r) as.numeric(r$shape), numeric(1)), samps)
+  fill <- setNames(vapply(rs, function(r) as.character(r$fill), ""), samps)
+  a <- list(labels = labels, name = name)
+  if (!is.null(limits)) a$limits <- limits
+  list(do.call(ggplot2::scale_shape_manual, c(list(values = pch),  a)),
+       do.call(ggplot2::scale_fill_manual,  c(list(values = fill), a)))
 }
 
 # ── Panels (facets) ──────────────────────────────────────────────────────────
@@ -12619,11 +12651,9 @@ server <- function(input, output, session) {
     idx_end   <- min(page * PAGE_SIZE, n_total)
     page_samps <- all_samps[idx_start:idx_end]
     
-    shape_opts <- c("Circle" = 16, "Square" = 15, "Triangle Up" = 17,
-                    "Diamond" = 18, "Triangle Down" = 25, "Cross" = 4,
-                    "X" = 8, "Open Circle" = 21, "Open Square" = 22,
-                    "Open Triangle" = 24, "Plus" = 3, "Star" = 10,
-                    "Open Diamond" = 123, "Open Triangle Down" = 125)    # v2.22: hollow whatever the Filled box says
+    # v2.23.9: one Shape menu of base forms and ONE Filled box (off = the open marker); the old "Open ..." entries are gone
+    shape_opts <- c("Circle" = 16, "Square" = 15, "Triangle Up" = 17, "Triangle Down" = 25, "Diamond" = 18,
+                    "Cross" = 4, "X" = 8, "Plus" = 3, "Star" = 10)
     default_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
                         "#984EA3","#FF7F00","#A65628","#F781BF",
                         "#999999","#66C2A5","#FC8D62","#8DA0CB")
@@ -12650,7 +12680,7 @@ server <- function(input, output, session) {
       i   <- idx_start + j - 1L   # global index across all samples
       vn  <- page_samps[j]
       vid <- safe_id(vn)
-      shape_def <- as.character(shape_opts[1 + (i - 1L) %% 12L])   # the default cycle stays the twelve shapes of v2.21
+      shape_def <- as.character(c(16, 15, 17, 18, 25, 4, 8, 16, 15, 17, 3, 10)[1 + (i - 1L) %% 12L])   # the default cycle of v2.21 (its "open" entries drew solid markers: the base form)
       
       imp_aes <- rv$imported_settings$samples[[vn]]
       qe_c    <- isolate(rv$qe_colors[[vn]])   # v2.21: a colour picked in the quick-edit strip (isolated: this UI must not redraw on every pick)
@@ -12674,9 +12704,10 @@ server <- function(input, output, session) {
       }
       if (is.na(color_def) || is.null(color_def)) color_def <- "#000000"
       
-      default_shape  <- if (!is.null(imp_aes$shape))       as.character(imp_aes$shape)    else shape_def
+      imp_mk         <- if (!is.null(imp_aes$shape)) normalise_marker(imp_aes$shape, imp_aes$shape_filled %||% TRUE) else NULL   # v2.23.9: an old code shows as its base form + the Filled box
+      default_shape  <- if (!is.null(imp_mk))              as.character(imp_mk$shape)     else shape_def
       default_lt     <- if (!is.null(imp_aes$line_type))    imp_aes$line_type              else "solid"
-      default_filled <- if (!is.null(imp_aes$shape_filled)) imp_aes$shape_filled           else TRUE
+      default_filled <- if (!is.null(imp_mk))              imp_mk$filled                  else if (!is.null(imp_aes$shape_filled)) imp_aes$shape_filled else TRUE
       default_grp    <- if (!is.null(imp_aes$group))        as.character(imp_aes$group)    else ""   # v2.18
       
       div(
@@ -12691,7 +12722,7 @@ server <- function(input, output, session) {
         fluidRow(
           column(6, selectInput(paste0("shape_", vid), "Shape:",
                                 choices = shape_opts, selected = default_shape)),
-          column(6, checkboxInput(paste0("shape_filled_", vid), "Filled", default_filled))
+          column(6, checkboxInput(paste0("shape_filled_", vid), "Filled (off = open marker)", default_filled))
         ),
         div(class = "panel-section",
             h5("Color", class = "panel-title"),
@@ -13373,8 +13404,11 @@ server <- function(input, output, session) {
     for (i in seq_len(n)) {
       vn  <- samples[i]; vid <- safe_id(vn)
       si  <- input[[paste0("shape_", vid)]]
-      shapes[i] <- if (!is.null(si)) as.numeric(si)
-      else def_shapes[(i - 1) %% length(def_shapes) + 1]
+      fi <- input[[paste0("shape_filled_", vid)]]
+      mk <- normalise_marker(if (!is.null(si)) si else def_shapes[(i - 1) %% length(def_shapes) + 1],     # v2.23.9: one rule, here
+                             if (!is.null(fi)) fi else TRUE)
+      shapes[i] <- mk$shape
+      filled_map[i] <- mk$filled
       
       sel <- input[[paste0("color_selector_", vid)]]
       qe_col <- rv$qe_colors[[vn]]
@@ -13398,8 +13432,6 @@ server <- function(input, output, session) {
       
       leg_labels[i] <- display_name_of(vn, rv$display_names)   # v2.21: the display name (quick-edit strip)
       
-      fi <- input[[paste0("shape_filled_", vid)]]
-      filled_map[i] <- if (!is.null(fi)) fi else TRUE
 
       gi <- input[[paste0("group_", vid)]]
       groups[i] <- if (!is.null(gi) && length(gi) == 1 && !is.na(gi)) trimws(as.character(gi)) else ""
@@ -13890,10 +13922,9 @@ server <- function(input, output, session) {
       }
     }
 
-    # Error bars / shadow
-    # Track whether shadow/ribbon mode is used so we can unify the fill scale
-    # with the points layer later (ggplot2 only allows ONE scale per aesthetic).
-    using_shadow <- FALSE
+    # Error bars / shadow. The bands are filled with the sample colour through an AsIs aesthetic (fill = I(band_col)), which
+    # bypasses the fill scale: that scale belongs to the markers (marker_scales), so an open marker stays hollow in every mode.
+    band_cols <- setNames(display_colors, samples)
     
     direct_w_pt <- 0                                       # v2.22: right margin (pt) for the direct labels, set where they are drawn
     dm0 <- sel1("error_display_mode", "bars")            # v2.22: bars | shadow | spaghetti | quantile_bands | jitter | combo
@@ -13969,15 +14000,13 @@ server <- function(input, output, session) {
 
       dm <- dm0
       if (dm %in% c("shadow", "combo")) {
-        using_shadow <- TRUE
+        eb_data$band_col <- unname(band_cols[as.character(eb_data$variable)])
         p <- p +
           geom_ribbon(data = eb_data,
                       aes(x = time, ymin = err_lo, ymax = err_hi,
-                          group = variable, fill = variable),
+                          group = variable, fill = I(band_col)),
                       alpha = if (identical(dm, "combo")) input$shadow_alpha * 0.6 else input$shadow_alpha,
                       color = NA, inherit.aes = FALSE, show.legend = FALSE)
-        # NOTE: scale_fill_manual is added AFTER the points section to unify
-        # the fill scale for both ribbon and points (if points are enabled).
       } else {
         pos <- if (!is.null(sel1("error_bar_position")) && sel1("error_bar_position", APP_DEFAULTS$error_bar_position) == "dodge")
           position_dodge(0.2) else position_identity()
@@ -14019,11 +14048,11 @@ server <- function(input, output, session) {
           y_fq <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1] else if (isTRUE(input$use_advanced_ticks)) 10^ylog_min_or() else 1e-9
           qb$q025 <- pmax(qb$q025, y_fq); qb$q975 <- pmax(qb$q975, y_fq); qb$q25 <- pmax(qb$q25, y_fq); qb$q75 <- pmax(qb$q75, y_fq)
         }
-        using_shadow <- TRUE
+        qb$band_col <- unname(band_cols[as.character(qb$variable)])
         p <- p +
-          geom_ribbon(data = qb, aes(x = time, ymin = q025, ymax = q975, group = variable, fill = variable),
+          geom_ribbon(data = qb, aes(x = time, ymin = q025, ymax = q975, group = variable, fill = I(band_col)),
                       alpha = input$qband_outer_alpha %||% 0.15, color = NA, inherit.aes = FALSE, show.legend = FALSE) +
-          geom_ribbon(data = qb, aes(x = time, ymin = q25, ymax = q75, group = variable, fill = variable),
+          geom_ribbon(data = qb, aes(x = time, ymin = q25, ymax = q75, group = variable, fill = I(band_col)),
                       alpha = input$qband_inner_alpha %||% 0.40, color = NA, inherit.aes = FALSE, show.legend = FALSE)
       }
     }
@@ -14065,62 +14094,15 @@ server <- function(input, output, session) {
       p <- p + geom_line(aes(group = variable), linewidth = nin("line_thickness"))
 
     if (isTRUE(input$show_points)) {
-      # Build lookup tables of shape and fill per variable.
-      shape_map <- integer(n_vars)
-      fill_map  <- character(n_vars)
-      for (i in seq_len(n_vars)) {
-        rs <- resolve_point_shape(shapes[i], filled_map[i], display_colors[i])   # v2.22: codes 123 / 125 are the hollow diamond / down-triangle
-        fill_map[i]  <- rs$fill
-        shape_map[i] <- rs$shape
-      }
-      names(shape_map) <- samples
-      names(fill_map)  <- samples
-      
-      if (using_shadow) {
-        # When shadow/ribbon is active, both ribbon and points share the 'fill'
-        # aesthetic mapped to 'variable'.  We use a single scale_fill_manual that
-        # maps each variable to its display color.  For open (unfilled) shapes the
-        # fill is overridden to white via `override.aes` — open shapes use stroke-
-        # based variants (21/22/24/23) whose interior respects the fill scale, so
-        # we simply accept the fill color from the scale for filled shapes.
-        # 
-        # Trade-off: open shapes will show the ribbon color fill instead of white
-        # inside the point.  This is acceptable because the alternative (two
-        # conflicting fill scales) crashes ggplot2 entirely.  Users who need white-
-        # filled open shapes can switch error display to "bars" mode.
-        p <- p + geom_point(
-          data        = plot_data,
-          aes(x = time, y = mean_value, color = variable, shape = variable,
-              fill = variable),
-          size        = nin("shape_size"),
-          stroke      = nin("point_stroke"),
-          inherit.aes = FALSE
-        ) +
-          scale_shape_manual(values = shape_map, labels = leg_labels,
-                             name = NULL, guide = "none") +
-          scale_fill_manual(values = setNames(display_colors, samples),
-                            labels = leg_labels, guide = "none")
-      } else {
-        # No shadow: use scale_fill_identity for per-point fill control
-        pt_data          <- plot_data
-        pt_data$pt_fill  <- fill_map[pt_data$variable]
-        
-        p <- p + geom_point(
-          data        = pt_data,
-          aes(x = time, y = mean_value, color = variable, shape = variable,
-              fill = pt_fill),
-          size        = nin("shape_size"),
-          stroke      = nin("point_stroke"),
-          inherit.aes = FALSE
-        ) +
-          scale_shape_manual(values = shape_map, labels = leg_labels,
-                             name = NULL, guide = "none") +
-          scale_fill_identity()
-      }
-    } else if (using_shadow) {
-      # Points disabled but shadow is active: still need the fill scale for ribbon
-      p <- p + scale_fill_manual(values = setNames(display_colors, samples),
-                                  labels = leg_labels, guide = "none")
+      # v2.23.9: one rule for filled / open markers. The shape scale carries the pch, the fill scale the white (open) or
+      # colour (filled) interior, with the same labels / name so the key shows what the panel draws.
+      p <- p + geom_point(
+        data        = plot_data,
+        aes(x = time, y = mean_value, color = variable, shape = variable, fill = variable),
+        size        = nin("shape_size"),
+        stroke      = nin("point_stroke"),
+        inherit.aes = FALSE
+      ) + marker_scales(samples, aes_vals, leg_labels, name = NULL, colours = display_colors)
     }
     
     if (isTRUE(input$show_end_labels) || identical(sel1("legend_position"), "direct")) {   # v2.22: "direct" hides the legend, names the lines
@@ -14152,7 +14134,8 @@ server <- function(input, output, session) {
     # When points are disabled the shape scale wasn't added inside the points block;
     # add it now for a consistent legend.
     if (!isTRUE(input$show_points))
-      p <- p + scale_shape_manual(values = { sv <- shapes; sv[sv >= 100] <- sv[sv >= 100] - 100; sv }, labels = lg_labels, name = lg_title)
+      p <- p + scale_shape_manual(values = setNames(vapply(seq_along(samples), function(i) as.numeric(resolve_point_shape(shapes[i], filled_map[i], "black")$shape), numeric(1)), samples),
+                                  labels = lg_labels, name = lg_title)
     
     p <- p +
       # the shape and colour keys MERGE into one legend; override.aes on both is "Duplicated `override.aes` is
@@ -15101,6 +15084,8 @@ server <- function(input, output, session) {
                         scale_fill_manual(    values = cols, labels = labs_v, name = NULL,
                                               limits = function(x) intersect(x, names(cols))),
                         scale_linetype_manual(values = lts,  labels = labs_v, name = NULL))
+    base_scales_nf <- base_scales[-2]    # v2.23.9: colour + linetype only; figures that draw sample markers add marker_scales() (shape + fill)
+    col_of <- function(x) unname(cols[as.character(x)])   # a band / bar filled with the sample colour: fill = I(col_of(sample)), bypassing the marker fill scale
     p <- switch(type,
       metric_summary = {
         rm   <- replicate_metric_rows_current()
@@ -15305,10 +15290,10 @@ server <- function(input, output, session) {
         ref_lab <- if (mode == "reference") unname(labs_v[ref]) else "t = 0"
         leg_xy <- list(x = nd$time, y = nd$ratio, g = nd$variable)
         ggplot(nd, aes(x = time, y = ratio, color = variable, linetype = variable,
-                       shape = variable, group = variable)) +
+                       shape = variable, fill = variable, group = variable)) +
           geom_hline(yintercept = 1, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
           geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7) +
-          base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
           labs(x = x_label_obj(), y = axis_y_label(paste0(input$y_axis_label, " relative to ", ref_lab)))
       },
       replicate_overlay = {
@@ -15367,8 +15352,8 @@ server <- function(input, output, session) {
                         width = 0, linewidth = pt2lw(0.5), na.rm = TRUE) +
           geom_point(data = d, aes(x = moi, y = value, color = sample), shape = 21, fill = "white",
                      size = ptsz * 0.6, stroke = pt2lw(0.5)) +
-          geom_point(aes(color = sample, shape = sample), size = ptsz) +
-          base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          geom_point(aes(color = sample, shape = sample, fill = sample), size = ptsz) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
           scale_x_log10(labels = scales::label_number(drop0trailing = TRUE, big.mark = ""),
                         expand = if (length(series_levels) > 1) expansion(mult = c(0.05, 0.35)) else waiver()) +
           labs(x = "MOI", y = axis_y_label(metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
@@ -15524,7 +15509,7 @@ server <- function(input, output, session) {
         ref_lab <- unname(labs_v[ref])
         yr   <- range(c(0, d$diff)); span <- if (yr[2] > yr[1]) yr[2] - yr[1] else 1
         leg_xy <- list(x = d$time, y = d$diff, g = d$variable)
-        g <- ggplot(d, aes(x = time, y = diff, color = variable, linetype = variable, shape = variable, group = variable)) +
+        g <- ggplot(d, aes(x = time, y = diff, color = variable, linetype = variable, shape = variable, fill = variable, group = variable)) +
           geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
           geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7)
         if (isTRUE(input$diff_mark %||% TRUE) && "p_adj_holm" %in% names(d)) {
@@ -15535,7 +15520,7 @@ server <- function(input, output, session) {
                                 stroke = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)   # an asterisk marker, readable at any font size
           }
         }
-        g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+        g + base_scales_nf + marker_scales(samps, aes_v, labs_v) +
           scale_y_continuous(expand = expansion(mult = c(0.06, 0.14))) +
           labs(x = x_label_obj(),
                y = axis_y_label(if (identical(mode, "log2_ratio")) paste0("log2 (", input$y_axis_label, " / ", ref_lab, ")")
@@ -15579,14 +15564,14 @@ server <- function(input, output, session) {
         if (any(is.finite(summ$ex)))
           g <- g + do.call(geom_linerange, c(list(data = summ, mapping = eb_aes_h, orientation = "y", linewidth = pt2lw(0.5),
                                                   inherit.aes = FALSE, na.rm = TRUE, show.legend = FALSE), eb_fixed))
-        g <- g + geom_point(aes(color = sample, shape = sample), size = ptsz)
+        g <- g + geom_point(aes(color = sample, shape = sample, fill = sample), size = ptsz)
         if (isTRUE(input$explorer_labels))
           g <- g + geom_text(data = summ, aes(x = mx, y = my, label = unname(labs_v[as.character(sample)]), color = sample),
                              hjust = 0, vjust = -0.6, show.legend = FALSE, inherit.aes = FALSE,
                              size = (nin("axis_text_font_size", 8)) / ggplot2::.pt,
                              family = if (nzchar(sel1("font_family", ""))) sel1("font_family") else "")
         num_lab <- scales::label_number(drop0trailing = TRUE, big.mark = "")
-        g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+        g <- g + base_scales_nf + marker_scales(samps, aes_v, labs_v) +
           (if (logx) scale_x_log10(labels = num_lab, expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))
            else scale_x_continuous(expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))) +
           (if (logy) scale_y_log10(labels = num_lab, expand = expansion(mult = 0.08))
@@ -15663,9 +15648,7 @@ server <- function(input, output, session) {
         g <- g + geom_point(data = pin, aes(x = time, y = mean_value, color = variable, shape = variable, fill = variable),
                             size = ptsz) +
           scale_color_manual(values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
-          scale_fill_manual( values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
-          scale_shape_manual(values = shp,  labels = labs_v, limits = sample_levels(samps), name = NULL) +   # same limits: one merged key
-          guides(fill = "none") +
+          marker_scales(samps, aes_v, labs_v, limits = sample_levels(samps)) +   # same limits: one merged key
           labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
         # v2.22: optional overlays (Curve fitting tab): the growth-fit band, the fitted lysis decay, the exponential window; none by default
         ov <- s22_fit_overlay(fr, logy, lw, yr = range(c(pd$mean_value, pd$lo, pd$hi)[is.finite(c(pd$mean_value, pd$lo, pd$hi))]))   # the window spans the plotted data (-Inf is not drawn on a log axis)
@@ -15765,9 +15748,9 @@ server <- function(input, output, session) {
             geom_point(data = x, aes(x = xpos, y = value, color = sample), shape = 21, fill = "white",
                        size = ptsz * 0.6, stroke = pt2lw(0.5), position = pjit, show.legend = FALSE)
         if (sty == "dot")
-          g <- g + geom_point(data = summ, aes(x = xpos, y = mean, color = sample, shape = sample), size = ptsz)
+          g <- g + geom_point(data = summ, aes(x = xpos, y = mean, color = sample, shape = sample, fill = sample), size = ptsz)
         x_ang_ok <- x_angle_in() == 0
-        g <- g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+        g <- g + (if (sty == "dot") list(base_scales_nf, marker_scales(samps, aes_v, labs_v)) else list(base_scales, scale_shape_manual(values = shp, labels = labs_v, name = NULL))) +
           scale_x_continuous(breaks = seq_along(tms), labels = as.character(tms), expand = expansion(add = 0.5),
                              guide = if (x_ang_ok && length(tms) >= 6) guide_axis(angle = 45) else waiver()) +
           labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
@@ -15872,8 +15855,8 @@ server <- function(input, output, session) {
           geom_step(linewidth = lw, direction = "hv")
         t50f <- t50[is.finite(t50$time), , drop = FALSE]
         t50f$y <- rep(0.5, nrow(t50f))       # (a zero-row frame: no sample reaches half lysed) the point sits where the curve's rise crosses the dashed 0.5 line
-        if (nrow(t50f)) g <- g + geom_point(data = t50f, aes(x = time, y = y, color = variable, shape = variable), size = ptsz, inherit.aes = FALSE)
-        g + base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
+        if (nrow(t50f)) g <- g + geom_point(data = t50f, aes(x = time, y = y, color = variable, shape = variable, fill = variable), size = ptsz, inherit.aes = FALSE)
+        g + base_scales_nf + marker_scales(samps, aes_v, labs_v, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
           scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = expansion(mult = 0.03)) +
           labs(x = x_label_obj(), y = "Fraction of replicates lysed")
       },
@@ -15912,7 +15895,7 @@ server <- function(input, output, session) {
         eb_aes   <- if (eb_col == "sample") aes(x = time, ymin = lo, ymax = hi, color = variable) else aes(x = time, ymin = lo, ymax = hi)
         eb_fixed <- if (eb_col == "sample") list() else list(color = eb_col)
         pk <- pd[is.finite(pd$lo) & is.finite(pd$hi), , drop = FALSE]
-        g <- ggplot(pd, aes(x = time, y = mean_value, color = variable, linetype = variable, shape = variable, group = variable))
+        g <- ggplot(pd, aes(x = time, y = mean_value, color = variable, linetype = variable, shape = variable, fill = variable, group = variable))
         if (nrow(pk)) g <- g + do.call(geom_linerange, c(list(data = pk, mapping = eb_aes, linewidth = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE), eb_fixed))
         g <- g + geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7)
         if (!is.null(st) && nrow(st))
@@ -15920,7 +15903,7 @@ server <- function(input, output, session) {
         g <- g + ggrepel::geom_text_repel(data = lab, aes(x = time, y = mean_value, label = name, color = variable), hjust = 0, direction = "y", min.segment.length = Inf,
                                           box.padding = 0.25, point.padding = 0, seed = 1, show.legend = FALSE, inherit.aes = FALSE,
                                           size = (nin("legend_font_size", 14)) / ggplot2::.pt) +
-          base_scales + scale_shape_manual(values = shp, labels = labs_v, name = NULL) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
           scale_x_continuous(expand = expansion(mult = c(0.02, 0.32))) +
           labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g + scale_y_continuous(expand = expansion(mult = c(0.04, 0.12)))
@@ -17097,9 +17080,9 @@ server <- function(input, output, session) {
     q <- quantile(d$residual, c(0.25, 0.75)); z <- qnorm(c(0.25, 0.75)); sl <- diff(q) / diff(z); ic <- q[1] - sl * z[1]
     p <- ggplot(d, aes(x = theoretical, y = residual)) +
       (if (is.finite(sl) && sl > 0) geom_abline(slope = sl, intercept = ic, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed")) +
-      geom_point(aes(color = sample, shape = sample), size = nin("shape_size", 3) * 0.8) +
+      geom_point(aes(color = sample, shape = sample, fill = sample), size = nin("shape_size", 3) * 0.8) +
       scale_color_manual(values = cols, labels = labs_v, limits = lim_q, name = NULL) +
-      scale_shape_manual(values = shp, labels = labs_v, limits = lim_q, name = NULL) +
+      marker_scales(samps, aes_v, labs_v, limits = lim_q) +
       labs(x = "Theoretical normal quantile", y = axis_y_label(paste0("Residual: ", metric_axis_label(m, tunit = time_unit_from_label(input$x_axis_label), ylab = input$y_axis_label %||% "OD"))))
     s22_finish_figure(p, xy = list(x = d$theoretical, y = d$residual, g = d$sample))
   }
@@ -17307,11 +17290,11 @@ server <- function(input, output, session) {
     samps <- sel_samples(); aes_v <- resolve_aesthetics(samps)
     cols <- setNames(aes_v$colors, samps); labs_v <- aes_v$leg_labels; shp <- aes_v$shapes
     rf$variable <- factor(rf$sample, levels = sample_levels(samps))
-    p <- ggplot(rf, aes(x = t, y = residual, color = variable, shape = variable)) +
+    p <- ggplot(rf, aes(x = t, y = residual, color = variable, shape = variable, fill = variable)) +
       geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
       geom_point(size = nin("shape_size", 3) * 0.8, alpha = if (identical(fs$level, "replicate")) 0.7 else 1) +
       scale_color_manual(values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
-      scale_shape_manual(values = shp, labels = labs_v, limits = sample_levels(samps), name = NULL) +
+      marker_scales(samps, aes_v, labs_v, limits = sample_levels(samps)) +
       labs(x = input$x_axis_label, y = if (isTRUE(fs$log)) "Residual (ln OD/OD0)" else "Residual (OD change)")
     s22_finish_figure(p, xy = list(x = rf$t, y = rf$residual, g = rf$variable))
   }
@@ -17406,6 +17389,7 @@ server <- function(input, output, session) {
   s22_fit_overlay <- function(fr, logy, lw, yr = c(-Inf, Inf)) {
     back <- list(); front <- list(); notes <- character(0)
     fs <- fr$settings; tab <- fr$table; smp <- sample_levels(sel_samples())
+    scol <- local({ sm <- sel_samples(); setNames(resolve_aesthetics(sm)$colors, sm) })   # the sample colours for the bands (fill = I(): the fill scale belongs to the markers)
     if (isTRUE(input$fit_bands_on)) {
       if (!identical(fs$level, "mean")) notes <- c(notes, "Bands are drawn for the mean-curve fits: choose 'Mean curve' under Fit to.")
       else {
@@ -17413,9 +17397,9 @@ server <- function(input, output, session) {
         bf <- growth_band_frames(tab, fit_objects_cur(), fr$windows, rows, input$fit_bands_type, 0.95)
         if (is.null(bf)) notes <- c(notes, "No band could be computed (the fit could not be refitted to the same parameters, or it has no residual degrees of freedom).")
         else {
-          bf$variable <- factor(bf$sample, levels = smp); bf$grp <- paste(bf$sample, bf$model, sep = "|")
+          bf$variable <- factor(bf$sample, levels = smp); bf$band_col <- unname(scol[as.character(bf$sample)]); bf$grp <- paste(bf$sample, bf$model, sep = "|")
           if (logy) bf <- bf[is.finite(bf$lo) & bf$lo > 0, , drop = FALSE]
-          if (nrow(bf)) back[[length(back) + 1L]] <- geom_ribbon(data = bf, aes(x = time, ymin = lo, ymax = hi, fill = variable, group = grp), alpha = 0.18,
+          if (nrow(bf)) back[[length(back) + 1L]] <- geom_ribbon(data = bf, aes(x = time, ymin = lo, ymax = hi, fill = I(band_col), group = grp), alpha = 0.18,
                                                                  colour = NA, show.legend = FALSE, inherit.aes = FALSE)
           notes <- c(notes, paste0("Shaded: ", if (identical(input$fit_bands_type, "prediction")) "95 % prediction band (where a new reading is expected)" else "95 % confidence band of the fitted curve",
                                    " (delta method on the ln scale, back-transformed)."))
@@ -17440,8 +17424,8 @@ server <- function(input, output, session) {
       if (is.null(ew) || !nrow(ew)) notes <- c(notes, "No exponential window could be fitted.")
       else {
         ew <- do.call(rbind, lapply(split(ew, as.character(ew$sample)), function(z) data.frame(sample = z$sample[1], t_start = min(z$t_start), t_end = max(z$t_end), stringsAsFactors = FALSE)))
-        ew$variable <- factor(ew$sample, levels = smp)
-        back[[length(back) + 1L]] <- geom_rect(data = ew, aes(xmin = t_start, xmax = t_end, ymin = yr[1], ymax = yr[2], fill = variable), alpha = 0.12,
+        ew$variable <- factor(ew$sample, levels = smp); ew$band_col <- unname(scol[as.character(ew$sample)])
+        back[[length(back) + 1L]] <- geom_rect(data = ew, aes(xmin = t_start, xmax = t_end, ymin = yr[1], ymax = yr[2], fill = I(band_col)), alpha = 0.12,
                                                show.legend = FALSE, inherit.aes = FALSE)
         notes <- c(notes, "Light bands: the exponential-growth window of each sample (Exponential-growth window).")
       }
@@ -18536,9 +18520,16 @@ server <- function(input, output, session) {
         updateTextInput(session,   paste0("color_",          vid), value   = hex)
         updateTextInput(session,   paste0("hex_color_",      vid), value   = hex)
       }
-      if (!is.null(aes$shape))
-        updateSelectInput(session, paste0("shape_", vid), selected = as.character(aes$shape))
-      if (!is.null(aes$shape_filled))
+      if (!is.null(aes$shape)) {                  # v2.23.9: an old code (21, 123 ...) sets its base form AND the Filled box
+        mk <- normalise_marker(aes$shape, aes$shape_filled %||% TRUE)
+        legacy <- !(suppressWarnings(as.integer(aes$shape)) %in% c(16L, 15L, 17L, 18L, 25L, 4L, 8L, 3L, 10L))
+        imp$samples[[vn]]$shape <- as.numeric(mk$shape)
+        updateSelectInput(session, paste0("shape_", vid), selected = as.character(mk$shape))
+        if (legacy || !is.null(aes$shape_filled)) {
+          imp$samples[[vn]]$shape_filled <- mk$filled
+          updateCheckboxInput(session, paste0("shape_filled_", vid), value = mk$filled)
+        }
+      } else if (!is.null(aes$shape_filled))
         updateCheckboxInput(session, paste0("shape_filled_", vid), value = aes$shape_filled)
       if (!is.null(aes$line_type))
         updateSelectInput(session, paste0("line_type_", vid), selected = aes$line_type)

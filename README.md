@@ -206,7 +206,7 @@ Every label on a figure has one place to set it; the tutorial [docs/LABELLING_HO
 
 **Error Bars / Shadow** — Display variability as error bars (T-shaped or lines) or as a shaded ribbon around each line. Choose between SD, SEM, or 95% CI. If you only have one replicate per sample per time point, error bars will simply not appear (there's no variability to show).
 
-**Variable Styling** — Fine-tune each sample individually: set its color (from presets, HEX code, or RGB sliders), point shape (circle, square, triangle, etc.), line type (solid, dashed, dotted, etc.); the sample's name is edited in the Quick edit strip under the figure. New in v2.18: a free-text **Group** per sample (for example the phage, host or medium). Tick **One panel per group (main figure)** and the lysis curve is split into one panel per group with shared axes and the group name above each panel (needs two or more different groups; samples without a group go to "Other"); with *fixed panel size* the panel area you set is divided among the panels. In **Compose figure**, the panel **Lysis curve, one panel per group** adds one separate single-group figure per group, lettered a, b, c in group order. Groups are saved with the settings.
+**Variable Styling** — Fine-tune each sample individually: set its color (from presets, HEX code, or RGB sliders), point shape (circle, square, triangle up or down, diamond, cross, X, plus, star) with one **Filled** box (off = open marker; an open marker is hollow in every figure, error display and legend key, v2.23.9), line type (solid, dashed, dotted, etc.); the sample's name is edited in the Quick edit strip under the figure. New in v2.18: a free-text **Group** per sample (for example the phage, host or medium). Tick **One panel per group (main figure)** and the lysis curve is split into one panel per group with shared axes and the group name above each panel (needs two or more different groups; samples without a group go to "Other"); with *fixed panel size* the panel area you set is divided among the panels. In **Compose figure**, the panel **Lysis curve, one panel per group** adds one separate single-group figure per group, lettered a, b, c in group order. Groups are saved with the settings.
 
 ### Saving and Loading Settings
 
@@ -642,4 +642,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.23.8 (2026-11-10) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.23.9 (2026-11-10) — Michael Baffour Awuah / Ramsey Lab*

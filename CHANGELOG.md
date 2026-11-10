@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.23.9 — 2026-11-10
+
+**Filled vs open markers: one rule, everywhere.** The per-sample **Shape** menu is now the base forms only (Circle, Square,
+Triangle Up, Triangle Down, Diamond, Cross, X, Plus, Star) and one **Filled (off = open marker)** box decides filled or
+open; the old "Open Circle / Open Square / Open Triangle / Open Diamond / Open Triangle Down" entries are gone (they fought
+the box: "Open Circle" with Filled on drew a filled circle). An open marker is a hollow marker in every error display
+(bars, shadow, combo, quantile bands: it used to be painted with the curve colour whenever a band was drawn) and in every
+analysis figure that draws sample markers (normalised OD, dose-response, difference from reference, metric explorer, the
+bar/dot summary, time to half lysed, over time with stars, curve fitting, residuals, Q-Q) and in Compare; a sample with
+Filled off used to be solid in those figures. The legend key, the embedded legend, the legend key image and the legend
+words ("open squares", "filled circles") read the same rule as the panel, so they match what is drawn (the key fill is
+white for an open marker, the colour for a filled one). Old settings files, themes and N4 files with the old codes (21, 22,
+24, 23, 1, 0, 2, 5, 6, 123, 125) load as the same look: the menu shows the base form and the box its value; saved files
+now always hold the base codes. Startup figure and every styling scenario are unchanged byte for byte.
+
 ## v2.23.8 — 2026-11-10
 
 **Load and download a colour map (CSV).** Save / Load Settings has **Load colour map (CSV)** (a status line and **Clear
