@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.23.8 — 2026-11-10
+
+**Load and download a colour map (CSV).** Save / Load Settings has **Load colour map (CSV)** (a status line and **Clear
+colour map** under it); the Legend text tab has **Download colour map (CSV)** next to the legend key. The file is
+`"Sample","Hex","Colour_Name"`, one row per drawn sample in legend order (display name, upper-case hex, the colour word the
+legend text uses). On load, headers are matched case-insensitively (Sample / Name / Sample_name / Variable; Hex / Colour /
+Color), a semicolon, a BOM or CRLF are fine, Colour_Name is ignored, bad rows (empty name, not #RRGGBB) are skipped and
+counted, and the first row of a repeated name wins. A loaded map sits above the paper style and below any colour you pick
+by hand or in the quick-edit strip; the figure, the legend key, the legend text and the Samples-as-drawn table follow. A map
+loaded before the data applies when samples with those names appear. A map you download loads back unchanged. Nothing is
+added to the saved settings.
+
+## v2.23.7 — 2026-11-09
+
+**Hardening round 4: run-time selects, multi-selects and the Compare tab's second file.** A fourth break-and-fix pass fuzzed
+the 13 selects whose choices are set at run time (samples, columns, sheets, themes, facet sources, widths), the seven
+multi-selects and the second-file picker with values a browser never sends (unknown names, vectors, lists, NA, 500 names,
+100 kB strings, path-like theme names, malformed upload messages, empty / binary / zero-column / header-only files).
+Sixty-one probes ended the session and forty-one gave silent wrong output; none hangs. Fixes:
+- `sel1()` now also checks a run-time select against the choices of the moment (`dyn_choices()`), and a new `sel_multi()`
+  reads every multi-select as the valid subset of its choices. A stale or scripted value is the default, never a sample,
+  column, sheet or theme that does not exist.
+- A cell edit or a time-column change while the blank or control sample held a vector no longer ends the session;
+  `analysis_metrics = list()` no longer kills the analysis figure; a vector into the sheet picker no longer destroys the
+  session; Apply / Delete theme with a path-like name ("../../x") no longer reaches another theme's file.
+- The second file of the Compare tab has the first file's guards: a malformed upload message is ignored, a file that cannot
+  be read is one notification plus a line under the picker (no raw R text), and a file whose sample names share nothing with
+  the main data says so once (both datasets are still drawn; a sample is paired across files by its exact name).
+- 20 new checks in `tests/test_v222_hardening.R` (343 total) with fixtures under `tests/fixtures/round4/`. Figures for
+  valid inputs are unchanged (the styling byte test holds).
+
 ## v2.23.6 — 2026-11-09
 
 **Shades in the legend words.** When two curves share a colour word (the paper style's #0072B2 and the default #56B4E9 are

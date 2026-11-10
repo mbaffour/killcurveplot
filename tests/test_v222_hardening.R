@@ -1167,5 +1167,256 @@ check(sprintf("R3-SEL02: the main figure and the metric summary render (no raw R
       length(ff$fail) == 0 && ff$errs == 0)
 if (length(errs_f)) cat("   unhandled observer errors:", paste(utils::head(unique(errs_f), 5), collapse = " | "), "\n")
 
+# ── round 4 ── (the selects whose choices are set at run time, the multi-selects, the Compare tab's second file)
+cat("\n--- round 4: run-time selects fed values that are not among the current choices ---\n")
+R4 <- "tests/fixtures/round4"
+r4f <- function(f) file.path(R4, f)
+r4_new_file <- function(path, name = basename(path)) data.frame(name = name, size = if (file.exists(path)) file.size(path) else 0, type = "text/csv", datapath = path, stringsAsFactors = FALSE)
+r4_png <- function(p) tryCatch({ ggplot2::ggsave(tempfile(fileext = ".png"), p, device = env$export_device("png"), width = 3, height = 2, dpi = 40); "ok" }, error = function(e) paste("ERR", conditionMessage(e)))
+
+# (1) the 13 run-time ids x five bad values: no unhandled error, a figure or an empty state, the samples plotted unchanged
+errs_d <- character(0); dyn <- list(); dyn_bad <- character(0)
+testServer(app, {
+  session$onUnhandledError(function(e) errs_d <<- c(errs_d, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  f_xlsx <- tempfile(fileext = ".xlsx"); writexl::write_xlsx(list(Summary = data.frame(a = 1:2), Data = demo_d), f_xlsx)
+  rv$xlsx_path <- f_xlsx; rv$xlsx_name <- "two_sheets.xlsx"; rv$xlsx_sheets <- c("Summary", "Data"); rv$xlsx_sheet <- "Data"
+  session$setInputs(blank_mode = "sample", transform_mode = "control")             # so blank_sample / transform_control are read
+  session$setInputs(compare_file = r4_new_file(r4f("partial_common.csv")))
+  smp0 <- rv$od_vars; want <- sort(unique(smp0))
+  plotted <- function() { p <- generate_plot(); if (is_placeholder_plot(p)) NULL else sort(unique(as.character(p$data$variable))) }
+  ids13 <- c("time_col_choice", "selected_samples", "metrics_ref_sample", "blank_sample", "transform_control", "data_cell_col", "facet_source", "compose_width",
+             "active_theme", "compare_samples_b", "sheet_choice", "cmp_samples", "excluded_reps")
+  bads <- list(nope = "nope", na = NA_character_, lst = list(), vec2 = c("nope", "nope2"), vec500 = paste0("v", 1:500))
+  base_in <- lapply(setNames(ids13, ids13), function(i) input[[i]])
+  for (id in ids13) for (bn in names(bads)) {
+    a <- list(); a[id] <- list(bads[[bn]]); do.call(session$setInputs, a)
+    if (id == "data_cell_col") session$setInputs(data_cell_row = 2, data_cell_value = "0.5", data_cell_set = length(dyn) + 1L)
+    r <- tryCatch({
+      if (id == "selected_samples") { if (is.null(sel_samples())) tryCatch({ generate_plot(); "selected_samples: a figure for no valid sample" }, shiny.silent.error = function(e) "ok") else "selected_samples: a bad value selected a sample" }   # the empty state ('Select at least one sample.') is req()
+      else {
+      p <- generate_plot(); pa <- generate_analysis_plot("metric_summary")
+      if (is.null(p) || is.null(pa)) "no figure"
+      else if (id %in% c("blank_sample", "transform_control", "time_col_choice")) { rr <- r4_png(p); if (identical(rr, "ok") && !is_placeholder_plot(p)) "ok" else paste("figure:", rr) }
+      else if (id == "data_cell_col") { if (identical(r4_png(p), "ok")) "ok" else "figure" }
+      else if (identical(plotted(), want) && identical(r4_png(p), "ok") && identical(r4_png(pa), "ok")) "ok" else paste("plotted", paste(plotted(), collapse = "/"))
+      }
+    }, error = function(e) paste("ERR", conditionMessage(e)))
+    if (id == "data_cell_col") session$setInputs(data_edit_reset = length(dyn) + 1L)
+    dyn[[paste(id, bn)]] <<- r
+    if (!identical(r, "ok")) dyn_bad <<- c(dyn_bad, paste0(id, "/", bn, ": ", substr(r, 1, 80)))
+    a <- list(); a[id] <- list(base_in[[id]]); do.call(session$setInputs, a)
+  }
+})
+check(sprintf("R4-DYN01: the 13 run-time selects (time_col_choice, selected_samples, metrics_ref_sample, blank_sample, transform_control, data_cell_col, facet_source, compose_width, active_theme, compare_samples_b, sheet_choice, cmp_samples, excluded_reps) fed 'nope' / NA / list() / 2 strings / 500 strings: no unhandled error, a figure (or the 'Select at least one sample' empty state)%s",
+              if (length(dyn_bad)) paste0(" (bad: ", paste(utils::head(dyn_bad, 4), collapse = " | "), ")") else ""),
+      length(dyn) == 13 * 5 && length(dyn_bad) == 0 && length(errs_d) == 0)
+if (length(errs_d)) cat("   unhandled observer errors:", paste(utils::head(unique(errs_d), 3), collapse = " | "), "\n")
+
+# (2) sel1() reads the single run-time selects against the choices of NOW
+sl4 <- list()
+testServer(app, {
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  s1 <- rv$od_vars[1]; th <- tempfile("themes4"); dir.create(th); old_th <- getOption("killcurve.themes_dir"); options(killcurve.themes_dir = th); on.exit(options(killcurve.themes_dir = old_th), add = TRUE)
+  writeLines('{"name":"Alpha","sample_aesthetics":{"Uninfected":{"color":"#112233"}}}', file.path(th, "Alpha.json"))
+  session$setInputs(metrics_ref_sample = "nope", blank_sample = "nope", transform_control = list(), time_col_choice = "nope", facet_source = "../x", compose_width = "huge", active_theme = "../../Alpha")
+  sl4$bad <<- list(sel1("metrics_ref_sample"), sel1("blank_sample"), sel1("transform_control"), sel1("time_col_choice"), sel1("facet_source", "group"), sel1("compose_width", "double"), sel1("active_theme", ""))
+  session$setInputs(metrics_ref_sample = s1, blank_sample = "", transform_control = rv$od_vars[2], time_col_choice = "Time", facet_source = "manual", compose_width = "custom", active_theme = "Alpha")
+  sl4$good <<- list(sel1("metrics_ref_sample"), sel1("blank_sample"), sel1("transform_control"), sel1("time_col_choice"), sel1("facet_source", "group"), sel1("compose_width", "double"), sel1("active_theme", ""))
+  sl4$exp <<- list(s1, rv$od_vars[2])
+  session$setInputs(metrics_ref_sample = c(s1, "nope"))                 # a longer vector gives its first element (round 3 rule), checked against the choices
+  sl4$vec <<- sel1("metrics_ref_sample")
+})
+check("R4-SEL01: sel1() gives the default for a value that is not among the CURRENT choices (a sample / column / theme that does not exist, a path-like theme name, an unknown width)",
+      all(vapply(sl4$bad[c(1, 3, 4)], is.null, NA)) && is.null(sl4$bad[[2]]) && identical(sl4$bad[[5]], "group") && identical(sl4$bad[[6]], "double") && identical(sl4$bad[[7]], ""))
+check("R4-SEL01: and returns the value itself when it IS one of them (a loaded sample, the blank '' entry, the Time column, 'manual', 'custom', a saved theme); a 2-element vector gives its valid first element",
+      identical(sl4$good[[1]], sl4$exp[[1]]) && identical(sl4$good[[2]], "") && identical(sl4$good[[3]], sl4$exp[[2]]) && identical(sl4$good[[4]], "Time") && identical(sl4$good[[5]], "manual") &&
+        identical(sl4$good[[6]], "custom") && identical(sl4$good[[7]], "Alpha") && identical(sl4$vec, sl4$exp[[1]]))
+
+# (3) before any data is loaded
+errs_n <- character(0); nd <- character(0)
+testServer(app, {
+  session$onUnhandledError(function(e) errs_n <<- c(errs_n, conditionMessage(e)))
+  do.call(session$setInputs, env$APP_DEFAULTS)
+  for (id in c("time_col_choice", "selected_samples", "metrics_ref_sample", "blank_sample", "transform_control", "data_cell_col", "facet_source", "compose_width", "active_theme",
+               "compare_samples_b", "sheet_choice", "cmp_samples", "excluded_reps", "analysis_metrics", "pheno_metrics", "boot_metrics", "s22_metrics"))
+    for (bn in c("nope", "na", "lst", "vec2")) {
+      v <- switch(bn, nope = "nope", na = NA_character_, lst = list(), vec2 = c("a", "b")); a <- list(); a[id] <- list(v); do.call(session$setInputs, a)
+      r <- tryCatch({ output$downloadPlot; output$stats_tab_metrics; output$compare_status; output$excluded_reps_ui; output$cmp_samples_ui; "ok" }, shiny.silent.error = function(e) "ok", error = function(e) paste(id, bn, conditionMessage(e)))
+      if (!identical(r, "ok")) nd <<- c(nd, r)
+    }
+})
+check(sprintf("R4-NODATA01: the run-time selects and the multi-selects fed bad values before any file is loaded: no error from the outputs, no unhandled observer error%s", if (length(nd)) paste0(" (", nd[1], ")") else ""), length(nd) == 0 && length(errs_n) == 0)
+
+# (4) the multi-selects
+cat("\n--- round 4: multi-selects read through sel_multi() ---\n")
+errs_m <- character(0); mm <- list()
+testServer(app, {
+  session$onUnhandledError(function(e) errs_m <<- c(errs_m, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  smp <- rv$od_vars
+  mm$s_half <<- { session$setInputs(analysis_metrics = c("lysis_time", "nope", "lysis_time", NA)); sel_multi("analysis_metrics") }
+  mm$s_list <<- { session$setInputs(analysis_metrics = list()); sel_multi("analysis_metrics") }
+  mm$s_names <<- { session$setInputs(analysis_metrics = c("sample", "replicate", "od_drop")); sel_multi("analysis_metrics") }
+  mm$s_vec500 <<- { session$setInputs(pheno_metrics = paste0("m", 1:500)); sel_multi("pheno_metrics") }
+  mm$s_null <<- { session$setInputs(analysis_metrics = NULL); sel_multi("analysis_metrics", d = "lysis_time") }
+  mm$s_rep <<- { session$setInputs(excluded_reps = c("nope", "WT #1")); sel_multi("excluded_reps", replicate_catalog_current()$key) }
+  # the figures and tables behind them
+  for (v in list(list(), NA_character_, "nope", c("sample", "replicate"), rep("lysis_time", 3), paste0("m", 1:500), 5)) {
+    session$setInputs(analysis_metrics = v, pheno_metrics = v, boot_metrics = v, s22_metrics = v, cmp_samples = v, excluded_reps = v)
+    for (nm in c("stats_tab_pairwise", "analysis_stats_omnibus", "analysis_stats_posthoc", "s22_describe_table", "s22_omnibus_table", "boot_table", "cmp_test_table", "cmp_params_table", "excluded_reps_ui", "stats_tab_summary_note")) {
+      r <- tryCatch({ output[[nm]]; "ok" }, shiny.silent.error = function(e) "ok", error = function(e) paste(nm, conditionMessage(e)))
+      if (!identical(r, "ok")) mm$bad <<- c(mm$bad, r)
+    }
+    for (ty in c("metric_summary", "phenotype_heatmap", "fit_overlay")) {
+      r <- tryCatch({ p <- generate_analysis_plot(ty); if (is.null(p)) "NULL" else r4_png(p) }, shiny.silent.error = function(e) "ok", error = function(e) paste(ty, conditionMessage(e)))
+      if (!identical(r, "ok")) mm$bad <<- c(mm$bad, paste(ty, r))
+    }
+    mm$n <<- (mm$n %||% 0L) + 1L
+  }
+  session$setInputs(analysis_metrics = list())                   # the crash that was: analysis_stat_metric()[1] of an empty list
+  mm$stat_metric <<- tryCatch(analysis_stat_metric(), error = function(e) paste("ERR", conditionMessage(e)))
+})
+check("R4-MULTI01: a multi-select read keeps its valid choices only, in order, once each (NA / unknown / duplicates dropped); list(), 500 unknown names and 'sample' / 'replicate' (column names of the metric table, not metrics) give none; NULL gives the default",
+      identical(mm$s_half, "lysis_time") && length(mm$s_list) == 0 && identical(mm$s_names, "od_drop") && length(mm$s_vec500) == 0 && identical(mm$s_null, "lysis_time") && length(mm$s_rep) <= 1L)
+check(sprintf("R4-MULTI01: list() / NA / unknown / duplicate / 500-element / numeric values in analysis_metrics, pheno_metrics, boot_metrics, s22_metrics, cmp_samples and excluded_reps: no output or figure raises (7 value sets)%s", if (length(mm$bad)) paste0(" (", mm$bad[1], ")") else ""),
+      identical(mm$n, 7L) && length(mm$bad) == 0 && length(errs_m) == 0)
+check("R4-MULTI01: analysis_metrics = list() no longer ends the session in analysis_stat_metric() ('invalid subscript type list')", !is.character(mm$stat_metric) || !grepl("^ERR", mm$stat_metric))
+if (length(errs_m)) cat("   unhandled observer errors:", paste(utils::head(unique(errs_m), 3), collapse = " | "), "\n")
+
+# (5) bad run-time values while the data are RE-loaded (a cell edit keeps the state; a fresh load starts over)
+cat("\n--- round 4: bad run-time values while the data are re-ingested ---\n")
+errs_r <- character(0); rl <- character(0)
+testServer(app, {
+  session$onUnhandledError(function(e) errs_r <<- c(errs_r, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, blank_mode = "sample", transform_mode = "control")
+  ids <- c("blank_sample", "transform_control", "metrics_ref_sample", "time_col_choice", "facet_source", "compose_width", "active_theme", "sheet_choice", "selected_samples", "excluded_reps", "cmp_samples", "analysis_metrics", "pheno_metrics")
+  for (bn in c("vec2", "vec500", "lst")) {
+    v <- switch(bn, vec2 = c("Uninfected", "nope"), vec500 = paste0("v", 1:500), lst = list("Uninfected", "x"))
+    do.call(session$setInputs, setNames(rep(list(v), length(ids)), ids))
+    n0 <- length(errs_r)
+    session$setInputs(data_cell_row = 2, data_cell_col = 2, data_cell_value = "0.5", data_cell_set = length(rl) + 1L)      # keep_state ingest: read blank_sample / transform_control
+    session$setInputs(load_demo = length(rl) + 1L)                                                                          # fresh ingest
+    session$setInputs(time_col_choice = v)
+    rl <<- c(rl, bn)
+    if (length(errs_r) > n0) rl <<- c(rl, paste0("ERR ", bn, ": ", errs_r[n0 + 1]))
+  }
+})
+check(sprintf("R4-RELOAD01: a cell edit, a fresh demo load and a time-column change while blank_sample / transform_control / metrics_ref_sample / selected_samples ... hold a vector or a list: no unhandled error (the keep-state ingest ended the session: 'length = 2 in coercion to logical(1)')%s", if (length(errs_r)) paste0(" (", errs_r[1], ")") else ""),
+      length(errs_r) == 0 && length(rl) == 3)
+
+# (6) sheet_choice
+cat("\n--- round 4: sheet_choice ---\n")
+errs_x <- character(0); sx <- list()
+testServer(app, {
+  session$onUnhandledError(function(e) errs_x <<- c(errs_x, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  f_xlsx <- tempfile(fileext = ".xlsx"); writexl::write_xlsx(list(Summary = data.frame(a = 1:2), Data = demo_d), f_xlsx)
+  rv$xlsx_path <- f_xlsx; rv$xlsx_name <- "two_sheets.xlsx"; rv$xlsx_sheets <- c("Summary", "Data"); rv$xlsx_sheet <- "Data"
+  src0 <- rv$data_source; sx$n <<- 0L
+  for (v in list(c("zzz", "Data"), paste0("s", 1:500), "zzz", NA, list(), strrep("Z", 1e5))) { session$setInputs(sheet_choice = v); sx$n <<- sx$n + 1L }
+  sx$same <<- identical(rv$data_source, src0)
+  session$setInputs(sheet_choice = "Data"); sx$data <<- rv$data_source
+})
+check("R4-SHEET01: sheet_choice fed a 2-string vector / 500 strings / an unknown sheet / NA / list() / 100 kB: no unhandled error ('Can't access reactive ... session has been destroyed') and the loaded data is untouched",
+      length(errs_x) == 0 && sx$n == 6L && isTRUE(sx$same))
+check("R4-SHEET01: a real sheet name still loads that sheet", identical(sx$data, "two_sheets.xlsx [Data]"))
+
+# (7) the active theme: only a saved theme is applied or deleted ("../../x" and "-x" used to delete the theme called x)
+cat("\n--- round 4: active_theme in the apply / delete observers ---\n")
+errs_t <- character(0); tt4 <- list()
+th4 <- tempfile("themes4b"); dir.create(th4); old_th4 <- getOption("killcurve.themes_dir"); options(killcurve.themes_dir = th4)
+mk_theme <- function() for (n in c("Alpha", "x")) writeLines(sprintf('{"name":"%s","sample_aesthetics":{"Uninfected":{"color":"#112233"}}}', n), file.path(th4, paste0(n, ".json")))
+testServer(app, {
+  session$onUnhandledError(function(e) errs_t <<- c(errs_t, conditionMessage(e)))
+  ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+  k <- 0L
+  for (nm in c("../../x", "../x", "-x", "..\\..\\x", "/etc/hosts", "nope", "")) {
+    unlink(list.files(th4, full.names = TRUE)); mk_theme(); k <- k + 1L
+    session$setInputs(active_theme = nm, apply_theme = k, delete_theme = k, delete_theme_confirm = k)
+    tt4[[paste0("k:", nm)]] <<- sort(list.files(th4))
+  }
+  for (v in list(list(), c("Alpha", "x"), paste0("t", 1:500), NA_character_)) {
+    unlink(list.files(th4, full.names = TRUE)); mk_theme(); k <- k + 1L
+    a <- list(active_theme = v, apply_theme = k, delete_theme = k, delete_theme_confirm = k); do.call(session$setInputs, a)
+    tt4$cnt <<- (tt4$cnt %||% 0L) + 1L
+  }
+  unlink(list.files(th4, full.names = TRUE)); mk_theme(); k <- k + 1L
+  session$setInputs(active_theme = "Alpha", delete_theme = k, delete_theme_confirm = k); tt4$real <<- sort(list.files(th4))
+})
+options(killcurve.themes_dir = old_th4)
+check("R4-THEME01: a path-like or unknown theme name (../../x, ../x, -x, a Windows path, /etc/hosts, 'nope', '') in Apply / Delete leaves BOTH saved themes in place (it used to delete the theme 'x')",
+      all(vapply(c("../../x", "../x", "-x", "..\\..\\x", "/etc/hosts", "nope", ""), function(n) identical(tt4[[paste0("k:", n)]], c("Alpha.json", "x.json")), NA)))
+check("R4-THEME01: list() / 2 names / 500 names / NA in the Apply and Delete observers end no session; a real theme is still deleted by name", length(errs_t) == 0 && identical(tt4$cnt, 4L) && identical(tt4$real, "x.json"))
+
+# (8) the Compare tab's second file
+cat("\n--- round 4: the Compare tab's second file ---\n")
+errs_c <- character(0); cf <- list(kept = list(), status = list(), fig_after = list(), fig = list(), n = list(), same = list())
+same_f <- tempfile(fileext = ".csv"); utils::write.csv(demo_d, same_f, row.names = FALSE)
+cn <- with_notes(function() {
+  testServer(app, {
+    session$onUnhandledError(function(e) errs_c <<- c(errs_c, conditionMessage(e)))
+    ingest_data(demo_d, "Demo"); do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars, compare_mode = "overlay")
+    status <- function() paste(as.character(output$compare_status$html), collapse = " ")
+    session$setInputs(compare_file = r4_new_file(r4f("partial_common.csv")))
+    cf$good <<- rv_cmp$ds$data_source; cf$fig_good <<- !is_placeholder_plot(generate_compare_plot())
+    # a bad second file: one notification, a friendly line, the dataset that was loaded stays
+    for (b in c("empty.csv", "zero_columns.csv", "binary.csv", "excel_named_csv.xlsx", "one_column.csv", "header_only.csv", "text_not_numbers.csv")) {
+      session$setInputs(compare_file = r4_new_file(r4f(b)))
+      cf$kept[[b]] <<- is.null(rv_cmp$ds)
+      cf$status[[b]] <<- status()
+      cf$fig_after[[b]] <<- is_placeholder_plot(generate_compare_plot())
+      session$setInputs(compare_file = r4_new_file(r4f("partial_common.csv")))
+    }
+    session$setInputs(compare_file = r4_new_file(file.path(tempdir(), "no_such_file.csv"), "gone.csv"))
+    cf$kept$missing <<- is.null(rv_cmp$ds); cf$status$missing <<- status()
+    session$setInputs(compare_file = r4_new_file(r4f("partial_common.csv")))
+    # malformed upload messages are ignored
+    n_before <- length(errs_c)
+    for (v in list("nonsense", NA, list(), list(name = "x.csv"), list(name = "x.csv", datapath = NA_character_), list(name = "x.csv", datapath = c(same_f, same_f)), list(name = c("a", "b"), datapath = r4f("partial_common.csv"))))
+      session$setInputs(compare_file = v)
+    cf$msg_kept <<- identical(rv_cmp$ds$data_source, "partial_common.csv")
+    cf$msg_errs <<- length(errs_c) - n_before
+    # no sample in common: one notification, an empty-state figure
+    session$setInputs(compare_file = r4_new_file(r4f("no_common_samples.csv")))
+    p_nc <- generate_compare_plot(); cf$nc_ph <<- is_placeholder_plot(p_nc); cf$nc_label <<- if (cf$nc_ph) p_nc$layers[[1]]$aes_params$label else ""
+    cf$nc_status <<- status(); cf$nc_dl <<- tryCatch({ output$downloadCompare; "file" }, shiny.silent.error = function(e) "silent", error = function(e) paste("ERR", conditionMessage(e)))
+    # regex / quote / unicode sample names, 500 samples, the same file as the first dataset
+    for (f in c("regex_names.csv", "many_samples_500.csv")) {
+      session$setInputs(compare_file = r4_new_file(r4f(f))); session$setInputs(compare_samples_b = rv_cmp$ds$od_vars)
+      pc <- generate_compare_plot(); cf$fig[[f]] <<- if (is_placeholder_plot(pc)) "placeholder" else r4_png(pc); cf$n[[f]] <<- length(rv_cmp$ds$od_vars)
+    }
+    session$setInputs(compare_file = r4_new_file(same_f, "same_as_first.csv")); session$setInputs(compare_samples_b = rv_cmp$ds$od_vars)
+    for (m in c("overlay", "facet")) { session$setInputs(compare_mode = m); pc <- generate_compare_plot(); cf$same[[m]] <<- !is_placeholder_plot(pc) && identical(r4_png(pc), "ok") }
+    # compare_samples_b flipped through bad values
+    sB_ok <- TRUE; bad_b <- character(0)
+    s <- rv_cmp$ds$od_vars
+    for (v in list(c("nope", "x"), c(s[1], "x"), character(0), c(s[1], s[1]), NA_character_, 5, list(), NULL, paste0("v", 1:500), strrep("Z", 1e5), "a.b*(c)[", list(s[1], "x")))
+      { a <- list(); a["compare_samples_b"] <- list(v); do.call(session$setInputs, a)
+        r <- tryCatch({ sb <- compare_sample_sets()$B; pc <- generate_compare_plot(); output$compare_note; output$compare_status; if (all(sb %in% s)) "ok" else "sB has unknown samples" }, shiny.silent.error = function(e) "ok", error = function(e) paste("ERR", conditionMessage(e)))
+        if (!identical(r, "ok")) bad_b <- c(bad_b, r) }
+    cf$bad_b <<- bad_b
+    # scripted labels
+    session$setInputs(compare_label_a = c("a", "b"), compare_label_b = list()); cf$lab <<- tryCatch(compare_labels_now(), error = function(e) "ERR")
+  })
+})
+check("R4-CMP01: a second file that is empty / has no columns / is binary / is a CSV named .xlsx / has one column / only a header / no readable time is refused with a notification and a friendly line under the picker (not a raw R message)",
+      all(vapply(c("empty.csv", "zero_columns.csv", "binary.csv", "excel_named_csv.xlsx", "one_column.csv", "header_only.csv", "text_not_numbers.csv"), function(b) grepl("could not be loaded|not loaded|Could not read", cf$status[[b]]) && !grepl("\\$ operator|coercion|argument is of length|invalid filename", cf$status[[b]]), NA)) &&
+        sum(grepl("^\\[error\\].*(not loaded|Could not read)", cn$notes)) >= 7)
+check("R4-CMP01: a refused second file leaves no second dataset (v2.22 rule) and the figure is the 'load a second dataset' empty state, never a stale second file",
+      identical(cf$good, "partial_common.csv") && isTRUE(cf$fig_good) && all(unlist(cf$kept)) && all(unlist(cf$fig_after)))
+check("R4-CMP01: a path that does not exist is a notification too ('gone.csv ... not loaded') and leaves no dataset", isTRUE(cf$kept$missing) && grepl("gone.csv", cf$status$missing) && any(grepl("gone.csv", cn$notes)))
+check("R4-CMP02: malformed upload messages (a scalar, NA, list(), no datapath, NA / 2 datapaths, 2 names) are ignored: no error, nothing loaded over the good dataset", cf$msg_errs == 0 && isTRUE(cf$msg_kept))
+check(sprintf("R4-CMP03: a second file with NO sample name in common with the main data: one notification naming the file, the status line says so, and the figure still draws both datasets (two experiments with different strains is a supported comparison) and downloads%s",
+              sprintf(" [notes %d, placeholder %s, status %s, download '%s']", sum(grepl("no_common_samples.csv.*no sample name in common", cn$notes)), cf$nc_ph, grepl("No sample name in common", cf$nc_status), substr(cf$nc_dl, 1, 40))),
+      sum(grepl("no_common_samples.csv.*no sample name in common", cn$notes)) == 1L && isFALSE(cf$nc_ph) && grepl("No sample name in common", cf$nc_status) && identical(cf$nc_dl, "file"))
+check("R4-CMP04: sample names with regex metacharacters / quotes / a leading '-' / Unicode and a 500-sample second file load and draw (overlay and facet); the SAME file as the first dataset draws too",
+      identical(cf$n[["many_samples_500.csv"]], 500L) && identical(cf$fig[["regex_names.csv"]], "ok") && identical(cf$fig[["many_samples_500.csv"]], "ok") &&
+        isTRUE(cf$same$overlay) && isTRUE(cf$same$facet))
+check(sprintf("R4-CMP05: compare_samples_b flipped through unknown / half-unknown / empty / duplicate / NA / numeric / list() / NULL / 500 names / 100 kB / regex / list values: no error and only real samples of the second file%s", if (length(cf$bad_b)) paste0(" (", cf$bad_b[1], ")") else ""),
+      length(cf$bad_b) == 0 && length(errs_c) == 0)
+check("R4-CMP06: scripted compare labels (a 2-element vector gives its first element, list() the default 'Dataset B') raise nothing", identical(unname(cf$lab), c("a", "Dataset B")))
+if (length(errs_c)) cat("   unhandled observer errors:", paste(utils::head(unique(errs_c), 3), collapse = " | "), "\n")
+
 cat(sprintf("\n============ SUMMARY: %d passed / %d failed / %d skipped ============\n", pass, fail, skip))
 if (fail > 0) quit(status = 1)

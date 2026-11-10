@@ -42,7 +42,7 @@ ids <- c("time_col_choice", "sheet_ui", "blank_mode", "blank_od", "blank_sample"
 check("UI has every new control", all(vapply(ids, function(id) grepl(paste0('id="', id, '"'), ui_html, fixed = TRUE), logical(1))))
 tabs <- regmatches(ui_html, gregexpr('data-value="[^"]+"', ui_html))[[1]]
 tabs <- sub('data-value="(.*)"', "\\1", tabs)
-check("main tab 'Data' comes right after 'Lysis curve'", match("Data", tabs) == match("Lysis curve", tabs) + 1L)
+check("main tabs open with 'Lysis curve', 'Legend text' (v2.23.3), then 'Data'", match("Legend text", tabs) == match("Lysis curve", tabs) + 1L && match("Data", tabs) == match("Legend text", tabs) + 1L)
 check("Data sub-tabs: View & edit and Enter data", all(c("View &amp; edit", "Enter data") %in% tabs) || all(c("View & edit", "Enter data") %in% tabs))
 check("the file picker accepts Excel", grepl(".xlsx", ui_html, fixed = TRUE))
 check("Statistics tab has the Replicate QC section", grepl("Replicate QC", ui_html, fixed = TRUE))

@@ -85,7 +85,7 @@ testServer(app, {
   key <- env$legend_key_grob(generate_plot()); f <- tempfile(fileext = ".svg"); env$write_legend_key(key, f, "svg")
   check("the legend key SVG carries the paper colour", "#0072B2" %in% hexes_in(read_all(f)))
   lg <- figure_legend_string()
-  check("the legend text carries its colour word", grepl("MG1655 (blue", lg, fixed = TRUE))
+  check("the legend text carries its colour word (v2.23.6 shades: 'dark blue' next to the default light blue)", grepl("MG1655 (dark blue", lg, fixed = TRUE) || grepl("MG1655 (blue", lg, fixed = TRUE))
   # a colour picked in the sample's own selector wins over the paper colour
   id <- env$safe_id("MG1655")
   do.call(session$setInputs, setNames(list("custom", "#984EA3"), paste0(c("color_selector_", "color_"), id)))

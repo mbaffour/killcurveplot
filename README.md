@@ -352,7 +352,7 @@ Expand the **Plot Dimensions & Export** section.
 
 **Copy figure (new in v2.23.2).** Every figure has a **Copy figure** button beside its download button (**Copy key** for the legend key preview) that puts the current preview on the clipboard as a PNG, and Cmd/Ctrl+C over a preview does the same. The clipboard holds a screen-resolution image; use **Download Image** for print.
 
-**Paper style (shared with CFU Plot Studio, lysis-curve-app, plaque-toolkit; new in v2.23.4).** If a `paper_style.json` from CFU Plot Studio sits beside the app (or at the path in the environment variable `CFU_PAPER_STYLE`), the app reads it at start and on **Reload paper style** (Save / Load Settings): the font family, title size and font size go to the font boxes, and each sample named in its `sample_palette` gets that colour. A colour you pick yourself (quick-edit strip or Variable Styling) always wins; the legend key and the legend text follow. Nothing else in the file is used, a missing or unreadable file changes nothing, and the app never writes it.
+**Paper style (shared with CFU Plot Studio, lysis-curve-app, plaque-toolkit; new in v2.23.4).** If a `paper_style.json` from CFU Plot Studio sits beside the app (or at the path in the environment variable `CFU_PAPER_STYLE`), the app reads it at start and on **Reload paper style** (Save / Load Settings): the font family, title size and font size go to the font boxes, and each sample named in its `sample_palette` gets that colour. A colour you pick yourself (quick-edit strip or Variable Styling) always wins; the legend key and the legend text follow. Nothing else in the file is used, a missing or unreadable file changes nothing, and the app never writes it. A colour map (CSV: `Sample`, `Hex`, `Colour_Name`) can also be loaded from Save / Load Settings and downloaded from the Legend text tab; a loaded map beats the paper style for the same name, and a colour picked by hand still wins (v2.23.8).
 
 **Download all figures (new in v2.18).** **"Download all figures (.zip)"** (`all_figures_<W>x<H>mm.zip`) writes one SVG and one PNG of the main figure, of every analysis figure that can be drawn for the current data and of the composed figure, each at the size it has in the app and under the same sized file names as the single downloads, plus `figure_legend.txt` and `methods.txt` (the Statistics tab's text, or the drafted paragraph when that box is empty). A figure that is not available (for example the normalized OD without a reference sample) is not written; `SKIPPED.txt` in the archive lists it with the reason.
 
@@ -642,4 +642,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.23.6 (2026-11-09) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.23.8 (2026-11-10) — Michael Baffour Awuah / Ramsey Lab*
