@@ -697,7 +697,7 @@ COLOUR_MAP_HEX_REGEX <- "^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
 read_colour_map <- function(path) {
   d <- read_csv_locale_aware(path, "auto")
   if (!is.data.frame(d)) stop("the file is not a table")
-  key <- gsub("^_+|_+$", "", gsub("[^a-z0-9]+", "_", tolower(trimws(sub("^﻿", "", names(d))))))
+  key <- gsub("^_+|_+$", "", gsub("[^a-z0-9]+", "_", tolower(trimws(sub("^\ufeff", "", names(d))))))
   cs <- match(c("sample", "name", "sample_name", "variable"), key); cs <- cs[!is.na(cs)][1]
   ch <- match(c("hex", "colour", "color", "hex_colour", "hex_color"), key); ch <- ch[!is.na(ch)][1]
   if (is.na(cs)) return(list(palette = character(0), skipped = 0L, missing = "Sample"))
