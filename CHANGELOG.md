@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.23.8 — 2026-11-10
+
+**Load and download a colour map (CSV).** Save / Load Settings has **Load colour map (CSV)** (a status line and **Clear
+colour map** under it); the Legend text tab has **Download colour map (CSV)** next to the legend key. The file is
+`"Sample","Hex","Colour_Name"`, one row per drawn sample in legend order (display name, upper-case hex, the colour word the
+legend text uses). On load, headers are matched case-insensitively (Sample / Name / Sample_name / Variable; Hex / Colour /
+Color), a semicolon, a BOM or CRLF are fine, Colour_Name is ignored, bad rows (empty name, not #RRGGBB) are skipped and
+counted, and the first row of a repeated name wins. A loaded map sits above the paper style and below any colour you pick
+by hand or in the quick-edit strip; the figure, the legend key, the legend text and the Samples-as-drawn table follow. A map
+loaded before the data applies when samples with those names appear. A map you download loads back unchanged. Nothing is
+added to the saved settings.
+
 ## v2.23.7 — 2026-11-09
 
 **Hardening round 4: run-time selects, multi-selects and the Compare tab's second file.** A fourth break-and-fix pass fuzzed

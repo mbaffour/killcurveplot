@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.7"
+APP_VERSION <- "2.23.8"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -686,6 +686,31 @@ read_csv_locale_aware <- function(path, locale = "auto") {
     stop(smart)
   }
   smart$data
+}
+
+# v2.23.8: a colour map (CSV: Sample, Hex, optional Colour_Name) -> list(palette = named character (name -> upper-case #RRGGBB),
+# skipped = rows with an empty name or a colour that is not #RRGGBB, missing = the required column that is absent, or NULL).
+# Headers are matched case-insensitively (sample / name / sample_name / variable; hex / colour / color / hex_colour / hex_color);
+# Colour_Name and any other column are ignored; the first row of a repeated name wins; at most 2000 colours. A file that cannot
+# be read is an error (the caller says so and changes nothing).
+COLOUR_MAP_HEX_REGEX <- "^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
+read_colour_map <- function(path) {
+  d <- read_csv_locale_aware(path, "auto")
+  if (!is.data.frame(d)) stop("the file is not a table")
+  key <- gsub("^_+|_+$", "", gsub("[^a-z0-9]+", "_", tolower(trimws(sub("^﻿", "", names(d))))))
+  cs <- match(c("sample", "name", "sample_name", "variable"), key); cs <- cs[!is.na(cs)][1]
+  ch <- match(c("hex", "colour", "color", "hex_colour", "hex_color"), key); ch <- ch[!is.na(ch)][1]
+  if (is.na(cs)) return(list(palette = character(0), skipped = 0L, missing = "Sample"))
+  if (is.na(ch)) return(list(palette = character(0), skipped = 0L, missing = "Hex"))
+  nm  <- trimws(as.character(d[[cs]])); nm[is.na(nm)] <- ""
+  hx  <- trimws(as.character(d[[ch]])); hx[is.na(hx)] <- ""
+  ok  <- nzchar(nm) & grepl(COLOUR_MAP_HEX_REGEX, hx)
+  skipped <- sum(!ok)
+  nm <- nm[ok]; hx <- toupper(hx[ok])
+  keep <- !duplicated(nm)
+  pal <- stats::setNames(hx[keep], nm[keep])
+  if (length(pal) > 2000L) pal <- pal[seq_len(2000L)]
+  list(palette = pal, skipped = as.integer(skipped), missing = NULL)
 }
 
 # Ingest round 1 (item 8): numbers written with a thousands separator or a decimal comma inside quotes ("12,345.6",
@@ -9558,7 +9583,12 @@ ui <- fluidPage(
                      # v2.23.4: the paper style read at start (paper_style.json beside the app, or CFU_PAPER_STYLE)
                      div(style = "font-size:.8em;color:#555;margin-top:8px;",
                          textOutput("paper_style_status", inline = TRUE)),
-                     actionButton("reload_paper_style", "Reload paper style", class = "btn-xs", style = "margin-top:4px;")
+                     actionButton("reload_paper_style", "Reload paper style", class = "btn-xs", style = "margin-top:4px;"),
+                     # v2.23.8: a colour map (CSV: Sample, Hex, Colour_Name), the file the Legend text tab downloads
+                     fileInput("colour_map_file", "Load colour map (CSV)", accept = c(".csv", "text/csv")),
+                     div(style = "font-size:.8em;color:#555;margin-top:-10px;",
+                         textOutput("colour_map_status", inline = TRUE)),
+                     actionLink("clear_colour_map", "Clear colour map", class = "btn-xs", style = "display:inline-block;margin-top:2px;")
                  ),
                  
                  # ── Axis Settings ─────────────────────────────────────────────────────────
@@ -10408,6 +10438,7 @@ ui <- fluidPage(
             plotOutput("legend_key_preview", height = "auto"),
             downloadButton("downloadLegendKey", "Download legend key", style = "margin-top:6px;"),
             kc_copy_button("legend_key", " Copy key", style = "margin-top:6px;"),
+            downloadButton("downloadColourMap", "Download colour map (CSV)", style = "margin-top:6px;"),
             p(class = "kc-leg-help", "The text follows the Experiment Notebook fields and the current styling; edit it in the manuscript."))),
         # ── Data (v2.22): view and edit the working data, or enter it by hand ──
         tabPanel("Data", br(),
@@ -11434,6 +11465,8 @@ server <- function(input, output, session) {
     #   $samples — named list keyed by SAMPLE NAME, each a list of per-sample aesthetics
     imported_settings = NULL,
     settings_status   = NULL,
+    colour_map        = NULL,   # v2.23.8: sample name -> hex from a loaded colour map CSV (named character); beats paper_palette
+    colour_map_source = NULL,   # the file name shown in the status line
     paper_palette     = NULL,   # v2.23.4: sample name -> hex from paper_style.json (named character)
     paper_style_applied = NULL,
     style_page        = 1L,     # current page in Variable Styling panel (pagination)
@@ -13315,11 +13348,12 @@ server <- function(input, output, session) {
 
   # ── Aesthetics resolver ──────────────────────────────────────────────────────
   # v2.23.4: the paper style's colour for a sample (raw or display name, exact match), else NULL
+  # v2.23.8: a loaded colour map (rv$colour_map) is looked up first, then the paper style's palette
   paper_colour_of <- function(vn) {
-    pal <- rv$paper_palette
-    if (is.null(pal) || !length(pal) || is.null(names(pal))) return(NULL)
-    for (k in unique(c(vn, display_name_of(vn, rv$display_names)))) {
-      j <- match(k, names(pal)); if (!is.na(j)) return(unname(pal[[j]]))
+    ks <- unique(c(vn, display_name_of(vn, rv$display_names)))
+    for (pal in list(rv$colour_map, rv$paper_palette)) {
+      if (is.null(pal) || !length(pal) || is.null(names(pal))) next
+      for (k in ks) { j <- match(k, names(pal)); if (!is.na(j)) return(unname(pal[[j]])) }
     }
     NULL
   }
@@ -13382,7 +13416,8 @@ server <- function(input, output, session) {
   output$paper_style_status <- renderText(
     paper_style_status() %||% paste0("No paper style (looked for ", paper_style_path(), ")"))
   apply_paper_palette <- function(loaded) {
-    pal <- isolate(rv$paper_palette)
+    pal <- isolate(rv$paper_palette); cm <- isolate(rv$colour_map)
+    if (length(cm)) pal <- c(cm, pal[setdiff(names(pal), names(cm))])      # v2.23.8: a loaded colour map beats the paper style
     if (is.null(pal) || !length(pal)) return(invisible(0L))
     for (nm in intersect(names(pal), loaded %||% character(0))) {
       if (!is.null(isolate(rv$qe_colors[[nm]]))) next                      # a colour picked in the quick-edit strip stays
@@ -13424,6 +13459,69 @@ server <- function(input, output, session) {
   }
   session$onFlushed(function() isolate(load_paper_style()), once = TRUE)
   observeEvent(input$reload_paper_style, load_paper_style(), ignoreInit = TRUE)
+
+  # ── Colour map (v2.23.8) ─────────────────────────────────────────────────────
+  # A CSV of Sample, Hex (, Colour_Name): the file the Legend text tab downloads. rv$colour_map is read by paper_colour_of()
+  # first, so it sits above the paper style and below any colour picked by hand; the figure, the legend key, the legend text
+  # and the Samples-as-drawn table follow because they all read resolve_aesthetics().
+  colour_map_matches <- function(pal, vars) {
+    if (!length(pal) || !length(vars)) return(0L)
+    sum(vapply(vars, function(v) any(c(v, display_name_of(v, rv$display_names)) %in% names(pal)), TRUE))
+  }
+  output$colour_map_status <- renderText({
+    pal <- rv$colour_map
+    if (is.null(pal)) return("No colour map loaded")
+    paste0("Colour map: ", rv$colour_map_source %||% "file", " (", length(pal), " colours, ", colour_map_matches(pal, rv$od_vars), " match)")
+  })
+  observeEvent(input$colour_map_file, {
+    f <- input$colour_map_file
+    req(is.list(f), all(c("name", "datapath") %in% names(f)))
+    fpath <- f$datapath; fname <- f$name
+    req(is.character(fpath), length(fpath) == 1L, !is.na(fpath))
+    fname <- if (is.character(fname) && length(fname) == 1L && !is.na(fname)) fname else basename(fpath)
+    m <- tryCatch(read_colour_map(fpath), error = function(e) e)
+    if (inherits(m, "error")) {
+      guard_notify("colour_map_read", load_failed_message(m, fname), "error")
+      return(invisible(NULL))
+    }
+    if (!is.null(m$missing)) {
+      guard_notify("colour_map_read", sprintf("Colour map '%s' has no %s column (it needs Sample and Hex). The file was not loaded.", fname, m$missing), "error")
+      return(invisible(NULL))
+    }
+    if (!length(m$palette)) {
+      guard_notify("colour_map_read", sprintf("Colour map '%s' has no usable colour (%d rows skipped: empty name or not a #RRGGBB colour). The file was not loaded.", fname, m$skipped), "error")
+      return(invisible(NULL))
+    }
+    rv$colour_map <- m$palette; rv$colour_map_source <- fname
+    vars <- isolate(rv$od_vars)
+    apply_paper_palette(vars)                                   # move the pickers of samples already loaded
+    n <- length(m$palette); k <- colour_map_matches(m$palette, vars)
+    msg <- if (length(vars)) sprintf("Colour map '%s': %d colours, %d match the loaded samples", fname, n, k)
+           else sprintf("Colour map '%s': %d colours; they apply when a file with those names is loaded", fname, n)
+    if (m$skipped > 0L) msg <- paste0(msg, sprintf(". %d rows skipped (empty name or not a #RRGGBB colour)", m$skipped))
+    guard_notify("colour_map_loaded", paste0(msg, "."), "message")
+    invisible(NULL)
+  })
+  observeEvent(input$clear_colour_map, {
+    old <- isolate(rv$colour_map)
+    rv$colour_map <- NULL; rv$colour_map_source <- NULL
+    vars <- isolate(rv$od_vars)
+    for (i in seq_along(vars)) {                                  # give the pickers of mapped samples their colour back
+      nm <- vars[i]
+      if (!any(c(nm, display_name_of(nm, isolate(rv$display_names))) %in% names(old))) next
+      if (!is.null(isolate(rv$qe_colors[[nm]]))) next
+      col <- isolate(paper_colour_of(nm)) %||%
+        (if (!is.null(isolate(rv$palette_colors)) && !is.na(isolate(rv$palette_colors[i]))) isolate(rv$palette_colors[i]) else NULL) %||%
+        c("#000000","#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#A65628","#F781BF","#999999","#66C2A5","#FC8D62","#8DA0CB")[1 + (i - 1L) %% 12L]
+      vid <- safe_id(nm)
+      tryCatch({
+        updateSelectInput(session, paste0("color_selector_", vid), selected = "custom")
+        updateTextInput(session,   paste0("color_",          vid), value    = col)
+        updateTextInput(session,   paste0("hex_color_",      vid), value    = col)
+      }, error = function(e) invisible(NULL))
+    }
+    guard_notify("colour_map_cleared", "Colour map cleared.", "message")
+  }, ignoreInit = TRUE)
 
   # ── Shared figure theme (v2.11) ─────────────────────────────────────────────
   # Everything that makes the main lysis curve look the way it does, as a list
@@ -14899,6 +14997,23 @@ server <- function(input, output, session) {
       write_legend_key(k, file, fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
     })
   output$downloadLegendKey         <- legend_key_download(function() "main", function() generate_plot())
+
+  # v2.23.8: the colours as drawn, in the format Load colour map reads: "Sample","Hex","Colour_Name" (display names, upper-case
+  # hex, the same words as the legend text), UTF-8 without a BOM, quoted. A map downloaded here loads back unchanged.
+  output$downloadColourMap <- downloadHandler(
+    filename = function() paste0("colour_map_", format(Sys.Date(), "%Y-%m-%d"), ".csv"),
+    content  = function(file) {
+      if (is.null(rv$data) || !length(sel_samples())) {
+        msg <- "Nothing to export. Load data and select at least one sample first."
+        guard_notify("download_refused", msg, "warning")
+        stop(structure(class = c("kc_refused", "error", "condition"), list(message = msg, call = NULL)))
+      }
+      refuse_if_empty()
+      d <- legend_samples_df()
+      q <- function(x) paste0('"', gsub('"', '""', enc2utf8(as.character(x)), fixed = TRUE), '"')
+      con <- file(file, open = "wb"); on.exit(close(con), add = TRUE)
+      writeLines(c('"Sample","Hex","Colour_Name"', paste(q(d$name), q(d$hex), q(d$colour), sep = ",")), con, sep = "\n", useBytes = TRUE)
+    })
   output$downloadAnalysisLegendKey <- legend_key_download(function() sel1("analysis_type", "figure"),
                                                           function() generate_analysis_plot(sel1("analysis_type", "metric_summary")))
   output$downloadFitLegendKey      <- legend_key_download(function() "fit", function() generate_analysis_plot("fit_overlay"))

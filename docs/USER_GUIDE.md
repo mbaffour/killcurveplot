@@ -58,6 +58,8 @@ The layout is detected automatically. Check the data summary box after every loa
 ### Using the paper style from CFU Plot Studio
 If CFU Plot Studio saved a paper style (`paper_style.json`) beside this app, the font and sizes and the colour of every sample it names are applied when the app starts, so a strain has the same colour in every tool. Press **Reload paper style** (Save / Load Settings) after saving a new one. A colour you pick by hand still wins; the status line under the button says what was read. The app only reads the file.
 
+**Colour map (CSV).** The Legend text tab downloads **Download colour map (CSV)**: `"Sample","Hex","Colour_Name"`, one row per drawn sample. **Load colour map (CSV)** (Save / Load Settings) reads that file, or one you write with the same Sample and Hex columns, and gives each named sample its colour; it beats the paper style, a colour you pick yourself still wins, and **Clear colour map** takes it away.
+
 ## 4. A multi-panel figure
 
 **In the app: the Compose figure tab** (after Dashboard).
