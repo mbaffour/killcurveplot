@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.24.1 — 2026-11-18
+
+**Second click-through round: Compose, Compare, settings, window sizes.** No errors in 17 Compose / Compare option states or
+at four window sizes; four things were wrong.
+- **Clear & Reset resets.** It worked only after a settings *file* had been loaded: a figure styled by hand stayed as it was,
+  with a status line ("No imported settings to clear.") that is usually scrolled out of view. It now always puts every
+  visual setting and every sample's colour, marker, line type and display name back to the defaults, after asking (it
+  cannot be undone; data, sample selection and time filter are kept).
+- **A saved settings file loads back cleanly.** Loading a file the app had just written reported "8 settings had the wrong
+  type and were ignored": the number boxes that were blank. A blank box is now read as blank (and clears a box filled in the
+  meantime). Buttons and file pickers (Clear & Reset, Load Demo Data, the colour-map picker, Reload paper style) are no
+  longer written into the file. Save, Reset, Load now reproduces the styled figure byte for byte.
+- **Dashed and dotted lines show in the legend.** In the standard 4 mm key the marker covered the pattern, so a dashed and a
+  solid sample looked the same in the legend (the Compare overlay draws the second dataset dashed). When a dashed, dotted
+  or dot-dashed line is drawn, the keys are 9 mm long. Figures of solid lines are unchanged.
+- **Night mode:** the Quick edit heading was dark on dark.
+- `tests/test_v224_canvas_ux.R`: 52 checks.
+
 ## v2.24.0 — 2026-11-18
 
 **The canvas as a user handles it.** Found by clicking through the app in a real (headless) browser, making figures on

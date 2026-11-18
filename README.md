@@ -214,7 +214,7 @@ Under **Save / Load Settings**, you can:
 
 - **Save Settings** — Downloads a `.json` file containing all your visual settings (colors, shapes, line types, axis options, etc.). Does not save your data.
 - **Load Settings** — Upload a previously saved `.json` file to restore your settings. If the sample names in the settings file match your current data, their colors/shapes/linetypes are applied automatically.
-- **Clear & Reset** — Restores everything to default values.
+- **Clear & Reset** — Restores every visual setting and every sample's styling to the defaults, after asking (your data, sample selection and time filter are kept). Works whether or not a settings file was loaded.
 
 This is useful when you want to apply the same visual style to different datasets.
 
@@ -644,4 +644,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.24.0 (2026-11-18) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.24.1 (2026-11-18) — Michael Baffour Awuah / Ramsey Lab*
