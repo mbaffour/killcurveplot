@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.24.0"
+APP_VERSION <- "2.24.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -9034,7 +9034,8 @@ ui <- fluidPage(
       "body.kc-night .nav-tabs > li > a { color:#aab4c0; } body.kc-night .nav-tabs > li.active > a { background:#222831; color:#fff; border-color:#2f3640; }",
       "body.kc-night .stats-note, body.kc-night .settings-status.warn { background:#3b3320; color:#f2dba0; border-color:#5a4a1c; }",
       "body.kc-night .settings-status.ok { background:#1f3a2a; color:#bfe8cb; border-color:#2f5a40; }",
-      "body.kc-night details > summary, body.kc-night p { color:#c4ccd6; } body.kc-night a { color:#7db7f0; }"))),
+      "body.kc-night details > summary, body.kc-night p { color:#c4ccd6; } body.kc-night a { color:#7db7f0; }",
+      "body.kc-night .kc-qe-title { color:#e6ebf1; } body.kc-night .kc-start-hint { background:#1b2028; border-color:#3a4450; color:#c4ccd6; }"))),   # v2.24.1: the Quick edit heading was dark on dark
     # v2.21: sticky figure toggle, one-open-at-a-time sidebar sections, the "Jump to" menu, the quick-edit strip
     tags$script(HTML(
       "(function() {
@@ -12475,6 +12476,9 @@ server <- function(input, output, session) {
       # Inputs that belong to the data/session — never saved
       data_inputs     <- c("file", "loadSettings", "selected_samples",
                            "time_filter_range", "exclude_timepoints",
+                           # v2.24.1: buttons and file pickers are not settings (they were written into the file, and the colour-map picker's
+                           # upload record came back as a "wrong type" warning)
+                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                            "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -12601,6 +12605,7 @@ server <- function(input, output, session) {
     # Skip anything data-specific or per-sample — only visual controls
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
+                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style",   # v2.24.1 (files saved before it carry them)
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                          "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -12643,6 +12648,15 @@ server <- function(input, output, session) {
     ignored_unknown <- gkeys[unk_key]
     for (gi in which(!skip_key & !unk_key)) {
       nm <- gkeys[gi]
+      # v2.24.1: a number box that was BLANK when the file was saved is written as an empty value. That is a setting too
+      # (blank = automatic): the box is cleared, silently. It used to be reported as "wrong type and ignored" (8 warnings
+      # for a file the app had just saved) and a box filled in the meantime kept its number.
+      raw_v <- settings_unbox(global[[gi]])
+      if ((is.null(raw_v) || (length(raw_v) == 1L && is.atomic(raw_v) && is.na(raw_v))) && !is.list(tryCatch(global[[gi]][[1]], error = function(e) NULL)) &&
+          (identical(INPUT_KINDS[[nm]], "number") || (is.numeric(APP_DEFAULTS[[nm]]) && length(APP_DEFAULTS[[nm]]) == 1L))) {
+        tryCatch({ updateNumericInput(session, nm, value = NA); n_global <- n_global + 1L }, error = function(e) invisible(NULL))
+        next
+      }
       chk <- check_setting_value(nm, global[[gi]])
       if (!isTRUE(chk$ok)) { bad_type <- c(bad_type, paste0(nm, " (", chk$why, ")")); next }
       val <- chk$value
@@ -12763,12 +12777,18 @@ server <- function(input, output, session) {
   # Revokes all imported settings: resets global visual settings to app defaults
   # AND restores per-sample aesthetics to position-based defaults.
   # Never touches: data, sample selection, time filter.
+  # v2.24.1: Clear & Reset resets, whatever was done before. It used to work only after a settings FILE had been loaded:
+  # a figure styled by hand stayed as it was and the only sign was a status line ("No imported settings to clear.") that is
+  # usually scrolled out of view. It asks first, because it cannot be undone (Save Settings keeps a copy).
   observeEvent(input$clearSettings, {
-    if (is.null(rv$imported_settings)) {
-      rv$settings_status <- list(type = "warn", msg = "No imported settings to clear.", details = NULL)
-      return()
-    }
-    
+    showModal(modalDialog(title = "Reset the figure styling?", size = "s", easyClose = TRUE,
+                          p("Every visual setting, and every sample's colour, marker, line type and display name, goes back to the default."),
+                          p(style = "color:#555;", "Your data, the sample selection and the time filter are kept. Use Save Settings first if you want a copy."),
+                          footer = tagList(modalButton("Cancel"),
+                                           actionButton("clearSettings_confirm", "Reset", style = "background:#dc3545;color:white;border:none;"))))
+  })
+  observeEvent(input$clearSettings_confirm, {
+    removeModal()
     # ── Reset global visual settings to app defaults ──────────────────────────
     apply_settings(APP_DEFAULTS)   # v2.14: the journal standard (also moves rv$units_seen)
     
@@ -12805,7 +12825,7 @@ server <- function(input, output, session) {
     rv$imported_settings <- NULL
     rv$settings_status   <- list(
       type    = "ok",
-      msg     = "All imported settings cleared. Global and per-sample settings restored to defaults.",
+      msg     = "Styling reset: global and per-sample settings are back at the defaults.",
       details = NULL
     )
   })
@@ -14463,6 +14483,10 @@ server <- function(input, output, session) {
     p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value, g = plot_data$variable),
                                  n_entries = n_vars, log_y = identical(sel1("y_scale_type"), "log"),
                                  label_chars = max(nchar(unname(leg_labels)), 1), special_legend = TRUE)
+    # v2.24.1: a dashed / dotted / dot-dashed line needs a longer key to show its pattern (in the standard 4 mm key the
+    # marker covers it, so a dashed and a solid sample looked the same in the legend). Only when such a line is drawn.
+    if (!isTRUE(input$hide_lines) && any(!(as.character(line_types) %in% c("solid", "blank"))))
+      p <- p + theme(legend.key.width = grid::unit(9, "mm"))
     ml_now <- matrix_legend_now(samples, aes_vals)          # v2.22: the matrix (grid) legend, attached in the grob pipeline
     if (identical(sel1("legend_position"), "matrix") && is.null(ml_now)) p <- p + theme(legend.position = "right")   # nothing assigned yet: the ordinary key
     if (direct_w_pt > 0) {                                  # v2.22: room outside the panel for the direct labels (the figure grows in the fixed panel size)

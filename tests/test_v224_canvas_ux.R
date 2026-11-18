@@ -157,5 +157,45 @@ check("a download with nothing to write (the bootstrap table before a run) stops
       identical(ex$boot, "shiny.silent.error") && any(grepl("Nothing to download yet", notes, fixed = TRUE)))
 check("the page asks for no favicon", grepl("rel=\"icon\" href=\"data:,\"", full, fixed = TRUE))
 
+cat("\n--- v2.24.1: dashed keys, Clear & Reset, the settings round trip ---\n")
+kw <- function(p) { w <- ggplot2::calc_element("legend.key.width", p$theme); if (is.null(w)) NA_real_ else grid::convertWidth(w, "mm", valueOnly = TRUE) }
+r1 <- list(); notes <- character(0)
+env$showNotification <- function(ui, ..., type = "default") { notes <<- c(notes, paste0("[", type, "] ", as.character(ui))); invisible(NULL) }
+sfile <- tempfile(fileext = ".json")
+testServer(app, {
+  S <- session$setInputs
+  ingest_data(env$make_demo_data("lysis"), "Demo"); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars, export_format = "svg")
+  ids <- vapply(rv$od_vars, env$safe_id, "")
+  r1$kw_solid <<- kw(generate_plot()); r1$svg0 <<- readLines(output$downloadPlot)
+  a <- list(); a[[paste0("line_type_", ids[2])]] <- "dashed"; do.call(S, a)
+  r1$kw_dashed <<- kw(generate_plot())
+  S(hide_lines = TRUE); r1$kw_hidden <<- kw(generate_plot()); S(hide_lines = FALSE)
+  # a figure styled by hand (no settings file loaded): Clear & Reset asks, then resets
+  S(plot_title = "By hand", legend_position = "right")
+  r1$styled <<- readLines(output$downloadPlot)
+  r1$doc <<- settings_json_list(); writeLines(jsonlite::toJSON(r1$doc, auto_unbox = TRUE, null = "null", na = "null"), sfile)
+  S(clearSettings = 1); r1$after_click <<- identical(readLines(output$downloadPlot), r1$styled)
+  S(clearSettings_confirm = 1); r1$status <<- rv$settings_status$msg; r1$imported_null <<- is.null(rv$imported_settings)
+  # (the mock session does not move inputs: what the reset sent is replayed, as the paper-style tests do)
+  do.call(S, env$APP_DEFAULTS); b <- list(); b[[paste0("line_type_", ids[2])]] <- "solid"; do.call(S, b)
+  r1$reset <<- identical(readLines(output$downloadPlot), r1$svg0)
+  notes <<- character(0)
+  S(loadSettings = data.frame(name = "s.json", size = file.size(sfile), type = "application/json", datapath = sfile, stringsAsFactors = FALSE))
+  r1$load_status <<- paste(rv$settings_status$msg, rv$settings_status$details %||% "")
+})
+check("a figure of solid lines keeps the standard legend key (the default figure is unchanged)", is.na(r1$kw_solid) || r1$kw_solid < 6)
+check("a dashed line gives a 9 mm key, long enough to show the pattern beside the marker", isTRUE(all.equal(r1$kw_dashed, 9, tolerance = 1e-6)))
+check("with the lines hidden the key stays standard", is.na(r1$kw_hidden) || r1$kw_hidden < 6)
+check("Clear & Reset asks first: the click alone changes nothing", isTRUE(r1$after_click))
+check("confirming resets a figure styled by hand (no settings file needed) and says so",
+      grepl("Styling reset", r1$status, fixed = TRUE) && isTRUE(r1$imported_null) && isTRUE(r1$reset))
+gs <- names(r1$doc$global_settings)
+check("buttons and file pickers are not written into a settings file",
+      !any(c("clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style") %in% gs))
+check("a settings file the app has just written loads back with no 'wrong type' warning (blank number boxes are blank, not errors)",
+      !grepl("wrong type", r1$load_status, fixed = TRUE) && !any(grepl("wrong type", notes, fixed = TRUE)))
+check("the page has the confirm button's modal wording and the night-mode rule for the Quick edit heading",
+      any(grepl("Reset the figure styling?", readLines("Lysis_Curve_App_v28.R", warn = FALSE), fixed = TRUE)) && grepl("body.kc-night .kc-qe-title", full, fixed = TRUE))
+
 cat(sprintf("\nSUMMARY: %d passed, %d failed\n", pass, fail))
 if (fail > 0) quit(status = 1)
