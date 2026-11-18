@@ -235,7 +235,7 @@ testServer(app, {
   check("journal look: the explorer SVG is Arial text, no textLength", any(grepl('font-family: "Arial"', svg)) && !any(grepl("textLength", svg)))
   # selectable through the analysis tab download and in the composer
   session$setInputs(analysis_type = "metric_explorer", panel_size_mode = "fit")
-  check("analysis download name uses the type", grepl("^metric_explorer_metric_explorer_[0-9]+x[0-9]+mm\\.", analysis_download_name()))
+  check("analysis download name uses the type", grepl("^metric_explorer_[0-9]+x[0-9]+mm\\.", analysis_download_name()))
   session$setInputs(compose_panels = c("main", "metric_explorer"))
   check("composer accepts the explorer panel", compose_info()$n == 2)
 })

@@ -771,14 +771,14 @@ testServer(app, {
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = "Uninfected")
   check("no panel letter by default (v2.16): both panel-label defaults are empty", identical(input$panel_label, "") && identical(input$analysis_panel_label, ""))
   check("main download name at startup: lysis_curve_main_89x65mm.svg", identical(main_download_name(), "lysis_curve_main_89x65mm.svg"))
-  check("analysis download name at startup: metric_summary_metric_summary_89x65mm.svg", identical(analysis_download_name(), "metric_summary_metric_summary_89x65mm.svg"))
+  check("analysis download name at startup: metric_summary_89x65mm.svg (v2.24.0: the figure name once)", identical(analysis_download_name(), "metric_summary_89x65mm.svg"))
   check("the startup Figure Legend Text has no '(a) ' prefix and the startup figure has no tag",
         !grepl("^\\(", output$figure_legend_text) && is.null(generate_plot()$labels$tag))
   check("composed download name: figure_composed_183x120mm.svg", identical(composed_download_name(), "figure_composed_183x120mm.svg"))
   check("file names carry no timestamp", all(!grepl("[0-9]{8}", c(main_download_name(), analysis_download_name(), composed_download_name()))))
   session$setInputs(panel_label = "", analysis_panel_label = "", analysis_type = "growth_rate", export_format = "png")
   check("empty panel labels fall back to 'main' and the figure type",
-        identical(main_download_name(), "lysis_curve_main_89x65mm.png") && identical(analysis_download_name(), "growth_rate_growth_rate_89x65mm.png"))
+        identical(main_download_name(), "lysis_curve_main_89x65mm.png") && identical(analysis_download_name(), "growth_rate_89x65mm.png"))
   session$setInputs(panel_label = "a", analysis_panel_label = "b", analysis_type = "metric_summary", export_format = "svg")
   # the bar
   bar <- output$figure_standard_bar$html

@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.23.9"
+APP_VERSION <- "2.24.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3057,9 +3057,28 @@ export_device <- function(format) {
          svg  = svglite_inkscape_device,
          png  = if (has_ragg) ragg::agg_png  else "png",
          tiff = if (has_ragg) ragg::agg_tiff else "tiff",
-         jpeg = if (has_ragg) ragg::agg_jpeg else "jpeg",
+         jpeg = if (isTRUE(capabilities("jpeg"))) jpeg_dpi_device else if (has_ragg) ragg::agg_jpeg else "jpeg",
          format)
 }
+# v2.24.0: a JPEG that knows its size. ragg's JPEG (and R's quartz one) carry no resolution, so a 77 mm figure at 600 dpi
+# opened 640 mm wide (72 dpi assumed) while the PNG and TIFF of the same figure opened at 77 mm. The JPEG is now written by
+# R's own device, which starts the file with a JFIF header, and the app's ggsave() (below) writes the resolution into that header.
+jpeg_dpi_device <- function(filename, width, height, units = "in", res = 300, bg = "white", ...) {
+  if (isTRUE(capabilities("aqua"))) grDevices::jpeg(filename, width = width, height = height, units = units, res = res, bg = bg, quality = 95, type = "quartz")
+  else grDevices::jpeg(filename, width = width, height = height, units = units, res = res, bg = bg, quality = 95)
+}
+# Writes `dpi` into a JFIF header (density unit = dots per inch). Any other file (PNG, TIFF, SVG, PDF, a JPEG without a JFIF
+# header) is left untouched. TRUE when the header was written.
+jpeg_set_dpi <- function(path, dpi) tryCatch({
+  d <- suppressWarnings(as.integer(round(as.numeric(dpi))))
+  if (length(d) != 1L || is.na(d) || d < 1L || d > 65535L || !file.exists(path)) return(FALSE)
+  b <- readBin(path, "raw", n = 18L)
+  if (length(b) < 18L || !identical(b[1:4], as.raw(c(0xff, 0xd8, 0xff, 0xe0))) || !identical(b[7:11], c(charToRaw("JFIF"), as.raw(0)))) return(FALSE)
+  con <- file(path, open = "r+b"); on.exit(close(con), add = TRUE)
+  seek(con, where = 13L, origin = "start", rw = "write")
+  writeBin(as.raw(c(1L, d %/% 256L, d %% 256L, d %/% 256L, d %% 256L)), con)
+  TRUE
+}, error = function(e) FALSE)
 
 # ── v2.14.1: guards against oversized allocations ────────────────────────────
 # Largest dpi <= `dpi` for which width_in x height_in x dpi^2 stays within max_pixels (floored to
@@ -3143,8 +3162,11 @@ ggsave <- function(filename, plot = ggplot2::last_plot(), device = NULL, path = 
     if (isTRUE(attr(s, "clamped"))) { width <- s[1]; height <- s[2]; units <- "in" }   # valid sizes are passed through untouched
     if (!is.character(dpi)) dpi <- safe_dpi(dpi)
   }
-  ggplot2::ggsave(filename = filename, plot = plot, device = device, path = path, scale = scale, width = width,
-                  height = height, units = units, dpi = dpi, limitsize = limitsize, ...)
+  out <- ggplot2::ggsave(filename = filename, plot = plot, device = device, path = path, scale = scale, width = width,
+                         height = height, units = units, dpi = dpi, limitsize = limitsize, ...)
+  if (is.numeric(dpi) && length(dpi) == 1L && is.finite(dpi))          # v2.24.0: a JPEG records its resolution (jpeg_set_dpi)
+    jpeg_set_dpi(if (is.null(path)) filename else file.path(path, filename), dpi)
+  invisible(out)
 }
 # A readable message for a failed render; memory errors get a hint.
 friendly_error_message <- function(e) {
@@ -3217,7 +3239,49 @@ figure_size_mm <- function(g) {
 # A ggplot as a gtable whose panel area is exactly panel_w_mm x panel_h_mm (split evenly over the
 # panel columns / rows of a facet figure), with attr(, "size_mm") = the whole figure's size. Only
 # the panels' null units are replaced; every other null unit is zeroed so the size is absolute.
-fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
+# v2.24.0: a legend that does not fit its side is wrapped, never cut off. A row legend (above / below the panel) wider than
+# the figure goes onto 2, 3 ... rows; a column legend (left / right) taller than the figure onto 2, 3 ... columns. The
+# guides keep their own settings (override.aes, order); only nrow / ncol are set, on every aesthetic that draws a key.
+legend_overflow <- function(g) {
+  sz <- attr(g, "size_mm"); if (is.null(sz)) return(NULL)
+  hit <- which(grepl("^guide-box-(left|right|top|bottom)$", g$layout$name) & !vapply(g$grobs, inherits, NA, "zeroGrob"))
+  if (!length(hit)) return(NULL)
+  i <- hit[1]; side <- sub("^guide-box-", "", g$layout$name[i]); gb <- g$grobs[[i]]
+  dim_mm <- tryCatch(kc_with_measure_device(c(grid::convertWidth(sum(gb$widths), "mm", valueOnly = TRUE), grid::convertHeight(sum(gb$heights), "mm", valueOnly = TRUE))),
+                     error = function(e) NULL)
+  if (is.null(dim_mm) || !all(is.finite(dim_mm))) return(NULL)
+  row <- side %in% c("top", "bottom")
+  over <- if (row) dim_mm[1] - sz[1] else dim_mm[2] - sz[2]
+  if (over > 0.5) list(row = row, by = over) else NULL
+}
+legend_with_rows <- function(p, k, row = TRUE) {
+  gs <- tryCatch(p$guides$guides, error = function(e) NULL)
+  new <- list()
+  for (a in c("colour", "shape", "linetype", "fill")) {
+    old <- gs[[a]]
+    if (is.character(old) && identical(old, "none")) next
+    par <- tryCatch(old$params, error = function(e) NULL)
+    args <- list(override.aes = par$override.aes %||% list(), order = par$order %||% 0, byrow = TRUE)
+    if (row) args$nrow <- k else args$ncol <- k
+    new[[a]] <- do.call(ggplot2::guide_legend, args)
+  }
+  p + do.call(ggplot2::guides, new)
+}
+fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm, wrap_legend = TRUE) {
+  g <- fixed_panel_grob_once(p, panel_w_mm, panel_h_mm)
+  if (!isTRUE(wrap_legend) || !inherits(p, "ggplot")) return(g)
+  ov <- tryCatch(legend_overflow(g), error = function(e) NULL)
+  if (is.null(ov)) return(g)
+  best <- g
+  for (k in 2:16) {
+    g2 <- tryCatch(fixed_panel_grob_once(legend_with_rows(p, k, ov$row), panel_w_mm, panel_h_mm), error = function(e) NULL)
+    if (is.null(g2)) break
+    best <- g2
+    if (is.null(tryCatch(legend_overflow(g2), error = function(e) NULL))) break
+  }
+  best
+}
+fixed_panel_grob_once <- function(p, panel_w_mm, panel_h_mm) {
   g   <- tryCatch(kc_with_measure_device(ggplot2::ggplotGrob(p)), error = function(e) {
     # v2.18: a figure with a plotmath colour-bar title (the heatmap) measures text while the grob is built; with no
     # device open that goes to R's default pdf() device, which cannot load Arial ("failed to find or load PDF CID
@@ -8951,6 +9015,7 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
 ui <- fluidPage(
   titlePanel("Optical Density (OD) Time-Series Visualization"),
   
+  tags$head(tags$link(rel = "icon", href = "data:,")),   # v2.24.0: no favicon request (it was a 404 in the browser console)
   tags$head(
     tags$script(HTML(
       "Shiny.addCustomMessageHandler('updateColorPreview', function(msg) {
@@ -9144,6 +9209,7 @@ ui <- fluidPage(
          document.addEventListener('click', function(ev) {
            var t = ev.target && ev.target.closest ? ev.target.closest('#od_plot_svg text.kc-ed') : null;
            if (t) { kcOpen(t); return; }
+           if (ev.target && ev.target.classList && ev.target.classList.contains('kc-leg-drag')) return;   // the legend overlay: its own mouseup opened (or left) the editor
            if (kcPop && kcPop.style.display !== 'none' && !kcPop.contains(ev.target)) kcClose();
          });
          document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape' && kcCur) kcClose(); });
@@ -9179,36 +9245,132 @@ ui <- fluidPage(
              return {x: hx.a, y: vy.a, w: hx.b - hx.a, h: vy.b - vy.a};
            return {x: vb.x + 0.12 * vb.width, y: vb.y + 0.08 * vb.height, w: 0.8 * vb.width, h: 0.8 * vb.height};   // last resort: the middle of the canvas
          }
+         // v2.24.0: exact geometry from the figure's own rectangles (svglite writes one flat group): the panel is the largest
+         // rectangle that is not the whole canvas, the legend box the smallest one that holds every legend entry. In SVG
+         // user units (pt). NULL when the figure has no such rectangle (then the estimates below are used).
+         function kcRects(svg) {
+           var out = [];
+           svg.querySelectorAll('rect').forEach(function(r) {
+             if (r.closest('clipPath')) return;
+             var ws = r.getAttribute('width') || '', w = parseFloat(ws), h = parseFloat(r.getAttribute('height'));
+             if (!(w > 0 && h > 0) || ws.indexOf('%') >= 0) return;
+             out.push({x: parseFloat(r.getAttribute('x')) || 0, y: parseFloat(r.getAttribute('y')) || 0, w: w, h: h});
+           });
+           return out;
+         }
+         function kcPanelBox(svg, vb) {
+           var best = null, all = kcRects(svg), A = vb.width * vb.height;
+           all.forEach(function(q) { var a = q.w * q.h; if (a < 0.98 * A && a > 0.12 * A && (!best || a > best.w * best.h)) best = q; });
+           if (!best) return null;
+           var x0 = best.x, y0 = best.y, x1 = best.x + best.w, y1 = best.y + best.h, a0 = best.w * best.h;
+           all.forEach(function(q) {                       // facets: the panels of (nearly) the same size span the panel area
+             var a = q.w * q.h; if (a >= 0.98 * A || a < 0.6 * a0 || a > 1.02 * a0) return;
+             x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y); x1 = Math.max(x1, q.x + q.w); y1 = Math.max(y1, q.y + q.h);
+           });
+           return {x: x0, y: y0, w: x1 - x0, h: y1 - y0};
+         }
+         function kcLegendBox(svg, texts, P) {
+           var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, fs = 0;
+           texts.forEach(function(t) {
+             var b; try { b = t.getBBox(); } catch (e) { return; }
+             if (!(b.width > 0)) return;
+             x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.width); y1 = Math.max(y1, b.y + b.height); fs = Math.max(fs, b.height);
+           });
+           if (!(x1 > x0)) return null;
+           var best = null, lim = P ? 0.9 * P.w * P.h : 1e12;
+           kcRects(svg).forEach(function(q) {
+             if (q.x > x0 + 0.5 || q.y > y0 + 0.5 || q.x + q.w < x1 - 0.5 || q.y + q.h < y1 - 0.5) return;
+             var a = q.w * q.h; if (a >= lim) return;
+             if (!best || a < best.w * best.h) best = q;
+           });
+           if (best) return {x: best.x, y: best.y, w: best.w, h: best.h, exact: true};
+           return {x: x0 - 2.4 * fs - 2, y: y0 - 2, w: x1 - x0 + 2.4 * fs + 5, h: y1 - y0 + 4, exact: false};   // no legend background: the entries plus their keys
+         }
          function kcSetPos(v) {
            var el = document.getElementById('legend_position'); if (!el) return;
            if (el.selectize) el.selectize.setValue(v); else { el.value = v; el.dispatchEvent(new Event('change', {bubbles: true})); }
          }
+         // The legend is dragged as a live copy of itself (a window onto a clone of the figure), so it is seen where it will
+         // land: inside the panel it is kept within the frame and dropped exactly there (legend_inside_x / y from the legend
+         // box and the panel, both read off the figure); outside the panel a label names the side it will go to (the figure
+         // then grows on that side, the panel keeps its size). The copy stays until the redrawn figure arrives: no jump back.
+         var kcGhostSvg = null;
+         function kcDropGhost() {
+           var host = document.getElementById('od_plot_svg'); if (!host) return;
+           host.querySelectorAll('.kc-leg-ghost, .kc-leg-veil, .kc-leg-hint').forEach(function(e) { e.remove(); });
+           kcGhostSvg = null;
+         }
          function kcLegDrag() {
            var host = document.getElementById('od_plot_svg'); if (!host) return;
+           var svg = host.querySelector('svg');
+           if (kcGhostSvg && kcGhostSvg !== svg) kcDropGhost();          // the redrawn figure is here: the dragged copy goes
            host.querySelectorAll('.kc-leg-drag').forEach(function(e) { e.remove(); });
-           var svg = host.querySelector('svg'), pos = kcVal('legend_position');
+           var pos = kcVal('legend_position');
            if (!svg || pos === 'none' || pos === 'direct' || pos === 'matrix') return;
            var texts = host.querySelectorAll('svg text.kc-ed[data-kc=sample]'); if (!texts.length) return;
-           var hr = host.getBoundingClientRect(), r = svg.getBoundingClientRect();
-           var l = 1e9, t = 1e9, rr = -1e9, b = -1e9, fs = 0;
-           texts.forEach(function(e) {
-             var q = e.getBoundingClientRect(); if (!(q.width > 0)) return;
-             l = Math.min(l, q.left); t = Math.min(t, q.top); rr = Math.max(rr, q.right); b = Math.max(b, q.bottom);
-             fs = Math.max(fs, q.height);
-           });
-           if (!(rr > l)) return;
-           l -= 2.2 * fs; l -= 4; t -= 4; rr += 4; b += 4;
-           var ov = document.createElement('div'); ov.className = 'kc-leg-drag'; ov.title = 'Drag to move the legend';
-           ov.style.left = (l - hr.left + (host.scrollLeft || 0)) + 'px'; ov.style.top = (t - hr.top + (host.scrollTop || 0)) + 'px';
-           ov.style.width = (rr - l) + 'px'; ov.style.height = (b - t) + 'px';
+           var vbb = svg.viewBox && svg.viewBox.baseVal, r = svg.getBoundingClientRect();
+           if (!(r.width > 0)) return;
+           var vb = vbb && vbb.width ? {x: vbb.x, y: vbb.y, width: vbb.width, height: vbb.height}
+                                     : {x: 0, y: 0, width: parseFloat(svg.getAttribute('width')) || r.width, height: parseFloat(svg.getAttribute('height')) || r.height};
+           var k = vb.width / r.width;                                    // user units (pt) per screen px
+           var P = kcPanelBox(svg, vb) || kcPanelRect(svg, vb), L = kcLegendBox(svg, texts, P);
+           if (!P || !L) return;
+           var hr = host.getBoundingClientRect(), offX = r.left - hr.left + (host.scrollLeft || 0), offY = r.top - hr.top + (host.scrollTop || 0);
+           function px(u) { return u / k; }
+           var ov = document.createElement('div'); ov.className = 'kc-leg-drag'; ov.title = 'Drag to move the legend (click a name to rename it)';
+           var l0 = offX + px(L.x - vb.x), t0 = offY + px(L.y - vb.y), lw = px(L.w), lh = px(L.h);
+           ov.style.left = l0 + 'px'; ov.style.top = t0 + 'px'; ov.style.width = lw + 'px'; ov.style.height = lh + 'px';
            host.appendChild(ov);
            ov.addEventListener('mousedown', function(ev) {
-             if (ev.button !== 0) return; document.body.classList.add('kc-nosel');   /* no text selection while dragging; the event itself is left alone */
-             var sx = ev.clientX, sy = ev.clientY, moved = false;
+             if (ev.button !== 0 || ev.ctrlKey) return; document.body.classList.add('kc-nosel');   /* no text selection while dragging; the event itself is left alone */
+             var sx = ev.clientX, sy = ev.clientY, moved = false, gh = null, veil = null, hint = null, drop = null;
+             var pl = offX + px(P.x - vb.x), pt = offY + px(P.y - vb.y), pw = px(P.w), ph = px(P.h);
+             // a legend above / below the panel is one row; inside the panel it becomes a column: its size there is estimated
+             // from the entries (widest name + the key, one line per entry) and the drop is anchored at the dragged centre
+             var horiz = pos === 'top' || pos === 'bottom', lwI = lw, lhI = lh;
+             if (horiz) {
+               var tw = [], th = 0; texts.forEach(function(t) { var b = t.getBoundingClientRect(); if (b.width > 0) { tw.push(b.width); th = Math.max(th, b.height); } });
+               var sum = 0, mxw = 0; tw.forEach(function(v) { sum += v; mxw = Math.max(mxw, v); });
+               if (tw.length) { lwI = Math.min(lw, mxw + Math.max(0, (lw - sum) / tw.length)); lhI = tw.length * (th * 1.75) + th * 0.6; }
+             }
+             function lift() {
+               veil = document.createElement('div'); veil.className = 'kc-leg-veil';
+               veil.style.cssText = 'left:' + l0 + 'px;top:' + t0 + 'px;width:' + lw + 'px;height:' + lh + 'px;';
+               gh = document.createElement('div'); gh.className = 'kc-leg-ghost';
+               gh.style.cssText = 'left:' + l0 + 'px;top:' + t0 + 'px;width:' + lw + 'px;height:' + lh + 'px;';
+               var cl = svg.cloneNode(true); cl.removeAttribute('id');
+               cl.querySelectorAll('[id]').forEach(function(e) { e.removeAttribute('id'); });
+               cl.style.cssText = 'position:absolute;max-width:none;left:' + (offX - l0) + 'px;top:' + (offY - t0) + 'px;width:' + r.width + 'px;height:' + r.height + 'px;';
+               gh.appendChild(cl);
+               hint = document.createElement('div'); hint.className = 'kc-leg-hint'; hint.style.display = 'none';
+               host.appendChild(veil); host.appendChild(gh); host.appendChild(hint); kcGhostSvg = svg;
+               ov.style.visibility = 'hidden';
+             }
+             function place(dx, dy) {
+               var gl = l0 + dx, gt = t0 + dy, cx = gl + lw / 2, cy = gt + lh / 2;
+               var inside = cx >= pl && cx <= pl + pw && cy >= pt && cy <= pt + ph;
+               if (inside) {
+                 var mx = 0.02 * Math.max(pw - lwI, 0), my = 0.02 * Math.max(ph - lhI, 0);
+                 var il = Math.max(pl + mx, Math.min(pl + pw - lwI - mx, cx - lwI / 2)), it = Math.max(pt + my, Math.min(pt + ph - lhI - my, cy - lhI / 2));
+                 if (!horiz) { gl = il; gt = it; }                          // same shape inside: the copy shows the landing spot exactly
+                 var fx = pw - lwI > 1 ? (il - pl) / (pw - lwI) : 0.5, fy = ph - lhI > 1 ? 1 - (it - pt) / (ph - lhI) : 0.5;
+                 drop = {inside: true, fx: Math.round(Math.max(0, Math.min(1, fx)) * 1000) / 1000, fy: Math.round(Math.max(0, Math.min(1, fy)) * 1000) / 1000};
+                 hint.style.display = 'none'; gh.classList.remove('kc-out');
+               } else {
+                 var d = {left: pl - cx, right: cx - pl - pw, top: pt - cy, bottom: cy - pt - ph}, side = 'right', m = -1e9;
+                 for (var n in d) if (d[n] > m) { m = d[n]; side = n; }
+                 drop = {inside: false, side: side};
+                 gh.classList.add('kc-out');
+                 hint.textContent = 'Drop: legend ' + (side === 'top' ? 'above' : side === 'bottom' ? 'below' : side + ' of') + ' the panel (the figure grows on that side)';
+                 hint.style.display = 'block'; hint.style.left = Math.max(0, gl) + 'px'; hint.style.top = (gt + lh + 6) + 'px';
+               }
+               gh.style.left = gl + 'px'; gh.style.top = gt + 'px';
+             }
              function mv(e) {
                var dx = e.clientX - sx, dy = e.clientY - sy;
                if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
-               moved = true; ov.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+               if (!moved) { moved = true; lift(); }
+               place(dx, dy);
              }
              function up(e) {
                document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
@@ -9221,26 +9383,19 @@ ui <- fluidPage(
                  if (tx) kcOpen(tx);
                  return;
                }
-               var q = ov.getBoundingClientRect(), vbb = svg.viewBox && svg.viewBox.baseVal;
-               var vb = vbb && vbb.width ? {x: vbb.x, y: vbb.y, width: vbb.width, height: vbb.height}
-                                         : {x: 0, y: 0, width: parseFloat(svg.getAttribute('width')) || r.width, height: parseFloat(svg.getAttribute('height')) || r.height};
-               var k = vb.width / r.width, rect = r;
-               rect = svg.getBoundingClientRect();
-               var P = kcPanelRect(svg, vb); if (!P) { ov.style.transform = ''; return; }
-               var cx = vb.x + (q.left + q.width / 2 - rect.left) * k, cy = vb.y + (q.top + q.height / 2 - rect.top) * k;
-               var lw = q.width * k, lh = q.height * k;
-               if (cx >= P.x && cx <= P.x + P.w && cy >= P.y && cy <= P.y + P.h) {
-                 var fx = P.w - lw > 1 ? (cx - P.x - lw / 2) / (P.w - lw) : 0.5;
-                 var fy = P.h - lh > 1 ? 1 - ((cy - P.y - lh / 2) / (P.h - lh)) : 0.5;
-                 fx = Math.round(Math.max(0, Math.min(1, fx)) * 100) / 100; fy = Math.round(Math.max(0, Math.min(1, fy)) * 100) / 100;
-                 kcSetText('legend_inside_x', fx); kcSetText('legend_inside_y', fy);
-                 if (window.Shiny && Shiny.setInputValue) { Shiny.setInputValue('legend_inside_x', fx); Shiny.setInputValue('legend_inside_y', fy); }
+               if (hint) hint.style.display = 'none';
+               var same = false;
+               if (drop && drop.inside) {
+                 same = pos === 'inside-custom' && Math.abs(parseFloat(kcVal('legend_inside_x')) - drop.fx) < 0.0005 && Math.abs(parseFloat(kcVal('legend_inside_y')) - drop.fy) < 0.0005;
+                 kcSetText('legend_inside_x', drop.fx); kcSetText('legend_inside_y', drop.fy);
+                 if (window.Shiny && Shiny.setInputValue) { Shiny.setInputValue('legend_inside_x', drop.fx); Shiny.setInputValue('legend_inside_y', drop.fy); }
                  if (pos !== 'inside-custom') kcSetPos('inside-custom');
-               } else {
-                 var d = {left: P.x - cx, right: cx - P.x - P.w, top: P.y - cy, bottom: cy - P.y - P.h}, side = 'right', m = -1e9;
-                 for (var n in d) if (d[n] > m) { m = d[n]; side = n; }
-                 kcSetPos(side);
+               } else if (drop) {
+                 same = pos === drop.side;
+                 if (!same) kcSetPos(drop.side);
                }
+               if (same || !drop) { kcDropGhost(); ov.style.visibility = ''; }
+               else setTimeout(function() { if (kcGhostSvg === svg) { kcDropGhost(); kcLegDrag(); } }, 6000);   // no redraw came: put things back
              }
              document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
            });
@@ -9350,6 +9505,36 @@ ui <- fluidPage(
            if (sel || (a && /^(input|textarea|select)$/i.test(a.tagName))) return;
            ev.preventDefault(); window.kcCopyFigure(hov);
          });
+         // v2.24.0: right-click > Copy Image on the main figure. The figure is an inline <svg> (its labels are clickable), and
+         // browsers offer 'Copy image' only on an <img>; so a PNG of the figure (the pixels Copy figure makes) lies invisibly
+         // over it and takes the SECONDARY button only (and Ctrl+click on a Mac): every other click goes to the figure as
+         // before. It is made when the pointer comes over the figure, again after each redraw.
+         var rcUrl = null, rcFor = null, rcBusy = false, rcTimer = null;
+         function rcHost() { return document.getElementById('od_plot_svg'); }
+         function rcBuild() {
+           var host = rcHost(), svg = host && host.querySelector('svg.kc-canvas-svg, svg');
+           if (!svg || rcBusy || rcFor === svg) return;
+           rcBusy = true; var dims = {w: 0, h: 0};
+           toPng(svg, dims).then(function(b) {
+             rcBusy = false;
+             if (!host.contains(svg)) return;                             // redrawn meanwhile: the next hover makes a new one
+             var img = host.querySelector('img.kc-rc-img');
+             if (!img) { img = document.createElement('img'); img.className = 'kc-rc-img'; img.alt = 'Figure (PNG copy)'; img.draggable = false; host.appendChild(img); }
+             if (rcUrl) URL.revokeObjectURL(rcUrl);
+             rcUrl = URL.createObjectURL(b); img.src = rcUrl; rcFor = svg;
+           }, function() { rcBusy = false; });
+         }
+         function rcArm(on) { var img = document.querySelector('#od_plot_svg img.kc-rc-img'); if (img) img.style.pointerEvents = on ? 'auto' : 'none'; }
+         document.addEventListener('mouseover', function(ev) {
+           if (ev.target && ev.target.closest && ev.target.closest('#od_plot_svg')) { clearTimeout(rcTimer); rcTimer = setTimeout(rcBuild, 120); }
+         });
+         document.addEventListener('mousedown', function(ev) {
+           var inFig = ev.target && ev.target.closest && ev.target.closest('#od_plot_svg');
+           var mac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+           rcArm(!!inFig && (ev.button === 2 || (ev.button === 0 && ev.ctrlKey && mac)));
+         }, true);
+         document.addEventListener('contextmenu', function() { setTimeout(function() { rcArm(false); }, 400); }, true);
+         if (window.jQuery) jQuery(document).on('shiny:value', function(ev) { if (ev.name === 'od_plot_svg') { rcFor = null; setTimeout(function() { if (hov === 'main') rcBuild(); }, 300); } });
        })();"
     )),
     # v2.14: the main panel's pixel width, so true-size previews can pick the zoom that fits it
@@ -9493,9 +9678,15 @@ ui <- fluidPage(
       .kc-leg-sw { display:inline-block; width:14px; height:14px; border:1px solid #888; vertical-align:-2px; margin-right:6px; }
       .kc-qe-canvas .checkbox { margin:2px 0; font-weight:normal; }
       .kc-canvas { position:relative; }
+      .kc-start-hint { margin:28px 8px; padding:18px 20px; max-width:560px; border:1px dashed #bbb; border-radius:6px; color:#555; background:#fafafa; font-size:.95em; line-height:1.5; }
+      .kc-canvas img.kc-rc-img { position:absolute; left:0; top:0; width:100%; height:100%; opacity:0; pointer-events:none; z-index:45; -webkit-user-drag:none; }
       .kc-leg-drag { position:absolute; z-index:40; cursor:move; background:transparent; }
       .kc-nosel, .kc-nosel * { user-select:none !important; -webkit-user-select:none !important; }
       .kc-leg-drag:hover { outline:1px dashed #0069d9; }
+      .kc-leg-veil { position:absolute; z-index:39; background:rgba(255,255,255,.82); pointer-events:none; }
+      .kc-leg-ghost { position:absolute; z-index:41; overflow:hidden; pointer-events:none; outline:1px dashed #0069d9; box-shadow:0 1px 6px rgba(0,0,0,.25); background:#fff; }
+      .kc-leg-ghost.kc-out { outline-color:#c7511f; }
+      .kc-leg-hint { position:absolute; z-index:42; pointer-events:none; white-space:nowrap; font-size:11px; padding:2px 6px; border-radius:3px; background:#333; color:#fff; }
       .kc-canvas-svg text.kc-ed { cursor:pointer; }
       .kc-canvas-svg text.kc-ed:hover { fill:#0069d9; text-decoration:underline; }
       #kc_canvas_pop { position:absolute; z-index:50; display:none; min-width:220px; background:#fff; border:1px solid #ccc;
@@ -11468,14 +11659,19 @@ server <- function(input, output, session) {
   
   # v2.14.1: every download in this server fails with a readable message (and a notification)
   # instead of an opaque error; memory errors get a hint. Shadows shiny::downloadHandler locally.
-  guarded_content <- function(fn) function(file) {
+  guarded_content <- function(fn) function(file) shiny::withReactiveDomain(session, {     # (the domain: a notification sent from a download reaches the page)
     tryCatch(fn(file), error = function(e) {
+      # v2.24.0: a download that has nothing to write says so. Many handlers stop with req() when their table or figure is
+      # empty (no bootstrap run yet, no times chosen, no data): the browser then showed only a failed download.
+      if (inherits(e, "shiny.silent.error"))
+        tryCatch(guard_notify("download_nothing", "Nothing to download yet: this table or figure is empty in the current state (load data, choose its options or run its analysis first).", "warning"),
+                 error = function(e2) NULL)
       if (inherits(e, "shiny.silent.error") || inherits(e, "kc_refused")) stop(e)
       msg <- friendly_error_message(e)
       guard_notify("download_error", paste("Download failed:", msg), "error")
       stop(msg, call. = FALSE)
     })
-  }
+  })
   downloadHandler <- function(filename, content, contentType = NULL, outputArgs = list())
     shiny::downloadHandler(filename = filename, content = guarded_content(content),
                            contentType = contentType, outputArgs = outputArgs)
@@ -14102,7 +14298,9 @@ server <- function(input, output, session) {
         size        = nin("shape_size"),
         stroke      = nin("point_stroke"),
         inherit.aes = FALSE
-      ) + marker_scales(samples, aes_vals, leg_labels, name = NULL, colours = display_colors)
+      ) + marker_scales(samples, aes_vals,                               # v2.24.0: the SAME labels and title as the colour / linetype scales
+                        markup_labels(wrap_legend_labels(leg_labels, input$legend_wrap_width)),   # (a title, wrapped or marked-up names used to split the key in two)
+                        name = { tl <- trimws(input$legend_title %||% ""); if (nzchar(tl)) text_label(tl) else NULL }, colours = display_colors)
     }
     
     if (isTRUE(input$show_end_labels) || identical(sel1("legend_position"), "direct")) {   # v2.22: "direct" hides the legend, names the lines
@@ -14560,24 +14758,66 @@ server <- function(input, output, session) {
   # v2.21: with a sticky figure column the main figure's preview also fits the window HEIGHT (`height_in`, the
   # figure's height; input$sticky_viewport_height is 0 / absent when the column is not sticky): the window minus the
   # size bar and tabs, and minus the quick-edit strip while it is open, so the figure and the strip are in view together.
-  preview_zoom_value <- function(width_in, height_in = NULL) {
+  # v2.24.0: the scale of the main preview does not follow the legend. `core_in` is the figure without an outside legend
+  # (panel, axes, titles; main_core_size_in()): the zoom is chosen for it, so a legend moved outside the panel makes the
+  # figure grow on that side at the SAME scale. It is reduced only when the whole figure would no longer fit the column
+  # width or the window (the quick-edit strip may then go below the fold; the figure column scrolls).
+  preview_zoom_value <- function(width_in, height_in = NULL, core_in = NULL) {
     pw <- input$main_panel_width
     if (isTRUE(input$preview_zoom_auto %||% TRUE) && is.numeric(pw) && length(pw) == 1 && is.finite(pw) &&
         pw > 0 && is.finite(width_in) && width_in > 0) {
       pw <- min(max(pw, 200), 8000)                      # v2.14.1: a sane page width
-      z  <- min(max(floor((pw - 24) / (width_in * 96) * 4) / 4, 0.5), 4)
+      fit_w <- function(w) min(max(floor((pw - 24) / (w * 96) * 4) / 4, 0.5), 4)
+      core_ok <- is.numeric(core_in) && length(core_in) == 2 && all(is.finite(core_in)) && all(core_in > 0)
+      cw <- if (core_ok) min(core_in[1], width_in) else width_in
+      z  <- fit_w(cw)
       vh <- input$sticky_viewport_height
       if (!is.null(height_in) && is.numeric(vh) && length(vh) == 1 && is.finite(vh) && vh >= 400 &&
           is.finite(height_in) && height_in > 0) {
+        ch <- if (core_ok) min(core_in[2], height_in) else height_in
         reserve <- 130 + if (isTRUE(input$quick_edit_open %||% TRUE)) 150 + 30 * min(length(rv$od_vars), 6) else 0
-        z <- min(z, max(floor((vh - reserve) / (height_in * 96) * 4) / 4, 0.5))
+        z <- min(z, max(floor((vh - reserve) / (ch * 96) * 4) / 4, 0.5))
+        if (core_ok) z <- min(z, max(floor((vh - 130) / (height_in * 96) * 4) / 4, 0.5))     # the whole figure stays in the window
       }
+      if (core_ok) z <- min(z, fit_w(width_in))                                                # and in the column
       z
     } else {
       z <- input$preview_zoom %||% 2
       if (!is.numeric(z) || length(z) != 1 || !is.finite(z)) z <- 2
       min(max(z, 0.5), 4)
     }
+  }
+  # v2.24.0: ONE preview scale on every tab. The main figure sets it (it has to share the window with the quick-edit strip);
+  # the analysis, fit, composed and compare figures are shown at the same scale, so a 65 mm panel is the same size on screen
+  # wherever it is drawn (they used to fill the column width: up to 4x, next to the main figure's 2x). A figure too wide for
+  # the column at that scale is still shrunk to fit it.
+  preview_zoom_for <- function(img_id, sz) {
+    if (identical(img_id, "od_plot_img")) return(preview_zoom_value(sz[1], sz[2], main_core_size_in()))
+    zw <- preview_zoom_value(sz[1])
+    zm <- tryCatch({ ms <- export_size_in(); preview_zoom_value(ms[1], ms[2], main_core_size_in()) }, error = function(e) NULL)
+    if (is.numeric(zm) && length(zm) == 1 && is.finite(zm)) min(zm, zw) else zw
+  }
+  # The main figure's size (inches) without the tracks an OUTSIDE legend adds (fixed-panel mode: the legend column / row of
+  # the gtable). Equal to the export size when the legend is inside, hidden, or the figure is in fit mode.
+  main_core_size_in <- function() {
+    sz <- export_size_in()
+    if (!fixed_mode()) return(sz)
+    tryCatch({
+      g <- main_fixed_info()
+      hit <- which(grepl("^guide-box-(left|right|top|bottom)$", g$layout$name) & !vapply(g$grobs, inherits, NA, "zeroGrob"))
+      if (!length(hit)) return(sz)
+      add <- kc_with_measure_device({
+        w <- 0; h <- 0
+        for (i in hit) {
+          nm <- g$layout$name[i]
+          if (grepl("left|right", nm)) w <- w + grid::convertWidth(g$widths[g$layout$l[i]], "in", valueOnly = TRUE)
+          else                         h <- h + grid::convertHeight(g$heights[g$layout$t[i]], "in", valueOnly = TRUE)
+        }
+        c(w, h)
+      })
+      core <- sz - add
+      if (all(is.finite(core)) && all(core > 0.3)) core else sz
+    }, error = function(e) sz)
   }
   # hardening (F37): with data loaded but every sample deselected the figure area says so instead of staying blank
   need_a_sample <- function() {
@@ -14587,11 +14827,11 @@ server <- function(input, output, session) {
   preview_container <- function(plot_id, img_id, size_fun = export_size_in) {
     sz <- size_fun()
     if (identical(input$preview_mode, "wysiwyg")) {
-      z <- preview_zoom_value(sz[1], if (identical(img_id, "od_plot_img")) sz[2])
+      z <- preview_zoom_for(img_id, sz)
       # v2.22: the main figure as the inline export SVG, so its labels can be clicked (checkbox canvas_edit)
       if (isTRUE(input$canvas_edit %||% TRUE) && identical(img_id, "od_plot_img"))
         return(uiOutput("od_plot_svg", class = "kc-canvas",
-                        title = "Use Copy figure (or Cmd/Ctrl+C while hovering) to copy; Download Image for a file.",
+                        title = "Right-click > Copy Image, the Copy figure button, or Cmd/Ctrl+C while hovering copies the figure; Download Image for a file.",
                         style = paste0("width:", round(sz[1] * 96 * z), "px;height:", round(sz[2] * 96 * z), "px;")))
       imageOutput(img_id,
                   width  = paste0(round(sz[1] * 96 * z), "px"),
@@ -14623,7 +14863,7 @@ server <- function(input, output, session) {
     output[[img_id]] <- renderImage({
       plot_inputs_debounced()
       need_a_sample()
-      sz <- size_fun(); z <- preview_zoom_value(sz[1], if (identical(img_id, "od_plot_img")) sz[2])
+      sz <- size_fun(); z <- preview_zoom_for(img_id, sz)
       pr <- session$clientData$pixelratio %||% 1
       pr <- if (is.numeric(pr) && length(pr) == 1 && is.finite(pr)) min(max(pr, 1), 3) else 1
       f  <- tempfile(fileext = ".png")
@@ -14661,8 +14901,10 @@ server <- function(input, output, session) {
   }
   # v2.18: the names without the extension, so the "Download all figures" archive uses the same ones
   main_file_stem <- function() paste0("lysis_curve_", file_label(input$panel_label, "main"), "_", export_size_tag())
-  analysis_file_stem <- function(ty, sz_in = NULL)
-    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(sz_in))
+  analysis_file_stem <- function(ty, sz_in = NULL) {     # v2.24.0: the panel label only when one was typed ("auc_auc_76x73mm" said the name twice)
+    lab <- file_label(input$analysis_panel_label, "")
+    paste0(ty, if (nzchar(lab)) paste0("_", lab), "_", export_size_tag(sz_in))
+  }
   composed_file_stem <- function(sz_mm = NULL)
     paste0("figure_composed", if (!is.null(sz_mm)) sprintf("_%dx%dmm", as.integer(round(sz_mm[1])), as.integer(round(sz_mm[2]))))
   main_download_name <- function() paste0(main_file_stem(), ".", sel1("export_format", "svg"))
@@ -14757,14 +14999,21 @@ server <- function(input, output, session) {
       showNotification(paste0("Could not copy: ", why, ". Use Download Image instead."), type = "warning")
     }
   })
-  output$plot_container <- renderUI(preview_container("od_plot", "od_plot_img"))
+  output$plot_container <- renderUI({
+    # v2.24.0: before any data the figure area says how to start (it used to be blank)
+    if (is.null(rv$data))
+      return(div(class = "kc-start-hint",
+                 tags$b("No data yet."), " Choose a CSV or Excel file on the left (first column time, then one column per sample; replicate columns share a name), ",
+                 "or click ", tags$b("Load Demo Data"), " to try the app. The figure appears here."))
+    preview_container("od_plot", "od_plot_img")
+  })
   register_preview("od_plot", "od_plot_img", main_plot_obj)
   # v2.22: the same figure as the export SVG, inline (svg_inline_for_preview); the page script makes the legend
   # entries, axis titles and title clickable. Too big an SVG (many points) shows a note instead.
   output$od_plot_svg <- renderUI({
     plot_inputs_debounced()
     need_a_sample()
-    sz <- export_size_in(); z <- preview_zoom_value(sz[1], sz[2])
+    sz <- export_size_in(); z <- preview_zoom_value(sz[1], sz[2], main_core_size_in())
     W  <- round(sz[1] * 96 * z); H <- round(sz[2] * 96 * z)
     f  <- tempfile(fileext = ".svg"); on.exit(unlink(f), add = TRUE)
     tryCatch(

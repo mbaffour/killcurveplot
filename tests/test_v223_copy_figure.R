@@ -87,9 +87,9 @@ testServer(app, {
   do.call(session$setInputs, env$APP_DEFAULTS)
   session$setInputs(selected_samples = rv$od_vars, error_type = "sem", exclude_timepoints = "")
   pc <- as.character(output$plot_container$html)
-  check("the od_plot_svg container carries the Copy figure title",
+  check("the od_plot_svg container carries the copy tooltip (v2.24.0: right-click > Copy Image, the button, Cmd/Ctrl+C)",
         grepl("od_plot_svg", pc, fixed = TRUE) &&
-        grepl("title=\"Use Copy figure (or Cmd/Ctrl+C while hovering) to copy; Download Image for a file.\"", pc, fixed = TRUE))
+        grepl("Right-click &gt; Copy Image, the Copy figure button, or Cmd/Ctrl+C while hovering copies the figure; Download Image for a file.", pc, fixed = TRUE))
 })
 
 cat(sprintf("\nSUMMARY: %d passed, %d failed\n", pass, fail))
