@@ -3057,9 +3057,28 @@ export_device <- function(format) {
          svg  = svglite_inkscape_device,
          png  = if (has_ragg) ragg::agg_png  else "png",
          tiff = if (has_ragg) ragg::agg_tiff else "tiff",
-         jpeg = if (has_ragg) ragg::agg_jpeg else "jpeg",
+         jpeg = if (isTRUE(capabilities("jpeg"))) jpeg_dpi_device else if (has_ragg) ragg::agg_jpeg else "jpeg",
          format)
 }
+# v2.24.0: a JPEG that knows its size. ragg's JPEG (and R's quartz one) carry no resolution, so a 77 mm figure at 600 dpi
+# opened 640 mm wide (72 dpi assumed) while the PNG and TIFF of the same figure opened at 77 mm. The JPEG is now written by
+# R's own device, which starts the file with a JFIF header, and the app's ggsave() (below) writes the resolution into that header.
+jpeg_dpi_device <- function(filename, width, height, units = "in", res = 300, bg = "white", ...) {
+  if (isTRUE(capabilities("aqua"))) grDevices::jpeg(filename, width = width, height = height, units = units, res = res, bg = bg, quality = 95, type = "quartz")
+  else grDevices::jpeg(filename, width = width, height = height, units = units, res = res, bg = bg, quality = 95)
+}
+# Writes `dpi` into a JFIF header (density unit = dots per inch). Any other file (PNG, TIFF, SVG, PDF, a JPEG without a JFIF
+# header) is left untouched. TRUE when the header was written.
+jpeg_set_dpi <- function(path, dpi) tryCatch({
+  d <- suppressWarnings(as.integer(round(as.numeric(dpi))))
+  if (length(d) != 1L || is.na(d) || d < 1L || d > 65535L || !file.exists(path)) return(FALSE)
+  b <- readBin(path, "raw", n = 18L)
+  if (length(b) < 18L || !identical(b[1:4], as.raw(c(0xff, 0xd8, 0xff, 0xe0))) || !identical(b[7:11], c(charToRaw("JFIF"), as.raw(0)))) return(FALSE)
+  con <- file(path, open = "r+b"); on.exit(close(con), add = TRUE)
+  seek(con, where = 13L, origin = "start", rw = "write")
+  writeBin(as.raw(c(1L, d %/% 256L, d %% 256L, d %/% 256L, d %% 256L)), con)
+  TRUE
+}, error = function(e) FALSE)
 
 # ── v2.14.1: guards against oversized allocations ────────────────────────────
 # Largest dpi <= `dpi` for which width_in x height_in x dpi^2 stays within max_pixels (floored to
@@ -3143,8 +3162,11 @@ ggsave <- function(filename, plot = ggplot2::last_plot(), device = NULL, path = 
     if (isTRUE(attr(s, "clamped"))) { width <- s[1]; height <- s[2]; units <- "in" }   # valid sizes are passed through untouched
     if (!is.character(dpi)) dpi <- safe_dpi(dpi)
   }
-  ggplot2::ggsave(filename = filename, plot = plot, device = device, path = path, scale = scale, width = width,
-                  height = height, units = units, dpi = dpi, limitsize = limitsize, ...)
+  out <- ggplot2::ggsave(filename = filename, plot = plot, device = device, path = path, scale = scale, width = width,
+                         height = height, units = units, dpi = dpi, limitsize = limitsize, ...)
+  if (is.numeric(dpi) && length(dpi) == 1L && is.finite(dpi))          # v2.24.0: a JPEG records its resolution (jpeg_set_dpi)
+    jpeg_set_dpi(if (is.null(path)) filename else file.path(path, filename), dpi)
+  invisible(out)
 }
 # A readable message for a failed render; memory errors get a hint.
 friendly_error_message <- function(e) {
@@ -3217,7 +3239,49 @@ figure_size_mm <- function(g) {
 # A ggplot as a gtable whose panel area is exactly panel_w_mm x panel_h_mm (split evenly over the
 # panel columns / rows of a facet figure), with attr(, "size_mm") = the whole figure's size. Only
 # the panels' null units are replaced; every other null unit is zeroed so the size is absolute.
-fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm) {
+# v2.24.0: a legend that does not fit its side is wrapped, never cut off. A row legend (above / below the panel) wider than
+# the figure goes onto 2, 3 ... rows; a column legend (left / right) taller than the figure onto 2, 3 ... columns. The
+# guides keep their own settings (override.aes, order); only nrow / ncol are set, on every aesthetic that draws a key.
+legend_overflow <- function(g) {
+  sz <- attr(g, "size_mm"); if (is.null(sz)) return(NULL)
+  hit <- which(grepl("^guide-box-(left|right|top|bottom)$", g$layout$name) & !vapply(g$grobs, inherits, NA, "zeroGrob"))
+  if (!length(hit)) return(NULL)
+  i <- hit[1]; side <- sub("^guide-box-", "", g$layout$name[i]); gb <- g$grobs[[i]]
+  dim_mm <- tryCatch(kc_with_measure_device(c(grid::convertWidth(sum(gb$widths), "mm", valueOnly = TRUE), grid::convertHeight(sum(gb$heights), "mm", valueOnly = TRUE))),
+                     error = function(e) NULL)
+  if (is.null(dim_mm) || !all(is.finite(dim_mm))) return(NULL)
+  row <- side %in% c("top", "bottom")
+  over <- if (row) dim_mm[1] - sz[1] else dim_mm[2] - sz[2]
+  if (over > 0.5) list(row = row, by = over) else NULL
+}
+legend_with_rows <- function(p, k, row = TRUE) {
+  gs <- tryCatch(p$guides$guides, error = function(e) NULL)
+  new <- list()
+  for (a in c("colour", "shape", "linetype", "fill")) {
+    old <- gs[[a]]
+    if (is.character(old) && identical(old, "none")) next
+    par <- tryCatch(old$params, error = function(e) NULL)
+    args <- list(override.aes = par$override.aes %||% list(), order = par$order %||% 0, byrow = TRUE)
+    if (row) args$nrow <- k else args$ncol <- k
+    new[[a]] <- do.call(ggplot2::guide_legend, args)
+  }
+  p + do.call(ggplot2::guides, new)
+}
+fixed_panel_grob <- function(p, panel_w_mm, panel_h_mm, wrap_legend = TRUE) {
+  g <- fixed_panel_grob_once(p, panel_w_mm, panel_h_mm)
+  if (!isTRUE(wrap_legend) || !inherits(p, "ggplot")) return(g)
+  ov <- tryCatch(legend_overflow(g), error = function(e) NULL)
+  if (is.null(ov)) return(g)
+  best <- g
+  for (k in 2:16) {
+    g2 <- tryCatch(fixed_panel_grob_once(legend_with_rows(p, k, ov$row), panel_w_mm, panel_h_mm), error = function(e) NULL)
+    if (is.null(g2)) break
+    best <- g2
+    if (is.null(tryCatch(legend_overflow(g2), error = function(e) NULL))) break
+  }
+  best
+}
+fixed_panel_grob_once <- function(p, panel_w_mm, panel_h_mm) {
   g   <- tryCatch(kc_with_measure_device(ggplot2::ggplotGrob(p)), error = function(e) {
     # v2.18: a figure with a plotmath colour-bar title (the heatmap) measures text while the grob is built; with no
     # device open that goes to R's default pdf() device, which cannot load Arial ("failed to find or load PDF CID
@@ -8951,6 +9015,7 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
 ui <- fluidPage(
   titlePanel("Optical Density (OD) Time-Series Visualization"),
   
+  tags$head(tags$link(rel = "icon", href = "data:,")),   # v2.24.0: no favicon request (it was a 404 in the browser console)
   tags$head(
     tags$script(HTML(
       "Shiny.addCustomMessageHandler('updateColorPreview', function(msg) {
@@ -9613,6 +9678,7 @@ ui <- fluidPage(
       .kc-leg-sw { display:inline-block; width:14px; height:14px; border:1px solid #888; vertical-align:-2px; margin-right:6px; }
       .kc-qe-canvas .checkbox { margin:2px 0; font-weight:normal; }
       .kc-canvas { position:relative; }
+      .kc-start-hint { margin:28px 8px; padding:18px 20px; max-width:560px; border:1px dashed #bbb; border-radius:6px; color:#555; background:#fafafa; font-size:.95em; line-height:1.5; }
       .kc-canvas img.kc-rc-img { position:absolute; left:0; top:0; width:100%; height:100%; opacity:0; pointer-events:none; z-index:45; -webkit-user-drag:none; }
       .kc-leg-drag { position:absolute; z-index:40; cursor:move; background:transparent; }
       .kc-nosel, .kc-nosel * { user-select:none !important; -webkit-user-select:none !important; }
@@ -11593,14 +11659,19 @@ server <- function(input, output, session) {
   
   # v2.14.1: every download in this server fails with a readable message (and a notification)
   # instead of an opaque error; memory errors get a hint. Shadows shiny::downloadHandler locally.
-  guarded_content <- function(fn) function(file) {
+  guarded_content <- function(fn) function(file) shiny::withReactiveDomain(session, {     # (the domain: a notification sent from a download reaches the page)
     tryCatch(fn(file), error = function(e) {
+      # v2.24.0: a download that has nothing to write says so. Many handlers stop with req() when their table or figure is
+      # empty (no bootstrap run yet, no times chosen, no data): the browser then showed only a failed download.
+      if (inherits(e, "shiny.silent.error"))
+        tryCatch(guard_notify("download_nothing", "Nothing to download yet: this table or figure is empty in the current state (load data, choose its options or run its analysis first).", "warning"),
+                 error = function(e2) NULL)
       if (inherits(e, "shiny.silent.error") || inherits(e, "kc_refused")) stop(e)
       msg <- friendly_error_message(e)
       guard_notify("download_error", paste("Download failed:", msg), "error")
       stop(msg, call. = FALSE)
     })
-  }
+  })
   downloadHandler <- function(filename, content, contentType = NULL, outputArgs = list())
     shiny::downloadHandler(filename = filename, content = guarded_content(content),
                            contentType = contentType, outputArgs = outputArgs)
@@ -14227,7 +14298,9 @@ server <- function(input, output, session) {
         size        = nin("shape_size"),
         stroke      = nin("point_stroke"),
         inherit.aes = FALSE
-      ) + marker_scales(samples, aes_vals, leg_labels, name = NULL, colours = display_colors)
+      ) + marker_scales(samples, aes_vals,                               # v2.24.0: the SAME labels and title as the colour / linetype scales
+                        markup_labels(wrap_legend_labels(leg_labels, input$legend_wrap_width)),   # (a title, wrapped or marked-up names used to split the key in two)
+                        name = { tl <- trimws(input$legend_title %||% ""); if (nzchar(tl)) text_label(tl) else NULL }, colours = display_colors)
     }
     
     if (isTRUE(input$show_end_labels) || identical(sel1("legend_position"), "direct")) {   # v2.22: "direct" hides the legend, names the lines
@@ -14714,6 +14787,16 @@ server <- function(input, output, session) {
       min(max(z, 0.5), 4)
     }
   }
+  # v2.24.0: ONE preview scale on every tab. The main figure sets it (it has to share the window with the quick-edit strip);
+  # the analysis, fit, composed and compare figures are shown at the same scale, so a 65 mm panel is the same size on screen
+  # wherever it is drawn (they used to fill the column width: up to 4x, next to the main figure's 2x). A figure too wide for
+  # the column at that scale is still shrunk to fit it.
+  preview_zoom_for <- function(img_id, sz) {
+    if (identical(img_id, "od_plot_img")) return(preview_zoom_value(sz[1], sz[2], main_core_size_in()))
+    zw <- preview_zoom_value(sz[1])
+    zm <- tryCatch({ ms <- export_size_in(); preview_zoom_value(ms[1], ms[2], main_core_size_in()) }, error = function(e) NULL)
+    if (is.numeric(zm) && length(zm) == 1 && is.finite(zm)) min(zm, zw) else zw
+  }
   # The main figure's size (inches) without the tracks an OUTSIDE legend adds (fixed-panel mode: the legend column / row of
   # the gtable). Equal to the export size when the legend is inside, hidden, or the figure is in fit mode.
   main_core_size_in <- function() {
@@ -14744,7 +14827,7 @@ server <- function(input, output, session) {
   preview_container <- function(plot_id, img_id, size_fun = export_size_in) {
     sz <- size_fun()
     if (identical(input$preview_mode, "wysiwyg")) {
-      z <- if (identical(img_id, "od_plot_img")) preview_zoom_value(sz[1], sz[2], main_core_size_in()) else preview_zoom_value(sz[1])
+      z <- preview_zoom_for(img_id, sz)
       # v2.22: the main figure as the inline export SVG, so its labels can be clicked (checkbox canvas_edit)
       if (isTRUE(input$canvas_edit %||% TRUE) && identical(img_id, "od_plot_img"))
         return(uiOutput("od_plot_svg", class = "kc-canvas",
@@ -14780,7 +14863,7 @@ server <- function(input, output, session) {
     output[[img_id]] <- renderImage({
       plot_inputs_debounced()
       need_a_sample()
-      sz <- size_fun(); z <- if (identical(img_id, "od_plot_img")) preview_zoom_value(sz[1], sz[2], main_core_size_in()) else preview_zoom_value(sz[1])
+      sz <- size_fun(); z <- preview_zoom_for(img_id, sz)
       pr <- session$clientData$pixelratio %||% 1
       pr <- if (is.numeric(pr) && length(pr) == 1 && is.finite(pr)) min(max(pr, 1), 3) else 1
       f  <- tempfile(fileext = ".png")
@@ -14818,8 +14901,10 @@ server <- function(input, output, session) {
   }
   # v2.18: the names without the extension, so the "Download all figures" archive uses the same ones
   main_file_stem <- function() paste0("lysis_curve_", file_label(input$panel_label, "main"), "_", export_size_tag())
-  analysis_file_stem <- function(ty, sz_in = NULL)
-    paste0(ty, "_", file_label(input$analysis_panel_label, ty), "_", export_size_tag(sz_in))
+  analysis_file_stem <- function(ty, sz_in = NULL) {     # v2.24.0: the panel label only when one was typed ("auc_auc_76x73mm" said the name twice)
+    lab <- file_label(input$analysis_panel_label, "")
+    paste0(ty, if (nzchar(lab)) paste0("_", lab), "_", export_size_tag(sz_in))
+  }
   composed_file_stem <- function(sz_mm = NULL)
     paste0("figure_composed", if (!is.null(sz_mm)) sprintf("_%dx%dmm", as.integer(round(sz_mm[1])), as.integer(round(sz_mm[2]))))
   main_download_name <- function() paste0(main_file_stem(), ".", sel1("export_format", "svg"))
@@ -14914,7 +14999,14 @@ server <- function(input, output, session) {
       showNotification(paste0("Could not copy: ", why, ". Use Download Image instead."), type = "warning")
     }
   })
-  output$plot_container <- renderUI(preview_container("od_plot", "od_plot_img"))
+  output$plot_container <- renderUI({
+    # v2.24.0: before any data the figure area says how to start (it used to be blank)
+    if (is.null(rv$data))
+      return(div(class = "kc-start-hint",
+                 tags$b("No data yet."), " Choose a CSV or Excel file on the left (first column time, then one column per sample; replicate columns share a name), ",
+                 "or click ", tags$b("Load Demo Data"), " to try the app. The figure appears here."))
+    preview_container("od_plot", "od_plot_img")
+  })
   register_preview("od_plot", "od_plot_img", main_plot_obj)
   # v2.22: the same figure as the export SVG, inline (svg_inline_for_preview); the page script makes the legend
   # entries, axis titles and title clickable. Too big an SVG (many points) shows a note instead.

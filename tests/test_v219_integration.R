@@ -183,7 +183,7 @@ testServer(app, {
         identical(isolate(fit_results())$table, fit_table_current()) && inherits(fit_results, "reactiveExpr"))
   # analysis download name, export svg, fixed-panel (square) and composer
   session$setInputs(analysis_type = "fit_overlay")
-  check("analysis download name uses the type", grepl("^fit_overlay_fit_overlay_[0-9]+x[0-9]+mm\\.", analysis_download_name()))
+  check("analysis download name uses the type", grepl("^fit_overlay_[0-9]+x[0-9]+mm\\.", analysis_download_name()))
   do.call(session$setInputs, env$journal_preset_settings(89, 65, "a"))
   fg <- fixed_figure(generate_analysis_plot("fit_overlay"), "fit_overlay")
   pc <- fg$layout[grepl("^panel", fg$layout$name), ]

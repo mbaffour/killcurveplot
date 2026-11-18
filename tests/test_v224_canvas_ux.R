@@ -83,5 +83,79 @@ check("a figure too tall for the window is still scaled down to fit it", res$low
 check("fit mode: the figure size does not depend on the legend, core = size", isTRUE(all.equal(res$fit$core, res$fit$sz)))
 check("auto-fit off: the slider's zoom is used as before", identical(res$manual, 1.5))
 
+cat("\n--- one preview scale on every tab ---\n")
+zz <- list()
+testServer(app, {
+  S <- session$setInputs
+  ingest_data(env$make_demo_data("lysis"), "Demo"); do.call(S, env$APP_DEFAULTS)
+  S(selected_samples = rv$od_vars, main_panel_width = 1095, sticky_viewport_height = 950, quick_edit_open = TRUE, preview_zoom_auto = TRUE)
+  ms <- export_size_in(); zz$main <<- preview_zoom_for("od_plot_img", ms)
+  for (a in c("metric_summary", "growth_rate", "phases", "phenotype_heatmap")) { S(analysis_type = a); zz[[a]] <<- preview_zoom_for("analysis_img", analysis_size_in()) }
+  zz$old_fill <<- preview_zoom_value(analysis_size_in()[1])
+  zz$wide <<- preview_zoom_for("compose_img", c(12, 4)); zz$wide_fit <<- 12 * 96 * zz$wide <= 1095 - 24 + 1e-6
+})
+check(sprintf("the analysis figures are shown at the main figure's zoom (%s), not stretched to the column", zz$main),
+      all(vapply(c("metric_summary", "growth_rate", "phases", "phenotype_heatmap"), function(a) identical(zz[[a]], zz$main), NA)))
+check("(the old rule filled the column: a larger zoom than the main figure's)", zz$old_fill > zz$main)
+check("a figure too wide for the column at that zoom is still shrunk to fit", zz$wide < zz$main && isTRUE(zz$wide_fit))
+
+cat("\n--- one legend, whatever its title and labels; long legends wrap ---\n")
+nkeys <- function(p) { g <- ggplot2::ggplotGrob(p); gb <- g$grobs[[which(grepl("guide-box", g$layout$name) & !vapply(g$grobs, inherits, NA, "zeroGrob"))[1]]]; sum(grepl("^guides", gb$layout$name)) }
+lg <- list()
+testServer(app, {
+  S <- session$setInputs
+  ingest_data(env$make_demo_data("lysis"), "Demo"); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars)
+  lg$plain <<- nkeys(generate_plot())
+  S(legend_title = "Strain / treatment"); lg$title <<- nkeys(generate_plot())
+  S(legend_title = "", legend_wrap_width = 8); lg$wrap <<- nkeys(generate_plot())
+  S(legend_wrap_width = NA, legend_title = "T", legend_position = "bottom", error_display_mode = "shadow"); lg$shadow <<- nkeys(generate_plot())
+  S(legend_title = "", error_display_mode = "bars", legend_position = "bottom")
+  g0 <- main_fixed_info(); lg$short_over <<- is.null(env$legend_overflow(g0)); lg$short_h <<- attr(g0, "size_mm")[2]
+  rv$display_names <- setNames(c("Uninfected control culture, no phage added", "Phage T4 wild type at MOI 10 (high)", "Phage T4 wild type at MOI 0.1 (low)"), rv$od_vars); session$flushReact()
+  p <- generate_plot(); d <- panel_dims_mm("main")
+  g1 <- env$fixed_panel_grob(p, d[1], d[2], wrap_legend = FALSE); g2 <- env$fixed_panel_grob(p, d[1], d[2])
+  lg$raw_over <<- env$legend_overflow(g1)$by; lg$fixed_over <<- is.null(env$legend_overflow(g2)); lg$w <<- c(attr(g1, "size_mm")[1], attr(g2, "size_mm")[1]); lg$h <<- c(attr(g1, "size_mm")[2], attr(g2, "size_mm")[2])
+  S(legend_position = "right"); lg$right_ok <<- is.null(env$legend_overflow(main_fixed_info()))
+})
+check("the default figure has one legend", identical(lg$plain, 1L))
+check("a legend title keeps it one (the marker scales carry the same title; it used to draw a second, black list)", identical(lg$title, 1L))
+check("wrapped labels keep it one", identical(lg$wrap, 1L))
+check("a title with a legend below and a shadow band keeps it one", identical(lg$shadow, 1L))
+check("a short legend below the panel fits: nothing to wrap", isTRUE(lg$short_over))
+check(sprintf("long names below the panel: one row would overflow the figure (by %.0f mm) ...", lg$raw_over %||% 0), is.numeric(lg$raw_over) && lg$raw_over > 5)
+check("... so the legend goes onto more rows: nothing is cut off, the figure keeps its width and gets taller", isTRUE(lg$fixed_over) && abs(lg$w[1] - lg$w[2]) < 0.01 && lg$h[2] > lg$h[1])
+check("the same names beside the panel need no wrapping (the figure widens)", isTRUE(lg$right_ok))
+
+cat("\n--- exports: one physical size in every format, plain names, a notice when there is nothing to write ---\n")
+ex <- list(); notes <- character(0)
+old_sn <- env$showNotification
+env$showNotification <- function(ui, ..., type = "default") { notes <<- c(notes, paste0("[", type, "] ", as.character(ui))); invisible(NULL) }
+testServer(app, {
+  S <- session$setInputs
+  ex$hint <<- as.character(output$plot_container$html)
+  ingest_data(env$make_demo_data("lysis"), "Demo"); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars)
+  ex$hint_after <<- as.character(output$plot_container$html)
+  ex$name <<- analysis_download_name()
+  S(analysis_panel_label = "b"); ex$name_lab <<- analysis_download_name()
+  S(export_format = "jpeg", export_dpi = 600); f <- output$downloadPlot; ex$jpeg <<- readBin(f, "raw", n = 18L)
+  ex$jpeg_px <<- tryCatch({ o <- system2("sips", c("-g", "pixelWidth", "-g", "dpiWidth", shQuote(f)), stdout = TRUE); as.numeric(sub(".*: ", "", o[grepl("pixelWidth|dpiWidth", o)])) }, error = function(e) NULL, warning = function(w) NULL)
+  ex$size_in <<- export_size_in()
+  ex$boot <<- tryCatch({ output$downloadBootCSV; "file" }, error = function(e) class(e)[1])
+})
+env$showNotification <- old_sn
+check("before any data the figure area says how to start", grepl("kc-start-hint", ex$hint, fixed = TRUE) && grepl("Load Demo Data", ex$hint, fixed = TRUE))
+check("with data loaded the hint is gone", !grepl("kc-start-hint", ex$hint_after, fixed = TRUE))
+check("an analysis download is named once (metric_summary_<size>.svg), with the panel label only when one is typed",
+      grepl("^metric_summary_[0-9]+x[0-9]+mm\\.svg$", ex$name) && grepl("^metric_summary_b_[0-9]+x[0-9]+mm\\.svg$", ex$name_lab))
+check("the JPEG starts with a JFIF header that records 600 dots per inch (unit 1, density 0x0258)",
+      identical(ex$jpeg[1:4], as.raw(c(0xff, 0xd8, 0xff, 0xe0))) && identical(ex$jpeg[14:18], as.raw(c(1, 2, 0x58, 2, 0x58))))
+if (!is.null(ex$jpeg_px) && length(ex$jpeg_px) == 2)
+  check(sprintf("so it opens at the figure's size (%.0f px at %.0f dpi = %.1f mm, the SVG's %.1f mm)", ex$jpeg_px[1], ex$jpeg_px[2], ex$jpeg_px[1] / ex$jpeg_px[2] * 25.4, ex$size_in[1] * 25.4),
+        ex$jpeg_px[2] == 600 && abs(ex$jpeg_px[1] / 600 - ex$size_in[1]) < 0.01)
+check("jpeg_set_dpi leaves a file that is not a JFIF JPEG alone", { f <- tempfile(fileext = ".png"); writeBin(as.raw(c(0x89, 0x50, 0x4e, 0x47, rep(0, 20))), f); b <- readBin(f, "raw", 24); isFALSE(env$jpeg_set_dpi(f, 600)) && identical(readBin(f, "raw", 24), b) })
+check("a download with nothing to write (the bootstrap table before a run) stops quietly AND tells the user",
+      identical(ex$boot, "shiny.silent.error") && any(grepl("Nothing to download yet", notes, fixed = TRUE)))
+check("the page asks for no favicon", grepl("rel=\"icon\" href=\"data:,\"", full, fixed = TRUE))
+
 cat(sprintf("\nSUMMARY: %d passed, %d failed\n", pass, fail))
 if (fail > 0) quit(status = 1)

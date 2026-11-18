@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.24.0 — 2026-11-18
+
+**The canvas as a user handles it.** Found by clicking through the app in a real (headless) browser, making figures on
+every tab and measuring what came out.
+- **Right-click > Copy Image.** The main figure is an inline SVG (its labels are clickable), and browsers offer no "Copy
+  image" on that. A PNG of the figure (the Copy figure pixels) now lies invisibly over it and takes the right button only
+  (and Ctrl+click on a Mac), so the browser's own menu has Copy Image and Save Image As. Every other click reaches the
+  figure as before; the Copy figure button and Cmd/Ctrl+C still work.
+- **Moving the legend.** The legend is dragged as a live copy of itself (its old place dims), it stays inside the frame,
+  and it lands where it is dropped: the panel and the legend box are read off the figure's own rectangles (the old
+  estimate landed about 34 px off). Dragged out of the panel, a label names the side it will go to and says the figure
+  grows there. The copy stays until the redrawn figure arrives, so nothing jumps back. Clicking a legend name through the
+  drag overlay opens the rename editor again (the page's click handler closed it at once).
+- **One scale on screen.** The preview zoom is chosen for the figure without an outside legend, so moving the legend above
+  / below / beside the panel no longer shrinks the whole preview (2x became 1.75x), and the analysis, fit, composed and
+  compare previews use the main figure's zoom (they filled the column: up to 4x next to the main figure's 2x). A 65 mm
+  panel is now the same size on screen on every tab. A figure too wide or tall for the window is still scaled to fit.
+- **One legend.** A legend title, wrapped names or marked-up names split the key in two (a second, black list): the marker
+  scales now carry the same title and labels as the colour scale.
+- **Long legends wrap.** A legend above / below the panel that is wider than the figure goes onto more rows, and one beside
+  the panel that is taller than the figure onto more columns; it used to be cut off at the figure's edge.
+- **JPEG at its true size.** The JPEG carried no resolution, so a 77 mm figure at 600 dpi opened 640 mm wide while the PNG
+  and TIFF opened at 77 mm. It is now written with a JFIF header that records the dpi: all five formats give the same
+  physical size.
+- **Small things.** Analysis downloads are named once (`auc_75x73mm.svg`, not `auc_auc_75x73mm.svg`; a typed panel label is
+  still added). A download with nothing to write (the bootstrap table before a run, OD at times with no time chosen) says
+  so in a notification. Before any data the figure area says how to start. No favicon request (a 404 in the console).
+- `tests/test_v224_canvas_ux.R` (44 checks). The startup figure is byte-identical (styling suite 236 / 0).
+
 ## v2.23.9 — 2026-11-10
 
 **Filled vs open markers: one rule, everywhere.** The per-sample **Shape** menu is now the base forms only (Circle, Square,
