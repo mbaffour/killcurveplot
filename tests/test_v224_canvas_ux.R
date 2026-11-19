@@ -197,5 +197,30 @@ check("a settings file the app has just written loads back with no 'wrong type' 
 check("the page has the confirm button's modal wording and the night-mode rule for the Quick edit heading",
       any(grepl("Reset the figure styling?", readLines("Lysis_Curve_App_v28.R", warn = FALSE), fixed = TRUE)) && grepl("body.kc-night .kc-qe-title", full, fixed = TRUE))
 
+cat("\n--- v2.24.2: the y axis follows the transform; Enter applies a table edit ---\n")
+tr <- list()
+testServer(app, {
+  S <- session$setInputs
+  ingest_data(env$make_demo_data("lysis"), "Demo"); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars)
+  one <- function(m, ctl = "") { S(transform_mode = m, transform_control = ctl); p <- generate_plot(); b <- ggplot2::ggplot_build(p)
+    list(scale = sel1("y_scale_type"), exp = ylog_exp("y_log_max_exponent"), lab = paste(deparse(p$labels$y), collapse = ""), yr = b$layout$panel_params[[1]]$y.range, eff = transform_effective(),
+         top = max(prepare_plot_data()$mean_value, na.rm = TRUE)) }
+  tr$none <<- one("none"); tr$t0 <<- one("t0"); tr$ctl0 <<- one("control"); tr$ctl <<- one("control", rv$od_vars[1]); tr$pct <<- one("pct_max"); tr$ln <<- one("ln")
+  tr$legend <<- figure_legend_string()
+  S(transform_mode = "pct_max", y_axis_label = "My own label"); tr$own <<- paste(deparse(generate_plot()$labels$y), collapse = "")
+})
+check("no transform: the scale menu, the OD decades and the label are used as before", identical(tr$none$scale, "log") && isTRUE(all.equal(tr$none$exp, env$APP_DEFAULTS$y_log_max_exponent)) && identical(tr$none$lab, "A[550]"))
+check("'% of own maximum' is drawn on a linear axis that reaches 100 (it was squashed against the top of the 0.01-10 log axis)",
+      identical(tr$pct$scale, "linear") && tr$pct$top > 99 && tr$pct$yr[2] >= 100 && tr$pct$yr[1] <= 5)
+check("its axis says so: A550 (% of maximum)", grepl("% of maximum", tr$pct$lab, fixed = TRUE))
+check("ln(OD) is drawn on a linear axis (its values are negative) and labelled ln A550", identical(tr$ln$scale, "linear") && tr$ln$yr[1] < 0 && grepl("ln", tr$ln$lab, fixed = TRUE))
+check("relative to t = 0: the log axis stays, with automatic ticks (the fixed OD decades are dropped) and a label that says so",
+      identical(tr$t0$scale, "log") && is.na(tr$t0$exp) && grepl("relative to t = 0", tr$t0$lab, fixed = TRUE))
+check("relative to a control: the label names the control", grepl("relative to Uninfected", tr$ctl$lab, fixed = TRUE) && is.na(tr$ctl$exp))
+check("'control' with no control chosen changes nothing (effective transform none: the default axis and label)", identical(tr$ctl0$eff, "none") && identical(tr$ctl0$lab, "A[550]") && isTRUE(all.equal(tr$ctl0$exp, env$APP_DEFAULTS$y_log_max_exponent)))
+check("the legend text names the transformed measure", grepl("measured as ln A550", tr$legend, fixed = TRUE))
+check("a y label the user typed is left alone", identical(tr$own, "\"My own label\""))
+check("Enter applies an edit in the data table (the editor only saved on blur)", has("ev.key === 'Enter'", "ev.target.matches('#data_view_table td input')) ev.target.blur();"))
+
 cat(sprintf("\nSUMMARY: %d passed, %d failed\n", pass, fail))
 if (fail > 0) quit(status = 1)

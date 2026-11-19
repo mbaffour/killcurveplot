@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.24.2 — 2026-11-18
+
+**Third click-through round: the Data tab, the transforms, Statistics and Curve fitting.** About 90 option states on the
+Statistics and Curve fitting tabs (demo data and a real one-replicate-per-block file) gave no error and no raw R text;
+wide tables scroll in their own box. Two things were wrong.
+- **The y axis follows the Transform.** "0-100 % of each sample's own maximum" was drawn on the default log axis from
+  0.01 to 10, so every curve was squashed against the top, still labelled A550. Now "% of own maximum" and "ln(OD)" are
+  drawn on a linear axis whatever the scale menu says, a transform drops the fixed OD decades for automatic ticks, and the
+  default y label says what is plotted ("A550 (% of maximum)", "ln A550", "A550 relative to t = 0", "A550 relative to
+  <control>"); the legend text uses the same wording. A y label you typed is left alone; "control" with no control sample
+  chosen changes nothing.
+- **Enter applies an edit in the data table.** The table's editor saved only when the box lost focus, so pressing Enter
+  appeared to do nothing. The hint above the table says so.
+- `tests/test_v224_canvas_ux.R`: 62 checks.
+
 ## v2.24.1 — 2026-11-18
 
 **Second click-through round: Compose, Compare, settings, window sizes.** No errors in 17 Compose / Compare option states or

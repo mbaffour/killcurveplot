@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.24.1"
+APP_VERSION <- "2.24.2"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -9016,6 +9016,9 @@ ui <- fluidPage(
   titlePanel("Optical Density (OD) Time-Series Visualization"),
   
   tags$head(tags$link(rel = "icon", href = "data:,")),   # v2.24.0: no favicon request (it was a 404 in the browser console)
+  # v2.24.2: Enter applies an edit in the data table. The table's editor saves when the box loses focus only, so Enter
+  # did nothing and the edit looked lost until something else was clicked.
+  tags$script(HTML("document.addEventListener('keydown', function(ev) { if (ev.key === 'Enter' && ev.target && ev.target.matches && ev.target.matches('#data_view_table td input')) ev.target.blur(); }, true);")),
   tags$head(
     tags$script(HTML(
       "Shiny.addCustomMessageHandler('updateColorPreview', function(msg) {
@@ -10669,7 +10672,7 @@ ui <- fluidPage(
           tabsetPanel(id = "data_subtabs",
             tabPanel("View & edit", br(),
               p(style = "font-size:.85em;color:#555;",
-                if (has_DT) "Double-click a cell to edit it. An edit goes through the same loading step as a file, so the samples, replicates, figures, statistics and metrics refresh. Empty a cell to exclude that single reading."
+                if (has_DT) "Double-click a cell to edit it; press Enter (or click elsewhere) to apply. An edit goes through the same loading step as a file, so the samples, replicates, figures, statistics and metrics refresh. Empty a cell to exclude that single reading."
                 else "Cells can be changed with the box below the table (install the DT package for in-table editing). A change goes through the same loading step as a file. Empty a cell to exclude that single reading."),
               uiOutput("data_edit_status"),
               if (has_DT) DT::DTOutput("data_view_table")
@@ -11602,7 +11605,24 @@ server <- function(input, output, session) {
     if (is.null(v) || !is.atomic(v) || !length(v)) return(d)
     v <- as.character(v[1]); if (is.na(v)) return(d)
     ch <- SELECT_INPUT_CHOICES[[id]] %||% dyn_choices(id)   # a static select / radio group: a value that is not one of its choices is not a choice
-    if (!is.null(ch) && !(v %in% ch)) d else v
+    if (!is.null(ch) && !(v %in% ch)) return(d)
+    # v2.24.2: "% of own maximum" (0-100) and ln(OD) are drawn on a LINEAR y axis whatever the scale menu says: on the
+    # default log axis (0.01-10) every "% of maximum" curve was squashed against the top and ln values are negative.
+    if (identical(id, "y_scale_type") && transform_effective() %in% c("pct_max", "ln")) return("linear")
+    v
+  }
+  # The transform that is really applied: "control" without a control sample changes nothing.
+  transform_effective <- function() {
+    m <- tryCatch(transform_mode_current(), error = function(e) "none")
+    if (identical(m, "control") && !nzchar(tryCatch(transform_control_current(), error = function(e) ""))) "none" else m
+  }
+  # What the y axis shows under a transform. A label the user typed is left alone; the default label says what was done.
+  y_axis_label_now <- function() {
+    lab <- input$y_axis_label %||% APP_DEFAULTS$y_axis_label
+    tm <- transform_effective()
+    if (identical(tm, "none") || length(lab) != 1L || !identical(trimws(as.character(lab)), trimws(APP_DEFAULTS$y_axis_label))) return(lab)
+    switch(tm, t0 = paste0(lab, " relative to t = 0"), control = paste0(lab, " relative to ", dname(transform_control_current())),
+           pct_max = paste0(lab, " (% of maximum)"), ln = paste0("ln ", lab), lab)
   }
   # Round 4: the selects whose choices are set at run time (DYNAMIC_SELECT_IDS) are checked the same way, against the choices of
   # NOW (the loaded samples, columns, sheets, saved themes), so a stale or scripted value ("nope", a 100 kB string, a name of the
@@ -11648,6 +11668,7 @@ server <- function(input, output, session) {
   # non-finite and held to -12..12 otherwise (10^1e308 and 10^-400 broke the tick code); a smoothing window is a whole number in the
   # box's range, the default when cleared or NaN.
   ylog_exp <- function(id) {
+    if (!identical(transform_effective(), "none")) return(NA_real_)     # v2.24.2: transformed values do not live in the OD decades (0.01-10): automatic ticks
     v <- suppressWarnings(as.numeric(input[[id]])); if (length(v) != 1L || !is.finite(v)) NA_real_ else min(max(v, -12), 12)
   }
   ylog_min_or <- function() { v <- ylog_exp("y_log_min_exponent"); if (is.finite(v)) v else -2 }
@@ -14535,7 +14556,7 @@ server <- function(input, output, session) {
 
     out_p <- p + coord_cartesian(clip = "off") +
       labs(x        = x_label_obj(),
-           y        = axis_y_label(input$y_axis_label),
+           y        = axis_y_label(y_axis_label_now()),
            # v2.10: with journal spacing (theme_base_pt > 0) a blank title is NULL,
            # so no empty title row (~5 mm) is reserved above the panel. Legacy
            # spacing keeps "" so pre-2.10 figures reproduce exactly.
@@ -15140,7 +15161,7 @@ server <- function(input, output, session) {
                             if (is.null(v) || !nzchar(trimws(as.character(v)))) NULL else trimws(as.character(v)) }
     pl    <- nb("panel_label"); host <- nb("nb_host_strain"); phage <- nb("nb_phage_plasmid")
     moi   <- nb("nb_moi");      med  <- nb("nb_media");       temp  <- nb("nb_temperature")
-    ylab  <- markup_to_plain(nb("y_axis_label") %||% "optical density")   # v2.22: the figure markup as plain text
+    ylab  <- markup_to_plain({ yl <- trimws(as.character(y_axis_label_now() %||% "")); if (length(yl) == 1L && nzchar(yl)) yl else "optical density" })   # v2.22: the figure markup as plain text; v2.24.2: with the transform
     s1 <- paste0(if (!is.null(pl)) paste0("(", pl, ") ") else "",
                  "Growth and lysis of ", host %||% "the host strain",
                  if (!is.null(phage)) paste0(" infected with ", phage) else "",
@@ -15579,7 +15600,7 @@ server <- function(input, output, session) {
                     linewidth = lw * 0.5, alpha = 0.45) +
           geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable,
                                    group = variable), linewidth = lw * 1.3) +
-          base_scales + labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
+          base_scales + labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
         if (identical(sel1("y_scale_type"), "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       dose_response = {
@@ -15702,7 +15723,7 @@ server <- function(input, output, session) {
           guides(fill = "none", color = guide_legend(order = 1, override.aes = list(shape = NA)),
                  linetype = guide_legend(order = 1),
                  shape = guide_legend(order = 2, override.aes = list(color = "black", fill = "grey60"))) +
-          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
         if (identical(sel1("y_scale_type"), "log")) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       phases = {
@@ -15763,7 +15784,7 @@ server <- function(input, output, session) {
           scale_x_continuous(expand = c(0, 0)) +
           (if (logy) scale_y_log10(limits = y_lim, expand = c(0, 0), breaks = y_brk, labels = y_tick_labels(), oob = y_oob_fn())
            else scale_y_continuous(limits = y_lim, expand = c(0, 0), breaks = y_brk)) +
-          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
         g
       },
       difference = {
@@ -15922,7 +15943,7 @@ server <- function(input, output, session) {
                             size = ptsz) +
           scale_color_manual(values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
           marker_scales(samps, aes_v, labs_v, limits = sample_levels(samps)) +   # same limits: one merged key
-          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
         # v2.22: optional overlays (Curve fitting tab): the growth-fit band, the fitted lysis decay, the exponential window; none by default
         ov <- s22_fit_overlay(fr, logy, lw, yr = range(c(pd$mean_value, pd$lo, pd$hi)[is.finite(c(pd$mean_value, pd$lo, pd$hi))]))   # the window spans the plotted data (-Inf is not drawn on a log axis)
         if (length(ov$back)) g <- s22_prepend_layers(g, ov$back)
@@ -16026,7 +16047,7 @@ server <- function(input, output, session) {
         g <- g + (if (sty == "dot") list(base_scales_nf, marker_scales(samps, aes_v, labs_v)) else list(base_scales, scale_shape_manual(values = shp, labels = labs_v, name = NULL))) +
           scale_x_continuous(breaks = seq_along(tms), labels = as.character(tms), expand = expansion(add = 0.5),
                              guide = if (x_ang_ok && length(tms) >= 6) guide_axis(angle = 45) else waiver()) +
-          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn())
         else if (sty == "bar") g + expand_limits(y = 0) + scale_y_continuous(expand = expansion(mult = c(0, 0.08)))
         else g
@@ -16099,7 +16120,7 @@ server <- function(input, output, session) {
           scale_color_identity() +
           facet_wrap(~ panel, ncol = if (n_pan <= 3) n_pan else ceiling(sqrt(n_pan)), labeller = facet_strip_labeller(levels(pd$panel))) +
           scale_x_continuous(breaks = scales::breaks_pretty(n = 3)) +
-          labs(x = x_label_obj(), y = axis_y_label(input$y_axis_label))
+          labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g
       },
       lysed_fraction = {
@@ -16178,7 +16199,7 @@ server <- function(input, output, session) {
                                           size = (nin("legend_font_size", 14)) / ggplot2::.pt) +
           base_scales_nf + marker_scales(samps, aes_v, labs_v) +
           scale_x_continuous(expand = expansion(mult = c(0.02, 0.32))) +
-          labs(x = input$x_axis_label, y = axis_y_label(input$y_axis_label))
+          labs(x = input$x_axis_label, y = axis_y_label(y_axis_label_now()))
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g + scale_y_continuous(expand = expansion(mult = c(0.04, 0.12)))
       },
       auc = {
