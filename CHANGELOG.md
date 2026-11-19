@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.25.0 — 2026-11-18
+
+**Floating labels: names you drag onto the figure.** (The lysis-curve-app had this; it is now here too.)
+- **Legend position > Floating labels (drag each name).** The legend box is replaced by the sample names themselves, each in
+  its sample's colour, each its own label inside the panel. Drag a name where you want it (next to its curve, usually);
+  click it without dragging to rename it. The figure keeps its size.
+- **Extra labels on the figure** (Label Options): type one label per line (a gene name, "lysis onset") and drag each to its
+  place. `*text*` is italic, `**text**` bold, `x_{2}` / `x^{2}` sub- and superscript, so a gene name is `*mltG*`. They work
+  with every legend position, including an ordinary inside legend.
+- Places are fractions of the panel, so they hold on a log axis, with custom limits, on screen and in every export. A label
+  is kept whole inside the frame. A drop is exact (the page sends how far the label was moved; a second drag starts from
+  where the label is).
+- **Saved and restored.** Save Settings writes the places (`label_positions`); Clear & Reset and "Put the labels back"
+  return them to the default column; a settings file from the old lysis-curve-app loads its `floating_labels`.
+- With facets (one panel per group) the ordinary legend is used instead: a place inside "the panel" has no single meaning
+  there. Dragging needs the on-canvas preview (the default); the exports always carry the labels.
+- `tests/test_v225_floating_labels.R` (30 checks). Figures without floating or extra labels are unchanged.
+
 ## v2.24.2 — 2026-11-18
 
 **Third click-through round: the Data tab, the transforms, Statistics and Curve fitting.** About 90 option states on the
