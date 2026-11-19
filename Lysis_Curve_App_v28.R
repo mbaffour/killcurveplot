@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.25.0"
+APP_VERSION <- "2.25.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3768,7 +3768,7 @@ LEGACY_BASE <- list(
   theme_autoapply = TRUE,
   notes_show_caption = FALSE, notes_caption_fields = c("exp_id", "host_strain", "phage_plasmid", "moi"), notes_caption_size = 6,
   notes_pptx_slide = FALSE,
-  batch_outputs = "main", batch_format = "svg", batch_dpi = 300, batch_size_mode = "current", batch_width_mm = 89, batch_height_mm = 65,
+  batch_outputs = c("main", "legend_key"), batch_format = "svg", batch_dpi = 300, batch_size_mode = "current", batch_width_mm = 89, batch_height_mm = 65,
   night_mode = FALSE,
   # v2.22 statistics and fitting UI (Statistics tab sections, Curve fitting tab blocks, the AUC / per-time / 4PL figures).
   # Every one is off or a neutral choice: a session that does not touch them is exactly what it was.
@@ -7475,6 +7475,16 @@ OLD_IGNORED_REASONS <- c(
 OLD_SAMPLE_KEY_RE <- "^(color_selector|color|shape|shape_filled|line_type|legend_label|exclude_var|use_rgb|red|green|blue|alpha|use_hex|hex_color|apply_rgb|apply_hex)_([0-9]+)$"
 OLD_NEVER_GLOBAL <- c("file", "loadSettings", "selected_samples", "time_filter_range", "exclude_timepoints", "samples_select_all",
                       "samples_deselect_all", "saveSettings", "clearSettings", "load_demo", "compare_file")
+# v2.25.1: what a table widget reports about itself (rows on screen, sort, search box) is not a setting: never saved, never
+# loaded. A file saved after a visit to the Statistics tab came back as "7 settings had the wrong type and were ignored".
+TABLE_STATE_PREFIXES <- c("data_view_table_", "stats_tab_summary_")
+is_table_state_key <- function(nm) {
+  out <- rep(FALSE, length(nm))
+  for (pfx in TABLE_STATE_PREFIXES) out <- out | startsWith(nm, pfx)
+  out
+}
+# Legend positions that draw no legend box on the figure (names only, or nothing): the "Place the key on the figure" switch is off
+LEGEND_OFF_FIGURE <- c("none", "direct", "floating")
 LEGEND_POSITIONS_OK <- c("right", "left", "top", "bottom", "none", "inside-auto", "inside-top-left", "inside-top-right",
                          "inside-bottom-left", "inside-bottom-right", "inside-custom", "direct", "matrix", "floating")   # v2.23.4 inside-custom; v2.22 styling: direct labels, matrix legend
 
@@ -8066,7 +8076,10 @@ legend_key_boxes <- function(p) {
   g$grobs[i]
 }
 legend_key_grob <- function(plot, margin_mm = 2) {
-  bx <- legend_key_boxes(plot)
+  # v2.25.1: a figure with the matrix (grid) legend carries that legend as a grob: the key is that grid itself, so the
+  # downloaded key and the legend on the figure are the same thing (it used to be the plain one-column key)
+  ml <- if (inherits(plot, "ggplot")) attr(plot, "matrix_legend") else NULL
+  bx <- if (is.list(ml) && inherits(ml$grob, "gtable")) list(ml$grob) else legend_key_boxes(plot)
   if (!length(bx) && inherits(plot, "ggplot"))              # no legend (hidden, direct labels, matrix, inside): the plain right-hand key
     bx <- legend_key_boxes(plot + ggplot2::theme(legend.position = "right"))
   if (!length(bx)) return(NULL)
@@ -8720,9 +8733,16 @@ annotation_npc <- function(grob)
 FLOAT_LABEL_MAX <- 40L
 FLOAT_CLAMP <- function(v) min(0.98, max(0.02, v))
 # Where labels start before they are dragged: a staggered column, so nothing lies on top of something else.
+# v2.25.1: a column that reaches the bottom of the frame continues in the next one (x, x - 0.22, x + 0.22, ... inside the
+# frame); they used to pile up on the bottom edge, one on top of the other. The first column is where it always was.
 float_default_pos <- function(keys, x = 0.82, top = 0.92, step = 0.10) {
   if (!length(keys)) return(list())
-  setNames(lapply(seq_along(keys), function(i) c(x, FLOAT_CLAMP(top - step * (i - 1)))), keys)
+  per_col <- max(1L, as.integer(floor((top - 0.06) / step + 1e-9)) + 1L)
+  cols <- x + 0.22 * c(0, as.vector(rbind(-(1:4), 1:4))); cols <- cols[cols >= 0.05 & cols <= 0.95]
+  setNames(lapply(seq_along(keys), function(i) {
+    k <- (i - 1L) %/% per_col
+    c(cols[k %% length(cols) + 1L], FLOAT_CLAMP(top - step * ((i - 1L) %% per_col)))
+  }), keys)
 }
 # A {name: [fx, fy]} block from a settings file (or the old app's floating_labels) as a clean named list; junk is dropped.
 float_pos_clean <- function(fl) {
@@ -8989,6 +9009,9 @@ build_help_tab <- function() {
                 " are typeset as subscripts."),
         tags$li(strong("Legend:"), " ", strong("Legend position"), " in the strip (inside corners, the automatic corner, ",
                 "outside, or ", strong("None"), " with ", strong("Show End-of-Line Labels"), " under Label Options)."),
+        tags$li(strong("Names and gene names placed by hand:"), " Legend position ", strong("Floating labels (drag each name)"),
+                " turns every sample name into its own label that you drag onto the figure; ", strong("Extra labels on the figure"),
+                " under Label Options adds free text (", code("*mltG*"), " is an italic gene name), dragged the same way."),
         tags$li(strong("Panel letters:"), " ", strong("Panel label"), " under Figure Layout or in the Journal Figure Preset; ",
                 "the Analysis figures tab and the Compose figure tab have their own."),
         tags$li(strong("Events and thresholds:"), " a labelled marker under Time Point Markers, and the threshold line's ",
@@ -9048,7 +9071,8 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
                       selected = APP_DEFAULTS$legend_position)),
       conditionalPanel("input.legend_position == 'floating'",
         p(class = "kc-qe-note", "Every sample name is its own label, in the sample's colour. Drag each one where you want it on the figure; ",
-          "the places are kept in Save Settings. ", actionLink("reset_label_positions", "Put the labels back"), ".")),
+          "the places are kept in Save Settings. ", actionLink("reset_label_positions", "Put the labels back"), "."),
+        uiOutput("float_facet_note")),
       conditionalPanel("input.legend_position == 'inside-custom'",
         div(class = "kc-qe-field",
             tags$label(class = "control-label", "Legend x / y (fraction of the panel, 0 = left/bottom, 1 = right/top)"),
@@ -10102,6 +10126,7 @@ ui <- fluidPage(
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
                          "Each line is drawn on the figure in the legend font; drag it to its place. *text* is italic, **text** bold, x_{2} / x^{2} sub- and superscript. ",
                          "For the sample names themselves choose \u2018Floating labels\u2019 as the legend position (Quick edit strip)."),
+                       uiOutput("labels_facet_note"),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
                          "The legend position (Quick edit strip) also offers \u2018Direct labels at line ends\u2019 (each line named in its own colour, ",
                          "using the names from the strip) and a \u2018Matrix (grid) legend\u2019. Floating drag-to-place labels of the companion app are not ",
@@ -10789,6 +10814,7 @@ ui <- fluidPage(
             uiOutput("legend_samples_table"),
             h4("Legend key"),
             plotOutput("legend_key_preview", height = "auto"),
+            checkboxInput("legend_key_on_figure", "Place the key on the figure", !(APP_DEFAULTS$legend_position %in% LEGEND_OFF_FIGURE)),
             downloadButton("downloadLegendKey", "Download legend key", style = "margin-top:6px;"),
             kc_copy_button("legend_key", " Copy key", style = "margin-top:6px;"),
             downloadButton("downloadColourMap", "Download colour map (CSV)", style = "margin-top:6px;"),
@@ -11754,12 +11780,39 @@ server <- function(input, output, session) {
     out
   }
   figure_labels_now <- function() parse_figure_labels(input$figure_labels %||% "")
+  # v2.25.1: with one panel per group the labels are not drawn (the ordinary legend is). Say so where the labels are set:
+  # the names were simply gone from the figure, with the note under the menu still saying "drag each one".
+  labels_off_for_facets <- function() {
+    samps <- sel_samples()
+    if (is.null(rv$data) || !length(samps) || !isTRUE(input$facet_by_group)) return(FALSE)
+    !is.null(tryCatch(sample_group_map(samps, panel_groups(samps, resolve_aesthetics(samps))), error = function(e) NULL))
+  }
+  output$float_facet_note <- renderUI(if (floating_mode() && labels_off_for_facets())
+    p(class = "kc-qe-note", style = "color:#856404;", strong("One panel per group is on:"),
+      " the figure shows the ordinary legend and the names cannot be dragged. Untick it under Figure Layout to place the names by hand."))
+  output$labels_facet_note <- renderUI(if (length(figure_labels_now()) && labels_off_for_facets())
+    p(style = "font-size:.78em;color:#856404;margin-top:-2px;", strong("One panel per group is on:"),
+      " the extra labels are not drawn (with several panels a place on the figure has no single meaning). They come back when it is unticked."))
   note_positions <- function(labs) {
     out <- float_default_pos(labs, x = 0.5, top = 0.92, step = 0.08); st <- rv$note_pos
     for (k in labs) { if (!is.null(st[[k]])) out[[k]] <- st[[k]]; out[[k]][1] <- float_fit_x(out[[k]][1], k) }
     out
   }
   floating_mode <- function() identical(sel1("legend_position", "right"), "floating")
+  # v2.25.1: "Place the key on the figure" (Legend text tab) is the Legend position control seen from the key's side: off =
+  # no legend box on the figure, on = the last position that had one (the emptiest corner when there was none). One source
+  # of truth (legend_position), so the key on the figure and the downloaded key are always the same legend.
+  legend_last_on <- reactiveVal(NULL)
+  observeEvent(input$legend_position, {
+    pos <- sel1("legend_position", "right"); on <- !(pos %in% LEGEND_OFF_FIGURE)
+    if (on) legend_last_on(pos)
+    if (!identical(isTRUE(input$legend_key_on_figure), on)) updateCheckboxInput(session, "legend_key_on_figure", value = on)
+  })
+  observeEvent(input$legend_key_on_figure, {
+    pos <- sel1("legend_position", "right"); on <- !(pos %in% LEGEND_OFF_FIGURE); want <- isTRUE(input$legend_key_on_figure)
+    if (identical(want, on)) return(invisible(NULL))
+    updateSelectInput(session, "legend_position", selected = if (want) (legend_last_on() %||% "inside-auto") else "none")
+  }, ignoreInit = TRUE)
   # What the page needs to make the labels draggable: id, place and plain text of each (NULL when there is none).
   label_layout_now <- function() {
     samps <- sel_samples()
@@ -12689,7 +12742,7 @@ server <- function(input, output, session) {
                            "time_filter_range", "exclude_timepoints",
                            # v2.24.1: buttons and file pickers are not settings (they were written into the file, and the colour-map picker's
                            # upload record came back as a "wrong type" warning)
-                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions",
+                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions", "legend_key_on_figure",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                            "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -12716,7 +12769,7 @@ server <- function(input, output, session) {
       
       # Global visual settings: everything that isn't data-specific or per-sample
       global_settings <- all_inputs[vapply(names(all_inputs), function(nm)
-        !(nm %in% data_inputs) && !is_sample_inp(nm) && !startsWith(nm, "data_view_table_"), logical(1))]
+        !(nm %in% data_inputs) && !is_sample_inp(nm) && !is_table_state_key(nm), logical(1))]
       
       # Per-sample aesthetics keyed by sample name
       sample_aesthetics <- list()
@@ -12823,7 +12876,7 @@ server <- function(input, output, session) {
     # Skip anything data-specific or per-sample — only visual controls
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
-                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions",   # v2.24.1 (files saved before it carry them)
+                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions", "legend_key_on_figure",   # v2.24.1 (files saved before it carry them)
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                          "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -12861,7 +12914,7 @@ server <- function(input, output, session) {
     is_sample_key <- rep(FALSE, length(gkeys))
     for (pfx in sample_prefixes) is_sample_key <- is_sample_key | startsWith(gkeys, pfx)
     is_sample_key <- is_sample_key & !(gkeys %in% global_exceptions)
-    skip_key <- gkeys %in% data_inputs | is_sample_key | startsWith(gkeys, "data_view_table_")
+    skip_key <- gkeys %in% data_inputs | is_sample_key | is_table_state_key(gkeys)
     unk_key  <- !skip_key & !(gkeys %in% inp_names)
     ignored_unknown <- gkeys[unk_key]
     for (gi in which(!skip_key & !unk_key)) {
@@ -13225,7 +13278,7 @@ server <- function(input, output, session) {
           sel <- input[[paste0("color_selector_", vi)]]
           if (!is.null(sel) && sel != "custom") clear_qe_color(vnl, sel)   # v2.21: the sidebar colour wins again
           if (!is.null(sel) && sel != "custom") {
-            rc <- tryCatch(col2rgb(sel), error = function(e) NULL)
+            rc <- tryCatch(unname(col2rgb(sel)), error = function(e) NULL)
             if (!is.null(rc)) {
               updateSliderInput(session, paste0("red_",   vi), value = rc[1, 1])
               updateSliderInput(session, paste0("green_", vi), value = rc[2, 1])
@@ -13241,7 +13294,7 @@ server <- function(input, output, session) {
           clear_qe_color(vnl, col)                                          # v2.21: a different sidebar colour wins over the strip's
           session$sendCustomMessage("updateColorPreview",
                                     list(id = paste0("color_preview_", vi), color = col))
-          rc <- tryCatch(col2rgb(col), error = function(e) NULL)
+          rc <- tryCatch(unname(col2rgb(col)), error = function(e) NULL)
           if (!is.null(rc)) {
             updateSliderInput(session, paste0("red_",   vi), value = rc[1, 1])
             updateSliderInput(session, paste0("green_", vi), value = rc[2, 1])
@@ -13263,7 +13316,7 @@ server <- function(input, output, session) {
           hex <- normalize_hex_color(input[[paste0("hex_color_", vi)]])
           updateSelectInput(session, paste0("color_selector_", vi), selected = "custom")
           updateTextInput(session, paste0("color_", vi), value = hex)
-          rc <- tryCatch(col2rgb(hex), error = function(e) NULL)
+          rc <- tryCatch(unname(col2rgb(hex)), error = function(e) NULL)
           if (!is.null(rc)) {
             updateSliderInput(session, paste0("red_",   vi), value = rc[1, 1])
             updateSliderInput(session, paste0("green_", vi), value = rc[2, 1])
@@ -18546,6 +18599,12 @@ server <- function(input, output, session) {
             skipped <- c(skipped, paste0("Composed figure, panel left out: ", comp$skipped))
         }
       }) else skipped <- c(skipped, "Composed figure: the 'patchwork' package is not installed.")
+      attempt("Legend key", {          # v2.25.1: the key of the main figure, in the same two formats as every figure here
+        k <- legend_key_for(generate_plot())
+        if (is.null(k)) skipped <- c(skipped, "Legend key: the main figure has no legend to cut a key from.")
+        else for (fmt in c("svg", "png"))
+          write_legend_key(k, file.path(dir, paste0("legend_key.", fmt)), fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
+      })
       writeLines(enc2utf8(trimws(figure_legend_string())), file.path(dir, "figure_legend.txt"), useBytes = TRUE)
       mth <- trimws(input$methods_text %||% "")
       if (!nzchar(mth)) mth <- trimws(tryCatch(draft_methods_text(), error = function(e) ""))   # the drafted paragraph when the box is empty

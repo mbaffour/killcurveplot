@@ -104,9 +104,10 @@ The **Panels** section (after Axis Settings) holds:
   GIF builds draw it. The dashboard thumbnail and a non-fixed *Compose figure* panel show the figure without it.
 * **Hide lines** (Line & Point Settings) leaves the points and the error bars; the legend key becomes a point.
 * **Open diamond** and **open down-triangle** point shapes (hollow whatever the Filled box says; codes 123 and 125).
-* *Not ported:* the companion app's floating, drag-to-place legend labels. Here the preview is an inline SVG, not an image
-  the page can lay draggable labels over, so the placement maths would have to be rewritten against the SVG; direct labels
-  and the inside legend positions cover the use.
+* **Floating labels** (v2.25.0; the companion app's drag-to-place legend labels). Legend position **Floating labels (drag
+  each name)** replaces the legend box with the sample names, each in its colour, each dragged to its place on the inline
+  SVG preview; **Extra labels on the figure** (Label Options) adds free text placed the same way. Places are fractions of
+  the panel, saved in the settings file (`label_positions`); a file from the companion app loads its `floating_labels`.
 
 ## Axes
 

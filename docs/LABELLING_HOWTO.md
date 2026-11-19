@@ -49,11 +49,14 @@ The name of a sample is the text in its legend entry, and the app uses the same 
 
 ## 4. Where the legend goes
 
-**Legend position:** in the **Quick edit** strip offers the four sides outside the panel, the four inside corners, **Inside: emptiest corner (auto)** and **None**.
+**Legend position:** in the **Quick edit** strip offers the four sides outside the panel, the four inside corners, **Inside: emptiest corner (auto)**, **Inside: custom (drag it on the figure)**, **Direct labels at line ends**, **Floating labels (drag each name)**, **Matrix (grid) legend** and **None**.
 
 - **Inside: emptiest corner (auto)** is what the journal preset picks. It puts the key in the corner with the fewest plotted points and moves it outside, to the right, when there are more than four entries or every corner overlaps data.
 - **Legend box border**, **Legend key size (mm; 0 = auto)** and **Legend Font Size:** adjust the key. **Figure Layout** also holds **Sample order (legend, panels, facets):**.
 - **None** removes the key. Use it with end-of-line labels (section 5), or when the figure is one panel of a composed figure whose other panel already carries the key.
+- **Floating labels (drag each name)** replaces the key with the sample names themselves, each in its sample's colour. Drag each name next to its curve; click a name without dragging to rename it. **Put the labels back** under the menu returns them to the starting column. The places are saved with **Save Settings** and drawn in every export. With **One panel per group** the ordinary legend is used instead.
+- **Extra labels on the figure** (under **Label Options**) adds free text, one label per line: a gene name (`*mltG*` is italic), "lysis onset", a strain. Drag each to its place; they work with every legend position.
+- The **Legend text** tab has the legend as a separate image (**Download legend key**), the same legend as on the figure, and **Place the key on the figure**: untick it to keep the figure clean and put the key beside it in the layout, tick it to bring the legend back where it was. With floating labels the names on the figure carry no markers, so the downloaded key is where marker shape, fill and line type are shown.
 
 ## 5. Labels at the ends of lines
 
