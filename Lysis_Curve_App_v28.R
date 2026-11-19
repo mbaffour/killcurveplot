@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.24.2"
+APP_VERSION <- "2.25.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3825,7 +3825,8 @@ n4_preset_settings <- function()
                   error_bar_width = 1, error_bar_thickness = 0.8,
                   font_family = "sans", color_palette = "custom", x_tick_interval = 30))
 APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # v2.16: no panel letter unless the user sets one
-                  list(legend_inside_x = 0.98, legend_inside_y = 0.98))        # v2.23.4: appended at the end (the dragged legend, top-right)
+                  list(legend_inside_x = 0.98, legend_inside_y = 0.98),        # v2.23.4: appended at the end (the dragged legend, top-right)
+                  list(figure_labels = ""))                                     # v2.25.0: extra labels on the figure, one per line
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -7475,7 +7476,7 @@ OLD_SAMPLE_KEY_RE <- "^(color_selector|color|shape|shape_filled|line_type|legend
 OLD_NEVER_GLOBAL <- c("file", "loadSettings", "selected_samples", "time_filter_range", "exclude_timepoints", "samples_select_all",
                       "samples_deselect_all", "saveSettings", "clearSettings", "load_demo", "compare_file")
 LEGEND_POSITIONS_OK <- c("right", "left", "top", "bottom", "none", "inside-auto", "inside-top-left", "inside-top-right",
-                         "inside-bottom-left", "inside-bottom-right", "inside-custom", "direct", "matrix")   # v2.23.4 inside-custom; v2.22 styling: direct labels, matrix legend
+                         "inside-bottom-left", "inside-bottom-right", "inside-custom", "direct", "matrix", "floating")   # v2.23.4 inside-custom; v2.22 styling: direct labels, matrix legend
 
 # one JSON value as an R scalar / vector: a one-element array (list) becomes its element, NULL / empty -> NULL
 settings_unbox <- function(v) {
@@ -7678,10 +7679,11 @@ translate_old_settings <- function(s, od_vars = NULL, known_ids = NULL) {
       # panel / leg_row / leg_col are kept: the Panels section and the matrix legend are controls here (v2.22 styling)
       samples[[nm]] <- a
     }
-    if (!is.null(s[["floating_labels"]])) ign("floating_labels", OLD_IGNORED_REASONS[["floating_labels"]])
   }
   ignored <- if (ign_n) setNames(ign_v[seq_len(ign_n)], ign_k[seq_len(ign_n)]) else character(0)
-  list(kind = kind, s = list(global_settings = g, sample_aesthetics = samples), unselect = unselect, positional = positional,
+  list(kind = kind, s = c(list(global_settings = g, sample_aesthetics = samples),
+                          if (identical(kind, "lca") && is.list(s[["floating_labels"]])) list(label_positions = list(samples = s[["floating_labels"]]))),   # v2.25.0
+       unselect = unselect, positional = positional,
        ignored = ignored, notes = notes, n_global = length(g),
        n_sample_settings = count_sample_settings(samples))
 }
@@ -8700,6 +8702,48 @@ marker_scales <- function(samps, aes_v, labels, name = NULL, limits = NULL, colo
        do.call(ggplot2::scale_fill_manual,  c(list(values = fill), a)))
 }
 
+# ── v2.25.0: floating labels ─────────────────────────────────────────────────
+# Text placed on the panel by panel FRACTION (0,0 = bottom-left, 1,1 = top-right), so a position means the same on a log
+# axis, with custom limits, on screen and in every export. annotation_custom() cannot be used: its -Inf / Inf bounds go
+# through the scale transform (log10(-Inf) = NaN) and the viewport collapses. This geom hands the grob to grid untouched.
+GeomNpcGrob <- ggplot2::ggproto(
+  "GeomNpcGrob", ggplot2::Geom,
+  extra_params = c("na.rm", "npc_grob"),
+  handle_na    = function(data, params) data,
+  draw_panel   = function(data, panel_params, coord, npc_grob) npc_grob,
+  draw_key     = ggplot2::draw_key_blank,
+  default_aes  = ggplot2::aes(),
+  required_aes = character(0))
+annotation_npc <- function(grob)
+  ggplot2::layer(data = data.frame(x = NA_real_), mapping = NULL, stat = ggplot2::StatIdentity, position = ggplot2::PositionIdentity,
+                 geom = GeomNpcGrob, inherit.aes = FALSE, show.legend = FALSE, params = list(npc_grob = grob))
+FLOAT_LABEL_MAX <- 40L
+FLOAT_CLAMP <- function(v) min(0.98, max(0.02, v))
+# Where labels start before they are dragged: a staggered column, so nothing lies on top of something else.
+float_default_pos <- function(keys, x = 0.82, top = 0.92, step = 0.10) {
+  if (!length(keys)) return(list())
+  setNames(lapply(seq_along(keys), function(i) c(x, FLOAT_CLAMP(top - step * (i - 1)))), keys)
+}
+# A {name: [fx, fy]} block from a settings file (or the old app's floating_labels) as a clean named list; junk is dropped.
+float_pos_clean <- function(fl) {
+  out <- list()
+  if (!is.list(fl) || !length(fl) || is.null(names(fl))) return(out)
+  for (nm in utils::head(names(fl), 2000L)) {
+    if (!nzchar(nm)) next
+    v <- suppressWarnings(as.numeric(unlist(fl[[nm]])))
+    if (length(v) >= 2L && all(is.finite(v[1:2]))) out[[nm]] <- c(min(1, max(0, v[1])), min(1, max(0, v[2])))
+  }
+  out
+}
+# The extra labels typed in the box: one per line, blank lines and repeats dropped, at most 40, each at most 200 characters.
+parse_figure_labels <- function(txt) {
+  if (!is.character(txt) || length(txt) != 1L || is.na(txt)) return(character(0))
+  l <- trimws(strsplit(txt, "\r?\n")[[1]]); l <- unique(l[nzchar(l)])
+  utils::head(substr(l, 1L, 200L), FLOAT_LABEL_MAX)
+}
+# The plain characters of a label as the browser sees them in the figure (markup marks removed)
+float_label_plain <- function(x) trimws(gsub("[_^]\\{([^}]*)\\}", "\\1", gsub("\\*+", "", x)))
+
 # ── Panels (facets) ──────────────────────────────────────────────────────────
 FACET_SCALES_CHOICES <- c("Shared axes" = "fixed", "Free y" = "free_y", "Free x" = "free_x", "Free both" = "free")
 FACET_STRIP_CHOICES  <- c("Plain text (default)" = "plain", "Boxed strip" = "box", "None" = "none")
@@ -8998,9 +9042,13 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
                                   "Inside: emptiest corner (auto)" = "inside-auto",
                                   "Inside: custom (drag it on the figure)" = "inside-custom",   # v2.23.4
                                   "Direct labels at line ends"     = "direct",   # v2.22: no legend box, each line named in its colour
+                                  "Floating labels (drag each name)" = "floating",   # v2.25.0: every name its own label, dragged on the figure
                                   "Matrix (grid) legend"           = "matrix",   # v2.22: rows x columns (set under Figure Layout)
                                   "None"                 = "none"),
                       selected = APP_DEFAULTS$legend_position)),
+      conditionalPanel("input.legend_position == 'floating'",
+        p(class = "kc-qe-note", "Every sample name is its own label, in the sample's colour. Drag each one where you want it on the figure; ",
+          "the places are kept in Save Settings. ", actionLink("reset_label_positions", "Put the labels back"), ".")),
       conditionalPanel("input.legend_position == 'inside-custom'",
         div(class = "kc-qe-field",
             tags$label(class = "control-label", "Legend x / y (fraction of the panel, 0 = left/bottom, 1 = right/top)"),
@@ -9213,7 +9261,7 @@ ui <- fluidPage(
          document.addEventListener('click', function(ev) {
            var t = ev.target && ev.target.closest ? ev.target.closest('#od_plot_svg text.kc-ed') : null;
            if (t) { kcOpen(t); return; }
-           if (ev.target && ev.target.classList && ev.target.classList.contains('kc-leg-drag')) return;   // the legend overlay: its own mouseup opened (or left) the editor
+           if (ev.target && ev.target.classList && (ev.target.classList.contains('kc-leg-drag') || ev.target.classList.contains('kc-lab-drag'))) return;   // the legend overlay: its own mouseup opened (or left) the editor
            if (kcPop && kcPop.style.display !== 'none' && !kcPop.contains(ev.target)) kcClose();
          });
          document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape' && kcCur) kcClose(); });
@@ -9310,7 +9358,7 @@ ui <- fluidPage(
            if (kcGhostSvg && kcGhostSvg !== svg) kcDropGhost();          // the redrawn figure is here: the dragged copy goes
            host.querySelectorAll('.kc-leg-drag').forEach(function(e) { e.remove(); });
            var pos = kcVal('legend_position');
-           if (!svg || pos === 'none' || pos === 'direct' || pos === 'matrix') return;
+           if (!svg || pos === 'none' || pos === 'direct' || pos === 'matrix' || pos === 'floating') return;   // (floating: every name has its own handle, kcLabDrag)
            var texts = host.querySelectorAll('svg text.kc-ed[data-kc=sample]'); if (!texts.length) return;
            var vbb = svg.viewBox && svg.viewBox.baseVal, r = svg.getBoundingClientRect();
            if (!(r.width > 0)) return;
@@ -9404,9 +9452,79 @@ ui <- fluidPage(
              document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
            });
          }
+         // v2.25.0: floating labels. The server sends, with the figure, the place (panel fractions) and the plain text of
+         // every floating sample name and extra label (#kc_label_data). Each is found in the figure by its place, gets a
+         // transparent handle, and is dragged by moving its own text; the drop sends how far it went (fractions of the
+         // panel) and the server adds that to the stored place. A click without a drag on a sample name opens its editor.
+         function kcLabDrag() {
+           var host = document.getElementById('od_plot_svg'); if (!host) return;
+           host.querySelectorAll('.kc-lab-drag').forEach(function(e) { e.remove(); });
+           var svg = host.querySelector('svg'), dj = host.querySelector('#kc_label_data'); if (!svg || !dj) return;
+           var data; try { data = JSON.parse(dj.textContent || '{}'); } catch (e) { return; }
+           var vbb = svg.viewBox && svg.viewBox.baseVal, r = svg.getBoundingClientRect(); if (!(r.width > 0) || !vbb || !vbb.width) return;
+           var vb = {x: vbb.x, y: vbb.y, width: vbb.width, height: vbb.height}, k = vb.width / r.width;
+           var P = kcPanelBox(svg, vb) || kcPanelRect(svg, vb); if (!P) return;
+           var hr = host.getBoundingClientRect(), offX = r.left - hr.left + (host.scrollLeft || 0), offY = r.top - hr.top + (host.scrollTop || 0);
+           var texts = []; svg.querySelectorAll('text').forEach(function(t) { var b; try { b = t.getBBox(); } catch (e) { return; } if (b.width > 0 && !t.getAttribute('transform')) texts.push({el: t, b: b, s: (t.textContent || '').trim(), used: false}); });
+           function grab(it) {                                            // the text element(s) drawn at this label's place
+             var cx = P.x + it.fx * P.w, cy = P.y + (1 - it.fy) * P.h, plain = String(it.text || ''), best = null, bd = 1e9;
+             texts.forEach(function(q) {
+               if (q.used || !q.s || plain.indexOf(q.s) < 0) return;
+               var my = q.b.y + q.b.height / 2; if (Math.abs(my - cy) > 0.9 * q.b.height) return;
+               if (cx < q.b.x - plain.length * q.b.height || cx > q.b.x + q.b.width + plain.length * q.b.height) return;
+               var d = Math.abs(q.b.x + q.b.width / 2 - cx) + 2 * Math.abs(my - cy); if (d < bd) { bd = d; best = q; }
+             });
+             if (!best) return null;
+             var grp = [best]; best.used = true;
+             texts.forEach(function(q) {                                   // the rest of a label drawn in pieces (markup): same line, touching
+               if (q.used || !q.s || plain.indexOf(q.s) < 0) return;
+               if (Math.abs((q.b.y + q.b.height / 2) - (best.b.y + best.b.height / 2)) > 0.7 * best.b.height) return;
+               var x0 = Math.min.apply(null, grp.map(function(g) { return g.b.x; })), x1 = Math.max.apply(null, grp.map(function(g) { return g.b.x + g.b.width; }));
+               if (q.b.x > x1 + 0.6 * best.b.height || q.b.x + q.b.width < x0 - 0.6 * best.b.height) return;
+               if (Math.abs((q.b.x + q.b.width / 2) - cx) > plain.length * best.b.height * 0.6) return;
+               grp.push(q); q.used = true;
+             });
+             return grp;
+           }
+           function handle(kind, it) {
+             var grp = grab(it); if (!grp) return;
+             var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+             grp.forEach(function(g) { x0 = Math.min(x0, g.b.x); y0 = Math.min(y0, g.b.y); x1 = Math.max(x1, g.b.x + g.b.width); y1 = Math.max(y1, g.b.y + g.b.height); });
+             var ov = document.createElement('div'); ov.className = 'kc-lab-drag'; ov.title = kind === 'sample' ? 'Drag to move this label (click to rename)' : 'Drag to move this label';
+             var l0 = offX + (x0 - vb.x) / k - 3, t0 = offY + (y0 - vb.y) / k - 2, w0 = (x1 - x0) / k + 6, h0 = (y1 - y0) / k + 4;
+             ov.style.left = l0 + 'px'; ov.style.top = t0 + 'px'; ov.style.width = w0 + 'px'; ov.style.height = h0 + 'px';
+             host.appendChild(ov);
+             ov.addEventListener('mousedown', function(ev) {
+               if (ev.button !== 0 || ev.ctrlKey) return; document.body.classList.add('kc-nosel');
+               var sx = ev.clientX, sy = ev.clientY, moved = false, dxp = 0, dyp = 0;
+               var pw = P.w / k, ph = P.h / k, pl = offX + (P.x - vb.x) / k, pt = offY + (P.y - vb.y) / k;
+               function mv(e) {
+                 var dx = e.clientX - sx, dy = e.clientY - sy;
+                 if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+                 moved = true;
+                 dx = Math.max(pl + 2 - l0, Math.min(pl + pw - 2 - (l0 + w0), dx));             // the whole label stays inside the frame
+                 dy = Math.max(pt + 2 - t0, Math.min(pt + ph - 2 - (t0 + h0), dy));
+                 dxp = dx; dyp = dy;
+                 grp.forEach(function(g) { g.el.setAttribute('transform', 'translate(' + (dx * k) + ',' + (dy * k) + ')'); });
+                 ov.style.transform = 'translate(' + dx + 'px,' + dy + 'px)'; ov.classList.add('kc-moving');
+               }
+               function up(e) {
+                 document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+                 document.body.classList.remove('kc-nosel'); ov.classList.remove('kc-moving');
+                 if (!moved) { if (kind === 'sample' && grp[0].el.classList.contains('kc-ed')) kcOpen(grp[0].el); return; }
+                 if (Math.abs(dxp) < 0.5 && Math.abs(dyp) < 0.5) return;
+                 if (window.Shiny && Shiny.setInputValue)
+                   Shiny.setInputValue('kc_label_drop', {kind: kind, id: it.id, dfx: dxp / pw, dfy: -dyp / ph, n: Date.now()}, {priority: 'event'});
+               }
+               document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+             });
+           }
+           (data.samples || []).forEach(function(it) { handle('sample', it); });
+           (data.notes || []).forEach(function(it) { handle('note', it); });
+         }
          // after the SVG is replaced: tag its labels again; the popover stays only while its label still exists
          function kcAfterRender() {
-           kcMark(); kcLegDrag();
+           kcMark(); kcLegDrag(); kcLabDrag();
            if (!kcCur || !kcPop) return;
            var hit = null;
            document.querySelectorAll('#od_plot_svg text.kc-ed').forEach(function(t) {
@@ -9687,6 +9805,8 @@ ui <- fluidPage(
       .kc-leg-drag { position:absolute; z-index:40; cursor:move; background:transparent; }
       .kc-nosel, .kc-nosel * { user-select:none !important; -webkit-user-select:none !important; }
       .kc-leg-drag:hover { outline:1px dashed #0069d9; }
+      .kc-lab-drag { position:absolute; z-index:40; cursor:move; background:transparent; }
+      .kc-lab-drag:hover, .kc-lab-drag.kc-moving { outline:1px dashed #0069d9; }
       .kc-leg-veil { position:absolute; z-index:39; background:rgba(255,255,255,.82); pointer-events:none; }
       .kc-leg-ghost { position:absolute; z-index:41; overflow:hidden; pointer-events:none; outline:1px dashed #0069d9; box-shadow:0 1px 6px rgba(0,0,0,.25); background:#fff; }
       .kc-leg-ghost.kc-out { outline-color:#c7511f; }
@@ -9976,6 +10096,12 @@ ui <- fluidPage(
                                                selected = APP_DEFAULTS$legend_text_face))
                        ),
                        numericInput("legend_wrap_width", "Wrap legend labels at (characters; blank = no wrapping):", APP_DEFAULTS$legend_wrap_width, 5, 80, 1),
+                       # v2.25.0: free labels on the figure (a gene name, an arrow caption): typed here, dragged on the figure
+                       textAreaInput("figure_labels", "Extra labels on the figure (one per line):", APP_DEFAULTS$figure_labels, rows = 2,
+                                     placeholder = "*mltG*\nlysis onset"),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Each line is drawn on the figure in the legend font; drag it to its place. *text* is italic, **text** bold, x_{2} / x^{2} sub- and superscript. ",
+                         "For the sample names themselves choose \u2018Floating labels\u2019 as the legend position (Quick edit strip)."),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
                          "The legend position (Quick edit strip) also offers \u2018Direct labels at line ends\u2019 (each line named in its own colour, ",
                          "using the names from the strip) and a \u2018Matrix (grid) legend\u2019. Floating drag-to-place labels of the companion app are not ",
@@ -11611,6 +11737,68 @@ server <- function(input, output, session) {
     if (identical(id, "y_scale_type") && transform_effective() %in% c("pct_max", "ln")) return("linear")
     v
   }
+  # ── v2.25.0: floating labels ────────────────────────────────────────────────
+  # The place of every sample name (legend position "floating") and of every extra label: the dragged place if there is
+  # one, else the default column. Panel fractions.
+  # A label is kept whole inside the frame: its centre cannot come closer to the left / right edge than half its own
+  # (estimated) width. One rule for the drawing, for the page and for the next drag, so they never disagree.
+  float_fit_x <- function(x, label) {
+    pw <- tryCatch(if (fixed_mode()) panel_dims_mm("main")[1] / 25.4 * 72 else export_size_in()[1] * 72 * 0.8, error = function(e) 184)
+    if (!is.numeric(pw) || length(pw) != 1L || !is.finite(pw) || pw <= 0) pw <- 184
+    hw <- min(0.48, 0.27 * nchar(float_label_plain(label)) * nin("legend_font_size") / pw)
+    min(max(x, 0.01 + hw), 0.99 - hw)
+  }
+  float_positions <- function(samples) {
+    out <- float_default_pos(samples); st <- rv$float_pos
+    for (vn in samples) { if (!is.null(st[[vn]])) out[[vn]] <- st[[vn]]; out[[vn]][1] <- float_fit_x(out[[vn]][1], dname(vn)) }
+    out
+  }
+  figure_labels_now <- function() parse_figure_labels(input$figure_labels %||% "")
+  note_positions <- function(labs) {
+    out <- float_default_pos(labs, x = 0.5, top = 0.92, step = 0.08); st <- rv$note_pos
+    for (k in labs) { if (!is.null(st[[k]])) out[[k]] <- st[[k]]; out[[k]][1] <- float_fit_x(out[[k]][1], k) }
+    out
+  }
+  floating_mode <- function() identical(sel1("legend_position", "right"), "floating")
+  # What the page needs to make the labels draggable: id, place and plain text of each (NULL when there is none).
+  label_layout_now <- function() {
+    samps <- sel_samples()
+    if (is.null(rv$data) || !length(samps)) return(NULL)
+    if (isTRUE(input$facet_by_group) && !is.null(sample_group_map(samps, panel_groups(samps, resolve_aesthetics(samps))))) return(NULL)   # one panel only
+    out <- list(samples = list(), notes = list())
+    if (floating_mode()) {
+      fp <- float_positions(samps)
+      out$samples <- lapply(samps, function(vn) list(id = safe_id(vn), fx = fp[[vn]][1], fy = fp[[vn]][2], text = float_label_plain(dname(vn))))
+    }
+    labs <- figure_labels_now()
+    if (length(labs)) { np <- note_positions(labs)
+      out$notes <- lapply(seq_along(labs), function(i) list(id = i, fx = np[[labs[i]]][1], fy = np[[labs[i]]][2], text = float_label_plain(labs[i]))) }
+    if (!length(out$samples) && !length(out$notes)) NULL else out
+  }
+  # A label was dragged on the figure: the page sends which one and how far (fractions of the panel), the new place is the
+  # old one plus that, kept inside the frame.
+  observeEvent(input$kc_label_drop, {
+    d <- input$kc_label_drop
+    if (!is.list(d)) return(invisible(NULL))
+    num1 <- function(v) { v <- suppressWarnings(as.numeric(unlist(v))); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
+    dx <- num1(d$dfx); dy <- num1(d$dfy); kind <- as.character(unlist(d$kind) %||% "")[1]
+    if (is.na(dx) || is.na(dy) || abs(dx) > 2 || abs(dy) > 2) return(invisible(NULL))
+    if (identical(kind, "sample")) {
+      samps <- sel_samples(); id <- as.character(unlist(d$id) %||% "")[1]
+      vn <- samps[vapply(samps, safe_id, "") == id]
+      if (length(vn) != 1L) return(invisible(NULL))
+      cur <- float_positions(samps)[[vn]]; fp <- rv$float_pos
+      fp[[vn]] <- c(FLOAT_CLAMP(cur[1] + dx), FLOAT_CLAMP(cur[2] + dy)); rv$float_pos <- fp
+    } else if (identical(kind, "note")) {
+      labs <- figure_labels_now(); i <- suppressWarnings(as.integer(num1(d$id)))
+      if (is.na(i) || i < 1L || i > length(labs)) return(invisible(NULL))
+      cur <- note_positions(labs)[[labs[i]]]; np <- rv$note_pos
+      np[[labs[i]]] <- c(FLOAT_CLAMP(cur[1] + dx), FLOAT_CLAMP(cur[2] + dy)); rv$note_pos <- np
+    }
+    invisible(NULL)
+  })
+  observeEvent(input$reset_label_positions, { rv$float_pos <- list(); rv$note_pos <- list() }, ignoreInit = TRUE)
+
   # The transform that is really applied: "control" without a control sample changes nothing.
   transform_effective <- function() {
     m <- tryCatch(transform_mode_current(), error = function(e) "none")
@@ -11699,6 +11887,8 @@ server <- function(input, output, session) {
                            contentType = contentType, outputArgs = outputArgs)
   
   rv <- reactiveValues(
+    float_pos         = list(),  # v2.25.0: sample name -> c(fx, fy), the dragged place of its floating label (panel fractions)
+    note_pos          = list(),  # v2.25.0: extra label text -> c(fx, fy)
     data              = NULL,
     data_source       = NULL,   # file name (or "Demo data") for provenance
     time_col          = NULL,
@@ -12499,7 +12689,7 @@ server <- function(input, output, session) {
                            "time_filter_range", "exclude_timepoints",
                            # v2.24.1: buttons and file pickers are not settings (they were written into the file, and the colour-map picker's
                            # upload record came back as a "wrong type" warning)
-                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style",
+                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                            "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -12564,7 +12754,11 @@ server <- function(input, output, session) {
         saved_at          = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
         global_settings   = global_settings,
         sample_aesthetics = sample_aesthetics
-      )
+      ) -> doc
+      # v2.25.0: the dragged places of the floating labels and of the extra labels (only when something was dragged)
+      lp <- list(samples = isolate(rv$float_pos), notes = isolate(rv$note_pos)); lp <- lp[vapply(lp, length, 1L) > 0L]
+      if (length(lp)) doc$label_positions <- lp
+      doc
   }
   output$saveSettings <- downloadHandler(
     filename = function()
@@ -12621,12 +12815,15 @@ server <- function(input, output, session) {
     global <- migrate_styling_settings(global, s$styling_schema)   # v2.22: palette names of a pre-v2.22 file
     sample_aes <- lapply(sample_aes, sanitize_sample_aes)          # round 2 (F07): only values the widgets can take reach the sidebar rows
     rv$imported_settings <- list(global = global, samples = sample_aes)
+    if (is.list(s$label_positions)) {                    # v2.25.0 (an old lysis-curve-app file: its floating_labels, see translate_old_settings)
+      rv$float_pos <- float_pos_clean(s$label_positions$samples); rv$note_pos <- float_pos_clean(s$label_positions$notes)
+    }
 
     # ── Apply global visual settings ──────────────────────────────────────────
     # Skip anything data-specific or per-sample — only visual controls
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
-                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style",   # v2.24.1 (files saved before it carry them)
+                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions",   # v2.24.1 (files saved before it carry them)
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                          "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -12843,6 +13040,7 @@ server <- function(input, output, session) {
     for (v in rv$od_vars)                                 # v2.21: display names and quick-edit colours back to the file's own
       tryCatch(updateTextInput(session, paste0("qe_name_", safe_id(v)), value = v), error = function(e) invisible(NULL))
     rv$qe_colors <- list()
+    rv$float_pos <- list(); rv$note_pos <- list()          # v2.25.0: the dragged labels go back to their default column
     rv$imported_settings <- NULL
     rv$settings_status   <- list(
       type    = "ok",
@@ -13829,7 +14027,7 @@ server <- function(input, output, session) {
     leg_face <- { f <- sel1("legend_text_face", "plain"); if (f %in% c("bold", "italic", "bold.italic")) f else NULL }   # v2.22 (NULL = the theme's own plain)
     # v2.22: "Direct labels at line ends" and the matrix legend replace the legend box; a figure without end labels
     # (the analysis figures) keeps an ordinary key on the right
-    if (leg_pos %in% c("direct", "matrix")) leg_pos <- if (isTRUE(special_legend)) "none" else "right"
+    if (leg_pos %in% c("direct", "matrix", "floating")) leg_pos <- if (isTRUE(special_legend)) "none" else "right"   # v2.25.0: floating labels replace the box too
 
     layers <- list(base_t, theme(
       text             = element_text(family = sel1("font_family")),
@@ -14344,6 +14542,23 @@ server <- function(input, output, session) {
                         name = { tl <- trimws(input$legend_title %||% ""); if (nzchar(tl)) text_label(tl) else NULL }, colours = display_colors)
     }
     
+    # v2.25.0: floating labels. Every sample name as its own text in the sample's colour (legend position "floating"),
+    # and the extra labels of the Label Options box, each at its dragged place (panel fractions). One panel only: with
+    # facets the ordinary key is used instead.
+    if (is.null(grp_map)) {
+      f_fam <- sel1("font_family", APP_DEFAULTS$font_family); f_pt <- nin("legend_font_size")
+      f_one <- function(lab, xy, col, face, nm) annotation_npc(grid::textGrob(
+        label = markup_label(lab), x = grid::unit(xy[1], "npc"), y = grid::unit(xy[2], "npc"), name = nm,
+        gp = grid::gpar(col = col, fontsize = f_pt, fontfamily = f_fam, fontface = face)))
+      if (floating_mode() && n_vars > 0) {
+        fpos <- float_positions(samples); f_face <- { f <- sel1("legend_text_face", "plain"); if (f %in% c("bold", "italic", "bold.italic")) f else "plain" }
+        for (i in seq_len(n_vars)) p <- p + f_one(leg_labels[[i]], fpos[[samples[i]]], display_colors[i], f_face, paste0("float_label_", i))
+      }
+      f_notes <- figure_labels_now()
+      if (length(f_notes)) { npos <- note_positions(f_notes)
+        for (i in seq_along(f_notes)) p <- p + f_one(f_notes[i], npos[[f_notes[i]]], "black", "plain", paste0("float_note_", i)) }
+    }
+
     if (isTRUE(input$show_end_labels) || identical(sel1("legend_position"), "direct")) {   # v2.22: "direct" hides the legend, names the lines
       mt  <- max(plot_data$time, na.rm = TRUE)
       off <- mt * ((input$label_offset %||% 3.5) / 100)
@@ -14522,7 +14737,7 @@ server <- function(input, output, session) {
       fsz <- suppressWarnings(as.numeric(input$facet_strip_size %||% NA)); if (!length(fsz) || !is.finite(fsz[1]) || fsz[1] <= 0) fsz <- nin("axis_label_font_size")
       p <- p + facet_layers(attr(grp_map, "levels"), scales = input$facet_scales %||% "fixed", ncol = { fnc <- suppressWarnings(as.numeric(input$facet_ncol)); if (length(fnc) == 1L && is.finite(fnc) && fnc >= 1) fnc else NA },   # v2.22: columns, scales, strip style / size, parsed strips
                             strip_style = input$facet_strip_style %||% "plain", strip_size = fsz[1], axis_lw = pt2lw(nin("axis_line_pt", 1.07)))
-      if (startsWith(sel1("legend_position", "right"), "inside-")) p <- p + theme(legend.position = "right")
+      if (startsWith(sel1("legend_position", "right"), "inside-") || floating_mode()) p <- p + theme(legend.position = "right")   # v2.25.0: no floating labels over facets
     }
     if (isTRUE(input$custom_aspect_ratio))
       p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
@@ -15074,7 +15289,10 @@ server <- function(input, output, session) {
     sv <- svg_inline_for_preview(f, W, H)
     if (is.null(sv))
       p(class = "kc-qe-note", "Figure too large for on-canvas editing; untick 'Edit labels on the figure' to see the preview.")
-    else HTML(sv)
+    else {
+      lay <- tryCatch(label_layout_now(), error = function(e) NULL)      # v2.25.0: what the page needs to make the labels draggable
+      tagList(HTML(sv), if (!is.null(lay)) tags$script(type = "application/json", id = "kc_label_data", HTML(as.character(jsonlite::toJSON(lay, auto_unbox = TRUE, digits = 6)))))
+    }
   })
   
   output$downloadPlot <- downloadHandler(
@@ -19025,7 +19243,7 @@ server <- function(input, output, session) {
         p <- build_plot(pd, used, aes_f) +
           facet_wrap(~ dataset, nrow = 1, scales = "fixed", labeller = label_wrap_gen(width = 18)) +
           theme(strip.text = element_text(size = nin("axis_label_font_size"), face = "plain"), strip.background = element_blank())
-        if (startsWith(sel1("legend_position", "right"), "inside-")) p <- p + theme(legend.position = "right")
+        if (startsWith(sel1("legend_position", "right"), "inside-") || floating_mode()) p <- p + theme(legend.position = "right")   # v2.25.0: no floating labels over facets
       } else {
         pdA$variable <- compare_key("A", pdA$variable); pdB$variable <- compare_key("B", pdB$variable)
         keys <- compare_keys_in_order(samples, ss$A, ss$B)

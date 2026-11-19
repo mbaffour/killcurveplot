@@ -54,8 +54,8 @@ testServer(app, {
 
 cat("\n--- Part B: drag the legend ---\n")
 d <- env$APP_DEFAULTS
-check("APP_DEFAULTS ends with legend_inside_x, legend_inside_y (0.98 each)",
-      identical(tail(names(d), 2), c("legend_inside_x", "legend_inside_y")) && d$legend_inside_x == 0.98 && d$legend_inside_y == 0.98)
+check("legend_inside_x, legend_inside_y (0.98 each) were appended after the v2.23.3 defaults, together (later versions append after them)",
+      { i <- match(c("legend_inside_x", "legend_inside_y"), names(d)); all(!is.na(i)) && diff(i) == 1L && i[1] > length(d) - 6L } && d$legend_inside_x == 0.98 && d$legend_inside_y == 0.98)
 check("both are numeric boxes in the UI with 0..1 ranges",
       all(vapply(c("legend_inside_x", "legend_inside_y"), function(i) { r <- env$NUMERIC_INPUT_RANGES[[i]]; !is.null(r) && r[["min"]] == 0 && r[["max"]] == 1 }, logical(1))))
 check("legend_position accepts inside-custom (LEGEND_POSITIONS_OK and the select's choices)",

@@ -160,8 +160,8 @@ check("lysis-curve-app: the notes caption inputs keep their ids (notes_show_capt
 check("lysis-curve-app: legend_label -> display name; shape / filled / line type kept",
       tl$s$sample_aesthetics$Uninfected$legend_label == "No phage" && tl$s$sample_aesthetics$`Phage MOI 10`$line_type == "dashed" &&
       isFALSE(tl$s$sample_aesthetics$`Phage MOI 10`$shape_filled))
-check("lysis-curve-app: floating labels are ignored with a reason; panel and matrix-legend keys are controls here (v2.22 styling), so they are applied",
-      "floating_labels" %in% names(tl$ignored) &&
+check("lysis-curve-app: floating labels are carried as label_positions (v2.25.0; they used to be ignored); panel and matrix-legend keys are controls here (v2.22 styling), so they are applied",
+      !("floating_labels" %in% names(tl$ignored)) && isTRUE(all.equal(unlist(tl$s$label_positions$samples$Uninfected), c(0.6, 0.8))) &&
       !any(c("Uninfected$panel", "Uninfected$leg_row", "Phage MOI 10$leg_col") %in% names(tl$ignored)) &&
       identical(tl$s$sample_aesthetics$Uninfected$panel, "A") && tl$s$sample_aesthetics$`Phage MOI 10`$leg_row == 2)
 check("lysis-curve-app: exact panel and enable_facets are ignored; axis frame, legend title, direct labels and spaghetti are controls here (v2.22 styling), so they are applied",
@@ -201,9 +201,9 @@ testServer(app, {
         grepl("x_minor_step", rv$settings_status$details) && grepl("inches", rv$settings_status$details))
   session$setInputs(loadSettings = list(name = "lca.json", datapath = file.path(getwd(), "tests/v222_lca_settings.json"), size = 2, type = "application/json"))
   li <- rv$last_import
-  check("loader: the lysis-curve-app file is recognised; legend labels become display names; floating labels are ignored",
+  check("loader: the lysis-curve-app file is recognised; legend labels become display names; its floating label place is loaded (v2.25.0)",
         identical(li$kind, "lca") && identical(unname(rv$display_names["Uninfected"]), "No phage") && identical(unname(rv$display_names["Phage MOI 10"]), "MOI 10") &&
-        "floating_labels" %in% li$ignored)
+        !("floating_labels" %in% li$ignored) && isTRUE(all.equal(unname(rv$float_pos[["Uninfected"]]), c(0.6, 0.8))))
   check("loader: its notes are carried as nb_* settings (count in the record, no 'not a control' for nb_exp_id)",
         li$n_global >= 25 && !("nb_exp_id" %in% li$ignored))
   # a current-format file still gets the old message

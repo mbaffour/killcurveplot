@@ -45,7 +45,7 @@ check("outside the panel a label names the side and says the figure grows there"
 check("the copy stays until the redrawn figure arrives (no jump back), with a time limit when no redraw comes",
       has("if (kcGhostSvg && kcGhostSvg !== svg) kcDropGhost();", "}, 6000);"))
 check("a click on the overlay without a drag does not close the rename editor it has just opened",
-      has("ev.target.classList.contains('kc-leg-drag')) return;"))
+      has("ev.target.classList.contains('kc-leg-drag') || ev.target.classList.contains('kc-lab-drag'))) return;"))   # v2.25.0: the label handles too
 check("a row legend dropped into the panel is anchored at the dragged centre with its column size estimated", has("var horiz = pos === 'top' || pos === 'bottom'"))
 check("the drag still never calls preventDefault (it would cancel the sidebar's summary toggles on some browsers)",
       !grepl("preventDefault", sub("(?s).*(function kcLegDrag\\(\\).*?)// after the SVG is replaced.*", "\\1", full, perl = TRUE), fixed = TRUE))
