@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.25.1 — 2026-11-19
+
+**Fourth click-through round: floating labels crossed with every export, the other tabs, save / reset / load and odd
+label text.** Exports in all five formats, both archives, a second dataset, every transform, facets and 34 labels at once
+gave no error. What was wrong, or missing against the "every figure app ships a legend key" rule:
+- **A settings file saved after a visit to the Statistics tab loads back cleanly.** The summary table there reports its
+  rows, sort and search box as inputs; they were written into the file and came back as "7 settings had the wrong type and
+  were ignored". A table's own state is no longer saved, and older files that carry it load without the warning.
+- **The legend key is in every archive.** "Download all figures (.zip)" now has `legend_key.svg` and `legend_key.png`
+  beside `figure_legend.txt` (the figure bundle already had it), and the batch export starts with **Legend key** ticked
+  next to the main figure.
+- **Place the key on the figure** (Legend text tab): one switch beside the key. On = the legend is drawn on the figure,
+  where it last was (the emptiest corner if nowhere); off = no legend on the figure. It drives the Legend position menu
+  and follows it, so the key on the figure and the downloaded key are the same legend. With floating labels or direct
+  labels (names only) the switch is off and the downloaded key still has every marker, fill and line type.
+- **Many labels start in columns.** More than nine floating names or eleven extra labels used to pile up on the bottom
+  edge, one on top of the other; a full column now continues in the next one. The first column is where it was.
+- **The key of a matrix (grid) legend is that grid.** The downloaded key used to be the plain one-column key while the
+  figure showed the grid; it is now the grid as drawn, title, rows and columns included.
+- Help: the labelling summary and guide describe floating labels, extra labels and the key switch; the styling guide no
+  longer lists floating labels as "not ported".
+- **One panel per group says why the labels are gone.** With facets the ordinary legend is drawn and extra labels are
+  not; the note under the Floating labels menu still said "drag each one". A line under the menu and under the
+  extra-labels box now says so, and that they come back when the option is unticked.
+- The colour sliders send plain numbers (a named value was logged as a jsonlite warning on every colour change).
+- `tests/test_v2251_legend_key_everywhere.R`. The default figure is unchanged.
+
 ## v2.25.0 — 2026-11-18
 
 **Floating labels: names you drag onto the figure.** (The lysis-curve-app had this; it is now here too.)

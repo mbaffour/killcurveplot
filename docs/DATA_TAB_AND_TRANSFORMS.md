@@ -75,7 +75,7 @@ provenance** table (row *Data handling*), the **Figure Legend Text**, the **meth
 * long with a replicate / well column: the dense rank of its values within the sample;
 * long without one: the nth row at each (sample, time).
 
-Excluded replicates stay visible when **Show replicate points** is on, as **hollow grey circles**, and the figure legend
+Excluded replicates stay visible when **Show individual replicate values** is on, as **hollow grey circles**, and the figure legend
 says so. They remain in the **Replicate QC** tables (flagged `excluded`) so the decision can be reviewed. Replicate
 exclusions belong to the loaded file: they are not saved with the settings and start empty on every new load (a cell
 edit, a time-column change or Revert keeps them). If you exclude every replicate of a sample the sample leaves the data.

@@ -44,9 +44,9 @@ check("neither the journal preset nor the Legacy look carries a v2.22 key",
       !any(new_keys %in% names(env$legacy_preset_settings())) && !any(new_keys %in% names(env$journal_preset_settings(89, 65))))
 check("legacy_preset_settings() still covers exactly the journal preset's inputs",
       setequal(names(env$legacy_preset_settings()), names(env$journal_preset_settings(89, 65))))
-check("v2.22 defaults: compare overlay by line type, notes caption off, batch = main figure only, night mode off",
+check("v2.22 defaults: compare overlay by line type, notes caption off, batch = main figure and (v2.25.1) its legend key, night mode off",
       identical(d$compare_mode, "overlay") && identical(d$compare_overlay_style, "linetype") && isFALSE(d$notes_show_caption) &&
-      identical(d$batch_outputs, "main") && isFALSE(d$night_mode) && isTRUE(d$theme_autoapply))
+      identical(d$batch_outputs, c("main", "legend_key")) && isFALSE(d$night_mode) && isTRUE(d$theme_autoapply))
 check("the Compare figure is a composer panel choice",
       "compare" %in% env$COMPOSE_PANEL_CHOICES && !("compare" %in% env$ANALYSIS_FIGURE_CHOICES))
 rt <- htmltools::renderTags(env$ui)
