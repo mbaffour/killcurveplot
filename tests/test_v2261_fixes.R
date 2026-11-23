@@ -123,5 +123,67 @@ r7 <- env$s22_posthoc_for_metric(rm2, "m", "dunnett", reference = "")
 check("Dunnett without a reference: the note names the sample used, not 'all pairs'",
       any(grepl("'A' (the first sample) is used", r7$notes, fixed = TRUE)) && !any(grepl("all pairs are compared meanwhile", r7$notes)))
 
+cat("\n--- review fixes: settings, sidebar, panels ---\n")
+jf <- function(x) { f <- tempfile(fileext = ".json"); writeLines(x, f); f }
+q <- new.env()
+mk22 <- mk(paste("S", 1:22))
+calls <- list()   # testServer has no browser: the update*() calls are recorded (and still sent)
+for (f in c("updateTextInput", "updateNumericInput", "updateSelectInput", "updateCheckboxInput")) local({
+  orig <- get(f, envir = asNamespace("shiny")); fn <- f
+  assign(f, function(session, inputId, ...) { calls[[length(calls) + 1L]] <<- list(fn = fn, id = inputId, args = list(...)); orig(session, inputId, ...) }, envir = env)
+})
+last_update <- function(id, what) { v <- NULL; for (c0 in calls) if (identical(c0$id, id)) v <- c0$args[[what]]; v }
+testServer(app, {
+  S <- session$setInputs
+  S(load_demo = 1); session$flushReact(); do.call(S, env$APP_DEFAULTS)
+  samps <- rv$od_vars; S(selected_samples = samps); q$samps <- samps
+  invisible(output$var_settings)
+  id2 <- env$safe_id(samps[2])
+  a <- list("dashed", "8", "custom", "#984EA3"); names(a) <- paste0(c("line_type_", "shape_", "color_selector_", "color_"), id2); do.call(S, a)
+  S(selected_samples = samps[-1])
+  h <- as.character(output$var_settings$html)
+  q$keep_lt  <- grepl(paste0('<select id="line_type_', id2, '"[^>]*>.*?<option value="dashed" selected>'), gsub("\n", " ", h))
+  q$keep_sh  <- grepl(paste0('<select id="shape_', id2, '"[^>]*>.*?<option value="8" selected>'), gsub("\n", " ", h))
+  q$keep_col <- grepl(paste0('id="color_', id2, '"[^>]*value="#984EA3"'), h)
+  # Clear & Reset: the default palette's colours by position, as at startup
+  calls <<- list(); S(clearSettings_confirm = 1); session$flushReact()
+  q$reset_cols <- vapply(samps, function(v) toupper(last_update(paste0("color_", env$safe_id(v)), "value") %||% NA_character_), "")
+  q$start_cols <- toupper(env$get_palette_colors(env$APP_DEFAULTS$color_palette, length(samps)))
+  # regions and markers come back from a settings file even when their lists were not drawn
+  S(enable_highlighting = FALSE, region_count = 1, enable_time_markers = FALSE)
+  S(loadSettings = list(name = "s.json", type = "x", size = 1, datapath = jf('{"version":"2.26.1","styling_schema":222,"global_settings":{"enable_highlighting":true,"region_count":2,"region_x_min_1":10,"region_x_max_1":20,"region_x_min_2":40,"region_x_max_2":50,"enable_time_markers":true,"marker_count":1,"marker_time_1":75},"sample_aesthetics":{}}')))
+  session$flushReact(); S(enable_highlighting = TRUE, region_count = 2, enable_time_markers = TRUE, marker_count = 1)
+  rh <- as.character(output$region_settings$html); mh <- as.character(output$time_marker_settings$html)
+  q$reg <- grepl('id="region_x_min_2"[^>]*value="40"', rh) && grepl('id="region_x_max_1"[^>]*value="20"', rh)
+  q$mark <- grepl('id="marker_time_1"[^>]*value="75"', mh)
+  q$reg_status <- rv$settings_status$details %||% ""
+  # a file whose sample has only shape_filled = TRUE keeps the Filled box on (no $shape partial match)
+  calls <<- list()
+  S(loadSettings = list(name = "s2.json", type = "x", size = 1, datapath = jf(sprintf('{"version":"2.26.1","styling_schema":222,"global_settings":{},"sample_aesthetics":{"%s":{"shape_filled":true},"<img src=x onerror=alert(1)>":{"color":"#FF0000"}}}', samps[2]))))
+  session$flushReact()
+  q$filled <- last_update(paste0("shape_filled_", env$safe_id(samps[2])), "value")
+  q$status_html <- paste(unlist(rv$settings_status), collapse = " ")
+  # 22 samples: Save Settings writes what the figure draws for samples 21-22 (no sidebar widgets on page 2)
+  ingest_data(mk22, "twentytwo"); S(selected_samples = rv$od_vars); invisible(output$var_settings)
+  doc <- settings_json_list(); ra <- resolve_aesthetics(rv$od_vars)
+  q$save21 <- c(toupper(doc$sample_aesthetics[["S 21"]]$color), toupper(ra$colors[["S 21"]]), as.character(doc$sample_aesthetics[["S 21"]]$shape), as.character(ra$shapes[["S 21"]]))
+  q$shape8 <- c(as.numeric(ra$shapes[["S 8"]]), as.numeric(input[[paste0("shape_", env$safe_id("S 8"))]] %||% NA))
+})
+check("redraw of the sidebar (a sample hidden) keeps another sample's line type, marker and colour", isTRUE(q$keep_lt) && isTRUE(q$keep_sh) && isTRUE(q$keep_col))
+check("Clear & Reset gives each shown sample its startup colour (the default palette, by place in the file), not the red/blue cycle",
+      identical(unname(q$reset_cols[2:3]), q$start_cols[2:3]))
+check("regions and markers from a settings file are drawn with the file's values", isTRUE(q$reg) && isTRUE(q$mark))
+check("a sample entry with only shape_filled = TRUE keeps the Filled box on", isTRUE(q$filled))
+check("sample names from a settings file are escaped in the status line", !grepl("<img src=x", q$status_html, fixed = TRUE) && grepl("&lt;img", q$status_html, fixed = TRUE))
+check("Save Settings: sample 21 (page 2, no widgets) is saved as drawn, not black", length(q$save21) == 4 && q$save21[1] == q$save21[2] && q$save21[1] != "#000000" && q$save21[3] == q$save21[4])
+check("sample 8: the figure's default marker is the sidebar's (one cycle)", is.na(q$shape8[2]) || q$shape8[1] == q$shape8[2])
+check("one default marker cycle: sample 8 is a circle, 11 a plus", env$default_sample_shape(8) == 16 && env$default_sample_shape(11) == 3 && env$default_sample_shape(13) == 16)
+pm <- env$panel_membership(c("a", "b", "c"), c(a = "A", b = "Other", c = ""))
+check("panels: a panel typed 'Other' plus a sample with none -> one 'Other' level, no duplicated factor level",
+      identical(pm$levels, c("A", "Other")) && identical(levels(env$panel_expand(data.frame(variable = c("a", "b", "c")), pm)$group), c("A", "Other")))
+pm2 <- env$panel_membership(c("x", "y", "z"), list(x = "WT; no phage", y = "MOI 10", z = c("P1", "P2")))
+check("panels from a list: a name with ';' is one panel; a picked sample can be in two", identical(pm2$levels, c("WT; no phage", "MOI 10", "P1", "P2")) && identical(pm2$map$z, c("P1", "P2")))
+check("panels typed 'A; B' (manual / group) still split", identical(env$panel_membership(c("x", "y"), c(x = "A; B", y = "B"))$map$x, c("A", "B")))
+
 cat("\n", pass, "passed,", fail, "failed\n")
 if (fail > 0) quit(status = 1)

@@ -3936,6 +3936,10 @@ distinct_colours <- function(base, n, extras = character(0)) {
   rep_len(got, n)
 }
 default_sample_colours <- function(n) distinct_colours(DEFAULT_SAMPLE_COLOURS, max(12L, n), DEFAULT_SAMPLE_EXTRA)
+# v2.26.1: ONE default marker cycle (the sidebar's, v2.21). The figure used another one (8th sample code 23, 10 long) until
+# the sidebar was opened, and Clear & Reset a third: a sample past the 7th changed marker with no edit.
+DEFAULT_SHAPE_CYCLE <- c(16, 15, 17, 18, 25, 4, 8, 16, 15, 17, 3, 10)
+default_sample_shape <- function(i) DEFAULT_SHAPE_CYCLE[1 + (as.integer(i) - 1L) %% length(DEFAULT_SHAPE_CYCLE)]
 get_palette_colors <- function(pal, n) {
   gradient <- function(ends) {
     if (n <= 1) return(rep_len("#000000", n))
@@ -8982,17 +8986,23 @@ panel_letter <- function(i, case = "upper", prefix = "A") {
 # panels separated by ";", e.g. "A; B"); `every` = samples drawn in every panel (a control). The panels are the typed names
 # in first-appearance order, then "Other" for the samples with none. NULL when fewer than `min_panels` panels are named.
 # A plain one-panel-per-sample assignment gives exactly sample_group_map()'s panels and order.
+# v2.26.1: `panels` may also be a LIST (sample -> its panel name(s)), taken as they are: a display name or a picked panel
+# name that contains ";" ("WT; no phage") is one panel, not two. A catch-all "Other" merges with a panel typed "Other".
 panel_membership <- function(samples, panels, every = character(0), min_panels = 2L) {
   if (!length(samples)) return(NULL)
-  raw <- if (is.null(panels)) rep("", length(samples)) else as.character(unname(panels[samples]))
-  raw[is.na(raw)] <- ""
-  parts <- setNames(lapply(raw, function(x) { v <- trimws(strsplit(x, ";", fixed = TRUE)[[1]]); unique(v[nzchar(v)]) }), samples)
+  parts <- if (is.list(panels)) {
+    setNames(lapply(samples, function(x) { v <- trimws(as.character(unlist(panels[[x]]))); unique(v[!is.na(v) & nzchar(v)]) }), samples)
+  } else {
+    raw <- if (is.null(panels)) rep("", length(samples)) else as.character(unname(panels[samples]))
+    raw[is.na(raw)] <- ""
+    setNames(lapply(raw, function(x) { v <- trimws(strsplit(x, ";", fixed = TRUE)[[1]]); unique(v[nzchar(v)]) }), samples)
+  }
   every <- intersect(as.character(every), samples)
   own   <- setdiff(samples, every)
   named <- unique(unlist(parts[own], use.names = FALSE))
   if (length(named) < min_panels) return(NULL)
   none  <- own[lengths(parts[own]) == 0L]
-  lv    <- c(named, if (length(none)) "Other")
+  lv    <- unique(c(named, if (length(none)) "Other"))   # v2.26.1: a panel typed "Other" no longer duplicates the level
   map   <- setNames(lapply(samples, function(x) if (x %in% every) lv else if (length(parts[[x]])) parts[[x]] else "Other"), samples)
   list(map = map, levels = lv)
 }
@@ -13041,6 +13051,7 @@ server <- function(input, output, session) {
       sample_aesthetics <- list()
       samps <- isolate(sel_samples())
       if (!is.null(samps)) {
+        ra <- resolve_aesthetics(samps)   # v2.26.1: what the figure draws, for a sample whose sidebar widgets were never built (page 2+)
         for (vn in samps) {
           vid     <- safe_id(vn)
           col_sel <- input[[paste0("color_selector_", vid)]]
@@ -13049,12 +13060,12 @@ server <- function(input, output, session) {
           else if (!is.null(col_sel) && col_sel == "custom")
             normalize_hex_color(input[[paste0("color_", vid)]])
           else if (!is.null(col_sel)) col_sel
-          else "#000000"
+          else unname(ra$colors[[vn]]) %||% "#000000"
           sample_aesthetics[[vn]] <- list(
             color        = color,
-            shape        = input[[paste0("shape_",        vid)]],
-            shape_filled = input[[paste0("shape_filled_", vid)]],
-            line_type    = input[[paste0("line_type_",    vid)]],
+            shape        = input[[paste0("shape_",        vid)]] %||% as.character(unname(ra$shapes[[vn]])),
+            shape_filled = input[[paste0("shape_filled_", vid)]] %||% unname(ra$filled_map[[vn]]),
+            line_type    = input[[paste0("line_type_",    vid)]] %||% unname(ra$line_types[[vn]]),
             legend_label = display_name_of(vn, rv$display_names),   # v2.21: the display name (the key stays the raw name)
             group        = trimws(input[[paste0("group_", vid)]] %||% ""),     # v2.18; a file with this key also carries the windows
             panel        = trimws(input[[paste0("facet_of_", vid)]] %||% ""),  # v2.22: the panel typed in the Panels section
@@ -13165,10 +13176,14 @@ server <- function(input, output, session) {
       tryCatch(if (grepl("_name$|_color$", nm)) updateTextInput(session, nm, value = hit %||% "") else updateSelectInput(session, nm, selected = hit %||% ""),
                error = function(e) NULL)
     }
+    # v2.26.1: each on-screen box is matched to (panel, field) by its exact id: the old regex read "..._legend_title" as the
+    # field "title", and a prefix test matched panel "WT" to the boxes of panel "WT 2"
+    cfg_ids <- list(); for (lv in names(rv$panel_cfg)) for (f0 in PANEL_CFG_FIELDS) cfg_ids[[paste0("panelcfg_", safe_id(lv), "_", f0)]] <- c(lv, f0)
+    fields_long_first <- PANEL_CFG_FIELDS[order(-nchar(PANEL_CFG_FIELDS))]
     for (nm in grep("^panelcfg_", names(input), value = TRUE)) {   # panels already on screen take the file's values
-      g <- NULL; for (lv in names(rv$panel_cfg)) if (startsWith(nm, paste0("panelcfg_", safe_id(lv), "_"))) g <- lv
-      f <- sub("^panelcfg_.*_(title|legend|legend_title|xlab|ylab|xmin|xmax|ymin|ymax|hide_points|hide_lines|hide_errors)$", "\\1", nm)
-      v <- if (is.null(g)) NULL else rv$panel_cfg[[g]][[f]]
+      hit <- cfg_ids[[nm]]
+      f <- if (!is.null(hit)) hit[2] else { e <- fields_long_first[endsWith(nm, paste0("_", fields_long_first))]; if (length(e)) e[1] else next }
+      v <- if (is.null(hit)) NULL else rv$panel_cfg[[hit[1]]][[f]]
       tryCatch(if (startsWith(f, "hide_")) updateCheckboxInput(session, nm, value = isTRUE(v))
                else if (f %in% c("xmin", "xmax", "ymin", "ymax")) updateNumericInput(session, nm, value = if (is.null(v)) NA else v)
                else if (identical(f, "legend")) updateSelectInput(session, nm, selected = v %||% "")
@@ -13236,7 +13251,7 @@ server <- function(input, output, session) {
     for (pfx in sample_prefixes) is_sample_key <- is_sample_key | startsWith(gkeys, pfx)
     is_sample_key <- is_sample_key & !(gkeys %in% global_exceptions)
     skip_key <- gkeys %in% data_inputs | is_sample_key | is_table_state_key(gkeys)
-    unk_key  <- !skip_key & !(gkeys %in% inp_names)
+    unk_key  <- !skip_key & !(gkeys %in% inp_names) & !grepl("^(region|marker)_.*_[0-9]+$", gkeys)   # v2.26.1: drawn later from the file (dyn_init)
     ignored_unknown <- gkeys[unk_key]
     for (gi in which(!skip_key & !unk_key)) {
       nm <- gkeys[gi]
@@ -13289,10 +13304,10 @@ server <- function(input, output, session) {
     
     details_html <- if (length(saved_names) > 0) {
       match_lines   <- if (length(matched)   > 0)
-        paste0("<li style='color:#155724'>&#10003; ", matched, "</li>", collapse = "")
+        paste0("<li style='color:#155724'>&#10003; ", html_escape(matched), "</li>", collapse = "")   # v2.26.1: names from the file are text, not HTML
       else ""
       unmatch_lines <- if (length(unmatched) > 0)
-        paste0("<li style='color:#856404'>&#9675; ", unmatched,
+        paste0("<li style='color:#856404'>&#9675; ", html_escape(unmatched),
                " <em>(not in current data)</em></li>", collapse = "")
       else ""
       paste0("<ul class='match-list'>", match_lines, unmatch_lines, "</ul>")
@@ -13386,13 +13401,18 @@ server <- function(input, output, session) {
     
     # ── Reset per-sample aesthetics to position-based defaults ───────────────
     cur_samps  <- isolate(sel_samples())
-    def_colors <- default_sample_colours(length(cur_samps))   # v2.26.1: no repeat past the twelfth sample
-    shape_opts <- c(16, 15, 17, 18, 25, 4, 8, 23, 3, 10)
+    # v2.26.1: the colours the default palette (the journal standard's Okabe-Ito) gives each sample by its place in the file,
+    # as at startup; it wrote the "custom" cycle (red, blue ...) while the palette menu said Okabe-Ito
+    def_pal    <- as.character(APP_DEFAULTS$color_palette %||% "custom")
+    vars_all   <- isolate(rv$od_vars)
+    pal_cols   <- if (!identical(def_pal, "custom")) get_palette_colors(def_pal, length(vars_all)) else NULL
+    def_colors <- default_sample_colours(length(cur_samps))
     if (!is.null(cur_samps)) {
       for (i in seq_along(cur_samps)) {
         vn        <- cur_samps[i]; vid <- safe_id(vn)
-        def_col   <- def_colors[(i - 1) %% length(def_colors) + 1]
-        def_shape <- as.character(shape_opts[(i - 1) %% length(shape_opts) + 1])
+        k         <- match(vn, vars_all)
+        def_col   <- if (!is.null(pal_cols) && !is.na(k)) pal_cols[k] else def_colors[i]
+        def_shape <- as.character(default_sample_shape(i))
         tryCatch({
           updateSelectInput(session,   paste0("color_selector_", vid), selected = "custom")
           updateTextInput(session,     paste0("color_",          vid), value    = def_col)
@@ -13463,8 +13483,15 @@ server <- function(input, output, session) {
     rv$style_page <- min(n_pages, rv$style_page + 1L)
   })
   
+  # v2.26.1: a redraw of the sample widgets (another selection, another page) keeps what each widget holds; only a new
+  # settings file / theme / Clear & Reset (rv$imported_settings) or a palette change sets them from their source again.
+  # It used to rebuild every widget from its default, so hiding one sample undid every other sample's colour and marker.
+  var_settings_key <- NULL
   output$var_settings <- renderUI({
     req(rv$od_vars, sel_samples())
+    vs_key <- list(rv$imported_settings$samples, rv$palette_colors)
+    keep_inputs <- !is.null(var_settings_key) && identical(vs_key, var_settings_key)
+    var_settings_key <<- vs_key
     all_samps <- sel_samples()
     n_total   <- length(all_samps)
     n_pages   <- ceiling(n_total / PAGE_SIZE)
@@ -13500,14 +13527,19 @@ server <- function(input, output, session) {
       i   <- idx_start + j - 1L   # global index across all samples
       vn  <- page_samps[j]
       vid <- safe_id(vn)
-      shape_def <- as.character(c(16, 15, 17, 18, 25, 4, 8, 16, 15, 17, 3, 10)[1 + (i - 1L) %% 12L])   # the default cycle of v2.21 (its "open" entries drew solid markers: the base form)
+      shape_def <- as.character(default_sample_shape(i))   # the default cycle of v2.21 (its "open" entries drew solid markers: the base form)
       
       imp_aes <- rv$imported_settings$samples[[vn]]
       qe_c    <- isolate(rv$qe_colors[[vn]])   # v2.21: a colour picked in the quick-edit strip (isolated: this UI must not redraw on every pick)
+      cur     <- function(pfx) if (keep_inputs) isolate(input[[paste0(pfx, vid)]]) else NULL   # v2.26.1: what the widget holds now
+      cur_sel <- cur("color_selector_")
       
       if (!is.null(qe_c)) {
         color_def <- qe_c
         sel_def   <- "custom"
+      } else if (!is.null(cur_sel)) {                 # v2.26.1: a redraw (selection, page) keeps the colour chosen
+        sel_def   <- cur_sel
+        color_def <- if (identical(cur_sel, "custom")) normalize_hex_color(cur("color_") %||% "#000000") else cur_sel
       } else if (!is.null(imp_aes)) {
         color_def <- imp_aes$color %||% default_colors[1]
         sel_def   <- "custom"
@@ -13524,11 +13556,15 @@ server <- function(input, output, session) {
       }
       if (is.na(color_def) || is.null(color_def)) color_def <- "#000000"
       
-      imp_mk         <- if (!is.null(imp_aes$shape)) normalise_marker(imp_aes$shape, imp_aes$shape_filled %||% TRUE) else NULL   # v2.23.9: an old code shows as its base form + the Filled box
+      imp_mk         <- if (!is.null(imp_aes[["shape"]])) normalise_marker(imp_aes[["shape"]], imp_aes[["shape_filled"]] %||% TRUE) else NULL   # v2.23.9: an old code shows as its base form + the Filled box ([[ ]]: $shape would match shape_filled)
       default_shape  <- if (!is.null(imp_mk))              as.character(imp_mk$shape)     else shape_def
-      default_lt     <- if (!is.null(imp_aes$line_type))    imp_aes$line_type              else "solid"
-      default_filled <- if (!is.null(imp_mk))              imp_mk$filled                  else if (!is.null(imp_aes$shape_filled)) imp_aes$shape_filled else TRUE
-      default_grp    <- if (!is.null(imp_aes$group))        as.character(imp_aes$group)    else ""   # v2.18
+      default_lt     <- if (!is.null(imp_aes[["line_type"]])) imp_aes[["line_type"]]      else "solid"
+      default_filled <- if (!is.null(imp_mk))              imp_mk$filled                  else if (!is.null(imp_aes[["shape_filled"]])) imp_aes[["shape_filled"]] else TRUE
+      default_grp    <- if (!is.null(imp_aes[["group"]]))  as.character(imp_aes[["group"]]) else ""   # v2.18
+      default_shape  <- as.character(cur("shape_") %||% default_shape)     # v2.26.1: a redraw keeps what the widgets hold
+      default_lt     <- cur("line_type_")    %||% default_lt
+      default_filled <- cur("shape_filled_") %||% default_filled
+      default_grp    <- cur("group_")        %||% default_grp
       
       div(
         style = "margin-bottom:12px;padding:10px;border:1px solid #ddd;border-radius:6px;background:#fafafa;",
@@ -13765,64 +13801,82 @@ server <- function(input, output, session) {
   })
 
   # ── Dynamic UI: region / marker settings ────────────────────────────────────
+  # v2.26.1: these inputs only exist once their list is drawn, so a settings file loaded with the switch off used to lose
+  # them (unknown keys). Each box now starts from the loaded file's value when that file is newer than the list, else from
+  # the value it had (so changing the count keeps the others), else the default.
+  dyn_seen <- new.env(parent = emptyenv())
+  dyn_init <- function(which) {
+    imp <- rv$imported_settings$global
+    fresh <- !is.null(imp) && !identical(imp, dyn_seen[[which]]); assign(which, imp, envir = dyn_seen)
+    function(id, def) {
+      v <- if (fresh) tryCatch(settings_unbox(imp[[id]]), error = function(e) NULL) else NULL
+      if (is.null(v) || length(v) != 1L || is.list(v) || is.na(v)) v <- isolate(input[[id]])
+      if (is.null(v) || length(v) != 1L || is.list(v) || is.na(v)) return(def)
+      if (is.numeric(def)) { v <- suppressWarnings(as.numeric(v)); if (is.finite(v)) v else def }
+      else if (is.logical(def)) isTRUE(as.logical(v))
+      else as.character(v)
+    }
+  }
   output$region_settings <- renderUI({
     req(count_in("region_count", 5L), input$enable_highlighting)
+    iv <- dyn_init("region")
     do.call(tagList, lapply(seq_len(count_in("region_count", 5L)), function(i) {
       div(style = "border:1px solid #ddd;padding:10px;margin-bottom:8px;border-radius:5px;",
           h5(paste("Region", i)),
           fluidRow(
-            column(6, numericInput(paste0("region_x_min_", i), "X min:", 0)),
-            column(6, numericInput(paste0("region_x_max_", i), "X max:", 60))
+            column(6, numericInput(paste0("region_x_min_", i), "X min:", iv(paste0("region_x_min_", i), 0))),
+            column(6, numericInput(paste0("region_x_max_", i), "X max:", iv(paste0("region_x_max_", i), 60)))
           ),
           fluidRow(
-            column(6, numericInput(paste0("region_y_min_", i), "Y min:", 0.01)),
-            column(6, numericInput(paste0("region_y_max_", i), "Y max:", 1))
+            column(6, numericInput(paste0("region_y_min_", i), "Y min:", iv(paste0("region_y_min_", i), 0.01))),
+            column(6, numericInput(paste0("region_y_max_", i), "Y max:", iv(paste0("region_y_max_", i), 1)))
           ),
           selectInput(paste0("region_color_", i), "Fill Color:",
                       choices  = c("Light Gray"   = "#ebebeb", "Light Blue"  = "#e6f3ff",
                                    "Light Red"    = "#ffebeb", "Light Green" = "#ebffeb",
                                    "Light Yellow" = "#ffffeb", "Custom"      = "custom"),
-                      selected = "#ebebeb"),
+                      selected = iv(paste0("region_color_", i), "#ebebeb")),
           conditionalPanel(
             condition = paste0("input['region_color_", i, "'] == 'custom'"),
-            textInput(paste0("region_color_custom_", i), "HEX:", "#ebebeb")
+            textInput(paste0("region_color_custom_", i), "HEX:", iv(paste0("region_color_custom_", i), "#ebebeb"))
           ),
-          sliderInput(paste0("region_alpha_", i), "Transparency:", 0, 1, 0.3, 0.05)
+          sliderInput(paste0("region_alpha_", i), "Transparency:", 0, 1, iv(paste0("region_alpha_", i), 0.3), 0.05)
       )
     }))
   })
   
   output$time_marker_settings <- renderUI({
     req(count_in("marker_count", 10L), input$enable_time_markers)
+    iv <- dyn_init("marker")
     do.call(tagList, lapply(seq_len(count_in("marker_count", 10L)), function(i) {
       div(style = "border:1px solid #ddd;padding:10px;margin-bottom:8px;border-radius:5px;",
           h5(paste("Marker", i)),
-          numericInput(paste0("marker_time_", i), "Time Point:", 30),
+          numericInput(paste0("marker_time_", i), "Time Point:", iv(paste0("marker_time_", i), 30)),
           selectInput(paste0("marker_line_type_", i), "Line Type:",
                       choices  = c("Dashed" = "dashed", "Solid" = "solid",
                                    "Dotted" = "dotted", "DotDash" = "dotdash",
                                    "LongDash" = "longdash", "TwoDash" = "twodash"),
-                      selected = "dashed"),
+                      selected = iv(paste0("marker_line_type_", i), "dashed")),
           selectInput(paste0("marker_color_", i), "Color:",
                       choices  = c("Black" = "#000000", "Red"   = "#E41A1C",
                                    "Blue"  = "#377EB8", "Green" = "#4DAF4A",
                                    "Purple" = "#984EA3", "Orange" = "#FF7F00",
                                    "Gray"  = "#999999", "Custom" = "custom"),
-                      selected = "#000000"),
+                      selected = iv(paste0("marker_color_", i), "#000000")),
           conditionalPanel(
             condition = paste0("input['marker_color_", i, "'] == 'custom'"),
-            textInput(paste0("marker_color_custom_", i), "HEX:", "#000000")
+            textInput(paste0("marker_color_custom_", i), "HEX:", iv(paste0("marker_color_custom_", i), "#000000"))
           ),
-          sliderInput(paste0("marker_size_", i), "Width:", 0.1, 3, 1, 0.1),
-          checkboxInput(paste0("marker_label_", i), "Add Label", FALSE),
+          sliderInput(paste0("marker_size_", i), "Width:", 0.1, 3, iv(paste0("marker_size_", i), 1), 0.1),
+          checkboxInput(paste0("marker_label_", i), "Add Label", iv(paste0("marker_label_", i), FALSE)),
           conditionalPanel(
             condition = paste0("input['marker_label_", i, "'] == true"),
-            textInput(paste0("marker_text_", i),           "Label:",    paste0("t=", 30)),
-            numericInput(paste0("marker_label_size_", i),  "Size:",     4, 2, 12),
+            textInput(paste0("marker_text_", i),           "Label:",    iv(paste0("marker_text_", i), paste0("t=", 30))),
+            numericInput(paste0("marker_label_size_", i),  "Size:",     iv(paste0("marker_label_size_", i), 4), 2, 12),
             selectInput(paste0("marker_label_position_", i), "Position:",
                         choices = c("Top" = "top", "Middle" = "middle", "Bottom" = "bottom"),
-                        selected = "top"),
-            numericInput(paste0("marker_label_hjust_", i), "H-Offset:", 0, -5, 5, 0.1)
+                        selected = iv(paste0("marker_label_position_", i), "top")),
+            numericInput(paste0("marker_label_hjust_", i), "H-Offset:", iv(paste0("marker_label_hjust_", i), 0), -5, 5, 0.1)
           )
       )
     }))
@@ -14217,13 +14271,11 @@ server <- function(input, output, session) {
     filled_map <- setNames(logical(n),   samples)
     groups     <- setNames(character(n), samples)   # v2.18: free-text sample group ("" = none)
     def_colors <- default_sample_colours(n)   # v2.26.1: no repeat past the twelfth sample
-    def_shapes <- c(16, 15, 17, 18, 25, 4, 8, 23, 3, 10)
-    
     for (i in seq_len(n)) {
       vn  <- samples[i]; vid <- safe_id(vn)
       si  <- input[[paste0("shape_", vid)]]
       fi <- input[[paste0("shape_filled_", vid)]]
-      mk <- normalise_marker(if (!is.null(si)) si else def_shapes[(i - 1) %% length(def_shapes) + 1],     # v2.23.9: one rule, here
+      mk <- normalise_marker(if (!is.null(si)) si else default_sample_shape(i),     # v2.23.9: one rule, here (v2.26.1: the sidebar's cycle)
                              if (!is.null(fi)) fi else TRUE)
       shapes[i] <- mk$shape
       filled_map[i] <- mk$filled
@@ -14714,10 +14766,10 @@ server <- function(input, output, session) {
   }
   panel_groups <- function(samples, aes_vals) {
     src <- sel1("facet_source", "group")
-    if (identical(src, "each")) return(setNames(vapply(samples, dname, ""), samples))   # v2.26.0: the display name is the panel
-    if (identical(src, "pick")) {                       # v2.26.0: the panels a sample was picked for, "A; B"
+    if (identical(src, "each")) return(setNames(as.list(vapply(samples, dname, "")), samples))   # v2.26.0: the display name is the panel (v2.26.1: a list, never split at ";")
+    if (identical(src, "pick")) {                       # v2.26.0: the panels a sample was picked for (v2.26.1: a list of names, not "A; B")
       pk <- panel_picks_now()
-      return(setNames(vapply(samples, function(x) paste(unlist(lapply(pk, function(q) if (x %in% q$samples) q$name)), collapse = "; "), ""), samples))
+      return(setNames(lapply(samples, function(x) unlist(lapply(pk, function(q) if (x %in% q$samples) q$name))), samples))
     }
     if (identical(src, "manual")) {
       man <- vapply(samples, function(vn) trimws(as.character(input[[paste0("facet_of_", safe_id(vn))]] %||% "")[1]), "")
@@ -14726,7 +14778,7 @@ server <- function(input, output, session) {
     if (!identical(src, "group") && isTRUE(rv$is_long_format) && !is.null(rv$data) && !is.null(rv$group_col) && src %in% names(rv$data)) {
       gv <- as.character(rv$data[[rv$group_col]]); col <- as.character(rv$data[[src]])
       meta <- vapply(samples, function(vn) { hit <- col[gv == vn]; hit <- hit[!is.na(hit) & nzchar(hit)]; if (length(hit)) hit[1] else "" }, "")
-      return(panel_assignment(samples, "meta", meta = meta))
+      return(as.list(panel_assignment(samples, "meta", meta = meta)))   # v2.26.1: a file's value is one panel
     }
     aes_vals$groups
   }
@@ -19684,17 +19736,17 @@ server <- function(input, output, session) {
         updateTextInput(session,   paste0("color_",          vid), value   = hex)
         updateTextInput(session,   paste0("hex_color_",      vid), value   = hex)
       }
-      if (!is.null(aes$shape)) {                  # v2.23.9: an old code (21, 123 ...) sets its base form AND the Filled box
-        mk <- normalise_marker(aes$shape, aes$shape_filled %||% TRUE)
-        legacy <- !(suppressWarnings(as.integer(aes$shape)) %in% c(16L, 15L, 17L, 18L, 25L, 4L, 8L, 3L, 10L))
+      if (!is.null(aes[["shape"]])) {                  # v2.23.9: an old code (21, 123 ...) sets its base form AND the Filled box ([[ ]]: $shape partially matches shape_filled)
+        mk <- normalise_marker(aes[["shape"]], aes[["shape_filled"]] %||% TRUE)
+        legacy <- !(suppressWarnings(as.integer(aes[["shape"]])) %in% c(16L, 15L, 17L, 18L, 25L, 4L, 8L, 3L, 10L))
         imp$samples[[vn]]$shape <- as.numeric(mk$shape)
         updateSelectInput(session, paste0("shape_", vid), selected = as.character(mk$shape))
-        if (legacy || !is.null(aes$shape_filled)) {
+        if (legacy || !is.null(aes[["shape_filled"]])) {
           imp$samples[[vn]]$shape_filled <- mk$filled
           updateCheckboxInput(session, paste0("shape_filled_", vid), value = mk$filled)
         }
-      } else if (!is.null(aes$shape_filled))
-        updateCheckboxInput(session, paste0("shape_filled_", vid), value = aes$shape_filled)
+      } else if (!is.null(aes[["shape_filled"]]))
+        updateCheckboxInput(session, paste0("shape_filled_", vid), value = aes[["shape_filled"]])
       if (!is.null(aes$line_type))
         updateSelectInput(session, paste0("line_type_", vid), selected = aes$line_type)
       if (!is.null(aes$legend_label) && nzchar(trimws(as.character(aes$legend_label)))) {   # the display name (the quick-edit strip's name box)
