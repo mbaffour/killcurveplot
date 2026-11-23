@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.27.3"
+APP_VERSION <- "2.27.4"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -8948,10 +8948,12 @@ facet_layers <- function(levels, scales = "fixed", ncol = NA, strip_style = "pla
 # v2.26.0: panel letters, panel size and legends of a multi-panel figure.
 FACET_LEGEND_CHOICES <- c("A legend in each panel (each panel its own figure)" = "each", "One legend for all panels" = "shared")   # v2.27.2: each first (the default)
 # The per-panel settings of "A legend in each panel" (Panels section): blank = as the whole figure.
-PANEL_CFG_FIELDS <- c("title", "legend", "legend_title", "xlab", "ylab", "xmin", "xmax", "ymin", "ymax", "hide_points", "hide_lines", "hide_errors")
-PANEL_CFG_LEGEND_CHOICES <- c("As the figure" = "", "Right (outside)" = "right", "Bottom (outside)" = "bottom", "Top (outside)" = "top",
+PANEL_CFG_FIELDS <- c("title", "legend", "legend_title", "xlab", "ylab", "xmin", "xmax", "ymin", "ymax", "hide_points", "hide_lines", "hide_errors",
+                      "legend_x", "legend_y")   # v2.27.4: where the panel's legend was dragged (fractions of its panel)
+PANEL_CFG_LEGEND_CHOICES <- c("As the figure" = "", "Right (outside)" = "right", "Bottom (outside)" = "bottom", "Top (outside)" = "top", "Left (outside)" = "left",
                               "Inside: top-left" = "inside-top-left", "Inside: top-right" = "inside-top-right",
-                              "Inside: bottom-left" = "inside-bottom-left", "Inside: bottom-right" = "inside-bottom-right", "None" = "none")
+                              "Inside: bottom-left" = "inside-bottom-left", "Inside: bottom-right" = "inside-bottom-right",
+                              "Inside: where dragged" = "inside-custom", "None" = "none")   # v2.27.4: drag a panel's legend on the figure
 # One panel's settings onto its own figure: title, legend place and title, axis titles, axis ranges (a blank bound keeps
 # the figure's own). The samples' colours, markers and names stay those of the whole figure.
 apply_panel_cfg <- function(pg, cfg, subscripts = TRUE) {
@@ -8977,7 +8979,11 @@ apply_panel_cfg <- function(pg, cfg, subscripts = TRUE) {
       sc <- sl$scales[[i]]$clone(); sc$name <- t; sl$scales[[i]] <- sc }
   }
   lg <- s1(cfg$legend)
-  if (lg %in% c("right", "bottom", "top", "none")) pg <- pg + ggplot2::theme(legend.position = lg)
+  if (lg %in% c("right", "bottom", "top", "left", "none")) pg <- pg + ggplot2::theme(legend.position = lg)
+  else if (identical(lg, "inside-custom")) {          # v2.27.4: dragged on the figure, this panel only
+    fx <- n1(cfg$legend_x); fy <- n1(cfg$legend_y)
+    pg <- pg + inside_legend_theme("custom", if (is.finite(fx)) min(max(fx, 0), 1) else 0.98, if (is.finite(fy)) min(max(fy, 0), 1) else 0.98)
+  }
   else if (startsWith(lg, "inside-")) pg <- pg + inside_legend_theme(sub("^inside-", "", lg))
   xl <- c(n1(cfg$xmin), n1(cfg$xmax)); yl <- c(n1(cfg$ymin), n1(cfg$ymax))
   # v2.26.1: a bound <= 0 on a log axis cannot be drawn (it broke the whole figure: "'from' must be a finite number");
@@ -9721,7 +9727,107 @@ ui <- fluidPage(
            host.querySelectorAll('.kc-leg-ghost, .kc-leg-veil, .kc-leg-hint').forEach(function(e) { e.remove(); });
            kcGhostSvg = null;
          }
+         // v2.27.4: a figure of panels, each with its own legend (#kc_panel_legend_data: the panels in grid order). Every
+         // panel's legend gets its own handle; it is dragged within its own panel (dropped there: legend_x / legend_y of that
+         // panel) or out of it (that side of its panel). The other panels are not touched. Returns false for other figures.
+         function kcPanelLegDrag() {
+           var host = document.getElementById('od_plot_svg'); if (!host) return false;
+           var dj = host.querySelector('#kc_panel_legend_data'); if (!dj) return false;
+           var data; try { data = JSON.parse(dj.textContent || '{}'); } catch (e) { return false; }
+           host.querySelectorAll('.kc-leg-drag').forEach(function(e) { e.remove(); });
+           var svg = host.querySelector('svg'); if (!svg) return true;
+           if (kcGhostSvg && kcGhostSvg !== svg) kcDropGhost();
+           var vbb = svg.viewBox && svg.viewBox.baseVal, r = svg.getBoundingClientRect(); if (!(r.width > 0) || !vbb || !vbb.width) return true;
+           var vb = {x: vbb.x, y: vbb.y, width: vbb.width, height: vbb.height}, k = vb.width / r.width;
+           var hr = host.getBoundingClientRect(), offX = r.left - hr.left + (host.scrollLeft || 0), offY = r.top - hr.top + (host.scrollTop || 0);
+           function px(u) { return u / k; }
+           // the panels: the rectangles of (nearly) the size of the largest one that is not the whole canvas, in reading order
+           var all = kcRects(svg), A = vb.width * vb.height, big = null;
+           all.forEach(function(q) { var a = q.w * q.h; if (a < 0.98 * A && (!big || a > big.w * big.h)) big = q; });
+           if (!big) return true;
+           var a0 = big.w * big.h, panels = [];
+           all.forEach(function(q) {
+             var a = q.w * q.h; if (a < 0.9 * a0 || a > 1.1 * a0) return;
+             if (panels.some(function(p) { return Math.abs(p.x - q.x) < 1 && Math.abs(p.y - q.y) < 1; })) return;
+             panels.push(q);
+           });
+           panels.sort(function(a, b) { return Math.abs(a.y - b.y) > 0.5 * a.h ? a.y - b.y : a.x - b.x; });
+           var list = data.panels || []; if (panels.length !== list.length) return true;
+           // each legend entry belongs to the panel it sits in; one outside every panel to the panel on its left (a legend on
+           // the right), above it (below), below it (above) or on its right (left)
+           var groups = panels.map(function() { return []; });
+           host.querySelectorAll('svg text.kc-ed[data-kc=sample]').forEach(function(t) {
+             var b; try { b = t.getBBox(); } catch (e) { return; } if (!(b.width > 0)) return;
+             var cx = b.x + b.width / 2, cy = b.y + b.height / 2, hit = -1, bd = 1e12;
+             panels.forEach(function(P, i) { if (hit < 0 && cx >= P.x && cx <= P.x + P.w && cy >= P.y && cy <= P.y + P.h) hit = i; });
+             if (hit < 0) panels.forEach(function(P, i) {
+               var rowv = cy >= P.y && cy <= P.y + P.h, colv = cx >= P.x && cx <= P.x + P.w, d = 1e12;
+               if (rowv && cx > P.x + P.w) d = cx - P.x - P.w; else if (rowv && cx < P.x) d = P.x - cx;
+               else if (colv && cy > P.y + P.h) d = cy - P.y - P.h; else if (colv && cy < P.y) d = P.y - cy;
+               if (d < bd) { bd = d; hit = i; }
+             });
+             if (hit >= 0) groups[hit].push(t);
+           });
+           panels.forEach(function(P, i) {
+             var texts = groups[i], it = list[i]; if (!texts.length || !it) return;
+             var L = kcLegendBox(svg, texts, P); if (!L) return;
+             var pos = String(it.pos || '');
+             var ov = document.createElement('div'); ov.className = 'kc-leg-drag'; ov.title = 'Drag to move this panel’s legend (click a name to rename it)';
+             var l0 = offX + px(L.x - vb.x), t0 = offY + px(L.y - vb.y), lw = px(L.w), lh = px(L.h);
+             ov.style.left = l0 + 'px'; ov.style.top = t0 + 'px'; ov.style.width = lw + 'px'; ov.style.height = lh + 'px';
+             host.appendChild(ov);
+             ov.addEventListener('mousedown', function(ev) {
+               if (ev.button !== 0 || ev.ctrlKey) return; document.body.classList.add('kc-nosel');
+               var sx = ev.clientX, sy = ev.clientY, moved = false, gh = null, veil = null, hint = null, drop = null;
+               var pl = offX + px(P.x - vb.x), pt = offY + px(P.y - vb.y), pw = px(P.w), ph = px(P.h);
+               function lift() {
+                 veil = document.createElement('div'); veil.className = 'kc-leg-veil';
+                 veil.style.cssText = 'left:' + l0 + 'px;top:' + t0 + 'px;width:' + lw + 'px;height:' + lh + 'px;';
+                 gh = document.createElement('div'); gh.className = 'kc-leg-ghost';
+                 gh.style.cssText = 'left:' + l0 + 'px;top:' + t0 + 'px;width:' + lw + 'px;height:' + lh + 'px;';
+                 var cl = svg.cloneNode(true); cl.removeAttribute('id'); cl.querySelectorAll('[id]').forEach(function(e) { e.removeAttribute('id'); });
+                 cl.style.cssText = 'position:absolute;max-width:none;left:' + (offX - l0) + 'px;top:' + (offY - t0) + 'px;width:' + r.width + 'px;height:' + r.height + 'px;';
+                 gh.appendChild(cl);
+                 hint = document.createElement('div'); hint.className = 'kc-leg-hint'; hint.style.display = 'none';
+                 host.appendChild(veil); host.appendChild(gh); host.appendChild(hint); kcGhostSvg = svg; ov.style.visibility = 'hidden';
+               }
+               function place(dx, dy) {
+                 var gl = l0 + dx, gt = t0 + dy, cx = gl + lw / 2, cy = gt + lh / 2;
+                 if (cx >= pl && cx <= pl + pw && cy >= pt && cy <= pt + ph) {
+                   var mx = 0.02 * Math.max(pw - lw, 0), my = 0.02 * Math.max(ph - lh, 0);
+                   gl = Math.max(pl + mx, Math.min(pl + pw - lw - mx, gl)); gt = Math.max(pt + my, Math.min(pt + ph - lh - my, gt));
+                   var fx = pw - lw > 1 ? (gl - pl) / (pw - lw) : 0.5, fy = ph - lh > 1 ? 1 - (gt - pt) / (ph - lh) : 0.5;
+                   drop = {inside: true, fx: Math.round(Math.max(0, Math.min(1, fx)) * 1000) / 1000, fy: Math.round(Math.max(0, Math.min(1, fy)) * 1000) / 1000};
+                   hint.style.display = 'none'; gh.classList.remove('kc-out');
+                 } else {
+                   var d = {left: pl - cx, right: cx - pl - pw, top: pt - cy, bottom: cy - pt - ph}, side = 'right', m = -1e9;
+                   for (var n in d) if (d[n] > m) { m = d[n]; side = n; }
+                   drop = {inside: false, side: side}; gh.classList.add('kc-out');
+                   hint.textContent = 'Drop: this legend ' + (side === 'top' ? 'above' : side === 'bottom' ? 'below' : side + ' of') + ' its panel';
+                   hint.style.display = 'block'; hint.style.left = Math.max(0, gl) + 'px'; hint.style.top = (gt + lh + 6) + 'px';
+                 }
+                 gh.style.left = gl + 'px'; gh.style.top = gt + 'px';
+               }
+               function mv(e) { var dx = e.clientX - sx, dy = e.clientY - sy; if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return; if (!moved) { moved = true; lift(); } place(dx, dy); }
+               function up(e) {
+                 document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); document.body.classList.remove('kc-nosel');
+                 if (!moved) {
+                   ov.style.pointerEvents = 'none'; var under = document.elementFromPoint(e.clientX, e.clientY); ov.style.pointerEvents = '';
+                   var tx = under && under.closest ? under.closest('#od_plot_svg text.kc-ed') : null; if (tx) kcOpen(tx); return;
+                 }
+                 if (hint) hint.style.display = 'none';
+                 if (!drop || (!drop.inside && drop.side === pos)) { kcDropGhost(); ov.style.visibility = ''; return; }
+                 if (window.Shiny && Shiny.setInputValue)
+                   Shiny.setInputValue('kc_panel_legend_drop', {panel: it.name, inside: drop.inside, fx: drop.fx, fy: drop.fy, side: drop.side, n: Date.now()}, {priority: 'event'});
+                 setTimeout(function() { if (kcGhostSvg === svg) { kcDropGhost(); kcPanelLegDrag(); } }, 6000);   // no redraw came: put things back
+               }
+               document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+             });
+           });
+           return true;
+         }
          function kcLegDrag() {
+           if (kcPanelLegDrag()) return;                                  // v2.27.4: a figure of panels: one handle per panel legend
            var host = document.getElementById('od_plot_svg'); if (!host) return;
            var svg = host.querySelector('svg');
            if (kcGhostSvg && kcGhostSvg !== svg) kcDropGhost();          // the redrawn figure is here: the dragged copy goes
@@ -13129,7 +13235,7 @@ server <- function(input, output, session) {
                            "time_filter_range", "exclude_timepoints",
                            # v2.24.1: buttons and file pickers are not settings (they were written into the file, and the colour-map picker's
                            # upload record came back as a "wrong type" warning)
-                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions", "legend_key_on_figure", "facet_every",
+                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "kc_panel_legend_drop", "reset_label_positions", "legend_key_on_figure", "facet_every",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                            "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -13414,7 +13520,7 @@ server <- function(input, output, session) {
       f <- if (!is.null(hit)) hit[2] else { e <- fields_long_first[endsWith(nm, paste0("_", fields_long_first))]; if (length(e)) e[1] else next }
       v <- if (is.null(hit)) NULL else rv$panel_cfg[[hit[1]]][[f]]
       tryCatch(if (startsWith(f, "hide_")) updateCheckboxInput(session, nm, value = isTRUE(v))
-               else if (f %in% c("xmin", "xmax", "ymin", "ymax")) updateNumericInput(session, nm, value = if (is.null(v)) NA else v)
+               else if (f %in% c("xmin", "xmax", "ymin", "ymax", "legend_x", "legend_y")) updateNumericInput(session, nm, value = if (is.null(v)) NA else v)
                else if (identical(f, "legend")) updateSelectInput(session, nm, selected = v %||% "")
                else updateTextInput(session, nm, value = v %||% ""), error = function(e) NULL)
     }
@@ -13441,7 +13547,7 @@ server <- function(input, output, session) {
     # Skip anything data-specific or per-sample — only visual controls
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
-                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions", "legend_key_on_figure", "facet_every",   # v2.24.1 (files saved before it carry them)
+                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "kc_panel_legend_drop", "reset_label_positions", "legend_key_on_figure", "facet_every",   # v2.24.1 (files saved before it carry them)
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                          "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -13678,7 +13784,7 @@ server <- function(input, output, session) {
                error = function(e) NULL)
     for (nm in grep("^panelcfg_", names(input), value = TRUE))
       tryCatch(if (grepl("_hide_(points|lines|errors)$", nm)) updateCheckboxInput(session, nm, value = FALSE)
-               else if (grepl("_(xmin|xmax|ymin|ymax)$", nm)) updateNumericInput(session, nm, value = NA)
+               else if (grepl("_(xmin|xmax|ymin|ymax|legend_x|legend_y)$", nm)) updateNumericInput(session, nm, value = NA)
                else if (grepl("_legend$", nm)) updateSelectInput(session, nm, selected = "")
                else updateTextInput(session, nm, value = ""), error = function(e) NULL)
     rv$imported_settings <- NULL
@@ -14930,6 +15036,8 @@ server <- function(input, output, session) {
           textInput(panel_cfg_id(g, "title"), "Title:", val(g, "title"), placeholder = g),
           fluidRow(column(6, selectInput(panel_cfg_id(g, "legend"), "Legend:", PANEL_CFG_LEGEND_CHOICES, selected = val(g, "legend"))),
                    column(6, textInput(panel_cfg_id(g, "legend_title"), "Legend title:", val(g, "legend_title")))),
+          fluidRow(column(6, numericInput(panel_cfg_id(g, "legend_x"), "Legend x (0-1):", num(g, "legend_x"), 0, 1, 0.01)),   # v2.27.4: set by dragging the legend
+                   column(6, numericInput(panel_cfg_id(g, "legend_y"), "Legend y (0-1):", num(g, "legend_y"), 0, 1, 0.01))),
           fluidRow(column(6, textInput(panel_cfg_id(g, "xlab"), "X-axis label:", val(g, "xlab"))),
                    column(6, textInput(panel_cfg_id(g, "ylab"), "Y-axis label:", val(g, "ylab")))),
           fluidRow(column(3, numericInput(panel_cfg_id(g, "xmin"), "X min:", num(g, "xmin"))), column(3, numericInput(panel_cfg_id(g, "xmax"), "X max:", num(g, "xmax"))),
@@ -14950,6 +15058,36 @@ server <- function(input, output, session) {
       }))
   })
   # The panels as figures of their own, laid out like the composer (fixed panel size) or with patchwork (fit mode).
+  # v2.27.4: each panel's legend is dragged on its own. The page gets the panels in grid order (#kc_panel_legend_data);
+  # a drop inside a panel pins that panel's legend there (legend inside-custom, legend_x / legend_y as fractions of the
+  # panel), a drop outside moves it to that side of its panel. Only that panel changes.
+  panel_legend_layout <- function() {
+    if (!panel_legend_mode()) return(NULL)
+    sm <- sel_samples(); pm <- tryCatch(panel_membership_now(sm, resolve_aesthetics(sm), min_panels = 2L), error = function(e) NULL)
+    if (is.null(pm) || length(pm$levels) < 2L) return(NULL)
+    fig <- sel1("legend_position", "right")
+    list(panels = lapply(pm$levels, function(g) { lg <- as.character(panel_cfg_get(g)$legend %||% "")[1]; list(name = g, pos = if (is.na(lg) || !nzchar(lg)) fig else lg) }))
+  }
+  observeEvent(input$kc_panel_legend_drop, {
+    d <- input$kc_panel_legend_drop
+    if (!is.list(d)) return()
+    g <- as.character(unlist(d$panel))[1]; if (is.na(g) || !nzchar(g)) return()
+    sm <- sel_samples(); pm <- tryCatch(panel_membership_now(sm, resolve_aesthetics(sm), min_panels = 2L), error = function(e) NULL)
+    if (is.null(pm) || !(g %in% pm$levels)) return()
+    k <- pkey(g); cfg <- rv$panel_cfg[[k]] %||% list()
+    if (isTRUE(as.logical(unlist(d$inside))[1])) {
+      cl <- function(v) { v <- suppressWarnings(as.numeric(unlist(v))[1]); if (is.finite(v)) round(min(max(v, 0), 1), 3) else 0.98 }
+      fx <- cl(d$fx); fy <- cl(d$fy)
+      cfg$legend <- "inside-custom"; cfg$legend_x <- fx; cfg$legend_y <- fy
+      updateNumericInput(session, panel_cfg_id(g, "legend_x"), value = fx); updateNumericInput(session, panel_cfg_id(g, "legend_y"), value = fy)
+      updateSelectInput(session, panel_cfg_id(g, "legend"), selected = "inside-custom")
+    } else {
+      side <- as.character(unlist(d$side))[1]; if (is.na(side) || !side %in% c("right", "bottom", "top", "left")) side <- "right"
+      cfg$legend <- side
+      updateSelectInput(session, panel_cfg_id(g, "legend"), selected = side)
+    }
+    rv$panel_cfg[[k]] <- cfg
+  })
   panel_composite <- function() {
     plots <- main_group_plots(min_panels = 2L)
     n <- length(plots); if (n < 2L) return(NULL)
@@ -15475,6 +15613,20 @@ server <- function(input, output, session) {
     x_exp  <- expansion(mult = c(nin("x_expand_left"),   nin("x_expand_right")))
     y_exp  <- expansion(mult = c(nin("y_expand_bottom"), nin("y_expand_top")))
     x_lims <- eff_limits("x", plot_data)
+    # v2.27.4: with a typed x range that ends at a time point (0 to 120 with a reading at 120), the error bar's cap reaches
+    # half a cap past the end; the scale dropped that cap end as out of range and the whole cap vanished. Within half a cap
+    # of the range an x value is kept at the edge (the cap is cut at the frame, as a journal figure shows it); farther out
+    # it is dropped as before.
+    x_oob <- if (is.null(x_lims)) scales::censor else {
+      cap_hw <- (if (isTRUE(input$error_cap_relative)) diff(range(plot_data$time, na.rm = TRUE)) * nin("error_bar_width") / 100 else nin("error_bar_width")) / 2
+      cap_hw <- if (is.finite(cap_hw) && cap_hw > 0) cap_hw * 1.001 else 0
+      function(x, range = c(0, 1)) {
+        r <- sort(range); y <- x
+        hi <- !is.na(x) & x > r[2] & x <= r[2] + cap_hw; lo <- !is.na(x) & x < r[1] & x >= r[1] - cap_hw
+        y[hi] <- r[2]; y[lo] <- r[1]
+        scales::censor(y, range)
+      }
+    }
     y_lims <- eff_limits("y", plot_data)
     
     if (sel1("x_scale_type", APP_DEFAULTS$x_scale_type) == "log") {
@@ -15551,11 +15703,11 @@ server <- function(input, output, session) {
         x_guide_min <- prism_guide_if_safe(mnb, x0, max(mjb))
       }
 
-      p <- p + if (is.null(mjb)) scale_x_continuous(limits = x_lims, expand = x_exp, guide = guide_prism_minor())
+      p <- p + if (is.null(mjb)) scale_x_continuous(limits = x_lims, expand = x_exp, guide = guide_prism_minor(), oob = x_oob)
                else scale_x_continuous(limits = x_lims, expand = x_exp, breaks = mjb,
-                                       minor_breaks = mnb, guide = x_guide_min)
+                                       minor_breaks = mnb, guide = x_guide_min, oob = x_oob)
     } else {
-      p <- p + scale_x_continuous(limits = x_lims, expand = x_exp)
+      p <- p + scale_x_continuous(limits = x_lims, expand = x_exp, oob = x_oob)
     }
     
     y_oob <- y_oob_fn()   # v2.17: readings outside the axis limits are clipped to them ("squish") or dropped ("censor")
@@ -16233,7 +16385,9 @@ server <- function(input, output, session) {
       p(class = "kc-qe-note", "Figure too large for on-canvas editing; untick 'Edit labels on the figure' to see the preview.")
     else {
       lay <- tryCatch(label_layout_now(), error = function(e) NULL)      # v2.25.0: what the page needs to make the labels draggable
-      tagList(HTML(sv), if (!is.null(lay)) tags$script(type = "application/json", id = "kc_label_data", HTML(as.character(jsonlite::toJSON(lay, auto_unbox = TRUE, digits = 6)))))
+      pll <- tryCatch(panel_legend_layout(), error = function(e) NULL)  # v2.27.4: each panel's legend dragged on its own
+      tagList(HTML(sv), if (!is.null(lay)) tags$script(type = "application/json", id = "kc_label_data", HTML(as.character(jsonlite::toJSON(lay, auto_unbox = TRUE, digits = 6)))),
+              if (!is.null(pll)) tags$script(type = "application/json", id = "kc_panel_legend_data", HTML(as.character(jsonlite::toJSON(pll, auto_unbox = TRUE)))))
     }
   })
   

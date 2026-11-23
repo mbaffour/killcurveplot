@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.27.4 — 2026-11-23
+
+**Each panel's legend is moved on its own; the last error bar keeps its cap at the end of a typed x range.**
+- **Drag a panel's legend** (a figure of panels with *A legend in each panel*): every panel's legend has its own handle on
+  the figure. Dropped inside its panel it stays exactly there (that panel's Legend: *Inside: where dragged*, with
+  *Legend x / y* in the panel's settings); dropped outside, it goes to that side of its panel (right, left, above, below).
+  The other panels are not touched. Saved with Save Settings and in project files. The per-panel Legend menu also has
+  *Left (outside)*.
+- **Error bars at the end of a typed x range**: with Custom X range ending at a time point (0 to 120 with a reading at
+  120), the last bar's cap reached half a cap past the end and the scale dropped it, so the cap vanished. It is now kept
+  and cut at the frame. Readings beyond the range are still left out.
+- `tests/test_v2274_panel_legend_drag.R` (14 checks). Checked live: dragging panel B's legend moves only panel B's.
+
 ## v2.27.3 — 2026-11-23
 
 **The multi-panel agreement everywhere: every panel the size of a single figure's panel, all equal, legends inside.**
