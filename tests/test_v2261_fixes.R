@@ -1,0 +1,127 @@
+# ============================================================================
+# v2.26.1: the palettes no longer repeat past 8 samples (12 for the default colours), plus the fixes from the review.
+# Run from the repository root:  Rscript tests/test_v2261_fixes.R
+# ============================================================================
+suppressPackageStartupMessages({
+  library(shiny); library(tidyverse); library(ggpubr); library(scales)
+  library(ggrepel); library(ggprism); library(svglite); library(jsonlite)
+})
+if (!file.exists("Lysis_Curve_App_v28.R")) stop("Run from the repository root: Rscript tests/test_v2261_fixes.R")
+Sys.setenv(CFU_PAPER_STYLE = file.path(tempdir(), "no_paper_style_here.json"))
+pass <- 0L; fail <- 0L
+check  <- function(desc, cond) {
+  if (isTRUE(cond)) { pass <<- pass + 1L; cat("PASS:", desc, "\n") }
+  else              { fail <<- fail + 1L; cat("FAIL:", desc, "\n") }
+}
+env <- new.env()
+app <- source("Lysis_Curve_App_v28.R", local = env)$value
+check("APP_VERSION is 2.26.1 or later", package_version(env$APP_VERSION) >= "2.26.1")
+
+cat("\n--- palettes past their own length ---\n")
+okabe <- c("#000000","#E69F00","#56B4E9","#009E73","#F0E442","#0072B2","#D55E00","#CC79A7")
+set1  <- c("#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#FFFF33","#A65628","#F781BF")
+cust  <- c("#000000","#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#A65628","#F781BF","#999999","#66C2A5","#FC8D62","#8DA0CB")
+gp <- env$get_palette_colors
+check("up to 8 samples: Okabe-Ito / Set1 exactly as before", identical(gp("colorblind", 8), okabe) && identical(gp("publication", 5), okabe[1:5]) && identical(gp("set1", 8), set1))
+check("up to 12 samples: the default colours exactly as before", identical(env$default_sample_colours(12), cust) && identical(env$default_sample_colours(3), cust))
+for (n in c(9, 12, 16, 24, 40, 80)) {
+  ok <- vapply(c("colorblind", "publication", "set1"), function(p) { x <- gp(p, n); length(x) == n && !anyDuplicated(x) && identical(x[1:8], if (p == "set1") set1 else okabe) }, NA)
+  check(sprintf("%d samples: colorblind / publication / set1 give %d different colours, the first 8 unchanged", n, n), all(ok))
+  d <- env$default_sample_colours(n)
+  check(sprintf("%d samples: the default colours are all different", n), length(d) >= n && !anyDuplicated(d[seq_len(n)]))
+}
+check("the 9th Okabe-Ito colour is not black (the old repeat): purple", identical(gp("colorblind", 9)[9], "#800080"))
+x <- gp("colorblind", 16)
+dmin <- min(as.dist(farver::compare_colour(farver::decode_colour(x), farver::decode_colour(x), "rgb", method = "cie2000")))
+check(sprintf("16 Okabe-Ito-based colours: every pair at least 15 CIEDE2000 apart (min %.1f)", dmin), dmin >= 15)
+check("colours 9-16 have legend words of their own (no two of the 16 share a word)", !anyDuplicated(env$colour_words(x)))
+check("the extras are valid hex colours and none is near-white", all(grepl("^#[0-9A-F]{6}$", x)) &&
+        all(farver::convert_colour(farver::decode_colour(x), "rgb", "lab")[, "l"] < 92))
+check("distinct_colours: n = 0 / NA / negative give no colours, not an error",
+      identical(env$distinct_colours(okabe, 0), character(0)) && identical(env$distinct_colours(okabe, NA), character(0)) && identical(env$distinct_colours(okabe, -2), character(0)))
+check("distinct_colours: the same answer twice (cached) and deterministic", identical(env$distinct_colours(okabe, 30), env$distinct_colours(okabe, 30)))
+check("viridis / gradients unchanged", identical(gp("viridis", 4), scales::viridis_pal(option = "D")(4)) && gp("blues", 6)[1] == "#000000")
+
+cat("\n--- the app with twelve and twenty samples ---\n")
+mk <- function(nm) {
+  t <- seq(0, 120, 20); set.seed(5); cols <- list(Time = t)
+  for (i in seq_along(nm)) for (r in 1:2) cols[[length(cols) + 1]] <- round(0.05 * exp(0.02 * t) * (1 + i / 50) * exp(rnorm(length(t), 0, 0.02)), 4)
+  d <- as.data.frame(cols); names(d) <- c("Time", rep(nm, each = 2)); d
+}
+r <- new.env()
+testServer(app, {
+  S <- session$setInputs
+  ingest_data(mk(c("Control", paste("Phage", 1:11))), "twelve"); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars)
+  r$start12 <- unname(resolve_aesthetics(rv$od_vars)$colors)   # the startup (journal) palette
+  S(color_palette = "custom"); r$cust12 <- unname(resolve_aesthetics(rv$od_vars)$colors)
+  S(color_palette = "colorblind"); r$cb12 <- unname(resolve_aesthetics(rv$od_vars)$colors)
+  r$legend12 <- figure_legend_string()
+  S(color_palette = "custom")
+  ingest_data(mk(paste("S", 1:20)), "twenty"); S(selected_samples = rv$od_vars)
+  r$cust20 <- unname(resolve_aesthetics(rv$od_vars)$colors)
+  S(color_palette = "set1"); r$s120 <- unname(resolve_aesthetics(rv$od_vars)$colors)
+})
+check("12 samples at startup (the journal standard, Okabe-Ito): 12 different colours, the first 8 as before",
+      !anyDuplicated(toupper(r$start12)) && identical(toupper(r$start12[1:8]), okabe))
+check("12 samples, default colours: 12 different colours, as before", identical(toupper(r$cust12), cust))
+check("12 samples, Okabe-Ito: 12 different colours, the 9th ('Phage 8') no longer black", !anyDuplicated(toupper(r$cb12)) && toupper(r$cb12[9]) != "#000000")
+check("12 samples, Okabe-Ito: the legend text names Phage 8 purple", grepl("Phage 8 (purple", r$legend12, fixed = TRUE))
+check("20 samples, default colours: 20 different colours", length(r$cust20) == 20 && !anyDuplicated(toupper(r$cust20)))
+check("20 samples, Set1: 20 different colours", length(r$s120) == 20 && !anyDuplicated(toupper(r$s120)))
+
+cat("\n--- review fixes: statistics and file reading ---\n")
+set.seed(42); g <- rep(c("A","B","C","D"), c(3,4,5,3)); x <- rnorm(15, rep(c(1,1.5,3,1.2), c(3,4,5,3)), rep(c(.2,.5,.3,.1), c(3,4,5,3)))
+sd_ <- env$posthoc_table(x, g, "sidak"); rr <- sd_[sd_$group1 == "B" & sd_$group2 == "A", ]
+w <- t.test(x[g == "B"], x[g == "A"], conf.level = 0.95^(1/6))$conf.int
+check("Sidak post-hoc CI at level^(1/m) (99.15% for 6 pairs), not 1 - alpha^(1/m) (39%)", abs(rr$ci_lo - w[1]) < 1e-9 && abs(rr$ci_hi - w[2]) < 1e-9)
+check("Sidak CI: slightly narrower than Bonferroni's, not a fraction of it",
+      { b <- env$posthoc_table(x, g, "bonferroni"); rb <- b[b$group1 == "B" & b$group2 == "A", ]; (rr$ci_hi - rr$ci_lo) <= (rb$ci_hi - rb$ci_lo) && (rr$ci_hi - rr$ci_lo) > 0.95 * (rb$ci_hi - rb$ci_lo) })
+rm3 <- data.frame(sample = rep(c("WT", "Mut-1", "Phage"), each = 3), lysis_time = c(50,52,51, 60,63,61, 80,84,79))
+st <- env$compare_replicate_metric(rm3, "lysis_time")
+lt <- env$stats_long_table("lysis_time", list(pairwise = st$pairwise, omnibus = st$omnibus, posthoc = st$posthoc))
+ph <- lt[lt$section == "posthoc", ]
+check("stats CSV: Tukey rows keep both sample names (hyphenated names too), the adjusted p and the method",
+      nrow(ph) == 3 && !anyNA(ph$group1) && !anyNA(ph$group2) && all(c(ph$group1, ph$group2) %in% c("WT", "Mut-1", "Phage")) &&
+        !anyNA(ph$p_adj) && all(ph$method == "Tukey HSD"))
+check("Tukey rows: group1 - group2 is the difference's direction",
+      { r <- st$posthoc[st$posthoc$group1 == "Phage" & st$posthoc$group2 == "WT", ]; nrow(r) == 1 && abs(r$difference - (mean(c(80,84,79)) - mean(c(50,52,51)))) < 1e-9 } ||
+      { r <- st$posthoc[st$posthoc$group1 == "WT" & st$posthoc$group2 == "Phage", ]; nrow(r) == 1 && abs(r$difference - (mean(c(50,52,51)) - mean(c(80,84,79)))) < 1e-9 })
+check("dd/mm/yyyy across midnight, no seconds: 60 min, not a month", identical(env$parse_time_column(c("02/01/2024 23:30", "03/01/2024 00:30"))$values, c(0, 60)))
+check("mm/dd/yyyy across midnight, with seconds: 60 min, not a month", identical(env$parse_time_column(c("02/01/2024 23:30:00", "02/02/2024 00:30:00"))$values, c(0, 60)))
+ts <- format(seq(as.POSIXct("2024-01-12 14:00", tz = "UTC"), by = "30 min", length.out = 22), "%d/%m/%Y %H:%M")
+v <- env$parse_time_column(ts)$values
+check("a dd/mm run past day 12 keeps every row, half-hourly", !anyNA(v) && all(diff(v) == 30))
+ts2 <- format(seq(as.POSIXct("2024-03-05 08:00", tz = "UTC"), by = "15 min", length.out = 9), "%m/%d/%Y %H:%M")
+check("an unambiguous mm/dd run still reads as before", identical(env$parse_time_column(ts2)$values, seq(0, 120, 15)))
+check("ISO date-times with seconds keep the seconds", identical(env$parse_time_column(c("2024-01-01 10:00:00", "2024-01-01 10:30:45"))$values, c(0, 30.75)))
+t <- seq(0, 300, 10)
+rr3 <- do.call(rbind, lapply(1:3, function(r) data.frame(time = t, variable = "X", replicate = r, value = c(0.500, 0.501, 0.505)[r])))
+check("replicate outlier flag: three replicates within 1% are not flagged", !any(env$replicate_outlier_flags(rr3)$flagged))
+bad <- rr3; bad$value[bad$replicate == 3] <- 0.9
+check("replicate outlier flag: a replicate 80% off is still flagged", sum(env$replicate_outlier_flags(bad)$flagged) == 1)
+t <- seq(0, 120, 10); ref <- 0.05 * exp(0.03 * pmin(t, 80))
+pd <- rbind(data.frame(time = t, variable = "Ref", replicate = 1, mean_value = ref), data.frame(time = t, variable = "P", replicate = 1, mean_value = ref * 0.9),
+            data.frame(time = t[t <= 40], variable = "P", replicate = 2, mean_value = (ref * 0.9)[t <= 40]))
+lv <- env$calculate_local_virulence(pd, "Ref")
+check("local virulence: a full curve 10% under the reference is 0.1; one that stops before t_stat is NA, not 0.87",
+      abs(lv$local_virulence[lv$sample == "P" & lv$replicate == 1] - 0.1) < 1e-9 && is.na(lv$local_virulence[lv$sample == "P" & lv$replicate == 2]))
+d <- data.frame(Time = seq(0, 60, 10), check.names = FALSE)
+for (nm in c("WT temp 30", "Temp-sensitive mutant", "WT")) d[[nm]] <- c(.05,.08,.13,.2,.31,.45,.6)
+d[["Temp"]] <- 37; d[["T° 600"]] <- 37.1; d[["Temperature [°C]"]] <- 30
+ws <- env$wide_sample_columns(d, "Time")
+check("columns named 'WT temp 30' / 'Temp-sensitive mutant' holding OD values are samples", all(c("WT temp 30", "Temp-sensitive mutant", "WT") %in% ws$used))
+check("real temperature traces (Temp, T° 600, Temperature [°C]) are still dropped", !any(c("Temp", "T° 600", "Temperature [°C]") %in% ws$used) && sum(ws$dropped$reason == "temperature column") == 3)
+set.seed(3); tmin <- seq(0, 240, 10)
+curve <- function(mu) 0.05 * exp(env$gm_logistic(tmin, 3, mu, 30))
+df <- do.call(rbind, lapply(1:3, function(r) rbind(data.frame(t = tmin, od = curve(0.03) * exp(rnorm(25, 0, .03)), sample = "A"),
+                                                   data.frame(t = tmin, od = curve(0.02) * exp(rnorm(25, 0, .03)), sample = "B"))))
+df$od[df$t > 170] <- df$od[df$t > 170] * 0.5
+dfh <- df; dfh$t <- dfh$t / 60
+check("compare fits: time in hours fits the same points as in minutes", identical(env$compare_fits(df, "logistic", "mu")$test$n, env$compare_fits(dfh, "logistic", "mu")$test$n))
+rm2 <- data.frame(sample = rep(c("A", "B", "C"), each = 3), m = c(1, 1.1, .9, 2, 2.2, 2.1, 3, 3.3, 3.1))
+r7 <- env$s22_posthoc_for_metric(rm2, "m", "dunnett", reference = "")
+check("Dunnett without a reference: the note names the sample used, not 'all pairs'",
+      any(grepl("'A' (the first sample) is used", r7$notes, fixed = TRUE)) && !any(grepl("all pairs are compared meanwhile", r7$notes)))
+
+cat("\n", pass, "passed,", fail, "failed\n")
+if (fail > 0) quit(status = 1)

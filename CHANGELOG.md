@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.26.1 — 2026-11-23
+
+**Colours no longer repeat past the eighth sample, and the fixes from a full review.**
+- **Palettes:** Okabe-Ito (the journal default), Publication and Set1 used to start again after 8 samples, and the
+  default colour cycle after 12, so with twelve samples "Phage 8" was black like the control. Each now keeps its own
+  colours first (figures with up to 8 / 12 samples are byte-identical) and continues with 8 further distinct colours,
+  each with a legend word of its own (purple, maroon, grey, olive, navy, magenta, green, brown), then generated ones
+  (`distinct_colours()`, CIEDE2000-spaced). The legend text has four more colour words: navy, olive, maroon, magenta.
+  Only Okabe-Ito's own eight are colour-blind safe; the notification now says so instead of warning about repeats. The
+  palette preview shows every sample's colour (up to 24). Clear & Reset and Clear colour map use the same colours.
+- **Statistics:** Sidak post-hoc confidence intervals were computed at 1 - alpha^(1/m) (a 39% interval for 6 pairs)
+  instead of (1 - alpha)^(1/m) (99.15%); p-values were right. The replicate-statistics CSV now keeps the Tukey rows'
+  sample names, adjusted p and method. Dunnett without a reference says which sample it used. The replicate-curve
+  outlier flag also needs the replicate to be more than 10% of the sample's level away from the median curve (with
+  three replicates a 1% spread was flagged). Local virulence is NA for a curve that stops before t_stat (it was
+  inflated). Compare fits keeps the peak time point when time is shown in hours.
+- **Reading files:** date-times that read either way (dd/mm or mm/dd) take the order that reads more rows, then the
+  shorter run: a run crossing midnight no longer jumps a month or loses rows. A column with "temp" in its name is a
+  temperature trace only if its values look like one (15-60): "WT temp 30" holding OD readings is a sample.
+
 ## v2.26.0 — 2026-11-23
 
 **One dataset, several panels, each set on its own.** (Panels section, after Axis Settings.)

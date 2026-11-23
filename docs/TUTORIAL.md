@@ -559,7 +559,7 @@ Download figure bundle (.zip): figure, legend key, legend text, methods, statist
 | Error bars are missing at some points | n = 1 at that time point (no spread), or the bar fell below a log axis' floor; switch on *draw bars that cross zero*. |
 | The figure is wider than the journal column | The size bar says so. Move the legend inside, shorten names, or for panels use *Panel size: Fit a double column*. |
 | Text looks huge on screen | The preview shows the true print size scaled to the screen; the exported file is correct. Use *True export size* to check. |
-| Two samples share a colour | The default palette repeats after eight colours (with twelve samples, "Phage 8" is black like the first). Set the colour in Variable Styling, or load a colour map. |
+| Two samples share a colour | Since v2.26.1 the palettes no longer repeat: samples past the eighth (twelfth for the default colours) get further distinct colours (purple, maroon, grey, olive, navy, magenta ...). Two samples that still look alike were most likely given the same colour by hand or by a colour map: set the colour in Variable Styling. Only Okabe-Ito's first eight colours are colour-blind safe, so with more samples give them different markers or line types too. |
 | Floating labels or extra labels are not drawn | With *Split the lysis curve into panels* on, the ordinary legend is used; a note under the menu says so. |
 | A settings file reports "wrong type" settings | Those values could not apply to a control (e.g. from a much older version); everything else was applied. |
 | The app does not start | Run it once from RStudio to see the message; usually a package is missing: `install.packages("name")`. |

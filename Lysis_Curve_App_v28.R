@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.26.0"
+APP_VERSION <- "2.26.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -933,10 +933,22 @@ parse_time_column <- function(x, name = NULL) {
   fmts <- c("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S",
             "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
             "%m/%d/%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d/%m/%Y %H:%M")
+  # v2.26.1: a day/month format is weighed against its month/day twin (and the other way round): the one that reads
+  # more rows wins, on a tie the shorter run (a 1 h step read the wrong way round is a jump of a month), so a run that
+  # crosses midnight on a day <= 12 no longer loses rows or jumps
+  swap_dm <- function(f) if (grepl("%d([/.])%m", f)) sub("%d([/.])%m", "%m\\1%d", f) else if (grepl("%m([/.])%d", f)) sub("%m([/.])%d", "%d\\1%m", f) else NA_character_
+  need <- if (sum(keep) == 1L) 1 else max(2, 0.8 * sum(keep))
   for (tx in unique(list(txt24, txt))) for (f in fmts) {          # (12-hour text first: its 24-hour rewrite)
     pt <- suppressWarnings(as.POSIXct(tx, format = f, tz = "UTC"))
-    if (sum(!is.na(pt)) >= (if (sum(keep) == 1L) 1 else max(2, 0.8 * sum(keep))))     # round 2 (#8): one data row is a datetime too (0 min)
+    if (sum(!is.na(pt)) >= need) {                                  # round 2 (#8): one data row is a datetime too (0 min)
+      f2 <- swap_dm(f)
+      if (!is.na(f2)) {
+        p2 <- suppressWarnings(as.POSIXct(tx, format = f2, tz = "UTC"))
+        span <- function(x) diff(range(as.numeric(x), na.rm = TRUE))
+        if (sum(!is.na(p2)) > sum(!is.na(pt)) || (sum(!is.na(p2)) == sum(!is.na(pt)) && span(p2) < span(pt))) pt <- p2
+      }
       return(conv(as.numeric(difftime(pt, min(pt, na.rm = TRUE), units = "mins"))))
+    }
   }
 
   # 4. whatever was already numeric; the caller decides what to do with the rest
@@ -1064,6 +1076,10 @@ wide_sample_columns <- function(data, time_col) {
   cand <- setdiff(seq_along(cn), which(cn == time_col))
   is_temp <- grepl(TEMP_COL_REGEX, cn[cand], ignore.case = TRUE, perl = TRUE)
   is_num  <- vapply(cand, function(i) is.numeric(data[[i]]), logical(1))
+  # v2.26.1: a header with the word temp is a temperature trace only when its values look like one (15-60, as for T600):
+  # "WT temp 30", "Temp-sensitive mutant" holding OD readings are samples
+  temp_vals <- vapply(cand, function(i) { x <- data[[i]]; if (!is.numeric(x)) return(TRUE); x <- x[is.finite(x)]; !length(x) || all(x >= 15 & x <= 60) }, logical(1))
+  is_temp <- is_temp & (temp_vals | grepl("^T°", cn[cand]))
   is_t600 <- is_num & grepl("^T\\s*[0-9]{3}$", cn[cand], ignore.case = TRUE) &
     vapply(cand, function(i) { x <- data[[i]]; x <- x[is.finite(x)]; length(x) > 0 && all(x >= 15 & x <= 60) }, logical(1))
   is_temp <- is_temp | is_t600
@@ -2042,6 +2058,10 @@ calculate_local_virulence <- function(pd, ref_sample, smooth_window = 5,
   rows <- lapply(split(seq_len(nrow(pd)), key, drop = TRUE), function(ix) {
     d  <- pd[ix, , drop = FALSE]
     Ai <- area_to(d$time, d$mean_value, t_stat)
+    # v2.26.1: a curve that stops before t_stat (or starts after the reference) has no comparable area: NA, not an
+    # area over a shorter range divided by the reference's full one (which inflated the virulence)
+    tf <- d$time[is.finite(d$time) & is.finite(d$mean_value)]
+    if (!length(tf) || max(tf) < t_stat - 1e-9 || min(tf) > t_ref[1] + 1e-9) Ai <- NA_real_
     r  <- data.frame(sample = d$variable[1],
                      local_virulence = if (is.finite(A0) && A0 > 0 && is.finite(Ai)) 1 - Ai / A0 else NA_real_,
                      t_stat_used = t_stat, stringsAsFactors = FALSE)
@@ -3189,7 +3209,8 @@ stats_long_table <- function(metric, sections, notes = character(0), info = NULL
     rows[[length(rows) + 1L]] <- data.frame(
       metric = as.character(metric)[1], section = sec, group1 = txt(pick(d, "group1", "sample")), group2 = txt(pick(d, "group2", "versus")),
       estimate = num(pick(d, "estimate", "difference", "statistic")), ci_lo = num(pick(d, "ci_lo", "ci_low")), ci_hi = num(pick(d, "ci_hi", "ci_high")),
-      p = num(pick(d, "p_raw", "p")), p_adj = num(pick(d, "p_adj", "p_adj_holm")), method = txt(pick(d, "method", "test")),
+      p = num(pick(d, "p_raw", "p")), p_adj = num(pick(d, "p_adj", "p_adj_holm", "p_adj_tukey")),
+      method = txt(if ("p_adj_tukey" %in% names(d) && !any(c("method", "test") %in% names(d))) rep("Tukey HSD", nrow(d)) else pick(d, "method", "test")),   # v2.26.1
       note = txt(pick(d, "note")), stringsAsFactors = FALSE)
   }
   extra <- c(if (!is.null(info)) setNames(info, rep("info", length(info))), setNames(notes, rep("note", length(notes))))
@@ -3646,10 +3667,17 @@ compare_replicate_metric <- function(rm, metric, ref_sample = NULL,
         om <- data.frame(test = "One-way ANOVA", statistic = s[["F value"]][1],
                          df1 = s[["Df"]][1], df2 = s[["Df"]][2], p = s[["Pr(>F)"]][1],
                          stringsAsFactors = FALSE)
+        # v2.26.1: Tukey on coded levels too, so each row names its two samples (group1 - group2) even when a sample
+        # name contains a hyphen; the CSV export (stats_long_table) needs them
+        lv  <- levels(d$sample); dc <- data.frame(value = d$value, g = factor(paste0("g", as.integer(d$sample)), levels = paste0("g", seq_along(lv))))
+        tkc <- tryCatch(TukeyHSD(aov(value ~ g, data = dc))$g, error = function(e) NULL)
         tk <- tryCatch(TukeyHSD(fit)$sample, error = function(e) NULL)
         if (!is.null(tk)) {
+          gi <- if (!is.null(tkc) && nrow(tkc) == nrow(tk)) do.call(rbind, strsplit(sub("^g", "", rownames(tkc)), "-g", fixed = TRUE)) else NULL
           ph <- data.frame(comparison = rownames(tk), difference = tk[, "diff"],
                            ci_low = tk[, "lwr"], ci_high = tk[, "upr"], p_adj_tukey = tk[, "p adj"],
+                           group1 = if (is.null(gi)) NA_character_ else lv[as.integer(gi[, 1])],
+                           group2 = if (is.null(gi)) NA_character_ else lv[as.integer(gi[, 2])],
                            row.names = NULL, stringsAsFactors = FALSE)
           ph$stars <- sig_stars(ph$p_adj_tukey)
         }
@@ -3877,6 +3905,37 @@ write_bundle_archive <- function(archive, root, folder, kind = bundle_archive_ki
 # n colours for a named palette. v2.17: "blues" and "blue_red" are dose gradients for MOI series:
 # the first sample (usually the uninfected control) is black and the n - 1 others run along the
 # ramp from low to high dose (light to dark blue, or blue to red).
+# v2.26.1: the named sets (Okabe-Ito, Set1, the "custom" default cycle) no longer repeat. Their own colours come first,
+# unchanged, so a figure with up to 8 (12 for the default cycle) samples is exactly as before; the next 6-8 colours are
+# chosen for distance (CIEDE2000) from those already used and each has a legend word of its own (purple, maroon, grey,
+# olive, navy, magenta ...); past those, more are generated from an HCL grid the same way. Only the first 8 Okabe-Ito
+# colours are colour-blind safe: the notification says so.
+OKABE_ITO_COLOURS     <- c("#000000","#E69F00","#56B4E9","#009E73","#F0E442","#0072B2","#D55E00","#CC79A7")
+OKABE_ITO_EXTRA       <- c("#800080","#800000","#808080","#999933","#222255","#FF00FF","#117733","#A6761D")
+SET1_COLOURS          <- c("#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#FFFF33","#A65628","#F781BF")
+SET1_EXTRA            <- c("#000000","#225522","#000080","#808000","#008080","#808080","#800000","#FF00FF")
+DEFAULT_SAMPLE_COLOURS <- c("#000000","#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#A65628","#F781BF",
+                            "#999999","#66C2A5","#FC8D62","#8DA0CB")
+DEFAULT_SAMPLE_EXTRA  <- c("#225522","#000080","#808000","#008080","#800000","#FF00FF")
+.distinct_cache <- new.env(parent = emptyenv())
+# n colours: base, then extras, then generated ones, none repeated (n is capped at 400; beyond that the list recycles).
+distinct_colours <- function(base, n, extras = character(0)) {
+  n <- suppressWarnings(as.integer(n)[1]); if (is.na(n) || n <= 0L) return(character(0))
+  pool <- unique(toupper(c(base, extras)))
+  if (n <= length(pool)) return(pool[seq_len(n)])
+  key <- paste(c(pool, min(n, 400L)), collapse = ",")
+  if (!is.null(got <- .distinct_cache[[key]])) return(rep_len(got, n))
+  grid <- expand.grid(h = seq(5, 355, 10), l = c(35, 50, 65), c = c(40, 70))
+  cand <- setdiff(unique(toupper(grDevices::hcl(grid$h, grid$c, grid$l, fixup = TRUE))), pool)
+  got <- pool
+  while (length(got) < min(n, 400L) && length(cand)) {
+    d <- farver::compare_colour(farver::decode_colour(cand), farver::decode_colour(got), "rgb", method = "cie2000")
+    j <- which.max(apply(d, 1, min)); got <- c(got, cand[j]); cand <- cand[-j]
+  }
+  assign(key, got, envir = .distinct_cache)
+  rep_len(got, n)
+}
+default_sample_colours <- function(n) distinct_colours(DEFAULT_SAMPLE_COLOURS, max(12L, n), DEFAULT_SAMPLE_EXTRA)
 get_palette_colors <- function(pal, n) {
   gradient <- function(ends) {
     if (n <= 1) return(rep_len("#000000", n))
@@ -3885,12 +3944,9 @@ get_palette_colors <- function(pal, n) {
   switch(pal,
          viridis     = scales::viridis_pal(option = "D")(n),
          plasma      = scales::viridis_pal(option = "C")(n),
-         colorblind  = rep_len(c("#000000","#E69F00","#56B4E9","#009E73",
-                                 "#F0E442","#0072B2","#D55E00","#CC79A7"), n),
-         publication = rep_len(c("#000000","#E69F00","#56B4E9","#009E73",     # v2.22: Okabe-Ito, what "publication" means in the N4 paper app
-                                 "#F0E442","#0072B2","#D55E00","#CC79A7"), n),
-         set1        = rep_len(c("#E41A1C","#377EB8","#4DAF4A","#984EA3",      # v2.22: what "publication" was before (ColorBrewer Set1)
-                                 "#FF7F00","#FFFF33","#A65628","#F781BF"), n),
+         colorblind  = distinct_colours(OKABE_ITO_COLOURS, n, OKABE_ITO_EXTRA),
+         publication = distinct_colours(OKABE_ITO_COLOURS, n, OKABE_ITO_EXTRA),   # v2.22: Okabe-Ito, what "publication" means in the N4 paper app
+         set1        = distinct_colours(SET1_COLOURS, n, SET1_EXTRA),             # v2.22: what "publication" was before (ColorBrewer Set1)
          rainbow     = rainbow(n),
          gray        = gray.colors(n, start = 0.15, end = 0.85),
          blues       = gradient(c("#c6dbef", "#08306b")),
@@ -4957,8 +5013,7 @@ compare_fits <- function(df, model = c("logistic", "gompertz", "baranyi"), param
     parts <- vector("list", ng); y0s <- numeric(ng); starts <- vector("list", ng); per_ok <- stats::setNames(rep(FALSE, ng), groups)
     for (i in seq_len(ng)) {
       sel <- g == groups[i]
-      xm  <- tapply(y[sel], x[sel], mean); tm <- as.numeric(names(xm)); xm <- as.numeric(xm)
-      o   <- order(tm); tm <- tm[o]; xm <- xm[o]
+      tm  <- sort(unique(x[sel])); xm <- vapply(tm, function(t0) mean(y[sel][x[sel] == t0]), 0)   # v2.26.1: exact times, not tapply's 15-digit names (hours lost the peak)
       kpk <- if (until == "peak") which.max(xm) else length(xm)
       tcut <- tm[kpk]
       keep <- sel & x <= tcut
@@ -5809,7 +5864,7 @@ omnibus_table <- function(values, groups) {
 #   tukey         pooled-variance Tukey-Kramer from TukeyHSD(aov()); p_raw NA (single-step); all-pairs family
 #   holm_welch    Welch t per pair, Holm-adjusted across the family; CI unadjusted
 #   bonferroni    Welch t per pair, Bonferroni p; CI widened to 1 - (1 - level) / m
-#   sidak         Welch t per pair, Sidak p;      CI at 1 - (1 - level)^(1 / m)
+#   sidak         Welch t per pair, Sidak p;      CI at level^(1 / m)  (v2.26.1: was 1 - (1 - level)^(1 / m), a 39% interval)
 #   games_howell  Welch df per pair, studentised-range (ptukey) p; estimate CI uses qtukey; p_raw NA
 #   dunn          Kruskal rank sums, tie-corrected z, Holm (or Bonferroni via `dunn_adjust`) p; estimate = mean-rank difference
 #   dunnett       each sample vs the reference, pooled-variance multivariate-t (needs mvtnorm); otherwise it falls back to
@@ -5945,7 +6000,7 @@ posthoc_table <- function(values, groups,
   }
 
   # Welch-based families: holm_welch, bonferroni, sidak (and the Dunnett fallback)
-  lv <- switch(method, bonferroni = 1 - (1 - level) / m, sidak = 1 - (1 - level)^(1 / m), level)
+  lv <- switch(method, bonferroni = 1 - (1 - level) / m, sidak = level^(1 / m), level)   # v2.26.1: Sidak's per-comparison level (0.95, 6 pairs -> 99.15%)
   ci_note <- if (method %in% c("bonferroni", "sidak")) "CIs widened for the family" else paste0("CIs unadjusted (", .s22_pct(level), "% for a single comparison)")
   rows <- lapply(pairs, function(pr) {
     a <- P$x[P$g == pr[1]]; b <- P$x[P$g == pr[2]]; w <- welch(a, b, lv)
@@ -6147,6 +6202,9 @@ grubbs_critical <- function(n, alpha = 0.05) {
 
 # Replicate-curve outliers: for each sample, the mean absolute deviation (over time) of every replicate curve from the
 # per-time MEDIAN curve of that sample, scaled by the median of those deviations; scaled distance > 3 is flagged.
+# v2.26.1: and only when the replicate is also more than 10% of the sample's mean level (the median curve's mean |OD|)
+# away from the median curve: with 3 replicates the scaled distance alone flagged ordinary 1% spreads (it only asks
+# "is one replicate 3x further out than the other").
 # Needs >= 3 replicates per sample. Columns: sample, replicate, well, abs_dev, distance (the scaled value), flagged, note.
 replicate_outlier_flags <- function(long, response = "od", time = "time", sample = "sample", id = "well") {
   na <- NA_real_
@@ -6166,7 +6224,8 @@ replicate_outlier_flags <- function(long, response = "od", time = "time", sample
     dist <- if (nzchar(note)) rep(na, length(wells)) else ad / md
     rows[[length(rows) + 1L]] <- data.frame(sample = s, replicate = g$replicate[match(wells, g$well)], well = wells,
                                             abs_dev = unname(ad), distance = unname(dist),
-                                            flagged = is.finite(dist) & dist > 3, note = note, stringsAsFactors = FALSE)
+                                            flagged = is.finite(dist) & dist > 3 & ad > 0.10 * mean(abs(medc), na.rm = TRUE),
+                                            note = note, stringsAsFactors = FALSE)
   }
   do.call(rbind, c(rows, list(make.row.names = FALSE)))
 }
@@ -6540,11 +6599,14 @@ s22_posthoc_for_metric <- function(rm, metric, method = "holm_welch", reference 
   ref <- if (!is.null(reference) && length(reference) == 1 && !is.na(reference) && nzchar(reference) && reference %in% keep) reference else NULL
   if (!is.null(reference) && length(reference) == 1 && !is.na(reference) && nzchar(reference) && is.null(ref))
     out$notes <- c(out$notes, paste0("The reference '", reference, "' has no usable values for this metric, so all pairs are compared."))
-  if (identical(method, "dunnett") && is.null(ref))
-    out$notes <- c(out$notes, "Dunnett's test compares each sample with one reference: set the reference sample under Stats & Reports; all pairs are compared meanwhile.")
   out$reference <- ref %||% ""
   out$omnibus <- omnibus_table(v[sel], g[sel])
   out$posthoc <- posthoc_table(v[sel], g[sel], method = method, reference = ref)
+  if (identical(method, "dunnett") && is.null(ref)) {   # v2.26.1: say which sample the engine used, not "all pairs"
+    used <- if (is.data.frame(out$posthoc) && "group2" %in% names(out$posthoc)) unique(as.character(out$posthoc$group2)) else character(0)
+    out$notes <- c(out$notes, paste0("Dunnett's test compares each sample with one reference: set the reference sample under Stats & Reports; ",
+                                     if (length(used) == 1L) paste0("'", used, "' (the first sample) is used meanwhile.") else "the first sample is used meanwhile."))
+  }
   out$n <- attr(out$posthoc, "n")
   if (any(ns[keep] < 3)) out$notes <- c(out$notes, "Some groups have n < 3.")
   out
@@ -8130,10 +8192,12 @@ write_legend_key <- function(plot, file, format = "svg", dpi = 300) {
 }
 
 # ── v2.23.1: colour and marker words for the legend text starter ─────────────
-# The nearest of twelve named colours by RGB distance ("#E69F00" -> "orange"); NA for something that is not a colour.
+# The nearest of sixteen named colours by RGB distance ("#E69F00" -> "orange"); NA for something that is not a colour.
 COLOUR_WORD_RGB <- list(black = c(0, 0, 0), white = c(255, 255, 255), grey = c(128, 128, 128), red = c(228, 26, 28),
                         orange = c(255, 127, 0), yellow = c(255, 215, 0), green = c(60, 170, 60), teal = c(0, 150, 136),
-                        blue = c(40, 100, 200), purple = c(130, 60, 160), pink = c(240, 130, 190), brown = c(150, 80, 30))
+                        blue = c(40, 100, 200), purple = c(130, 60, 160), pink = c(240, 130, 190), brown = c(150, 80, 30),
+                        # v2.26.1: four more words for the colours past the eighth sample (none is nearer an earlier palette colour)
+                        navy = c(0, 0, 128), olive = c(128, 128, 0), maroon = c(128, 0, 0), magenta = c(255, 0, 255))
 colour_word <- function(hex) {
   ref <- do.call(rbind, COLOUR_WORD_RGB)
   vapply(as.character(hex), function(h) {
@@ -12221,19 +12285,20 @@ server <- function(input, output, session) {
     pal <- palette_in()                                                         # round 3: one valid palette name, "custom" otherwise
     rv$palette_colors <- if (pal != "custom" && !is.null(rv$od_vars))
       get_palette_colors(pal, length(rv$od_vars)) else NULL
-    # v2.10: these two palettes have 8 distinct colours; beyond that they repeat.
-    if (pal %in% c("colorblind", "publication", "set1") &&
+    # v2.26.1: these palettes no longer repeat past 8 samples (distinct_colours()), but only Okabe-Ito's own 8 are
+    # colour-blind safe, so say so when more are drawn.
+    if (pal %in% c("colorblind", "publication") &&
         !is.null(rv$od_vars) && length(rv$od_vars) > 8)
-      showNotification(paste0("The '", pal, "' palette has 8 distinct colours but ",
-                              length(rv$od_vars), " samples are loaded, so colours will repeat. ",
-                              "Use Viridis, or set colours per sample."),
-                       type = "warning", duration = 10)
+      showNotification(paste0("Okabe-Ito has 8 colour-blind-safe colours; samples 9 to ", length(rv$od_vars),
+                              " get further distinct colours that are not all colour-blind safe. ",
+                              "Different markers or line types keep them apart for every reader."),
+                       type = "message", duration = 10)
   })
   
   output$palette_preview <- renderUI({
     pal <- palette_in()
     if (pal == "custom" || is.null(rv$od_vars)) return(NULL)
-    cols <- get_palette_colors(pal, min(8, length(rv$od_vars)))
+    cols <- get_palette_colors(pal, min(24, length(rv$od_vars)))   # v2.26.1: every sample's colour (up to 24), not just the first 8
     div(p("Preview:"),
         div(style = "margin-top:6px;",
             lapply(cols, function(col)
@@ -13321,8 +13386,7 @@ server <- function(input, output, session) {
     
     # ── Reset per-sample aesthetics to position-based defaults ───────────────
     cur_samps  <- isolate(sel_samples())
-    def_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00",
-                    "#A65628","#F781BF","#999999","#66C2A5","#FC8D62","#8DA0CB")
+    def_colors <- default_sample_colours(length(cur_samps))   # v2.26.1: no repeat past the twelfth sample
     shape_opts <- c(16, 15, 17, 18, 25, 4, 8, 23, 3, 10)
     if (!is.null(cur_samps)) {
       for (i in seq_along(cur_samps)) {
@@ -13412,9 +13476,7 @@ server <- function(input, output, session) {
     # v2.23.9: one Shape menu of base forms and ONE Filled box (off = the open marker); the old "Open ..." entries are gone
     shape_opts <- c("Circle" = 16, "Square" = 15, "Triangle Up" = 17, "Triangle Down" = 25, "Diamond" = 18,
                     "Cross" = 4, "X" = 8, "Plus" = 3, "Star" = 10)
-    default_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
-                        "#984EA3","#FF7F00","#A65628","#F781BF",
-                        "#999999","#66C2A5","#FC8D62","#8DA0CB")
+    default_colors <- default_sample_colours(n_total)   # v2.26.1: no repeat past the twelfth sample
     named_colors   <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
                         "#984EA3","#FF7F00","#FFFF33","#A65628",
                         "#F781BF","#999999","#009E73")
@@ -14154,9 +14216,7 @@ server <- function(input, output, session) {
     leg_labels <- setNames(character(n), samples)
     filled_map <- setNames(logical(n),   samples)
     groups     <- setNames(character(n), samples)   # v2.18: free-text sample group ("" = none)
-    def_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
-                    "#984EA3","#FF7F00","#A65628","#F781BF",
-                    "#999999","#66C2A5","#FC8D62","#8DA0CB")
+    def_colors <- default_sample_colours(n)   # v2.26.1: no repeat past the twelfth sample
     def_shapes <- c(16, 15, 17, 18, 25, 4, 8, 23, 3, 10)
     
     for (i in seq_len(n)) {
@@ -14302,7 +14362,7 @@ server <- function(input, output, session) {
       if (!is.null(isolate(rv$qe_colors[[nm]]))) next
       col <- isolate(paper_colour_of(nm)) %||%
         (if (!is.null(isolate(rv$palette_colors)) && !is.na(isolate(rv$palette_colors[i]))) isolate(rv$palette_colors[i]) else NULL) %||%
-        c("#000000","#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#A65628","#F781BF","#999999","#66C2A5","#FC8D62","#8DA0CB")[1 + (i - 1L) %% 12L]
+        default_sample_colours(length(vars))[i]
       vid <- safe_id(nm)
       tryCatch({
         updateSelectInput(session, paste0("color_selector_", vid), selected = "custom")

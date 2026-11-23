@@ -164,7 +164,7 @@ cat("\n--- palettes and the settings migration ---\n")
 okabe <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
 set1  <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#FFFF33", "#A65628", "#F781BF")
 check("publication is Okabe-Ito (what it means in the N4 paper app)", identical(env$get_palette_colors("publication", 8), okabe) && identical(env$get_palette_colors("publication", 3), okabe[1:3]))
-check("set1 is the colour set 'publication' used to be", identical(env$get_palette_colors("set1", 8), set1) && identical(env$get_palette_colors("set1", 10), rep_len(set1, 10)))
+check("set1 is the colour set 'publication' used to be", identical(env$get_palette_colors("set1", 8), set1) && identical(env$get_palette_colors("set1", 10)[1:8], set1) && !anyDuplicated(env$get_palette_colors("set1", 10)))   # v2.26.1: no repeat past 8
 check("colorblind is unchanged", identical(env$get_palette_colors("colorblind", 8), okabe) && is.null(env$get_palette_colors("custom", 3)))
 check("migrate_styling_settings: a file without styling_schema meant Set1 for 'publication'; a v2.22 file means Okabe-Ito",
       identical(env$migrate_styling_settings(list(color_palette = "publication"), NULL)$color_palette, "set1") &&
