@@ -8526,11 +8526,14 @@ error_spread <- function(v, type = "sem", mult = 1) {
 }
 # Per (time, sample) summary of a replicate frame (columns time, variable, value): n, mean and the bounds the error
 # types and the quantile bands need. Used by the main curve for range / iqr bars and the quantile bands.
+# v2.26.1: a `dataset` column (Compare tab: two files with the same sample names) and a `group` column (a sample drawn in
+# several panels: its rows repeated once per panel) are part of the key and kept, so neither pools rows it must not.
 replicate_bounds <- function(rp) {
   if (is.null(rp) || nrow(rp) == 0) return(NULL)
   rp <- rp[is.finite(rp$value), , drop = FALSE]
   if (nrow(rp) == 0) return(NULL)
-  key <- paste(rp$variable, format(rp$time, digits = 15), sep = "\r")
+  extra <- intersect(c("dataset", "group"), names(rp))
+  key <- do.call(paste, c(lapply(extra, function(k) as.character(rp[[k]])), list(rp$variable, format(rp$time, digits = 15), sep = "\r")))
   idx <- split(seq_len(nrow(rp)), factor(key, levels = unique(key)))
   rows <- lapply(idx, function(i) {
     v <- rp$value[i]
@@ -8538,7 +8541,10 @@ replicate_bounds <- function(rp) {
     data.frame(time = rp$time[i[1]], variable = as.character(rp$variable[i[1]]), n = length(v), mean = mean(v),
                min = min(v), max = max(v), q025 = q[1], q25 = q[2], q75 = q[3], q975 = q[4], stringsAsFactors = FALSE)
   })
-  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  out <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  first <- vapply(idx, `[`, 1L, 1L)
+  for (k in extra) out[[k]] <- rp[[k]][first]
+  out
 }
 # Lower / upper error bounds for the asymmetric types, aligned to the rows of `plot_data` (time, variable, mean_value):
 # data.frame(lo, hi) (NA where the point has fewer than 2 replicates). `bounds` = replicate_bounds().
@@ -8547,8 +8553,9 @@ asymmetric_error_bounds <- function(plot_data, bounds, type = "range", mult = 1)
   if (is.null(bounds) || !nr) return(out)
   # finding 27: format(x, digits = 15) pads to a common width / decimals PER VECTOR, so the keys of two different
   # vectors never matched (a plot_data subset got no error bars); sprintf() formats each time on its own.
-  k  <- match(paste(plot_data$variable, time_match_key(plot_data$time), sep = "\r"),
-              paste(bounds$variable, time_match_key(bounds$time), sep = "\r"))
+  ds <- if ("dataset" %in% names(plot_data) && "dataset" %in% names(bounds)) list(as.character(plot_data$dataset), as.character(bounds$dataset)) else list("", "")   # v2.26.1: Compare
+  k  <- match(paste(ds[[1]], plot_data$variable, time_match_key(plot_data$time), sep = "\r"),
+              paste(ds[[2]], bounds$variable, time_match_key(bounds$time), sep = "\r"))
   ok <- !is.na(k) & (bounds$n[k] >= 2 | is.na(bounds$n[k]))
   lo_b <- if (type == "range") bounds$min else bounds$q25
   hi_b <- if (type == "range") bounds$max else bounds$q75
@@ -8906,10 +8913,18 @@ apply_panel_cfg <- function(pg, cfg, subscripts = TRUE) {
   if (lg %in% c("right", "bottom", "top", "none")) pg <- pg + ggplot2::theme(legend.position = lg)
   else if (startsWith(lg, "inside-")) pg <- pg + inside_legend_theme(sub("^inside-", "", lg))
   xl <- c(n1(cfg$xmin), n1(cfg$xmax)); yl <- c(n1(cfg$ymin), n1(cfg$ymax))
+  # v2.26.1: a bound <= 0 on a log axis cannot be drawn (it broke the whole figure: "'from' must be a finite number");
+  # it is left blank (automatic) and the figure says so through attr "kc_cfg_note"
+  is_log <- function(a) { sc <- tryCatch(pg$scales$get_scales(a), error = function(e) NULL); if (is.null(sc)) return(FALSE)
+                          tr <- tryCatch(sc$get_transformation(), error = function(e) sc$trans); !is.null(tr) && grepl("log", tr$name %||% "") }
+  note <- character(0)
+  if (any(is.finite(xl) & xl <= 0) && is_log("x")) { xl[is.finite(xl) & xl <= 0] <- NA_real_; note <- c(note, "x") }
+  if (any(is.finite(yl) & yl <= 0) && is_log("y")) { yl[is.finite(yl) & yl <= 0] <- NA_real_; note <- c(note, "y") }
   if (all(is.finite(xl)) && xl[1] >= xl[2]) xl <- c(NA_real_, NA_real_)       # an impossible range is ignored
   if (all(is.finite(yl)) && yl[1] >= yl[2]) yl <- c(NA_real_, NA_real_)
   if (any(is.finite(c(xl, yl))))
     pg <- suppressMessages(pg + ggplot2::coord_cartesian(xlim = if (any(is.finite(xl))) xl else NULL, ylim = if (any(is.finite(yl))) yl else NULL))   # (clipped: a curve leaves the panel at the range's edge)
+  if (length(note)) attr(pg, "kc_cfg_note") <- note
   pg
 }
 # v2.26.0: a sample drawn differently in one panel ("A legend in each panel"): its name, colour, marker, fill and line there.
@@ -13172,13 +13187,13 @@ server <- function(input, output, session) {
     for (nm in grep("^panelsmp_", names(input), value = TRUE)) {   # sample styles already on screen take the file's values
       hit <- NULL
       for (g in names(rv$panel_cfg)) for (x in names(rv$panel_cfg[[g]]$samples %||% list())) for (f in PANEL_SAMPLE_FIELDS)
-        if (identical(nm, panel_smp_id(g, x, f))) hit <- rv$panel_cfg[[g]]$samples[[x]][[f]]
+        if (identical(nm, smp_id_k(g, x, f))) hit <- rv$panel_cfg[[g]]$samples[[x]][[f]]
       tryCatch(if (grepl("_name$|_color$", nm)) updateTextInput(session, nm, value = hit %||% "") else updateSelectInput(session, nm, selected = hit %||% ""),
                error = function(e) NULL)
     }
     # v2.26.1: each on-screen box is matched to (panel, field) by its exact id: the old regex read "..._legend_title" as the
     # field "title", and a prefix test matched panel "WT" to the boxes of panel "WT 2"
-    cfg_ids <- list(); for (lv in names(rv$panel_cfg)) for (f0 in PANEL_CFG_FIELDS) cfg_ids[[paste0("panelcfg_", safe_id(lv), "_", f0)]] <- c(lv, f0)
+    cfg_ids <- list(); for (lv in names(rv$panel_cfg)) for (f0 in PANEL_CFG_FIELDS) cfg_ids[[cfg_id_k(lv, f0)]] <- c(lv, f0)
     fields_long_first <- PANEL_CFG_FIELDS[order(-nchar(PANEL_CFG_FIELDS))]
     for (nm in grep("^panelcfg_", names(input), value = TRUE)) {   # panels already on screen take the file's values
       hit <- cfg_ids[[nm]]
@@ -14615,9 +14630,27 @@ server <- function(input, output, session) {
   # v2.26.0: "A legend in each panel": every panel is its own figure (own legend, title, axis titles and ranges), laid out
   # in a grid with the panel letters. rv$panel_cfg holds what a settings file brought for panels not on screen yet.
   panel_legend_mode <- function() isTRUE(input$facet_by_group) && identical(sel1("facet_legends", "shared"), "each")
-  panel_cfg_id <- function(g, f) paste0("panelcfg_", safe_id(g), "_", f)
+  # v2.26.1: where a panel's settings live. With "Each sample its own panel" the panel is the sample's DISPLAY name, so its
+  # settings are kept under the raw sample name (pkey): renaming a sample keeps its panel's title, ranges and styles, and
+  # a sample later given the old name does not inherit them. The box ids come from panel_idp(), which gives names that
+  # differ only in punctuation ("MOI 1", "MOI_1", "MOI-1") ids of their own.
+  pkey <- function(g) {
+    if (!identical(sel1("facet_source", "group"), "each") || is.null(rv$od_vars)) return(g)
+    hit <- rv$od_vars[vapply(rv$od_vars, dname, "") == g]
+    if (length(hit) == 1L) hit else g
+  }
+  panel_id_reg <- new.env(parent = emptyenv())
+  panel_idp <- function(k) {
+    k <- as.character(k)[1]; got <- panel_id_reg[[paste0("n:", k)]]; if (!is.null(got)) return(got)
+    base <- gsub("[^A-Za-z0-9_]", "_", k); used <- unlist(mget(ls(panel_id_reg), envir = panel_id_reg), use.names = FALSE)
+    id <- base; j <- 1L; while (id %in% used) { j <- j + 1L; id <- paste0(base, "_", j) }
+    assign(paste0("n:", k), id, envir = panel_id_reg); id
+  }
+  cfg_id_k <- function(k, f) paste0("panelcfg_", panel_idp(k), "_", f)
+  smp_id_k <- function(k, x, f) paste0("panelsmp_", panel_idp(k), "__", safe_id(x), "_", f)
+  panel_cfg_id <- function(g, f) cfg_id_k(pkey(g), f)
   panel_cfg_get <- function(g) {
-    st <- rv$panel_cfg[[g]] %||% list()
+    st <- rv$panel_cfg[[pkey(g)]] %||% list()
     setNames(lapply(PANEL_CFG_FIELDS, function(f) { v <- input[[panel_cfg_id(g, f)]]; if (is.null(v)) st[[f]] else v }), PANEL_CFG_FIELDS)
   }
   panel_cfg_all <- function(levels) {
@@ -14627,14 +14660,14 @@ server <- function(input, output, session) {
       keep <- Filter(function(v) { if (is.logical(v)) return(isTRUE(v)); v <- as.character(if (is.null(v)) "" else v)[1]; !is.na(v) && nzchar(trimws(v)) && !identical(v, "NA") }, cfg)
       keep <- lapply(keep, function(v) if (is.numeric(v) || is.logical(v)) v else trimws(as.character(v)[1]))
       sm <- panel_smp_all(g); if (length(sm)) keep$samples <- sm
-      if (length(keep)) out[[g]] <- keep
+      if (length(keep)) out[[pkey(g)]] <- keep
     }
     out
   }
   # v2.26.0: each sample's style in one panel (inputs panelsmp_<panel>__<sample>_<field>; rv$panel_cfg[[panel]]$samples)
-  panel_smp_id <- function(g, x, f) paste0("panelsmp_", safe_id(g), "__", safe_id(x), "_", f)
+  panel_smp_id <- function(g, x, f) smp_id_k(pkey(g), x, f)
   panel_smp_get <- function(g, samples) {
-    st <- rv$panel_cfg[[g]]$samples %||% list(); out <- list()
+    st <- rv$panel_cfg[[pkey(g)]]$samples %||% list(); out <- list()
     for (x in samples) {
       o <- setNames(lapply(PANEL_SAMPLE_FIELDS, function(f) { v <- input[[panel_smp_id(g, x, f)]]; if (is.null(v)) st[[x]][[f]] else v }), PANEL_SAMPLE_FIELDS)
       o <- Filter(function(v) { v <- as.character(if (is.null(v)) "" else v)[1]; !is.na(v) && nzchar(trimws(v)) }, o)
@@ -14644,7 +14677,8 @@ server <- function(input, output, session) {
   }
   panel_smp_all <- function(g) {
     sm <- sel_samples(); if (!length(sm)) return(list())
-    c(panel_smp_get(g, sm), (rv$panel_cfg[[g]]$samples %||% list())[setdiff(names(rv$panel_cfg[[g]]$samples %||% list()), sm)])
+    st <- rv$panel_cfg[[pkey(g)]]$samples %||% list()
+    c(panel_smp_get(g, sm), st[setdiff(names(st), sm)])
   }
   output$panel_custom_ui <- renderUI({
     if (!panel_legend_mode()) return(NULL)
@@ -14653,7 +14687,7 @@ server <- function(input, output, session) {
     if (is.null(pm)) return(p(style = "font-size:.8em;color:#888;", "Assign the samples to two or more panels to set each panel."))
     let <- sel1("facet_letters", "none")
     L <- if (let %in% FACET_LETTER_STYLES) panel_letter(seq_along(pm$levels), let, input$panel_label) else rep("", length(pm$levels))
-    val <- function(g, f, d = "") { v <- isolate(input[[panel_cfg_id(g, f)]]) %||% rv$panel_cfg[[g]][[f]] %||% d; if (is.null(v) || (length(v) == 1L && is.na(v))) d else v }
+    val <- function(g, f, d = "") { v <- isolate(input[[panel_cfg_id(g, f)]]) %||% rv$panel_cfg[[pkey(g)]][[f]] %||% d; if (is.null(v) || (length(v) == 1L && is.na(v))) d else v }
     num <- function(g, f) { v <- suppressWarnings(as.numeric(val(g, f, NA))); if (length(v) == 1L && is.finite(v)) v else NA }
     tagList(
       p(style = "font-size:.8em;color:#555;margin:6px 0 2px;", "Each panel (blank = as the whole figure):"),
@@ -14671,7 +14705,7 @@ server <- function(input, output, session) {
           fluidRow(column(4, checkboxInput(panel_cfg_id(g, "hide_points"), "Hide points", isTRUE(val(g, "hide_points", FALSE)))),
                    column(4, checkboxInput(panel_cfg_id(g, "hide_lines"), "Hide lines", isTRUE(val(g, "hide_lines", FALSE)))),
                    column(4, checkboxInput(panel_cfg_id(g, "hide_errors"), "Hide error bars / bands", isTRUE(val(g, "hide_errors", FALSE))))),
-          { gs <- samps[vapply(samps, function(x) g %in% pm$map[[x]], NA)]; st <- isolate(rv$panel_cfg[[g]]$samples) %||% list()
+          { gs <- samps[vapply(samps, function(x) g %in% pm$map[[x]], NA)]; st <- isolate(rv$panel_cfg[[pkey(g)]]$samples) %||% list()
             sv <- function(x, f) { v <- isolate(input[[panel_smp_id(g, x, f)]]) %||% st[[x]][[f]] %||% ""; if (is.na(v[1])) "" else v }
             tags$details(style = "margin:2px 0 6px;", tags$summary(style = "cursor:pointer;font-size:.85em;", "Samples in this panel (style here only)"),
               lapply(gs, function(x) div(style = "border-top:1px dotted #ccc;padding-top:2px;",
@@ -14878,7 +14912,9 @@ server <- function(input, output, session) {
 
   # ── Core plot builder ────────────────────────────────────────────────────────
   # highlight_samples: if non-NULL, all other samples are greyed out (not removed)
-  build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL, facets = TRUE) {
+  build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL, facets = TRUE, rep_fn = NULL) {
+    # v2.26.1: the replicate frame comes from rep_fn when given (Compare: each file's own replicates), else the main data
+    rep_data <- function(samples, which = "kept") if (is.null(rep_fn)) prepare_replicate_data(samples = samples, which = which) else rep_fn(samples, which)
     shapes     <- aes_vals$shapes;     colors     <- aes_vals$colors
     line_types <- aes_vals$line_types; leg_labels <- aes_vals$leg_labels
     filled_map <- aes_vals$filled_map; n_vars     <- length(samples)
@@ -14973,7 +15009,7 @@ server <- function(input, output, session) {
     rp_all <- NULL                                         # the replicate frame, fetched once for every mode that needs it
     get_rp <- function() {
       if (is.null(rp_all)) {
-        r <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
+        r <- tryCatch(rep_data(samples = samples), error = function(e) NULL)
         if (!is.null(r) && nrow(r) > 0) {
           if (identical(sel1("y_scale_type"), "log")) r <- r[r$value > 0, , drop = FALSE]
           if (!is.null(grp_map)) r <- panel_expand(r, grp_map)
@@ -15026,7 +15062,7 @@ server <- function(input, output, session) {
       plot_data$err_lo <- lo_val
       plot_data$err_hi <- plot_data$mean_value + err_vals * em
       if (sel1("error_type", APP_DEFAULTS$error_type) %in% c("range", "iqr")) {          # v2.22: asymmetric about the mean (min-max / 25th-75th percentile)
-        rpb <- replicate_bounds(tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL))
+        rpb <- replicate_bounds(tryCatch(rep_data(samples = samples), error = function(e) NULL))
         ab  <- asymmetric_error_bounds(plot_data, rpb, sel1("error_type"), em)
         lo_a <- ab$lo
         if (identical(sel1("y_scale_type"), "log")) {
@@ -15085,7 +15121,7 @@ server <- function(input, output, session) {
     if (identical(dm0, "quantile_bands")) {                 # v2.22: nested empirical bands, IQR inside 2.5-97.5 %
       qb <- replicate_bounds(get_rp())
       if (!is.null(qb) && nrow(qb) > 0) {
-        if (!is.null(grp_map)) qb <- panel_expand(qb, grp_map)
+        if (!is.null(grp_map) && !"group" %in% names(qb)) qb <- panel_expand(qb, grp_map)   # v2.26.1: get_rp() rows are per panel already
         if (identical(sel1("y_scale_type"), "log")) {
           y_fq <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1] else if (isTRUE(input$use_advanced_ticks)) 10^ylog_min_or() else 1e-9
           qb$q025 <- pmax(qb$q025, y_fq); qb$q975 <- pmax(qb$q975, y_fq); qb$q25 <- pmax(qb$q25, y_fq); qb$q75 <- pmax(qb$q75, y_fq)
@@ -15108,7 +15144,7 @@ server <- function(input, output, session) {
                             inherit.aes = FALSE, show.legend = FALSE)
     }
     if (isTRUE(input$show_replicate_points) && !identical(dm0, "jitter")) {
-      rp <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
+      rp <- tryCatch(rep_data(samples = samples), error = function(e) NULL)
       if (!is.null(rp) && nrow(rp) > 0) {
         if (sel1("y_scale_type", APP_DEFAULTS$y_scale_type) == "log") rp <- rp[rp$value > 0, , drop = FALSE]
         if (!is.null(grp_map)) rp <- panel_expand(rp, grp_map)
@@ -15120,7 +15156,7 @@ server <- function(input, output, session) {
                             inherit.aes = FALSE, show.legend = FALSE)
       }
       # v2.22: replicates the user excluded stay visible as hollow grey circles (they no longer enter any mean)
-      rx <- tryCatch(prepare_replicate_data(samples = samples, which = "excluded"), error = function(e) NULL)
+      rx <- tryCatch(rep_data(samples = samples, which = "excluded"), error = function(e) NULL)
       if (!is.null(rx) && nrow(rx) > 0) {
         if (sel1("y_scale_type", APP_DEFAULTS$y_scale_type) == "log") rx <- rx[rx$value > 0, , drop = FALSE]
         if (!is.null(grp_map)) rx <- panel_expand(rx, grp_map)
@@ -15422,7 +15458,10 @@ server <- function(input, output, session) {
       aes_g <- apply_panel_samples(aes_g, panel_smp_get(g, gs))            # v2.26.0: the samples' styles in this panel
       tryCatch({ pg <- build_plot(pd[pd$variable %in% gs, , drop = FALSE], gs, aes_g, facets = FALSE) + labs(tag = NULL)   # (the set's letter goes on the set)
                  if (show_names) pg <- pg + labs(title = text_label(g))
-                 apply_panel_cfg(pg, panel_cfg_get(g), isTRUE(input$axis_subscripts)) },   # v2.26.0: the panel's own settings
+                 pg <- apply_panel_cfg(pg, panel_cfg_get(g), isTRUE(input$axis_subscripts))   # v2.26.0: the panel's own settings
+                 if (!is.null(ax <- attr(pg, "kc_cfg_note")))
+                   guard_notify(paste0("panel_log_", g), paste0("Panel '", g, "': a ", paste(ax, collapse = " / "), " range limit of 0 or below cannot be drawn on a log axis, so it is left automatic."), "message")
+                 pg },
                error = function(e) NULL)
     })
     names(plots) <- paste0("main_by_group:", lv)
@@ -16058,7 +16097,8 @@ server <- function(input, output, session) {
     dmod <- sel1("error_display_mode", "bars")
     if (dmod %in% ERROR_MODES_WITHOUT_STAT) err <- NULL        # v2.22: those modes do not draw the SD / SEM
     mult <- nin("error_multiplier", 1)
-    s3 <- paste0(if (isTRUE(input$show_points)) "Symbols and lines" else "Lines",
+    sp3 <- isTRUE(input$show_points); sl3 <- !isTRUE(input$hide_lines)   # v2.26.1: say only what is drawn
+    s3 <- paste0(if (sp3 && sl3) "Symbols and lines" else if (sp3) "Symbols" else "Lines",
                  " show the mean of ", n_txt, " replicates",
                  if (!is.null(nb("nb_replicate"))) paste0(" (", nb("nb_replicate"), ")") else "",
                  if (!is.null(err)) paste0(
@@ -16109,8 +16149,9 @@ server <- function(input, output, session) {
   })
 
   # v2.23.3: one row per plotted sample: name, colour (swatch, word, hex), marker, line type, as drawn in the figure
-  legend_samples_df <- function() {
+  legend_samples_df <- function(drawn = TRUE) {
     ss <- sel_samples(); if (is.null(rv$data) || !length(ss)) return(NULL)
+    if (isTRUE(drawn)) ss <- panel_samples_now(ss)   # v2.26.1: the samples the figure draws (a sample picked for no panel is left off, as in the legend text and key)
     aes_v <- resolve_aesthetics(ss); hex <- toupper(unname(aes_v$colors[ss]))
     sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
     mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
@@ -16198,7 +16239,7 @@ server <- function(input, output, session) {
         stop(structure(class = c("kc_refused", "error", "condition"), list(message = msg, call = NULL)))
       }
       refuse_if_empty()
-      d <- legend_samples_df()
+      d <- legend_samples_df(drawn = FALSE)   # the colour map keeps every selected sample
       q <- function(x) paste0('"', gsub('"', '""', enc2utf8(as.character(x)), fixed = TRUE), '"')
       con <- file(file, open = "wb"); on.exit(close(con), add = TRUE)
       writeLines(c('"Sample","Hex","Colour_Name"', paste(q(d$name), q(d$hex), q(d$colour), sep = ",")), con, sep = "\n", useBytes = TRUE)
@@ -16277,19 +16318,20 @@ server <- function(input, output, session) {
     samps  <- sel_samples()
     aes_v  <- resolve_aesthetics(samps)
     cols   <- setNames(aes_v$colors, samps); labs_v <- aes_v$leg_labels
+    labs_m <- markup_labels(labs_v)   # v2.26.1: legend keys draw *italic* / ^sup^ markup as the main figure does (labs_v stays the plain text)
     lts    <- aes_v$line_types;              shp    <- aes_v$shapes
     tunit  <- time_unit_from_label(xlab_now())
     lw     <- nin("line_thickness", 1)
     ptsz   <- nin("shape_size", 3)
     tag    <- trimws(input$analysis_panel_label %||% "")
     ref    <- sel1("metrics_ref_sample", "")
-    base_scales <- list(scale_color_manual(   values = cols, labels = labs_v, name = NULL),
+    base_scales <- list(scale_color_manual(   values = cols, labels = labs_m, name = NULL),
                         # Fills are matched on the RAW sample key (names(cols)). The default limits function warns "No shared
                         # levels" whenever a figure has no fill mapped at all (replicate overlay, normalised OD: supervisor
                         # finding 2); this one returns the shared levels, possibly none, silently (same result otherwise).
-                        scale_fill_manual(    values = cols, labels = labs_v, name = NULL,
+                        scale_fill_manual(    values = cols, labels = labs_m, name = NULL,
                                               limits = function(x) intersect(x, names(cols))),
-                        scale_linetype_manual(values = lts,  labels = labs_v, name = NULL))
+                        scale_linetype_manual(values = lts,  labels = labs_m, name = NULL))
     base_scales_nf <- base_scales[-2]    # v2.23.9: colour + linetype only; figures that draw sample markers add marker_scales() (shape + fill)
     col_of <- function(x) unname(cols[as.character(x)])   # a band / bar filled with the sample colour: fill = I(col_of(sample)), bypassing the marker fill scale
     p <- switch(type,
@@ -16499,7 +16541,7 @@ server <- function(input, output, session) {
                        shape = variable, fill = variable, group = variable)) +
           geom_hline(yintercept = 1, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
           geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7) +
-          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           labs(x = x_label_obj(), y = axis_y_label(paste0(input$y_axis_label, " relative to ", ref_lab)))
       },
       replicate_overlay = {
@@ -16559,7 +16601,7 @@ server <- function(input, output, session) {
           geom_point(data = d, aes(x = moi, y = value, color = sample), shape = 21, fill = "white",
                      size = ptsz * 0.6, stroke = pt2lw(0.5)) +
           geom_point(aes(color = sample, shape = sample, fill = sample), size = ptsz) +
-          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           scale_x_log10(labels = scales::label_number(drop0trailing = TRUE, big.mark = ""),
                         expand = if (length(series_levels) > 1) expansion(mult = c(0.05, 0.35)) else waiver()) +
           labs(x = "MOI", y = axis_y_label(metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
@@ -16687,8 +16729,8 @@ server <- function(input, output, session) {
         g <- g +
           geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable, group = variable),
                     linewidth = lw) +
-          scale_color_manual(   values = cols, labels = labs_v, name = NULL) +
-          scale_linetype_manual(values = lts,  labels = labs_v, name = NULL) +
+          scale_color_manual(   values = cols, labels = labs_m, name = NULL) +
+          scale_linetype_manual(values = lts,  labels = labs_m, name = NULL) +
           scale_fill_manual(values = PHASE_COLORS, breaks = intersect(PHASE_LEVELS, as.character(ph$phase)),
                             drop = TRUE, name = if (strips) "Phase (strips top\u2192bottom\nin legend order)" else "Phase") +
           guides(color = guide_legend(order = 1), linetype = guide_legend(order = 1),
@@ -16726,7 +16768,7 @@ server <- function(input, output, session) {
                                 stroke = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)   # an asterisk marker, readable at any font size
           }
         }
-        g + base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+        g + base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           scale_y_continuous(expand = expansion(mult = c(0.06, 0.14))) +
           labs(x = x_label_obj(),
                y = axis_y_label(if (identical(mode, "log2_ratio")) paste0("log2 (", input$y_axis_label, " / ", ref_lab, ")")
@@ -16777,7 +16819,7 @@ server <- function(input, output, session) {
                              size = (nin("axis_text_font_size", 8)) / ggplot2::.pt,
                              family = if (nzchar(sel1("font_family", ""))) sel1("font_family") else "")
         num_lab <- scales::label_number(drop0trailing = TRUE, big.mark = "")
-        g <- g + base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+        g <- g + base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           (if (logx) scale_x_log10(labels = num_lab, expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))
            else scale_x_continuous(expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))) +
           (if (logy) scale_y_log10(labels = num_lab, expand = expansion(mult = 0.08))
@@ -16854,7 +16896,7 @@ server <- function(input, output, session) {
         g <- g + geom_point(data = pin, aes(x = time, y = mean_value, color = variable, shape = variable, fill = variable),
                             size = ptsz) +
           scale_color_manual(values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
-          marker_scales(samps, aes_v, labs_v, limits = sample_levels(samps)) +   # same limits: one merged key
+          marker_scales(samps, aes_v, labs_m, limits = sample_levels(samps)) +   # same limits: one merged key
           labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
         # v2.22: optional overlays (Curve fitting tab): the growth-fit band, the fitted lysis decay, the exponential window; none by default
         ov <- s22_fit_overlay(fr, logy, lw, yr = range(c(pd$mean_value, pd$lo, pd$hi)[is.finite(c(pd$mean_value, pd$lo, pd$hi))]))   # the window spans the plotted data (-Inf is not drawn on a log axis)
@@ -16956,7 +16998,7 @@ server <- function(input, output, session) {
         if (sty == "dot")
           g <- g + geom_point(data = summ, aes(x = xpos, y = mean, color = sample, shape = sample, fill = sample), size = ptsz)
         x_ang_ok <- x_angle_in() == 0
-        g <- g + (if (sty == "dot") list(base_scales_nf, marker_scales(samps, aes_v, labs_v)) else list(base_scales, scale_shape_manual(values = shp, labels = labs_v, name = NULL))) +
+        g <- g + (if (sty == "dot") list(base_scales_nf, marker_scales(samps, aes_v, labs_m)) else list(base_scales, scale_shape_manual(values = shp, labels = labs_m, name = NULL))) +
           scale_x_continuous(breaks = seq_along(tms), labels = as.character(tms), expand = expansion(add = 0.5),
                              guide = if (x_ang_ok && length(tms) >= 6) guide_axis(angle = 45) else waiver()) +
           labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
@@ -17062,7 +17104,7 @@ server <- function(input, output, session) {
         t50f <- t50[is.finite(t50$time), , drop = FALSE]
         t50f$y <- rep(0.5, nrow(t50f))       # (a zero-row frame: no sample reaches half lysed) the point sits where the curve's rise crosses the dashed 0.5 line
         if (nrow(t50f)) g <- g + geom_point(data = t50f, aes(x = time, y = y, color = variable, shape = variable, fill = variable), size = ptsz, inherit.aes = FALSE)
-        g + base_scales_nf + marker_scales(samps, aes_v, labs_v, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
+        g + base_scales_nf + marker_scales(samps, aes_v, labs_m, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
           scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = expansion(mult = 0.03)) +
           labs(x = x_label_obj(), y = "Fraction of replicates lysed")
       },
@@ -17109,7 +17151,7 @@ server <- function(input, output, session) {
         g <- g + ggrepel::geom_text_repel(data = lab, aes(x = time, y = mean_value, label = name, color = variable), hjust = 0, direction = "y", min.segment.length = Inf,
                                           box.padding = 0.25, point.padding = 0, seed = 1, show.legend = FALSE, inherit.aes = FALSE,
                                           size = (nin("legend_font_size", 14)) / ggplot2::.pt) +
-          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           scale_x_continuous(expand = expansion(mult = c(0.02, 0.32))) +
           labs(x = input$x_axis_label, y = axis_y_label(y_axis_label_now()))
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g + scale_y_continuous(expand = expansion(mult = c(0.04, 0.12)))
@@ -17224,7 +17266,11 @@ server <- function(input, output, session) {
   compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE,
                              tag_labels = NULL, whole_tag = "", whole_size = 8) {
     if (!has_patchwork) stop("The figure composer needs the 'patchwork' package: install.packages('patchwork')")
-    panels <- lapply(panels, function(p) patchwork::free(p + labs(tag = NULL)))
+    panels <- lapply(panels, function(p) {
+      ml <- attr(p, "matrix_legend"); p <- p + labs(tag = NULL)
+      if (is.null(ml)) return(patchwork::free(p))
+      attr(p, "matrix_legend") <- ml; patchwork::wrap_elements(full = drawable_figure(p))   # v2.26.1: the matrix legend comes along
+    })
     w <- patchwork::wrap_plots(panels, ncol = ncol)
     has_whole <- is.character(whole_tag) && length(whole_tag) == 1L && !is.na(whole_tag) && nzchar(whole_tag)   # v2.26.0
     if (has_whole) w <- w + patchwork::plot_annotation(title = whole_tag,
@@ -17282,7 +17328,9 @@ server <- function(input, output, session) {
     h_mm    <- max(rows, 1L) * num_or(input$compose_panel_height_mm, 60, 20, 250)
     fig <- if (n >= 1 && fixed_mode()) {
       # v2.15: every panel keeps its fixed panel size; the grid is as wide / tall as its cells need
-      items <- lapply(names(plots), function(nm) fixed_figure(plots[[nm]] + labs(tag = NULL), sub(":.*$", "", nm)))
+      items <- lapply(names(plots), function(nm) { p0 <- plots[[nm]]; ml <- attr(p0, "matrix_legend"); p0 <- p0 + labs(tag = NULL)
+                                                   if (!is.null(ml)) attr(p0, "matrix_legend") <- ml   # v2.26.1: kept through + labs()
+                                                   fixed_figure(p0, sub(":.*$", "", nm)) })
       g <- compose_fixed_figure(items, ncol = ncol, tag_size = nin("compose_tag_size", 8),
                                 font = sel1("font_family", "Arial"), tag_case = input$compose_tag_case %||% "a",
                                 tags_on = isTRUE(input$compose_tags %||% TRUE))
@@ -19939,12 +19987,21 @@ server <- function(input, output, session) {
       if (is.null(pdB) || nrow(pdB) == 0) return(compare_unavailable("the second dataset has no rows (or no data for the chosen samples)."))
       samples <- unique(c(ss$A, ss$B))
       aes_u <- resolve_aesthetics(samples)
+      # v2.26.1: each file's own replicates (range / IQR error bars, replicate traces, quantile bands, replicate points);
+      # build_plot() read the MAIN file's for both, so B's panel showed A's spread
+      repA <- function(which) tryCatch(prepare_replicate_data(samples = ss$A, which = which), error = function(e) NULL)
+      repB <- function(which) tryCatch(sc$prepare_replicate_data(samples = ss$B, which = which), error = function(e) NULL)
       if (identical(input$compare_mode %||% "overlay", "facet")) {
         pd <- dplyr::bind_rows(dplyr::mutate(pdA, dataset = lab[["A"]]), dplyr::mutate(pdB, dataset = lab[["B"]]))
         pd$dataset <- factor(pd$dataset, levels = unname(lab))
         used <- samples[samples %in% unique(as.character(pd$variable))]
         aes_f <- lapply(aes_u[c("shapes", "colors", "line_types", "leg_labels", "filled_map")], function(x) x[used])
-        p <- build_plot(pd, used, aes_f) +
+        rep_fn <- function(samples, which) {
+          a <- repA(which); b <- repB(which)
+          dplyr::bind_rows(if (!is.null(a) && nrow(a)) dplyr::mutate(a, dataset = factor(lab[["A"]], levels = unname(lab))),
+                           if (!is.null(b) && nrow(b)) dplyr::mutate(b, dataset = factor(lab[["B"]], levels = unname(lab))))
+        }
+        p <- build_plot(pd, used, aes_f, rep_fn = rep_fn) +
           facet_wrap(~ dataset, nrow = 1, scales = "fixed", labeller = label_wrap_gen(width = 18)) +
           theme(strip.text = element_text(size = nin("axis_label_font_size"), face = "plain"), strip.background = element_blank())
         if (startsWith(sel1("legend_position", "right"), "inside-") || floating_mode()) p <- p + theme(legend.position = "right")   # v2.25.0: no floating labels over facets
@@ -19954,11 +20011,14 @@ server <- function(input, output, session) {
         aes_k <- compare_overlay_aesthetics(keys, aes_u, lab, aes_u$leg_labels,
                                             style = input$compare_overlay_style %||% "linetype",
                                             alpha_b = suppressWarnings(as.numeric(input$compare_alpha_b %||% 0.5)))
-        p <- build_plot(dplyr::bind_rows(pdA, pdB), keys, aes_k)
+        rep_fn <- function(samples, which) {
+          a <- repA(which); b <- repB(which)
+          if (!is.null(a) && nrow(a)) a$variable <- compare_key("A", a$variable)
+          if (!is.null(b) && nrow(b)) b$variable <- compare_key("B", b$variable)
+          dplyr::bind_rows(a, b)
+        }
+        p <- build_plot(dplyr::bind_rows(pdA, pdB), keys, aes_k, rep_fn = rep_fn)
       }
-      # the replicate-point layer of build_plot() reads the MAIN data only (it would sit in both panels): not drawn here
-      is_rep_points <- function(l) inherits(l$geom, "GeomPoint") && identical(l$aes_params$shape, 1) && isFALSE(l$show.legend)
-      p$layers <- Filter(Negate(is_rep_points), p$layers)
       add_notes_caption(p)
     }, error = function(e) {
       if (inherits(e, "shiny.silent.error")) stop(e)
@@ -20084,8 +20144,16 @@ server <- function(input, output, session) {
       else { s <- export_size_in(); put(p, stem_fun(NULL), s[1], s[2]) }
     }
     sel <- as.character(outputs)
-    if ("main" %in% sel) attempt("Lysis curve (main)",
-      one_figure("Lysis curve (main)", generate_plot(), "main", function(s) if (is.null(s)) main_file_stem() else paste0("lysis_curve_main_", export_size_tag(s))))
+    # v2.26.1: the main figure as the Download button writes it (main_plot_obj(): the matrix legend, a legend in each panel);
+    # it was generate_plot(), which has neither
+    if ("main" %in% sel) attempt("Lysis curve (main)", {
+      p <- generate_plot(); stem <- function(s) if (is.null(s)) main_file_stem() else paste0("lysis_curve_main_", export_size_tag(s))
+      if (is_placeholder_plot(p)) skip("Lysis curve (main)", placeholder_reason(p))
+      else if (!is.null(sz_custom)) {
+        obj <- (if (panel_legend_mode()) tryCatch(panel_composite(), error = function(e) NULL)) %||% drawable_figure(p)
+        put(obj, stem(sz_custom), sz_custom[1], sz_custom[2])
+      } else { s <- export_size_in(); put(main_plot_obj(), stem(if (fixed_mode()) s), s[1], s[2]) }
+    })
     for (ty in sub("^analysis:", "", sel[startsWith(sel, "analysis:")])) {
       lab <- names(ANALYSIS_FIGURE_CHOICES)[match(ty, ANALYSIS_FIGURE_CHOICES)]
       attempt(lab, one_figure(lab, generate_analysis_plot(ty), ty, function(s) analysis_file_stem(ty, if (!is.null(s) && (fixed_mode() || !is.null(sz_custom))) s)))

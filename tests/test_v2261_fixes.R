@@ -185,5 +185,66 @@ pm2 <- env$panel_membership(c("x", "y", "z"), list(x = "WT; no phage", y = "MOI 
 check("panels from a list: a name with ';' is one panel; a picked sample can be in two", identical(pm2$levels, c("WT; no phage", "MOI 10", "P1", "P2")) && identical(pm2$map$z, c("P1", "P2")))
 check("panels typed 'A; B' (manual / group) still split", identical(env$panel_membership(c("x", "y"), c(x = "A; B", y = "B"))$map$x, c("A", "B")))
 
+cat("\n--- review fixes: Compare, per-panel settings, exports, legends ---\n")
+mk3 <- function(names, reps = 3, t = seq(0, 180, 15), seed = 1) { set.seed(seed); cols <- list(Time = t)
+  for (i in seq_along(names)) for (r in seq_len(reps)) cols[[length(cols) + 1]] <- round(0.05 * exp(0.02 * t) / (1 + 0.05 * (exp(0.02 * t) - 1)) * (1 - 0.05 * i) * exp(rnorm(length(t), 0, 0.03)), 4)
+  d <- as.data.frame(cols); names(d) <- c("Time", rep(names, each = reps)); d }
+dA <- mk3(c("Ctrl", "P1"), seed = 1); dB <- mk3(c("Ctrl", "P1"), seed = 2); dB[, -1] <- dB[, -1] * 3
+fB <- file.path(tempdir(), "B.csv"); write.csv(dB, fB, row.names = FALSE); l <- readLines(fB); l[1] <- paste(c("Time", rep(c("Ctrl", "P1"), each = 3)), collapse = ","); writeLines(l, fB)
+w <- new.env()
+testServer(app, {
+  S <- session$setInputs
+  ingest_data(dA, "A"); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars, export_format = "svg", y_scale_type = "linear")
+  compare_load(fB, "B.csv")
+  eb <- function(p) { b <- ggplot2::ggplot_build(p); i <- which(vapply(p$layers, function(l) inherits(l$geom, c("GeomErrorbar", "GeomLinerange")), NA))[1]; if (is.na(i)) NULL else b$data[[i]] }
+  S(compare_mode = "facet", error_type = "range", error_display_mode = "bars"); e <- eb(generate_compare_plot())
+  w$facet_range <- if (is.null(e)) NULL else e[e$x == 60, c("PANEL", "ymin", "ymax")]
+  S(compare_mode = "overlay"); e <- eb(generate_compare_plot()); w$overlay_rows <- if (is.null(e)) 0L else nrow(e)
+  S(compare_mode = "facet", error_type = "sem", error_display_mode = "spaghetti"); p <- generate_compare_plot(); b <- ggplot2::ggplot_build(p)
+  i <- which(vapply(p$layers, function(l) inherits(l$geom, "GeomLine") && isFALSE(l$show.legend), NA))[1]
+  w$spag <- if (is.na(i)) NULL else tapply(b$data[[i]]$y, b$data[[i]]$PANEL, max)
+  w$trueA <- range(as.numeric(dA[5, 2:4])); w$trueB <- range(as.numeric(dB[5, 2:4])); w$maxA <- max(dA[, -1]); w$maxB <- max(dB[, -1])
+  # a legend in each panel: Y min 0 on the log axis is left automatic, the figure still builds
+  S(compare_mode = "overlay", error_display_mode = "bars", y_scale_type = "log", facet_by_group = TRUE, facet_source = "each", facet_legends = "each")
+  S(panelcfg_Ctrl_ymin = 0, panelcfg_Ctrl_ymax = 1)
+  pl <- main_group_plots(min_panels = 2L); w$n_pl <- length(pl)
+  w$log_ok <- tryCatch({ for (z in pl) invisible(ggplot2::ggplotGrob(z)); TRUE }, error = function(e) conditionMessage(e))
+  w$log_ylim <- if (length(pl)) pl[[1]]$coordinates$limits$y else NULL
+  # renaming a sample keeps its panel's settings (each sample its own panel)
+  S(panelcfg_Ctrl_ymin = NA, panelcfg_Ctrl_ymax = NA, y_scale_type = "linear", panelcfg_P1_title = "My title")
+  w$t_before <- deparse(main_group_plots(min_panels = 2L)[[2]]$labels$title)
+  S(qe_name_P1 = "Phage one"); session$flushReact()
+  pl2 <- main_group_plots(min_panels = 2L); w$t_after <- deparse(pl2[[2]]$labels$title)
+  S(qe_name_Ctrl = "P1"); session$flushReact()
+  w$t_inherit <- deparse(main_group_plots(min_panels = 2L)[[1]]$labels$title)
+  S(qe_name_Ctrl = "", qe_name_P1 = ""); session$flushReact()
+  # batch export of the main figure = the Download button's figure (a legend in each panel)
+  d <- tempfile(); dir.create(d); r <- batch_export_build(d, c("main"), fmt = "svg")
+  f <- list.files(d, pattern = "\\.svg$", full.names = TRUE)
+  w$batch_ctrl <- if (length(f)) lengths(regmatches(paste(readLines(f[1], warn = FALSE), collapse = ""), gregexpr(">Ctrl<", paste(readLines(f[1], warn = FALSE), collapse = "")))) else NA
+  S(facet_legends = "shared", facet_by_group = FALSE)
+  # legend text: hidden lines are not called lines
+  S(hide_lines = TRUE, show_points = TRUE); w$txt_nolines <- figure_legend_string()
+  S(hide_lines = FALSE); w$txt_both <- figure_legend_string()
+  # markup in a sample name is drawn in the analysis figures' legends too
+  S(qe_name_P1 = "*E. coli* WT"); session$flushReact()
+  ga <- generate_analysis_plot("replicate_overlay")
+  labs <- unlist(lapply(ga$scales$scales, function(sc) if (any(sc$aesthetics %in% c("colour", "linetype"))) lapply(sc$labels, function(x) paste(deparse(x), collapse = "")) else NULL))
+  w$an_labels <- labs
+})
+check("Compare, side by side, range error bars: each file's own min / max at t = 60",
+      !is.null(w$facet_range) && nrow(w$facet_range) >= 2 && length(unique(round(w$facet_range$ymax, 4))) >= 2 &&
+        any(abs(w$facet_range$ymax - w$trueB[2]) < 1e-6) && any(abs(w$facet_range$ymax - w$trueA[2]) < 1e-6))
+check("Compare, overlay, range error bars are drawn", w$overlay_rows > 0)
+check("Compare, side by side, replicate traces: each panel its own file's", length(w$spag) == 2 && abs(max(w$spag) - w$maxB) < 1e-6 && abs(min(w$spag) - w$maxA) < 1e-6)
+check("a legend in each panel: Y min 0 on a log axis does not break the figure, and is left automatic", isTRUE(w$log_ok) && w$n_pl == 2 && (is.null(w$log_ylim) || !any(w$log_ylim <= 0, na.rm = TRUE)))
+check("renaming a sample keeps its panel's title (each sample its own panel)", grepl("My title", w$t_before) && grepl("My title", w$t_after))
+check("a sample given the old name does not inherit that panel's settings", !grepl("My title", w$t_inherit))
+check("batch export of the main figure = the downloaded figure (a legend in each panel: Ctrl in two keys)", isTRUE(w$batch_ctrl >= 2))
+check("legend text: with lines hidden it says 'Symbols show the mean'; with both, 'Symbols and lines'",
+      grepl("Symbols show the mean", w$txt_nolines, fixed = TRUE) && grepl("Symbols and lines show the mean", w$txt_both, fixed = TRUE))
+check("analysis figures: a sample name with *italic* markup is an expression in the legend, not literal asterisks",
+      length(w$an_labels) > 0 && any(grepl("italic", w$an_labels)) && !any(grepl("*E. coli*", w$an_labels, fixed = TRUE)))
+
 cat("\n", pass, "passed,", fail, "failed\n")
 if (fail > 0) quit(status = 1)
