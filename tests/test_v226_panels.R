@@ -40,7 +40,7 @@ check("the Panels section: split box, 'Each sample its own panel', every-panel s
 tl <- tail(names(env$APP_DEFAULTS), 4)
 check("new defaults are appended at the end: letters none, size shared, one legend, 2 picked panels (the faceted figure is unchanged)",
       identical(tl, c("facet_letters", "facet_size_mode", "facet_legends", "facet_n_panels")) && identical(env$APP_DEFAULTS$facet_n_panels, 2) && identical(env$APP_DEFAULTS$facet_letters, "none") &&
-        identical(env$APP_DEFAULTS$facet_size_mode, "share") && identical(env$APP_DEFAULTS$facet_legends, "shared"))
+        identical(env$APP_DEFAULTS$facet_size_mode, "each") && identical(env$APP_DEFAULTS$facet_legends, "each"))   # v2.27.2: full-size panels, a legend in each
 
 cat("\n--- pure helpers ---\n")
 s3 <- c("a", "b", "c")

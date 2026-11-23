@@ -440,7 +440,8 @@ testServer(app, {
   set_in(session, fid(smp[1]), "Same", fid(smp[2]), "Same", fid(smp[3]), "Same")
   check("manual: one distinct panel is no facet", inherits(generate_plot()$facet, "FacetNull"))
   set_in(session, "facet_source", "group", fid(smp[1]), "", fid(smp[2]), "", fid(smp[3]), "")
-  session$setInputs(panel_size_mode = "fixed", panel_width_mm = 60, panel_height_mm = 60, panel_square = TRUE, facet_ncol = 2)
+  session$setInputs(panel_size_mode = "fixed", panel_width_mm = 60, panel_height_mm = 60, panel_square = TRUE, facet_ncol = 2,
+                    facet_size_mode = "share", facet_legends = "shared")   # v2.27.2: the shared-area layout these checks measure (no longer the default)
   gf <- main_fixed_info()
   pan <- gf$layout[grepl("^panel", gf$layout$name), ]
   wpan <- sum(as.numeric(grid::convertWidth(gf$widths[sort(unique(unlist(Map(seq, pan$l, pan$r))))], "mm")))

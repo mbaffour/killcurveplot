@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.27.1"
+APP_VERSION <- "2.27.2"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -2957,7 +2957,9 @@ densify_xy <- function(x, y, g, k = 8) {
   do.call(rbind, c(parts, list(make.row.names = FALSE)))
 }
 # Points per corner (named, in tie-break order); all zero for no finite points.
-legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL) {
+# v2.27.2: yrange = the y axis limits (data units); the box is then placed against the axis, not the data's own range
+# (a log axis from 0.01 to 10 with curves at 0.2 to 3 has an empty bottom the data range cannot see)
+legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL, yrange = NULL) {
   corners <- c("top-left", "top-right", "bottom-left", "bottom-right")
   ok <- is.finite(x) & is.finite(y)
   if (isTRUE(log_y)) ok <- ok & y > 0
@@ -2969,7 +2971,9 @@ legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL) {
     n <- c(sum(!right & top), sum(right & top), sum(!right & !top), sum(right & !top))
   } else {
     u <- if (diff(range(x)) > 0) (x - min(x)) / diff(range(x)) else rep(0.5, length(x))
-    v <- if (diff(range(y)) > 0) (y - min(y)) / diff(range(y)) else rep(0.5, length(y))
+    yr <- if (length(yrange) == 2L && all(is.finite(yrange)) && (!isTRUE(log_y) || all(yrange > 0))) { z <- sort(if (isTRUE(log_y)) log10(yrange) else yrange); if (diff(z) > 0) z else NULL }
+    if (is.null(yr)) yr <- range(y)
+    v <- if (diff(yr) > 0) (y - yr[1]) / diff(yr) else rep(0.5, length(y))
     l <- u <= box[1]; r <- u >= 1 - box[1]; t <- v >= 1 - box[2]; b <- v <= box[2]
     n <- c(sum(l & t), sum(r & t), sum(l & b), sum(r & b))
   }
@@ -2981,6 +2985,7 @@ legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL) {
 # or more: a key that overlaps data is worse than an outside key.
 INSIDE_LEGEND_MAX_POINTS <- 2
 INSIDE_LEGEND_MAX_ENTRIES <- 4
+PANEL_INSIDE_MAX_ENTRIES  <- 8   # v2.27.2: a panel of a multi-panel figure keeps its key inside up to this many entries
 # Corner box a legend occupies, as fractions of the panel (x, y): about 9 % of
 # the height per entry, and 22 % + 1.7 % per label character of the width
 # (measured on 89 x 60 mm journal panels at 6 pt).
@@ -3866,7 +3871,7 @@ n4_preset_settings <- function()
 APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # v2.16: no panel letter unless the user sets one
                   list(legend_inside_x = 0.98, legend_inside_y = 0.98),        # v2.23.4: appended at the end (the dragged legend, top-right)
                   list(figure_labels = ""),                                     # v2.25.0: extra labels on the figure, one per line
-                  list(facet_letters = "none", facet_size_mode = "share", facet_legends = "shared", facet_n_panels = 2))   # v2.26.0: panel letters, panel size, legends (Panels section)
+                  list(facet_letters = "none", facet_size_mode = "each", facet_legends = "each", facet_n_panels = 2))   # v2.26.0: panel letters, panel size, legends (Panels section); v2.27.2: each panel full size with its own legend inside
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -8917,7 +8922,7 @@ facet_layers <- function(levels, scales = "fixed", ncol = NA, strip_style = "pla
   list(fw, th)
 }
 # v2.26.0: panel letters, panel size and legends of a multi-panel figure.
-FACET_LEGEND_CHOICES <- c("One legend for all panels" = "shared", "A legend in each panel (each panel its own figure)" = "each")
+FACET_LEGEND_CHOICES <- c("A legend in each panel (each panel its own figure)" = "each", "One legend for all panels" = "shared")   # v2.27.2: each first (the default)
 # The per-panel settings of "A legend in each panel" (Panels section): blank = as the whole figure.
 PANEL_CFG_FIELDS <- c("title", "legend", "legend_title", "xlab", "ylab", "xmin", "xmax", "ymin", "ymax", "hide_points", "hide_lines", "hide_errors")
 PANEL_CFG_LEGEND_CHOICES <- c("As the figure" = "", "Right (outside)" = "right", "Bottom (outside)" = "bottom", "Top (outside)" = "top",
@@ -9013,9 +9018,9 @@ stack_legend_keys <- function(keys, titles, font = "sans", size = 7, margin_mm =
 FACET_LETTER_CHOICES <- c("None" = "none", "A, B, C" = "upper", "a, b, c" = "lower", "1, 2, 3" = "number", "i, ii, iii" = "roman",
                           "A1, A2, A3 (the figure's Panel label, then a number)" = "prefixed")
 FACET_LETTER_STYLES <- c("upper", "lower", "number", "roman", "prefixed")
-FACET_SIZE_CHOICES   <- c("Share the panel area (the figure keeps its size)" = "share",
-                          "Fit one column" = "fit_single", "Fit 1.5 columns" = "fit_onehalf", "Fit a double column (page width)" = "fit_double",
-                          "Each panel at the full panel size (the figure grows)" = "each")
+FACET_SIZE_CHOICES   <- c("Each panel at the full panel size (the figure grows)" = "each",   # v2.27.2: first (the default): every panel the size of a single figure's panel
+                          "Share the panel area (the figure keeps its size)" = "share",
+                          "Fit one column" = "fit_single", "Fit 1.5 columns" = "fit_onehalf", "Fit a double column (page width)" = "fit_double")
 # The panel size that makes a multi-panel figure `target_w_mm` wide (and no taller than max_h_mm). `extra_mm` = the figure's
 # size minus its panels (axes, strips, legend, gaps) as measured with panels of panel_mm; nc / nr = panel columns / rows.
 # The panels keep the width : height of panel_mm; never below 10 mm.
@@ -14637,7 +14642,9 @@ server <- function(input, output, session) {
   # byte-identical to v2.10 (test suite).
   # v2.12.2: xy = list(x, y) of the plotted points, n_entries = legend entries,
   # log_y = y axis is log. Only used by legend_position "inside-auto".
-  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12, special_legend = FALSE) {
+  # v2.27.2: force_inside (a panel of a multi-panel figure): "inside-auto" always puts the key inside, in the corner with
+  # the least data measured against the axis (yrange), instead of moving it outside the panel
+  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12, special_legend = FALSE, force_inside = FALSE, yrange = NULL) {
     tf      <- if (isTRUE(input$bold_title))        "bold"   else "plain"
     af      <- if (isTRUE(input$italic_axis_labels)) "italic" else "plain"
     # v2.10: theme spacing (margins, gaps) follows the theme's base_size, which
@@ -14703,9 +14710,9 @@ server <- function(input, output, session) {
         xy <- list(x = dd$x, y = if (log_y) 10^dd$y else dd$y, per_point = 8)
       }
       cnt <- if (is.null(xy)) c("top-left" = 0L)
-             else legend_corner_counts(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars))
+             else legend_corner_counts(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars), yrange = if (isTRUE(force_inside)) yrange)
       if (!is.null(xy$per_point)) cnt <- cnt / xy$per_point   # interpolated points -> data-point equivalents
-      if (n_entries > INSIDE_LEGEND_MAX_ENTRIES || min(cnt) >= INSIDE_LEGEND_MAX_POINTS) {
+      if (if (isTRUE(force_inside)) n_entries > PANEL_INSIDE_MAX_ENTRIES else (n_entries > INSIDE_LEGEND_MAX_ENTRIES || min(cnt) >= INSIDE_LEGEND_MAX_POINTS)) {
         layers <- c(layers, list(theme(legend.position = "right")))
       } else {
         layers <- c(layers, list(inside_legend_theme(names(cnt)[which.min(cnt)])))
@@ -15108,7 +15115,7 @@ server <- function(input, output, session) {
 
   # ── Core plot builder ────────────────────────────────────────────────────────
   # highlight_samples: if non-NULL, all other samples are greyed out (not removed)
-  build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL, facets = TRUE, rep_fn = NULL) {
+  build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL, facets = TRUE, rep_fn = NULL, panel_inside = FALSE) {
     # v2.26.1: the replicate frame comes from rep_fn when given (Compare: each file's own replicates), else the main data
     rep_data <- function(samples, which = "kept") if (is.null(rep_fn)) prepare_replicate_data(samples = samples, which = which) else rep_fn(samples, which)
     shapes     <- aes_vals$shapes;     colors     <- aes_vals$colors
@@ -15557,7 +15564,8 @@ server <- function(input, output, session) {
     pl_lab <- trimws(input$panel_label %||% "")
     p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value, g = plot_data$variable),
                                  n_entries = n_vars, log_y = identical(sel1("y_scale_type"), "log"),
-                                 label_chars = max(nchar(unname(leg_labels)), 1), special_legend = TRUE)
+                                 label_chars = max(nchar(unname(leg_labels)), 1), special_legend = TRUE,
+                                 force_inside = panel_inside, yrange = y_lims)   # v2.27.2: a panel's key stays inside
     # v2.24.1: a dashed / dotted / dot-dashed line needs a longer key to show its pattern (in the standard 4 mm key the
     # marker covers it, so a dashed and a solid sample looked the same in the legend). Only when such a line is drawn.
     if (!isTRUE(input$hide_lines) && any(!(as.character(line_types) %in% c("solid", "blank"))))
@@ -15652,7 +15660,7 @@ server <- function(input, output, session) {
       aes_g <- list(shapes = aes_v$shapes[gs], colors = aes_v$colors[gs], line_types = aes_v$line_types[gs],
                     leg_labels = aes_v$leg_labels[gs], filled_map = aes_v$filled_map[gs])   # no groups: a plain panel
       aes_g <- apply_panel_samples(aes_g, panel_smp_get(g, gs))            # v2.26.0: the samples' styles in this panel
-      tryCatch({ pg <- build_plot(pd[pd$variable %in% gs, , drop = FALSE], gs, aes_g, facets = FALSE) + labs(tag = NULL)   # (the set's letter goes on the set)
+      tryCatch({ pg <- build_plot(pd[pd$variable %in% gs, , drop = FALSE], gs, aes_g, facets = FALSE, panel_inside = TRUE) + labs(tag = NULL)   # (the set's letter goes on the set)
                  if (show_names) pg <- pg + labs(title = text_label(g))
                  pg <- apply_panel_cfg(pg, panel_cfg_get(g), isTRUE(input$axis_subscripts))   # v2.26.0: the panel's own settings
                  if (!is.null(ax <- attr(pg, "kc_cfg_note")))

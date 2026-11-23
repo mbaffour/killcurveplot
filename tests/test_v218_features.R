@@ -146,7 +146,7 @@ testServer(app, {
         identical(as.character(b2$layout$layout$group), c("A", "B", "Other")))
   set_in(session, gid(smp[2]), "A", gid(smp[3]), "B")
   # fixed panel: the existing facet handling splits the panel area among the facets
-  session$setInputs(panel_size_mode = "fixed", panel_width_mm = 60, panel_square = TRUE)
+  session$setInputs(panel_size_mode = "fixed", panel_width_mm = 60, panel_square = TRUE, facet_size_mode = "share", facet_legends = "shared")   # v2.27.2: share is no longer the default
   g <- fixed_figure(generate_plot(), "main")
   panel_cells <- g$layout[grepl("^panel", g$layout$name), ]
   pw <- grid::convertWidth(g$widths[panel_cells$l[1]], "mm", valueOnly = TRUE)
