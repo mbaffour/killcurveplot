@@ -296,14 +296,15 @@ Or choose **A1, A2, A3**: each part carries the figure's letter, and the separat
 
 ### 9.3 Fit the figure to the page
 
-**Panel size**:
+**Panel size** (since v2.27.2 the default is the first one: split a figure and every panel looks like a single figure):
 
+* **Each panel at the full panel size** (default): every panel is exactly the size of a single figure's panel
+  (65 x 65 mm in the journal standard), all panels the same, and the figure grows to hold them (the size bar says when
+  it is wider than the page).
 * **Share the panel area**: the figure keeps the size of one panel and the panels divide it (small panels).
 * **Fit one column / 1.5 columns / a double column (page width)**: the whole figure is exactly that journal width
   (183 mm for a Nature double column), however many panels, and stays under the journal's maximum height. The size
   bar shows the panel count and one panel's size.
-* **Each panel at the full panel size**: each panel keeps 65 x 65 mm and the figure grows (the size bar warns when it
-  is wider than the page).
 
 The same figure fitted to a double column:
 
@@ -311,8 +312,11 @@ The same figure fitted to a double column:
 
 ### 9.4 A legend in each panel, and each panel set on its own
 
-**Legends: A legend in each panel** makes every panel a figure of its own, each with its own legend listing only its
-samples, laid out on the grid with the panel letters:
+**Legends: A legend in each panel** (the default since v2.27.2) makes every panel a figure of its own, each with its own
+legend listing only its samples, laid out on the grid with the panel letters. With the legend position *Inside:
+emptiest corner (auto)* each panel's legend always stays inside its panel, in the corner with the least data (measured
+against the axis, so the empty part of a log axis counts as free). *One legend for all panels* puts a single legend
+beside the grid instead.
 
 ![A legend in each panel](tutorial/38_fig_panels_legend_each.jpg)
 

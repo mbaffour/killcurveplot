@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.27.2 — 2026-11-23
+
+**Panels that look like the single figure: the same size each, with the legend inside each one.**
+- Splitting a figure into panels now gives, by default, **every panel the size of a single figure's panel** (65 x 65 mm in
+  the journal standard; all panels identical, the figure grows) and **a legend in each panel** (Panel size: *Each panel at
+  the full panel size*; Legends: *A legend in each panel*, both now first in their menus). The old default squeezed every
+  panel into one journal column (6 panels of about 22 x 32 mm).
+- With the legend position *Inside: emptiest corner (auto)*, a panel's legend always stays **inside** that panel, in the
+  corner with the least data, and the corners are measured against the axis (a log axis from 0.01 to 10 with curves at
+  0.2 to 3 has an empty bottom). It used to be pushed outside, between the panels, when the curves filled the data's own
+  range. A single figure keeps its own rule (unchanged, byte-identical).
+- The other sizes (share, fit one / 1.5 / double column) and *One legend for all panels* are unchanged.
+- `tests/test_v2272_panel_layout.R` (10 checks).
+
 ## v2.27.1 — 2026-11-23
 
 **A Mac app to open it: Lysis Curve Plotter.app.**
