@@ -24,5 +24,21 @@ if (length(missing)) {
   install.packages(missing, lib = ul)
 }
 app <- source(APP)$value
+
+# Started by "Lysis Curve Plotter.app": a fixed port (KC_PORT), so clicking the app again reopens the same page, and
+# KC_AUTO_STOP=1 stops the server about 15 s after the last browser tab closes (a page reload reconnects well within that).
+port <- suppressWarnings(as.integer(Sys.getenv("KC_PORT", "")))
+if (identical(Sys.getenv("KC_AUTO_STOP"), "1")) {
+  server <- app$serverFuncSource()
+  open_tabs <- 0L
+  app$serverFuncSource <- function() function(input, output, session) {
+    open_tabs <<- open_tabs + 1L
+    session$onSessionEnded(function() {
+      open_tabs <<- open_tabs - 1L
+      later::later(function() if (open_tabs <= 0L) shiny::stopApp(), 15)
+    })
+    server(input, output, session)
+  }
+}
 message("Opening Lysis Curve Plotter in your browser...")
-shiny::runApp(app, launch.browser = TRUE)
+if (!is.na(port)) shiny::runApp(app, port = port, host = "127.0.0.1", launch.browser = TRUE) else shiny::runApp(app, launch.browser = TRUE)

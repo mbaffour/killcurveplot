@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.27.1 — 2026-11-23
+
+**A Mac app to open it: Lysis Curve Plotter.app.**
+- Double-click **Lysis Curve Plotter.app** in the repository folder (or keep it in the Dock): the app opens in the default
+  browser with no Terminal window. A second click while it runs reopens the same page (one port, 8765; a port in use by
+  something else is skipped). The server stops by itself about 15 seconds after the last browser tab closes (a page
+  reload reconnects in time). R is found as the `.command` launcher finds it (CRAN, Homebrew, conda); without R the app
+  says so and opens CRAN. After one start from the folder, a copy in Applications works too.
+- `run_app.R`: `KC_PORT` (a fixed port) and `KC_AUTO_STOP=1` (stop after the last tab), both set by the app; run as before
+  without them. The `.command` / `.bat` / `run.sh` launchers are unchanged.
+- `tests/test_v2271_launcher.R`.
+
 ## v2.27.0 — 2026-11-23
 
 **Save the whole project in one file, and open it without uploading the data again.**
