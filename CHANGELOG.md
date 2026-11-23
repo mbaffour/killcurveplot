@@ -13,7 +13,7 @@
 - A panel source from a settings file ("Column of the file: Strain") now waits until the data offers it, instead of
   falling back to Groups; the exclusion list and the time-filter slider are drawn even while their sections are closed,
   so a project's exclusions and time window apply at once.
-- `tests/test_v227_project.R` (21 checks: tables, save in one session and open in another, the figure data, legend text
+- `tests/test_v227_project.R` (29 checks: tables, save in one session and open in another, the figure data, legend text
   and styles identical, bad files refused, the file picker route). Checked live: save, reload the page, open the file.
 
 ## v2.26.1 — 2026-11-23
