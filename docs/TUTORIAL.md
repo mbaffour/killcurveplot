@@ -53,7 +53,7 @@ When the app opens, the figure area is empty and says how to begin:
 ![The app at start, before any data is loaded](tutorial/01_start.jpg)
 
 > **Tip.** The app keeps everything in your browser session. Nothing is uploaded anywhere; closing the tab ends the
-> session. Use **Save Settings** (section 12) to keep a style for next time.
+> session. Use **Save project** (section 12) to keep the data and everything you did, or **Save Settings** to keep a style for next time.
 
 ---
 
@@ -402,6 +402,23 @@ the panel width* scales it to the screen.
 ---
 
 ## 12. Save, reload and reset your settings
+
+### Save the whole project (one file, no data upload next time)
+
+![The Project box: Save project and Open project, with a project just opened](tutorial/43_project.jpg)
+
+* **Save project** (top of *Save / Load Settings*, or the **Save the project** link under the file picker) writes one
+  `.kcproj` file holding **the data and everything you did with it**: the data as loaded and as edited on the Data
+  tab, the time column, the samples shown, excluded replicates and time points, the time filter, every setting and
+  sample style (names, colours, markers, groups, panels and each panel's settings, label positions, notes), a loaded
+  colour map and the Compare tab's second file.
+* **Open project** (in the same box, or simply choose the `.kcproj` in the main **Choose CSV or Excel file** picker)
+  restores all of it in one step: you do not upload the data again. A note says what was restored.
+* The data stays inside the file exactly as it was (repeated replicate names, every digit), so **Revert to loaded**
+  on the Data tab still goes back to the original numbers.
+* Send a `.kcproj` to a colleague and they open the same figure, with the same data, in their copy of the app.
+
+### Settings only
 
 ![Save / Load Settings](tutorial/21_save_load.jpg)
 

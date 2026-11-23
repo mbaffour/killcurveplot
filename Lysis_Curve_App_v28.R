@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.26.1"
+APP_VERSION <- "2.27.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -7567,6 +7567,44 @@ LEGEND_POSITIONS_OK <- c("right", "left", "top", "bottom", "none", "inside-auto"
                          "inside-bottom-left", "inside-bottom-right", "inside-custom", "direct", "matrix", "floating")   # v2.23.4 inside-custom; v2.22 styling: direct labels, matrix legend
 
 # one JSON value as an R scalar / vector: a one-element array (list) becomes its element, NULL / empty -> NULL
+# ── v2.27.0: tables in a project file ──────────────────────────────────────────────────────────────────────────────
+# A data frame as list(names, types, columns): column by column, so repeated replicate names ("WT","WT","WT") and the
+# column order survive JSON (an object would merge them); a reading that is NA / Inf is null.
+frame_to_doc <- function(d) {
+  if (is.null(d)) return(NULL)
+  d <- as.data.frame(d, stringsAsFactors = FALSE, check.names = FALSE, optional = TRUE)
+  ty <- vapply(d, function(x) if (is.logical(x)) "lgl" else if (is.numeric(x)) "num" else "chr", "", USE.NAMES = FALSE)
+  cols <- lapply(seq_along(d), function(j) {
+    x <- d[[j]]
+    if (ty[j] == "num") {          # as text with the fewest digits that give the same number back (15, else 17)
+      x <- as.numeric(x); x[!is.finite(x)] <- NA_real_
+      t <- sprintf("%.15g", x); bad <- !is.na(x) & suppressWarnings(as.numeric(t)) != x; t[bad] <- sprintf("%.17g", x[bad]); t[is.na(x)] <- NA_character_; t
+    }
+    else if (ty[j] == "lgl") as.logical(x) else as.character(x)
+  })
+  list(names = as.list(as.character(colnames(d))), types = as.list(ty), n = nrow(d), columns = cols)
+}
+doc_to_frame <- function(fd) {
+  if (!is.list(fd) || !length(fd$names)) stop("no table")
+  nm <- vapply(fd$names, function(x) if (is.null(x)) "" else as.character(x)[1], "")
+  ty <- vapply(seq_along(nm), function(j) { t <- fd$types[[j]]; if (is.null(t)) "chr" else as.character(t)[1] }, "")
+  nr <- suppressWarnings(as.integer(unlist(fd$n)))
+  cols <- lapply(seq_along(nm), function(j) {
+    v <- fd$columns[[j]]; v <- if (is.list(v)) vapply(v, function(z) if (is.null(z) || !length(z)) NA_character_ else as.character(z)[1], "") else as.character(v)
+    switch(ty[j], num = suppressWarnings(as.numeric(v)), lgl = as.logical(v), v)
+  })
+  n <- if (length(nr) == 1L && !is.na(nr)) nr else if (length(cols)) length(cols[[1]]) else 0L
+  if (any(lengths(cols) != n)) stop("the columns have different lengths")
+  structure(cols, names = nm, class = "data.frame", row.names = seq_len(n))
+}
+# A project file: the .kcproj extension, or a JSON file whose first characters carry the "kc_project" key.
+is_project_file <- function(path, name = path) {
+  if (grepl("\\.kcproj$", as.character(name)[1], ignore.case = TRUE)) return(TRUE)
+  if (!grepl("\\.json$", as.character(name)[1], ignore.case = TRUE)) return(FALSE)
+  head <- tryCatch(readChar(path, 200L, useBytes = TRUE), error = function(e) "")
+  isTRUE(grepl("\"kc_project\"", head, fixed = FALSE))
+}
+
 settings_unbox <- function(v) {
   if (is.null(v)) return(NULL)
   if (is.list(v)) {
@@ -9282,6 +9320,9 @@ build_help_tab <- function() {
         tags$li(strong("Names and gene names placed by hand:"), " Legend position ", strong("Floating labels (drag each name)"),
                 " turns every sample name into its own label that you drag onto the figure; ", strong("Extra labels on the figure"),
                 " (Axis Settings > Figure Layout) adds free text (", code("*mltG*"), " is an italic gene name), dragged the same way."),
+        tags$li(strong("Pick up where you left off:"), " ", strong("Save project"), " (Save / Load Settings, or the link under the file picker) ",
+                "keeps the data and everything done with it in one .kcproj file; open it in the file picker or with ", strong("Open project"),
+                ": no need to upload the data again."),   # v2.27.0
         tags$li(strong("Several panels from one dataset:"), " the ", strong("Panels"), " section: ", strong("Split the lysis curve into panels"),
                 ", ", strong("Each sample its own panel"), ", the control under ", strong("Show in every panel"), ", ", strong("Panel letters"),
                 " A, B, C, and ", strong("A legend in each panel"), " to set each panel on its own."),
@@ -10157,7 +10198,10 @@ ui <- fluidPage(
                                      choices = c("Jump to a section..." = "", SIDEBAR_SECTIONS), selected = ""),
                          tags$button(type = "button", class = "btn btn-link btn-xs kc-collapse-all", "Collapse all"))),
                  
-                 fileInput("file", "Choose CSV or Excel file", accept = c("text/csv", ".csv", ".xlsx", ".xls")),
+                 fileInput("file", "Choose CSV or Excel file", accept = c("text/csv", ".csv", ".xlsx", ".xls", ".kcproj")),
+                 div(style = "font-size:.78em;color:#555;margin:0 0 10px;",   # v2.27.0
+                     "A project file (.kcproj) opens here too, with everything restored. ",
+                     downloadLink("saveProjectTop", "Save the project")),
                  uiOutput("sheet_ui"),
                  # v2.22: override the detected time column (re-runs the detection on the loaded data, no re-read)
                  selectInput("time_col_choice", "Time column:", choices = character(0), width = "100%"),
@@ -10211,6 +10255,16 @@ ui <- fluidPage(
                  # ── Settings ─────────────────────────────────────────────────────────────
                  div(class = "panel-section",
                      h4("Save / Load Settings", class = "panel-title"),
+                     # v2.27.0: the project file, first: the data and everything done with it, in one file
+                     div(class = "kc-project-box", style = "border:1px solid #b6d4fe;background:#f0f6ff;border-radius:6px;padding:8px 10px;margin-bottom:12px;",
+                         tags$b("Project: your data and everything you did with it"),
+                         p(style = "font-size:.8em;color:#444;margin:4px 0 8px;",
+                           "One file holds the data (with any Data-tab edits), the samples shown, excluded replicates and time points, ",
+                           "every setting and sample style, panels, labels, notes, a colour map and the Compare file. ",
+                           "Open it here or in the file picker at the top to carry on where you left off: no need to upload the data again."),
+                         downloadButton("saveProject", "Save project", style = "width:100%;margin-bottom:6px;"),
+                         fileInput("loadProject", "Open project (.kcproj)", accept = c(".kcproj", ".json")),
+                         uiOutput("project_status_ui")),
                      p(style = "font-size:.82em;color:#555;margin-bottom:8px;",
                        "Saves all visual settings: axis scales, labels, error bars, fonts, line/point options, ",
                        "AND per-sample aesthetics (color, shape, linetype) keyed by sample name. ",
@@ -12333,6 +12387,7 @@ server <- function(input, output, session) {
   })
   
   # ── Time filter UI ───────────────────────────────────────────────────────────
+  slider_seen <- new.env(parent = emptyenv())
   output$time_range_slider_ui <- renderUI({
     tp <- rv$all_timepoints
     if (is.null(tp) || length(tp) < 2)
@@ -12341,10 +12396,19 @@ server <- function(input, output, session) {
     tp     <- tp * k
     t_min  <- min(tp); t_max <- max(tp)
     t_step <- max(min(diff(tp)), 0.001)
+    v0     <- c(t_min, t_max)
+    # v2.27.0: the range a project file was saved with (in the file's unit), else the range the slider had (converted
+    # when the display unit changed: it used to jump back to the full range), else the full range
+    pt     <- isolate(rv$pending_trange); cur <- isolate(input$time_filter_range); k0 <- slider_seen$k %||% k
+    if (length(pt) == 2L && all(is.finite(pt))) { v0 <- pt * k; rv$pending_trange <- NULL }
+    else if (isTRUE(slider_seen$data_version == isolate(rv$data_version)) && length(cur) == 2L && all(is.finite(cur))) v0 <- cur * k / k0
+    v0     <- c(max(t_min, min(v0)), min(t_max, max(v0))); if (v0[1] > v0[2]) v0 <- c(t_min, t_max)
+    slider_seen$k <- k; slider_seen$data_version <- isolate(rv$data_version)
     sliderInput("time_filter_range", label = NULL,
-                min = t_min, max = t_max, value = c(t_min, t_max),
+                min = t_min, max = t_max, value = v0,
                 step = t_step, width = "100%")
   })
+  outputOptions(output, "time_range_slider_ui", suspendWhenHidden = FALSE)   # v2.27.0: a project's time filter applies with the section closed
   
   output$excluded_timepoints_preview <- renderUI({
     if (is.null(rv$all_timepoints)) return(NULL)
@@ -12693,6 +12757,7 @@ server <- function(input, output, session) {
     req(input$file)
     req(is.list(input$file), all(c("name", "datapath") %in% names(input$file)))     # round 3: a scalar / malformed upload message is ignored
     fname <- input$file$name
+    if (is_project_file(input$file$datapath, fname)) return(invisible(load_project(input$file$datapath, fname)))   # v2.27.0: a project opens here too
     # Ingest round 1: EVERY read error (an empty file, a binary file, a bad encoding, a workbook that will not open) and
     # every refusal of ingest_frame() is a notification and nothing else: the loaded data is left exactly as it was.
     tryCatch({
@@ -12882,12 +12947,14 @@ server <- function(input, output, session) {
     fresh <- !identical(n1_state$excl_ver, ver)          # a new load starts with nothing excluded; an edit keeps the ticks
     n1_state$excl_ver <- ver
     sel <- if (fresh) character(0) else isolate(sel_multi("excluded_reps", ct$key))
+    if (length(pe <- isolate(rv$pending_excl))) { sel <- intersect(pe, ct$key); rv$pending_excl <- NULL }   # v2.27.0: from a project file
     ch  <- setNames(ct$key, paste0(dname(ct$sample), ": ", ct$label))
     tagList(
       if (all(table(ct$sample) < 2)) p(style = "font-size:.8em;color:#856404;", "Every sample has a single replicate: excluding it removes the sample."),
       div(style = "max-height:240px;overflow-y:auto;border:1px solid #eee;padding:4px 8px;margin-bottom:6px;",
           checkboxGroupInput("excluded_reps", NULL, choices = ch, selected = sel)))
   })
+  outputOptions(output, "excluded_reps_ui", suspendWhenHidden = FALSE)   # v2.27.0: a project's exclusions apply with the Data tab closed
   observeEvent(input$excluded_reps_clear, updateCheckboxGroupInput(session, "excluded_reps", selected = character(0)))
 
   # Samples: All / None
@@ -13025,7 +13092,7 @@ server <- function(input, output, session) {
   # Explicitly excluded: file path, loaded CSV, sample selection, time filter range —
   # anything that belongs to the data rather than the visualization.
   # v2.17: the settings document as a list, shared by the Save Settings download and the figure bundle
-  settings_json_list <- function() {
+  settings_json_list <- function(all_samples = FALSE) {   # v2.27.0: all_samples = every loaded sample (a project keeps hidden ones too)
       all_inputs <- reactiveValuesToList(input)
       
       # Inputs that belong to the data/session — never saved
@@ -13037,7 +13104,7 @@ server <- function(input, output, session) {
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                            "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
-                           "time_col_choice", "sheet_choice", "excluded_reps", "excluded_reps_clear", "samples_all", "samples_none",
+                           "time_col_choice", "sheet_choice", "excluded_reps", "excluded_reps_clear", "samples_all", "samples_none", "loadProject",
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                            "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
@@ -13064,7 +13131,7 @@ server <- function(input, output, session) {
       
       # Per-sample aesthetics keyed by sample name
       sample_aesthetics <- list()
-      samps <- isolate(sel_samples())
+      samps <- if (isTRUE(all_samples)) isolate(rv$od_vars) else isolate(sel_samples())
       if (!is.null(samps)) {
         ra <- resolve_aesthetics(samps)   # v2.26.1: what the figure draws, for a sample whose sidebar widgets were never built (page 2+)
         for (vn in samps) {
@@ -13117,12 +13184,124 @@ server <- function(input, output, session) {
       paste0("plot_settings_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".json"),
     content = function(file) write_json(settings_json_list(), file, pretty = TRUE, auto_unbox = TRUE)
   )
+
+  # ── v2.27.0: project file ────────────────────────────────────────────────────
+  # ONE file with the data and everything done with it: the data as loaded and as edited on the Data tab (and the time
+  # column), the selected samples, excluded replicates and time points, the time filter, every setting and sample style
+  # (the Save Settings document: names, colours, markers, groups, panels, label places, notes ...), a loaded colour map and
+  # the Compare tab's second file. Open it in the main file picker or under Save / Load: the data does not have to be
+  # uploaded again. JSON (.kcproj); a table is stored column by column, so repeated replicate names survive.
+  project_download <- function() downloadHandler(
+    filename = function() paste0(project_file_stem(), ".kcproj"),
+    content  = function(file) {
+      refuse_if_empty()
+      write_project_file(file)
+    }
+  )
+  write_project_file <- function(file) jsonlite::write_json(project_doc(), file, auto_unbox = TRUE, digits = NA, na = "null", null = "null", pretty = FALSE)
+  output$saveProject    <- project_download()
+  output$saveProjectTop <- project_download()   # the link under the file picker
+  project_file_stem <- function() {
+    src <- sub("\\.[A-Za-z0-9]+$", "", basename(as.character(rv$data_loaded_source %||% rv$data_source %||% "lysis")[1]))
+    src <- gsub("[^A-Za-z0-9._-]+", "_", src); if (!nzchar(src)) src <- "lysis"
+    paste0(substr(src, 1L, 60L), "_project_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+  }
+  project_doc <- function() isolate({
+    req(rv$data)
+    loaded <- rv$data_loaded %||% rv$data
+    same   <- identical(rv$data, loaded) && identical(rv$time_col, rv$data_loaded_tc %||% rv$time_col)
+    ds     <- rv_cmp$ds
+    doc <- list(
+      kc_project = 1L, app_version = APP_VERSION, saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+      data = list(source = rv$data_source %||% "", loaded_source = rv$data_loaded_source %||% rv$data_source %||% "",
+                  loaded_time_col = rv$data_loaded_tc %||% rv$time_col, time_col = rv$time_col,
+                  loaded = frame_to_doc(loaded), current = if (!same) frame_to_doc(rv$data)),
+      selection = list(selected_samples = as.list(sel_samples() %||% character(0)),
+                       excluded_reps = as.list(excluded_rep_keys() %||% character(0)),
+                       exclude_timepoints = as.character(input$exclude_timepoints %||% ""),
+                       time_filter_range = if (length(input$time_filter_range) == 2L) as.list(as.numeric(input$time_filter_range) / time_conv_k()),   # in the file's unit
+                       time_filter_unit = "file",
+                       compare_samples_b = as.list(as.character(input$compare_samples_b %||% character(0))),
+                       cmp_samples = as.list(as.character(input$cmp_samples %||% character(0)))),
+      settings = settings_json_list(all_samples = TRUE))
+    doc$data <- Filter(Negate(is.null), doc$data); doc$selection <- Filter(Negate(is.null), doc$selection)
+    if (!is.null(ds) && !is.null(ds$data)) doc$compare <- list(source = ds$data_source %||% "second file", frame = frame_to_doc(ds$data), time_col = ds$time_col)
+    if (length(rv$colour_map)) doc$colour_map <- list(source = rv$colour_map_source %||% "", map = as.list(rv$colour_map))
+    doc
+  })
+  load_project <- function(path, name = basename(path)) {
+    # the whole load is guarded: a file of any shape ends in a notification, never in an error that ends the session
+    tryCatch(load_project_body(path, name), error = function(e) {
+      reraise_time_limit(e)
+      guard_notify("project_read", sprintf("Could not open '%s' as a project: %s.", name, friendly_error_message(e)), "error")
+      invisible(FALSE)
+    })
+  }
+  load_project_body <- function(path, name) {
+    fail <- function(why) { guard_notify("project_read", sprintf("Could not open '%s' as a project: %s. Nothing was changed.", name, why), "error"); invisible(FALSE) }
+    doc <- tryCatch(jsonlite::fromJSON(path, simplifyVector = FALSE), error = function(e) NULL)
+    if (!is.list(doc) || is.null(names(doc)) || is.null(doc$kc_project)) return(fail("it is not a project file of this app"))
+    if (!is.list(doc$data) || !is.list(doc$data$loaded)) return(fail("it holds no data"))
+    s1 <- function(x, d = "") { x <- unlist(x); if (length(x) && !is.na(x[1]) && nzchar(as.character(x[1]))) as.character(x[1]) else d }
+    dl <- tryCatch(doc_to_frame(doc$data$loaded), error = function(e) NULL)
+    if (is.null(dl) || !ncol(dl)) return(fail("its data table could not be read"))
+    dc <- if (is.list(doc$data$current)) tryCatch(doc_to_frame(doc$data$current), error = function(e) NULL)
+    ok <- tryCatch({
+      src <- s1(doc$data$loaded_source, name); ltc <- s1(doc$data$loaded_time_col, NA_character_)
+      ingest_data(dl, src, time_col = if (!is.na(ltc) && ltc %in% colnames(dl)) ltc)
+      rv$xlsx_path <- NULL; rv$xlsx_sheets <- NULL; rv$xlsx_sheet <- NULL
+      tc <- s1(doc$data$time_col, rv$time_col); cur_src <- s1(doc$data$source, src)
+      if (!is.null(dc) && ncol(dc)) ingest_data(dc, cur_src, keep_state = TRUE, time_col = if (tc %in% colnames(dc)) tc)
+      else if (!identical(tc, rv$time_col) && tc %in% colnames(rv$data)) ingest_data(rv$data, cur_src, keep_state = TRUE, time_col = tc)
+      TRUE
+    }, error = function(e) { fail(load_failed_message(e, name)); FALSE })
+    if (!isTRUE(ok)) return(invisible(FALSE))
+    # the second file of the Compare tab
+    rv_cmp$ds <- NULL; rv_cmp$error <- NULL
+    if (is.list(doc$compare) && is.list(doc$compare$frame))
+      tryCatch(compare_load_frame(doc_to_frame(doc$compare$frame), s1(doc$compare$source, "second file")),
+               error = function(e) guard_notify("project_compare", paste("The project's Compare file could not be restored:", friendly_error_message(e)), "warning"))
+    # a loaded colour map
+    if (is.list(doc$colour_map) && is.list(doc$colour_map$map) && length(doc$colour_map$map)) {
+      m <- unlist(lapply(doc$colour_map$map, function(v) if (is.atomic(v) && length(v) == 1L) as.character(v) else NA_character_))
+      m <- m[!is.na(m) & nzchar(names(m)) & grepl("^#[0-9A-Fa-f]{6}$", m)]   # the colours read_colour_map() accepts
+      if (length(m)) { rv$colour_map <- setNames(toupper(as.character(m)), names(m)); rv$colour_map_source <- s1(doc$colour_map$source, name) }
+    } else { rv$colour_map <- NULL; rv$colour_map_source <- NULL }
+    # every setting and sample style, exactly as Load Settings applies them
+    if (is.list(doc$settings) && !is.null(names(doc$settings))) {
+      tf <- tempfile(fileext = ".json"); on.exit(unlink(tf), add = TRUE)
+      jsonlite::write_json(doc$settings, tf, auto_unbox = TRUE, digits = NA, na = "null", null = "null")
+      load_settings_file(tf)
+    }
+    # what was selected, excluded and filtered (the lists drawn later take their pending values)
+    sl <- if (is.list(doc$selection) && !is.null(names(doc$selection))) doc$selection else list(); vars <- rv$od_vars
+    sel <- intersect(as.character(unlist(sl$selected_samples)), vars)
+    if (length(sel)) updateSelectInput(session, "selected_samples", choices = vars, selected = sel)
+    updateTextInput(session, "exclude_timepoints", value = s1(sl$exclude_timepoints, ""))
+    rv$pending_excl <- as.character(unlist(sl$excluded_reps))
+    tr <- suppressWarnings(as.numeric(unlist(sl$time_filter_range)))
+    rv$pending_trange <- if (length(tr) == 2L && all(is.finite(tr))) tr else NULL       # in the file's unit; the slider converts
+    if (!is.null(rv_cmp$ds) && length(cb <- intersect(as.character(unlist(sl$compare_samples_b)), rv_cmp$ds$od_vars)))
+      updateSelectInput(session, "compare_samples_b", selected = cb)
+    if (length(cs <- intersect(as.character(unlist(sl$cmp_samples)), vars))) updateSelectizeInput(session, "cmp_samples", selected = cs)
+    rv$project_status <- sprintf("Project '%s' opened (saved %s with v%s): %d samples%s, settings and styles restored.", name,
+                                 s1(doc$saved_at, "?"), s1(doc$app_version, "?"), length(vars),
+                                 if (!is.null(dc)) ", with the Data-tab edits" else "")
+    guard_notify("project_open", rv$project_status, "message")
+    invisible(TRUE)
+  }
+  observeEvent(input$loadProject, {
+    f <- input$loadProject
+    req(is.list(f), all(c("name", "datapath") %in% names(f)))
+    load_project(f$datapath, f$name)
+  })
+  output$project_status_ui <- renderUI({ st <- rv$project_status; if (is.null(st)) NULL else div(class = "settings-status ok", st) })
   
   # ── Settings: Load ───────────────────────────────────────────────────────────
   # Applies global visual settings AND per-sample aesthetics from the file.
   # Never touches: file input, sample selection, time filter range.
-  observeEvent(input$loadSettings, {
-    req(input$loadSettings)
+  # v2.27.0: the body of Load Settings as a function of the file's path, so a project file applies its settings the same way
+  load_settings_file <- function(sf) {
     # Hardening round 1 (finding 34): the whole body is guarded. A settings file that parses to a scalar, an array or
     # something this app cannot read used to raise an error in the observer, which ENDS the Shiny session.
     tryCatch({
@@ -13132,7 +13311,6 @@ server <- function(input, output, session) {
       rv$settings_status <- list(type = "warn", msg = msg, details = NULL)
       tryCatch(showNotification(msg, type = "error", duration = 12), error = function(e2) invisible(NULL))
     }
-    sf <- input$loadSettings$datapath
     if (!is.character(sf) || !length(sf) || !file.exists(sf)) return(read_fail("the file could not be opened"))
     if (is.na(file.size(sf)) || file.size(sf) == 0L) return(read_fail("the file is empty"))
     s <- tryCatch(
@@ -13165,6 +13343,13 @@ server <- function(input, output, session) {
     else list()
     
     global <- migrate_styling_settings(global, s$styling_schema)   # v2.22: palette names of a pre-v2.22 file
+    fs0 <- tryCatch(settings_unbox(global$facet_source), error = function(e) NULL)   # v2.27.0: kept until the data offers it
+    if (is.character(fs0) && length(fs0) == 1L && !is.na(fs0) && nzchar(fs0)) {
+      facet_pending$v <- fs0
+      # offered already: the update below sets it, and the menu refresh of this same flush (a project's new data) keeps it;
+      # after the flush it is dropped, so it can never come back later over a source picked by hand
+      if (fs0 %in% isolate(facet_source_choices())) tryCatch(session$onFlushed(function() facet_pending$v <- NULL, once = TRUE), error = function(e) NULL)
+    }
     sample_aes <- lapply(sample_aes, sanitize_sample_aes)          # round 2 (F07): only values the widgets can take reach the sidebar rows
     rv$imported_settings <- list(global = global, samples = sample_aes)
     rv$panel_cfg <- list()                               # v2.26.0: each panel's settings (only known fields, one plain value each)
@@ -13231,7 +13416,7 @@ server <- function(input, output, session) {
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                          "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
-                           "time_col_choice", "sheet_choice", "excluded_reps", "excluded_reps_clear", "samples_all", "samples_none",
+                           "time_col_choice", "sheet_choice", "excluded_reps", "excluded_reps_clear", "samples_all", "samples_none", "loadProject",
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                          "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
@@ -13371,6 +13556,10 @@ server <- function(input, output, session) {
       rv$settings_status <- list(type = "warn", msg = msg, details = NULL)
       tryCatch(showNotification(msg, type = "error", duration = 12), error = function(e2) invisible(NULL))
     })
+  }
+  observeEvent(input$loadSettings, {
+    req(input$loadSettings)
+    load_settings_file(input$loadSettings$datapath)
   })
   
   # Applies imported per-sample aesthetics to any matching currently-loaded samples.
@@ -14574,11 +14763,18 @@ server <- function(input, output, session) {
     }
     ch
   })
+  # v2.27.0: a panel source from a settings / project file waits here until the data offers it ("Column of the file: Strain"
+  # before the file is loaded); a project loads its data first, and this refresh used to put the old source back
+  facet_pending <- new.env(parent = emptyenv())
   observe({
     ch  <- facet_source_choices()
     cur <- isolate(sel1("facet_source", "group"))
-    updateSelectInput(session, "facet_source", choices = ch, selected = if (cur %in% ch) cur else "group")
+    pv  <- facet_pending$v
+    sel <- if (!is.null(pv) && pv %in% ch) { facet_pending$v <- NULL; pv } else if (cur %in% ch) cur else "group"   # applied once
+    updateSelectInput(session, "facet_source", choices = ch, selected = sel)
   })
+  # a source the user picks by hand wins over one still waiting for its data
+  observeEvent(input$facet_source, { v <- as.character(input$facet_source %||% ""); if (length(v) == 1L && nzchar(v)) facet_pending$v <- NULL }, ignoreInit = TRUE)
   # One text box per selected sample for the panel it belongs to (samples typed with the same name share a panel).
   output$facet_manual_ui <- renderUI({
     if (!identical(sel1("facet_source", "group"), "manual")) return(NULL)
@@ -19920,8 +20116,9 @@ server <- function(input, output, session) {
   # one). A file with no sample name in common with the main data is loaded and drawn as before (comparing two experiments
   # with different strains is a supported use) but says so once, because a sample is paired across the files by its exact name.
   compare_no_common <- function(ds = rv_cmp$ds) !is.null(ds) && !is.null(rv$od_vars) && !length(intersect(as.character(rv$od_vars), as.character(ds$od_vars)))
-  compare_load <- function(path, name = path) {
-    ds <- ingest_frame(compare_read_file(path, name), name)
+  compare_load <- function(path, name = path) compare_load_frame(compare_read_file(path, name), name)
+  compare_load_frame <- function(frame, name) {   # v2.27.0: also used by a project file
+    ds <- ingest_frame(frame, name)
     rv_cmp$ds <- ds; rv_cmp$error <- NULL
     updateSelectInput(session, "compare_samples_b", choices = ds$od_vars, selected = ds$od_vars)
     for (nt in ds$notes) tryCatch(showNotification(nt, type = "message", duration = 12), error = function(e) NULL)

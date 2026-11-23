@@ -162,6 +162,7 @@ Metrics that do not apply are reported as NA, never as an invented value.
 
 ## 8. Reproducibility checklist
 
+- [ ] Click **Save project** and keep the `.kcproj` with the figure: it holds the data and everything you did, and opens in the file picker with nothing else to upload (v2.27.0).
 - [ ] Click **Save Settings** and keep the `.json` with the figure. **Load Settings File** restores the style later.
 - [ ] Keep the original CSV, the settings file and the report together.
 - [ ] For submission, download the figure bundle and keep its `README.txt`.
