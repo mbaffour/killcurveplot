@@ -4,6 +4,8 @@
 >
 > **Looking for the full analysis platform** (Analysis tab, 30+ metrics, statistics, heatmaps, curve fitting, virulence metrics)? That's the companion app: [mbaffour/lysis-curve-app](https://github.com/mbaffour/lysis-curve-app). This repo is the lightweight plotter.
 
+> **New to the app?** The [illustrated tutorial](docs/TUTORIAL.md) walks through every feature with screenshots (also in the app's Help tab).
+
 ## Quick start — double-click to run (no command line)
 
 If you have [R](https://cran.r-project.org/) installed, you don't need the terminal:
@@ -646,4 +648,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.25.1 (2026-11-19) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.26.0 (2026-11-23) — Michael Baffour Awuah / Ramsey Lab*

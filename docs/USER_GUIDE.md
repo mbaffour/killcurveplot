@@ -62,6 +62,15 @@ If CFU Plot Studio saved a paper style (`paper_style.json`) beside this app, the
 
 ## 4. A multi-panel figure
 
+**One dataset split into panels (v2.26.0).** Open **Panels** (after Axis Settings) and tick **Split the lysis curve into panels**.
+1. **Each sample's panel comes from:** *Each sample its own panel* is the quickest; *Pick the samples for each panel* sets the **Number of panels** and, for each, a name and the samples it shows (a sample can be in several; one picked for none is left off the figure); or type a panel name per sample (*A panel name typed below*; a sample in two panels: `A; B`); or use the Groups typed in Variable Styling.
+2. **Show in every panel:** pick the control so it is drawn in each panel next to its treatment.
+3. **Panel letters:** A, B, C, a, b, c, 1, 2, 3 or i, ii, iii. **Panel names:** plain, boxed, or *None* (letters alone, or nothing). For one letter on the whole set (the set is panel A of a larger figure), type it as the **Panel label** (Figure Layout): it is drawn once, top-left, over parts lettered a, b, c or 1, 2, 3; or choose **A1, A2, A3** so each part carries it.
+4. **Panel size:** *Fit a double column (page width)* makes the whole figure 183 mm wide (Nature; the width follows the journal family), however many panels; *Share the panel area* keeps the figure the size of one panel; *Each panel at the full panel size* lets it grow.
+5. **Legends:** *One legend for all panels*, or *A legend in each panel*: every panel becomes a figure of its own, with its own legend, and each one can be set on its own under the panel's name below the menu: title, legend place and title, axis titles, x and y ranges, **Hide points / lines / error bars**, and under **Samples in this panel** a sample's name, colour, marker, fill and line type in that panel only (a grey dashed control in panel B, say). The legend key then shows each panel's own key, and the legend text describes a sample styled differently in a panel.
+
+Any number of panels works; with 3, 5 or 7 the last row has a gap. **Panels per row** sets the grid. The Legend text tab adds a sentence naming what each panel holds, the legend key lists every sample once, and the settings file keeps the every-panel samples and each panel's settings.
+
 **In the app: the Compose figure tab** (after Dashboard).
 
 - **Panels (composed in this order):** tick the main lysis curve and any analysis figures. They are laid out in the order listed.
@@ -148,7 +157,7 @@ Metrics that do not apply are reported as NA, never as an invented value.
 - **Download legend key** (every figure tab) writes the figure's own legend as a separate image in the Export format: each sample's colour, marker, fill and line type next to its display name, in the figure's font. Place it beside a panel or use it to write the legend; the **Figure Legend Text** names the same colours and markers in words ("MG1655 (black, filled circles)"). The figure bundle contains it as `legend_key.svg` / `legend_key.pdf`, and batch export has a *Legend key* output.
 - **Copy figure** (beside every figure's download button; **Copy key** for the legend key) puts the current preview on the clipboard as a PNG, ready to paste into a slide or document; Cmd/Ctrl+C while hovering a preview does the same. It is a screen-resolution copy: use **Download Image** for print.
 - **Right-click the main figure** and choose the browser's **Copy Image** (or Save Image As): since v2.24.0 that copies the figure as a PNG too. **Drag the legend** on the figure to move it: it moves with the pointer, stays inside the frame and lands where you drop it; dropped outside the panel it goes above, below or beside it (the figure grows on that side, the panel keeps its size). The preview is drawn at one scale on every tab, whatever the legend position. A legend too long for its side wraps onto more rows or columns.
-- **Floating labels** (v2.25.0): Legend position **Floating labels (drag each name)** replaces the legend box with the sample names themselves, each in its colour; drag each one where you want it. **Extra labels on the figure** (Label Options) adds free labels, one per line (`*mltG*` gives an italic gene name), dragged the same way. Places are saved with Save Settings; **Put the labels back** returns them to the default column.
+- **Floating labels** (v2.25.0): Legend position **Floating labels (drag each name)** replaces the legend box with the sample names themselves, each in its colour; drag each one where you want it. **Extra labels on the figure** (Axis Settings > Figure Layout) adds free labels, one per line (`*mltG*` gives an italic gene name), dragged the same way. Places are saved with Save Settings; **Put the labels back** returns them to the default column.
 - **Download all figures (.zip)** writes an SVG and a PNG of every figure that can be drawn for the current data, plus the composed figure, legend and methods. Figures that cannot be drawn are listed with reasons in `SKIPPED.txt`.
 
 ## 8. Reproducibility checklist
@@ -164,6 +173,7 @@ Metrics that do not apply are reported as NA, never as an invented value.
 
 ## Where to look next
 
+- [Illustrated tutorial](TUTORIAL.md): the whole app step by step, with screenshots.
 - [README](../README.md): installation, quick start and the full control list.
 - [How to label a figure](LABELLING_HOWTO.md): a tutorial on sample names, axis titles, legends, end labels, panel letters, marker labels, significance marks and the legend text.
 - [Figure standards](FIGURE_STANDARDS.md): journal widths, sources and the Inkscape loop.

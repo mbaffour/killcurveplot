@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.25.1"
+APP_VERSION <- "2.26.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3300,24 +3300,27 @@ fixed_panel_grob_once <- function(p, panel_w_mm, panel_h_mm) {
   rows <- sort(unique(unlist(Map(seq, lay$t, lay$b))))
   cols <- cols[grid::unitType(g$widths)[cols]  == "null"]
   rows <- rows[grid::unitType(g$heights)[rows] == "null"]
-  for (i in cols) g$widths[i]  <- grid::unit(panel_w_mm / length(cols), "mm")
-  for (i in rows) g$heights[i] <- grid::unit(panel_h_mm / length(rows), "mm")
+  each <- isTRUE(attr(p, "kc_panel_each"))   # v2.26.0: every panel of a multi-panel figure at the full panel size
+  for (i in cols) g$widths[i]  <- grid::unit(if (each) panel_w_mm else panel_w_mm / length(cols), "mm")
+  for (i in rows) g$heights[i] <- grid::unit(if (each) panel_h_mm else panel_h_mm / length(rows), "mm")
   ml <- attr(p, "matrix_legend")        # v2.22: the matrix (grid) legend becomes a real gtable track / overlay
   if (!is.null(ml)) g <- tryCatch(attach_matrix_legend(g, ml$grob, ml$placement), error = function(e) g)
   for (i in which(grid::unitType(g$widths)  == "null")) g$widths[i]  <- grid::unit(0, "mm")
   for (i in which(grid::unitType(g$heights) == "null")) g$heights[i] <- grid::unit(0, "mm")
   g$respect <- FALSE
   attr(g, "size_mm") <- figure_size_mm(g)
+  attr(g, "panel_mm") <- c(if (each) panel_w_mm else panel_w_mm / max(1, length(cols)), if (each) panel_h_mm else panel_h_mm / max(1, length(rows)))   # v2.26.0: one panel
   g
 }
 # Panels laid out as an ncol-column grid of fixed-panel gtables (each placed top-left in a cell as
 # wide / tall as the largest one), with a, b, c tags at each cell's top-left corner.
-compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE) {
+compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE,
+                                 tag_labels = NULL, whole_tag = "", whole_size = 8) {
   n <- length(items); ncol <- max(1, min(ncol, n)); nrow <- ceiling(n / ncol)
   sz <- vapply(items, function(g) attr(g, "size_mm"), numeric(2))
   cw <- max(sz[1, ]); ch <- max(sz[2, ])
   master <- gtable::gtable(widths = grid::unit(rep(cw, ncol), "mm"), heights = grid::unit(rep(ch, nrow), "mm"))
-  tags <- if (identical(tag_case, "A")) LETTERS else letters
+  tags <- if (length(tag_labels) >= n) tag_labels else if (identical(tag_case, "A")) LETTERS else letters   # v2.26.0: 1, 2 / i, ii / A1, A2
   for (i in seq_len(n)) {
     r <- (i - 1) %/% ncol + 1; cc <- (i - 1) %% ncol + 1
     cell <- grid::gTree(children = grid::gList(items[[i]]),
@@ -3330,7 +3333,15 @@ compose_fixed_figure <- function(items, ncol = 2, tag_size = 8, font = "Arial", 
                           gp = grid::gpar(fontsize = tag_size, fontface = "bold", fontfamily = font))
     master <- gtable::gtable_add_grob(master, tag, t = r, l = cc, name = paste0("tag-", i), clip = "off", z = Inf)
   }
-  attr(master, "size_mm") <- c(cw * ncol, ch * nrow)
+  top <- 0
+  if (is.character(whole_tag) && length(whole_tag) == 1L && !is.na(whole_tag) && nzchar(whole_tag)) {   # v2.26.0: one letter for the whole set
+    top <- whole_size * 25.4 / 72 * 1.5
+    master <- gtable::gtable_add_rows(master, grid::unit(top, "mm"), pos = 0)
+    master <- gtable::gtable_add_grob(master, grid::textGrob(whole_tag, x = grid::unit(0.5, "mm"), y = grid::unit(1, "npc"), hjust = 0, vjust = 1,
+                                                             gp = grid::gpar(fontsize = whole_size, fontface = "bold", fontfamily = font)),
+                                      t = 1, l = 1, name = "whole-tag", clip = "off", z = Inf)
+  }
+  attr(master, "size_mm") <- c(cw * ncol, ch * nrow + top)
   master
 }
 # The fit indicator of the size bar: which column layouts a figure of width W (mm) fits in the
@@ -3826,7 +3837,8 @@ n4_preset_settings <- function()
                   font_family = "sans", color_palette = "custom", x_tick_interval = 30))
 APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # v2.16: no panel letter unless the user sets one
                   list(legend_inside_x = 0.98, legend_inside_y = 0.98),        # v2.23.4: appended at the end (the dragged legend, top-right)
-                  list(figure_labels = ""))                                     # v2.25.0: extra labels on the figure, one per line
+                  list(figure_labels = ""),                                     # v2.25.0: extra labels on the figure, one per line
+                  list(facet_letters = "none", facet_size_mode = "share", facet_legends = "shared", facet_n_panels = 2))   # v2.26.0: panel letters, panel size, legends (Panels section)
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -7477,7 +7489,7 @@ OLD_NEVER_GLOBAL <- c("file", "loadSettings", "selected_samples", "time_filter_r
                       "samples_deselect_all", "saveSettings", "clearSettings", "load_demo", "compare_file")
 # v2.25.1: what a table widget reports about itself (rows on screen, sort, search box) is not a setting: never saved, never
 # loaded. A file saved after a visit to the Statistics tab came back as "7 settings had the wrong type and were ignored".
-TABLE_STATE_PREFIXES <- c("data_view_table_", "stats_tab_summary_")
+TABLE_STATE_PREFIXES <- c("data_view_table_", "stats_tab_summary_", "panelcfg_", "panelpick_", "panelsmp_")   # v2.26.0: per-panel boxes are saved as panel_settings
 is_table_state_key <- function(nm) {
   out <- rep(FALSE, length(nm))
   for (pfx in TABLE_STATE_PREFIXES) out <- out | startsWith(nm, pfx)
@@ -8768,9 +8780,21 @@ float_label_plain <- function(x) trimws(gsub("[_^]\\{([^}]*)\\}", "\\1", gsub("\
 FACET_SCALES_CHOICES <- c("Shared axes" = "fixed", "Free y" = "free_y", "Free x" = "free_x", "Free both" = "free")
 FACET_STRIP_CHOICES  <- c("Plain text (default)" = "plain", "Boxed strip" = "box", "None" = "none")
 # The facet layers of the main curve: strip text, strip style and size, scales, columns. `ncol` NA = facet_wrap's own rule.
-facet_layers <- function(levels, scales = "fixed", ncol = NA, strip_style = "plain", strip_size = 7, axis_lw = 0.5, wrap = 18) {
+facet_layers <- function(levels, scales = "fixed", ncol = NA, strip_style = "plain", strip_size = 7, axis_lw = 0.5, wrap = 18,
+                         letters = "none", prefix = "A") {
   nc <- suppressWarnings(as.integer(ncol)); if (length(nc) != 1L || !is.finite(nc) || nc < 1L) nc <- NULL
   if (!scales %in% unname(FACET_SCALES_CHOICES)) scales <- "fixed"
+  if (letters %in% FACET_LETTER_STYLES) {
+    # v2.26.0: a letter at the left of each panel's header, bold; with the headers off ("None") the letter alone
+    show_names <- !identical(strip_style, "none")
+    txt <- facet_strip_texts(levels, letters, show_names, prefix)
+    lab <- if (show_names) function(labels) lapply(labels, function(v) lapply(as.character(v), function(x) as.expression(markup_label(txt[[x]] %||% x))))
+           else ggplot2::as_labeller(function(x) unname(ifelse(is.na(txt[as.character(x)]), as.character(x), txt[as.character(x)])))
+    fw <- ggplot2::facet_wrap(ggplot2::vars(group), scales = scales, ncol = nc, labeller = lab)
+    bg <- if (identical(strip_style, "box")) ggplot2::element_rect(fill = "grey92", color = "black", linewidth = axis_lw) else ggplot2::element_blank()
+    return(list(fw, ggplot2::theme(strip.text = ggplot2::element_text(size = strip_size, face = if (show_names) "plain" else "bold", hjust = 0),
+                                   strip.background = bg)))
+  }
   fw <- ggplot2::facet_wrap(ggplot2::vars(group), scales = scales, ncol = nc, labeller = facet_strip_labeller(levels, wrap))
   th <- switch(strip_style,
     none = ggplot2::theme(strip.text = ggplot2::element_blank(), strip.background = ggplot2::element_blank()),
@@ -8778,6 +8802,151 @@ facet_layers <- function(levels, scales = "fixed", ncol = NA, strip_style = "pla
                           strip.background = ggplot2::element_rect(fill = "grey92", color = "black", linewidth = axis_lw)),
     ggplot2::theme(strip.text = ggplot2::element_text(size = strip_size, face = "plain"), strip.background = ggplot2::element_blank()))
   list(fw, th)
+}
+# v2.26.0: panel letters, panel size and legends of a multi-panel figure.
+FACET_LEGEND_CHOICES <- c("One legend for all panels" = "shared", "A legend in each panel (each panel its own figure)" = "each")
+# The per-panel settings of "A legend in each panel" (Panels section): blank = as the whole figure.
+PANEL_CFG_FIELDS <- c("title", "legend", "legend_title", "xlab", "ylab", "xmin", "xmax", "ymin", "ymax", "hide_points", "hide_lines", "hide_errors")
+PANEL_CFG_LEGEND_CHOICES <- c("As the figure" = "", "Right (outside)" = "right", "Bottom (outside)" = "bottom", "Top (outside)" = "top",
+                              "Inside: top-left" = "inside-top-left", "Inside: top-right" = "inside-top-right",
+                              "Inside: bottom-left" = "inside-bottom-left", "Inside: bottom-right" = "inside-bottom-right", "None" = "none")
+# One panel's settings onto its own figure: title, legend place and title, axis titles, axis ranges (a blank bound keeps
+# the figure's own). The samples' colours, markers and names stay those of the whole figure.
+apply_panel_cfg <- function(pg, cfg, subscripts = TRUE) {
+  if (!length(cfg)) return(pg)
+  # v2.26.0: what the panel shows. Points = the mean markers; lines = the mean curves; error = error bars, bands and the
+  # replicate layers (spaghetti, jitter, replicate points). A layer left out also leaves the panel's legend key.
+  rep_layer <- function(l) is.data.frame(l$data) && "replicate" %in% names(l$data)
+  drop <- function(test) { keep <- !vapply(pg$layers, test, NA); if (!all(keep)) pg$layers <- pg$layers[keep]; pg }
+  tru <- function(v) isTRUE(v) || identical(toupper(as.character(v)[1]), "TRUE")
+  if (tru(cfg$hide_errors)) pg <- drop(function(l) inherits(l$geom, c("GeomErrorbar", "GeomRibbon", "GeomLinerange", "GeomPointrange", "GeomCrossbar")) || rep_layer(l))
+  if (tru(cfg$hide_points)) pg <- drop(function(l) inherits(l$geom, "GeomPoint") && !rep_layer(l) && "shape" %in% names(l$mapping))
+  if (tru(cfg$hide_lines))  pg <- drop(function(l) inherits(l$geom, "GeomLine") && !rep_layer(l))
+  s1 <- function(v) { v <- as.character(if (is.null(v)) "" else v)[1]; if (is.na(v)) "" else trimws(v) }
+  n1 <- function(v) { v <- suppressWarnings(as.numeric(if (is.null(v)) NA else v)[1]); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
+  if (nzchar(s1(cfg$title))) pg <- pg + ggplot2::labs(title = text_label(s1(cfg$title)))
+  if (nzchar(s1(cfg$xlab)))  pg <- pg + ggplot2::labs(x = text_label(s1(cfg$xlab), subscripts))
+  if (nzchar(s1(cfg$ylab)))  pg <- pg + ggplot2::labs(y = text_label(s1(cfg$ylab), subscripts))
+  lt <- s1(cfg$legend_title)
+  if (nzchar(lt)) {          # the scales carry the legend title themselves (marker_scales), so each one is renamed
+    t <- text_label(lt); pg <- pg + ggplot2::labs(colour = t, shape = t, fill = t, linetype = t)
+    sl <- pg$scales
+    for (i in seq_along(sl$scales)) if (any(sl$scales[[i]]$aesthetics %in% c("colour", "fill", "shape", "linetype"))) {
+      sc <- sl$scales[[i]]$clone(); sc$name <- t; sl$scales[[i]] <- sc }
+  }
+  lg <- s1(cfg$legend)
+  if (lg %in% c("right", "bottom", "top", "none")) pg <- pg + ggplot2::theme(legend.position = lg)
+  else if (startsWith(lg, "inside-")) pg <- pg + inside_legend_theme(sub("^inside-", "", lg))
+  xl <- c(n1(cfg$xmin), n1(cfg$xmax)); yl <- c(n1(cfg$ymin), n1(cfg$ymax))
+  if (all(is.finite(xl)) && xl[1] >= xl[2]) xl <- c(NA_real_, NA_real_)       # an impossible range is ignored
+  if (all(is.finite(yl)) && yl[1] >= yl[2]) yl <- c(NA_real_, NA_real_)
+  if (any(is.finite(c(xl, yl))))
+    pg <- suppressMessages(pg + ggplot2::coord_cartesian(xlim = if (any(is.finite(xl))) xl else NULL, ylim = if (any(is.finite(yl))) yl else NULL))   # (clipped: a curve leaves the panel at the range's edge)
+  pg
+}
+# v2.26.0: a sample drawn differently in one panel ("A legend in each panel"): its name, colour, marker, fill and line there.
+PANEL_SAMPLE_FIELDS <- c("name", "color", "shape", "filled", "line")
+PANEL_SHAPE_CHOICES <- c("As the figure" = "", "Circle" = "16", "Square" = "15", "Triangle Up" = "17", "Triangle Down" = "25", "Diamond" = "18",
+                         "Cross" = "4", "X" = "8", "Plus" = "3", "Star" = "10")
+PANEL_FILL_CHOICES  <- c("As the figure" = "", "Filled" = "filled", "Open" = "open")
+PANEL_LINE_CHOICES  <- c("As the figure" = "", "Solid" = "solid", "Dashed" = "dashed", "Dotted" = "dotted", "DotDash" = "dotdash",
+                         "LongDash" = "longdash", "TwoDash" = "twodash")
+# One panel's sample styles onto the styles of the whole figure (aes = shapes / colors / line_types / leg_labels / filled_map).
+apply_panel_samples <- function(aes, ov) {
+  if (!length(ov)) return(aes)
+  s1 <- function(v) { v <- as.character(if (is.null(v)) "" else v)[1]; if (is.na(v)) "" else trimws(v) }
+  for (x in intersect(names(ov), names(aes$colors))) {
+    o <- ov[[x]]
+    if (nzchar(s1(o$name))) aes$leg_labels[x] <- s1(o$name)
+    cl <- s1(o$color)
+    if (nzchar(cl) && isTRUE(tryCatch({ grDevices::col2rgb(cl); TRUE }, error = function(e) FALSE)))
+      aes$colors[x] <- grDevices::rgb(t(grDevices::col2rgb(cl)), maxColorValue = 255)
+    sh <- s1(o$shape); fl <- s1(o$filled)
+    if (nzchar(sh) || nzchar(fl)) {
+      mk <- normalise_marker(if (nzchar(sh)) sh else aes$shapes[[x]], if (nzchar(fl)) identical(fl, "filled") else aes$filled_map[[x]])
+      aes$shapes[x] <- mk$shape; aes$filled_map[x] <- mk$filled
+    }
+    if (s1(o$line) %in% PANEL_LINE_CHOICES[-1]) aes$line_types[x] <- s1(o$line)
+  }
+  aes
+}
+# The keys of several panels stacked into one legend key (each under its panel's letter / name), for a figure whose
+# panels draw their samples differently. Same margins and size attributes as legend_key_grob().
+stack_legend_keys <- function(keys, titles, font = "sans", size = 7, margin_mm = 2) {
+  ok <- !vapply(keys, is.null, NA); keys <- keys[ok]; titles <- titles[ok]
+  if (!length(keys)) return(NULL)
+  parts <- list(); hs <- list()
+  for (i in seq_along(keys)) {
+    parts[[length(parts) + 1L]] <- grid::textGrob(titles[i], x = grid::unit(margin_mm, "mm"), hjust = 0, gp = grid::gpar(fontsize = size, fontface = "bold", fontfamily = font))
+    hs[[length(hs) + 1L]] <- grid::unit(size * 1.6, "pt")
+    parts[[length(parts) + 1L]] <- grid::gTree(children = grid::gList(keys[[i]]),     # left-aligned under its title
+                                               vp = grid::viewport(x = 0, just = "left", width = grid::unit(attr(keys[[i]], "width_in"), "in")))
+    hs[[length(hs) + 1L]] <- grid::unit(attr(keys[[i]], "height_in"), "in")
+  }
+  key <- gtable::gtable(widths = grid::unit(max(vapply(keys, function(k) attr(k, "width_in"), 0)), "in"), heights = do.call(grid::unit.c, hs))
+  for (i in seq_along(parts)) key <- gtable::gtable_add_grob(key, parts[[i]], t = i, l = 1, name = paste0("part-", i), clip = "off")
+  dims <- kc_with_scratch_device(function() c(grid::convertWidth(sum(key$widths), "in", valueOnly = TRUE), grid::convertHeight(sum(key$heights), "in", valueOnly = TRUE)))
+  attr(key, "width_in") <- dims[1]; attr(key, "height_in") <- dims[2]
+  key
+}
+FACET_LETTER_CHOICES <- c("None" = "none", "A, B, C" = "upper", "a, b, c" = "lower", "1, 2, 3" = "number", "i, ii, iii" = "roman",
+                          "A1, A2, A3 (the figure's Panel label, then a number)" = "prefixed")
+FACET_LETTER_STYLES <- c("upper", "lower", "number", "roman", "prefixed")
+FACET_SIZE_CHOICES   <- c("Share the panel area (the figure keeps its size)" = "share",
+                          "Fit one column" = "fit_single", "Fit 1.5 columns" = "fit_onehalf", "Fit a double column (page width)" = "fit_double",
+                          "Each panel at the full panel size (the figure grows)" = "each")
+# The panel size that makes a multi-panel figure `target_w_mm` wide (and no taller than max_h_mm). `extra_mm` = the figure's
+# size minus its panels (axes, strips, legend, gaps) as measured with panels of panel_mm; nc / nr = panel columns / rows.
+# The panels keep the width : height of panel_mm; never below 10 mm.
+fit_panel_size <- function(target_w_mm, max_h_mm, panel_mm, extra_mm, nc, nr) {
+  ratio <- panel_mm[2] / panel_mm[1]
+  pw <- (target_w_mm - extra_mm[1]) / max(1, nc)
+  if (is.finite(max_h_mm) && max_h_mm > 0 && nr * pw * ratio + extra_mm[2] > max_h_mm) pw <- (max_h_mm - extra_mm[2]) / max(1, nr) / ratio
+  pw <- max(10, pw)
+  c(pw, pw * ratio)
+}
+# The letter of panel i: A..Z, then AA, AB ... (lower case with case = "lower"); "number" 1, 2, 3; "roman" i, ii, iii;
+# "prefixed" the parts of one lettered panel: A1, A2, A3 (`prefix` = the figure's Panel label, "A" when blank).
+panel_letter <- function(i, case = "upper", prefix = "A") {
+  if (identical(case, "number")) return(as.character(i))
+  if (identical(case, "roman")) return(tolower(as.character(utils::as.roman(i))))
+  if (identical(case, "prefixed")) { pf <- trimws(as.character(prefix %||% "")[1]); if (is.na(pf) || !nzchar(pf)) pf <- "A"; return(paste0(pf, i)) }
+  L <- if (identical(case, "lower")) letters else LETTERS
+  vapply(i, function(k) if (k <= 26L) L[k] else paste0(L[(k - 1L) %/% 26L], L[(k - 1L) %% 26L + 1L]), "")
+}
+# Which panel(s) every sample is drawn in. `panels` = named character vector sample -> typed panel ("" = none; several
+# panels separated by ";", e.g. "A; B"); `every` = samples drawn in every panel (a control). The panels are the typed names
+# in first-appearance order, then "Other" for the samples with none. NULL when fewer than `min_panels` panels are named.
+# A plain one-panel-per-sample assignment gives exactly sample_group_map()'s panels and order.
+panel_membership <- function(samples, panels, every = character(0), min_panels = 2L) {
+  if (!length(samples)) return(NULL)
+  raw <- if (is.null(panels)) rep("", length(samples)) else as.character(unname(panels[samples]))
+  raw[is.na(raw)] <- ""
+  parts <- setNames(lapply(raw, function(x) { v <- trimws(strsplit(x, ";", fixed = TRUE)[[1]]); unique(v[nzchar(v)]) }), samples)
+  every <- intersect(as.character(every), samples)
+  own   <- setdiff(samples, every)
+  named <- unique(unlist(parts[own], use.names = FALSE))
+  if (length(named) < min_panels) return(NULL)
+  none  <- own[lengths(parts[own]) == 0L]
+  lv    <- c(named, if (length(none)) "Other")
+  map   <- setNames(lapply(samples, function(x) if (x %in% every) lv else if (length(parts[[x]])) parts[[x]] else "Other"), samples)
+  list(map = map, levels = lv)
+}
+# The rows of a layer's data frame, once per panel their sample is drawn in, with the panel as the factor `group` (the
+# facet variable). With one panel per sample the rows are those of `d`, in the same order.
+panel_expand <- function(d, pm) {
+  if (is.null(pm) || is.null(d) || !nrow(d) || !"variable" %in% names(d)) return(d)
+  m <- pm$map[as.character(d$variable)]; k <- lengths(m)
+  out <- d[rep(seq_len(nrow(d)), k), , drop = FALSE]
+  out$group <- factor(unlist(m, use.names = FALSE), levels = pm$levels)
+  rownames(out) <- NULL
+  out
+}
+# The strip text of each panel with letters: "A" (names hidden) or "**A**  name" (letter in bold, then the name).
+facet_strip_texts <- function(levels, letters = "none", show_names = TRUE, prefix = "A") {
+  if (!letters %in% FACET_LETTER_STYLES) return(setNames(as.character(levels), levels))
+  L <- panel_letter(seq_along(levels), letters, prefix)
+  setNames(if (isTRUE(show_names)) paste0("**", L, "**  ", levels) else L, levels)
 }
 # The panel of every sample from one of three sources: the typed Groups ("group"), a text box per sample ("manual":
 # `manual` = named character vector sample -> panel) or a metadata column of a long file (`meta` = named vector
@@ -8924,6 +9093,7 @@ docs_dir_path <- function() {
 }
 # The guides, in the order shown; file paths are relative to the repository root. A file that is missing is skipped.
 HELP_GUIDES <- list(
+  list(file = "docs/TUTORIAL.md",                  title = "Illustrated tutorial: the whole app, step by step, with screenshots"),   # v2.26.0
   list(file = "docs/LABELLING_HOWTO.md",           title = "How to label a figure (tutorial)", open = TRUE),
   list(file = "docs/USER_GUIDE.md",                title = "User guide: a whole session, from data to reports"),
   list(file = "docs/FIGURE_STANDARDS.md",          title = "Journal figure standards and the Inkscape workflow"),
@@ -8943,7 +9113,7 @@ help_anchor <- function(file) paste0("help_", gsub("[^A-Za-z0-9]+", "_", sub("\\
 
 # One guide as HTML. `anchors` maps a link target as written in that file (e.g. "USER_GUIDE.md", "../README.md" or,
 # for a root-level file, "docs/USER_GUIDE.md") to the section id it should jump to. `base` is "docs" or "root".
-render_help_doc <- function(path, anchors = list(), base = "docs") {
+render_help_doc <- function(path, anchors = list(), base = "docs", prefix = NULL) {
   txt  <- paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
   html <- if (requireNamespace("commonmark", quietly = TRUE))
     commonmark::markdown_html(txt, extensions = TRUE, smart = FALSE)
@@ -8952,6 +9122,17 @@ render_help_doc <- function(path, anchors = list(), base = "docs") {
   for (target in names(anchors))
     html <- gsub(paste0('href="', gsub("([.?*+^$()\\[\\]{}|\\\\])", "\\\\\\1", target, perl = TRUE), '(#[^"]*)?"'),
                  paste0('href="#', anchors[[target]], '"'), html, perl = TRUE)
+  if (is.character(prefix) && length(prefix) == 1L && nzchar(prefix)) {
+    # v2.26.0: headings get GitHub-style ids (prefixed with the guide's own anchor), and the guide's "#section" links point at
+    # them, so a table of contents works in the Help tab as on GitHub
+    slug <- function(t) { t <- tolower(gsub("<[^>]+>", "", t)); t <- gsub("[^a-z0-9 -]", "", t); gsub(" ", "-", trimws(t)) }
+    hs <- regmatches(html, gregexpr("<h[2-4]>.*?</h[2-4]>", html, perl = TRUE))[[1]]
+    for (h in unique(hs)) {
+      lvl <- substr(h, 3L, 3L); inner <- sub("^<h[2-4]>(.*)</h[2-4]>$", "\\1", h)
+      html <- sub(h, paste0("<h", lvl, " id=\"", prefix, "-", slug(inner), "\">", inner, "</h", lvl, ">"), html, fixed = TRUE)
+    }
+    html <- gsub('href="#(?!help_)([^"]+)"', paste0('href="#', prefix, '-\\1"'), html, perl = TRUE)
+  }
   if (identical(base, "docs"))
     html <- gsub('(src|href)="(?!(?:https?:|#|mailto:|kc_docs/))', '\\1="kc_docs/', html, perl = TRUE)
   else
@@ -8973,7 +9154,7 @@ help_guides_ui <- function() {
   from_root <- setNames(as.list(ids), vapply(guides, function(g) g$file, ""))
   sections <- lapply(guides, function(g) {
     base <- if (startsWith(g$file, "docs/")) "docs" else "root"
-    body <- tryCatch(render_help_doc(file.path(root, g$file), if (base == "docs") from_docs else from_root, base),
+    body <- tryCatch(render_help_doc(file.path(root, g$file), if (base == "docs") from_docs else from_root, base, prefix = help_anchor(g$file)),
                      error = function(e) paste0("<p><em>Could not read ", htmltools::htmlEscape(g$file), ": ",
                                                 htmltools::htmlEscape(conditionMessage(e)), "</em></p>"))
     tags$details(class = "kc-help-doc", id = help_anchor(g$file), open = if (isTRUE(g$open)) NA else NULL,
@@ -9011,15 +9192,20 @@ build_help_tab <- function() {
                 "outside, or ", strong("None"), " with ", strong("Show End-of-Line Labels"), " under Label Options)."),
         tags$li(strong("Names and gene names placed by hand:"), " Legend position ", strong("Floating labels (drag each name)"),
                 " turns every sample name into its own label that you drag onto the figure; ", strong("Extra labels on the figure"),
-                " under Label Options adds free text (", code("*mltG*"), " is an italic gene name), dragged the same way."),
+                " (Axis Settings > Figure Layout) adds free text (", code("*mltG*"), " is an italic gene name), dragged the same way."),
+        tags$li(strong("Several panels from one dataset:"), " the ", strong("Panels"), " section: ", strong("Split the lysis curve into panels"),
+                ", ", strong("Each sample its own panel"), ", the control under ", strong("Show in every panel"), ", ", strong("Panel letters"),
+                " A, B, C, and ", strong("A legend in each panel"), " to set each panel on its own."),
         tags$li(strong("Panel letters:"), " ", strong("Panel label"), " under Figure Layout or in the Journal Figure Preset; ",
                 "the Analysis figures tab and the Compose figure tab have their own."),
         tags$li(strong("Events and thresholds:"), " a labelled marker under Time Point Markers, and the threshold line's ",
                 strong("Label"), "."),
         tags$li(strong("Significance marks and the caption:"), " stars on the metric summary vs the reference sample, ",
                 "and the drafted ", strong("Figure Legend Text"), " for everything that belongs under the figure rather than on it.")),
-      p("The full tutorial, with a ten-minute walkthrough on the demo data, a checklist and the common mistakes, is the ",
-        "first guide below. Click a guide to open it; links between guides jump to the other guide's section."),
+      p(strong("New here?"), " Open the ", strong("Illustrated tutorial"), " below: every part of the app, step by step, with a ",
+        "screenshot for each (several panels from one dataset in section 9)."),
+      p("The labelling tutorial, with a ten-minute walkthrough on the demo data, a checklist and the common mistakes, is the ",
+        "second guide below. Click a guide to open it; links between guides jump to the other guide's section."),
       h4("Guides"),
       uiOutput("help_guides"),
       tags$script(HTML(
@@ -10193,19 +10379,34 @@ ui <- fluidPage(
                  kc_section("Panels",
                    div(class = "panel-section",
                        h4("Multi-panel figure", class = "panel-title"),
-                       checkboxInput("facet_by_group", "One panel per group (main figure)", APP_DEFAULTS$facet_by_group),
+                       checkboxInput("facet_by_group", "Split the lysis curve into panels (one panel per group)", APP_DEFAULTS$facet_by_group),
                        selectInput("facet_source", "Each sample's panel comes from:",
-                                   choices = c("The Group typed in Variable Styling" = "group", "A panel name typed below" = "manual"),
+                                   choices = c("The Group typed in Variable Styling" = "group", "A panel name typed below" = "manual",
+                                               "Each sample its own panel" = "each", "Pick the samples for each panel" = "pick"),
                                    selected = APP_DEFAULTS$facet_source),
                        uiOutput("facet_manual_ui"),
+                       conditionalPanel("input.facet_source == 'pick'",
+                         numericInput("facet_n_panels", "Number of panels:", APP_DEFAULTS$facet_n_panels, 1, 26, 1)),
+                       uiOutput("facet_pick_ui"),
+                       selectizeInput("facet_every", "Show in every panel (e.g. the control):", choices = NULL, multiple = TRUE,
+                                      options = list(placeholder = "No sample")),
+                       fluidRow(
+                         column(6, selectInput("facet_letters", "Panel letters:", choices = FACET_LETTER_CHOICES, selected = APP_DEFAULTS$facet_letters)),
+                         column(6, selectInput("facet_size_mode", "Panel size:", choices = FACET_SIZE_CHOICES, selected = APP_DEFAULTS$facet_size_mode))),
+                       selectInput("facet_legends", "Legends:", choices = FACET_LEGEND_CHOICES, selected = APP_DEFAULTS$facet_legends),
+                       uiOutput("panel_custom_ui"),
                        fluidRow(
                          column(6, numericInput("facet_ncol", "Panels per row (blank = auto):", APP_DEFAULTS$facet_ncol, 1, 8, 1)),
                          column(6, selectInput("facet_scales", "Axis scales:", choices = FACET_SCALES_CHOICES, selected = APP_DEFAULTS$facet_scales))),
                        fluidRow(
-                         column(6, selectInput("facet_strip_style", "Panel headers:", choices = FACET_STRIP_CHOICES, selected = APP_DEFAULTS$facet_strip_style)),
+                         column(6, selectInput("facet_strip_style", "Panel names:", choices = FACET_STRIP_CHOICES, selected = APP_DEFAULTS$facet_strip_style)),
                          column(6, numericInput("facet_strip_size", "Header size (pt; blank = axis-title size):", APP_DEFAULTS$facet_strip_size, 4, 32, 0.5))),
                        p(style = "font-size:.78em;color:#777;margin-top:-4px;",
-                         "With two or more different panels the lysis curve is split into a grid. Samples without a panel go to \u2018Other\u2019. ",
+                         "With two or more different panels the lysis curve is split into a grid: any number of panels, the last row filled from the left ",
+                         "(3, 5 or 7 panels leave a gap). Samples without a panel go to \u2018Other\u2019. Panel letters put A, B, C at the left of each ",
+                         "panel's name; Panel names \u2018None\u2019 hides the names (letters alone, or nothing). One letter for the whole set: ",
+                         "type it as the Panel label (Figure Layout); with A1, A2, A3 the parts carry it instead. ",
+                         "For a legend in each panel, use \u2018Lysis curve, one panel per group\u2019 on the Compose figure tab: the same panels. ",
                          "Panel names accept the figure markup (*italic*, A_{550}). With a long-format file the panel can also come from another ",
                          "column of the file. In the fixed panel size the panel area is shared by the sub-panels, so the figure keeps the same panel size.")
                    ),
@@ -11785,7 +11986,7 @@ server <- function(input, output, session) {
   labels_off_for_facets <- function() {
     samps <- sel_samples()
     if (is.null(rv$data) || !length(samps) || !isTRUE(input$facet_by_group)) return(FALSE)
-    !is.null(tryCatch(sample_group_map(samps, panel_groups(samps, resolve_aesthetics(samps))), error = function(e) NULL))
+    !is.null(tryCatch(panel_membership_now(samps, resolve_aesthetics(samps)), error = function(e) NULL))
   }
   output$float_facet_note <- renderUI(if (floating_mode() && labels_off_for_facets())
     p(class = "kc-qe-note", style = "color:#856404;", strong("One panel per group is on:"),
@@ -11817,7 +12018,7 @@ server <- function(input, output, session) {
   label_layout_now <- function() {
     samps <- sel_samples()
     if (is.null(rv$data) || !length(samps)) return(NULL)
-    if (isTRUE(input$facet_by_group) && !is.null(sample_group_map(samps, panel_groups(samps, resolve_aesthetics(samps))))) return(NULL)   # one panel only
+    if (isTRUE(input$facet_by_group) && !is.null(panel_membership_now(samps, resolve_aesthetics(samps)))) return(NULL)   # one panel only
     out <- list(samples = list(), notes = list())
     if (floating_mode()) {
       fp <- float_positions(samps)
@@ -12742,7 +12943,7 @@ server <- function(input, output, session) {
                            "time_filter_range", "exclude_timepoints",
                            # v2.24.1: buttons and file pickers are not settings (they were written into the file, and the colour-map picker's
                            # upload record came back as a "wrong type" warning)
-                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions", "legend_key_on_figure",
+                           "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions", "legend_key_on_figure", "facet_every",
                            "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                            "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -12811,6 +13012,13 @@ server <- function(input, output, session) {
       # v2.25.0: the dragged places of the floating labels and of the extra labels (only when something was dragged)
       lp <- list(samples = isolate(rv$float_pos), notes = isolate(rv$note_pos)); lp <- lp[vapply(lp, length, 1L) > 0L]
       if (length(lp)) doc$label_positions <- lp
+      ev <- isolate(every_wanted()); if (length(ev)) doc$panel_every <- as.list(ev)   # v2.26.0: the samples drawn in every panel
+      pcs <- tryCatch(isolate({ sm <- sel_samples(); pm <- panel_membership_now(sm, resolve_aesthetics(sm))
+                               c(rv$panel_cfg[setdiff(names(rv$panel_cfg), if (is.null(pm)) character(0) else pm$levels)],
+                                 if (is.null(pm)) list() else panel_cfg_all(pm$levels)) }), error = function(e) list())
+      if (length(pcs)) doc$panel_settings <- pcs                                        # v2.26.0: each panel's own settings
+      pks <- tryCatch(isolate(if (identical(sel1("facet_source", "group"), "pick")) panel_picks_now() else NULL), error = function(e) NULL)
+      if (length(pks)) doc$panel_picks <- lapply(pks, function(q) list(name = q$name, samples = as.list(q$samples)))   # v2.26.0
       doc
   }
   output$saveSettings <- downloadHandler(
@@ -12868,6 +13076,54 @@ server <- function(input, output, session) {
     global <- migrate_styling_settings(global, s$styling_schema)   # v2.22: palette names of a pre-v2.22 file
     sample_aes <- lapply(sample_aes, sanitize_sample_aes)          # round 2 (F07): only values the widgets can take reach the sidebar rows
     rv$imported_settings <- list(global = global, samples = sample_aes)
+    rv$panel_cfg <- list()                               # v2.26.0: each panel's settings (only known fields, one plain value each)
+    if (is.list(s$panel_settings)) for (g in utils::head(names(s$panel_settings), 200L)) {
+      cf <- s$panel_settings[[g]]; if (!is.list(cf) || !nzchar(g)) next
+      smp <- cf$samples
+      cf <- cf[intersect(names(cf), PANEL_CFG_FIELDS)]
+      cf <- Filter(function(v) is.atomic(v) && length(v) == 1L && !is.na(v), lapply(cf, function(v) unlist(v)[1]))
+      cf <- lapply(cf, function(v) if (is.character(v)) substr(v, 1L, 500L) else v)
+      if (is.list(smp)) {                                # each sample's style in this panel
+        sl <- list()
+        for (x in utils::head(names(smp), 500L)) { o <- smp[[x]]; if (!is.list(o) || !nzchar(x)) next
+          o <- o[intersect(names(o), PANEL_SAMPLE_FIELDS)]
+          o <- Filter(function(v) is.character(v) && length(v) == 1L && !is.na(v), lapply(o, function(v) unlist(v)[1]))
+          if (length(o)) sl[[x]] <- lapply(o, function(v) substr(v, 1L, 200L)) }
+        if (length(sl)) cf$samples <- sl
+      }
+      if (length(cf)) rv$panel_cfg[[g]] <- cf
+    }
+    for (nm in grep("^panelsmp_", names(input), value = TRUE)) {   # sample styles already on screen take the file's values
+      hit <- NULL
+      for (g in names(rv$panel_cfg)) for (x in names(rv$panel_cfg[[g]]$samples %||% list())) for (f in PANEL_SAMPLE_FIELDS)
+        if (identical(nm, panel_smp_id(g, x, f))) hit <- rv$panel_cfg[[g]]$samples[[x]][[f]]
+      tryCatch(if (grepl("_name$|_color$", nm)) updateTextInput(session, nm, value = hit %||% "") else updateSelectInput(session, nm, selected = hit %||% ""),
+               error = function(e) NULL)
+    }
+    for (nm in grep("^panelcfg_", names(input), value = TRUE)) {   # panels already on screen take the file's values
+      g <- NULL; for (lv in names(rv$panel_cfg)) if (startsWith(nm, paste0("panelcfg_", safe_id(lv), "_"))) g <- lv
+      f <- sub("^panelcfg_.*_(title|legend|legend_title|xlab|ylab|xmin|xmax|ymin|ymax|hide_points|hide_lines|hide_errors)$", "\\1", nm)
+      v <- if (is.null(g)) NULL else rv$panel_cfg[[g]][[f]]
+      tryCatch(if (startsWith(f, "hide_")) updateCheckboxInput(session, nm, value = isTRUE(v))
+               else if (f %in% c("xmin", "xmax", "ymin", "ymax")) updateNumericInput(session, nm, value = if (is.null(v)) NA else v)
+               else if (identical(f, "legend")) updateSelectInput(session, nm, selected = v %||% "")
+               else updateTextInput(session, nm, value = v %||% ""), error = function(e) NULL)
+    }
+    rv$panel_picks <- list()                             # v2.26.0: the picked samples of each panel
+    if (is.list(s$panel_picks)) for (k in seq_len(min(length(s$panel_picks), 26L))) {
+      q <- s$panel_picks[[k]]; if (!is.list(q)) next
+      nm <- unlist(q$name)[1]; sm <- unlist(q$samples)
+      rv$panel_picks[[k]] <- list(name = if (is.character(nm) && !is.na(nm)) substr(nm, 1L, 200L) else "",
+                                  samples = if (is.character(sm)) utils::head(sm[!is.na(sm)], 500L) else character(0))
+    }
+    for (k in seq_along(rv$panel_picks)) tryCatch({
+      if (!is.null(input[[paste0("panelpick_", k, "_name")]])) updateTextInput(session, paste0("panelpick_", k, "_name"), value = rv$panel_picks[[k]]$name)
+      if (!is.null(input[[paste0("panelpick_", k, "_name")]])) updateSelectizeInput(session, paste0("panelpick_", k, "_samples"), selected = rv$panel_picks[[k]]$samples)
+    }, error = function(e) NULL)
+    if (!is.null(s$panel_every)) {                       # v2.26.0
+      ev <- unlist(s$panel_every); ev <- if (is.character(ev)) utils::head(substr(ev[!is.na(ev) & nzchar(ev)], 1L, 500L), 500L) else character(0)
+      every_wanted(ev)
+    } else every_wanted(character(0))
     if (is.list(s$label_positions)) {                    # v2.25.0 (an old lysis-curve-app file: its floating_labels, see translate_old_settings)
       rv$float_pos <- float_pos_clean(s$label_positions$samples); rv$note_pos <- float_pos_clean(s$label_positions$notes)
     }
@@ -12876,7 +13132,7 @@ server <- function(input, output, session) {
     # Skip anything data-specific or per-sample — only visual controls
     data_inputs     <- c("file","loadSettings","selected_samples",
                          "time_filter_range","exclude_timepoints",
-                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions", "legend_key_on_figure",   # v2.24.1 (files saved before it carry them)
+                         "clearSettings", "clearSettings_confirm", "load_demo", "colour_map_file", "clear_colour_map", "reload_paper_style", "kc_label_drop", "reset_label_positions", "legend_key_on_figure", "facet_every",   # v2.24.1 (files saved before it carry them)
                          "apply_journal_preset", "apply_journal_preset_bar", "apply_legacy_look",
                          "main_panel_width", "sticky_viewport_height", "boot_run", "sidebar_jump", "kc_copy_result",
                            # v2.22: data-tab and per-file inputs (the replicate exclusions belong to the file, not to the look)
@@ -13094,6 +13350,20 @@ server <- function(input, output, session) {
       tryCatch(updateTextInput(session, paste0("qe_name_", safe_id(v)), value = v), error = function(e) invisible(NULL))
     rv$qe_colors <- list()
     rv$float_pos <- list(); rv$note_pos <- list()          # v2.25.0: the dragged labels go back to their default column
+    every_wanted(character(0))                              # v2.26.0: no sample in every panel
+    rv$panel_cfg <- list()                                  # v2.26.0: and no per-panel settings
+    rv$panel_picks <- list()                                # v2.26.0: nor picked samples
+    for (nm in grep("^panelsmp_", names(input), value = TRUE))
+      tryCatch(if (grepl("_name$|_color$", nm)) updateTextInput(session, nm, value = "") else updateSelectInput(session, nm, selected = ""),
+               error = function(e) NULL)
+    for (nm in grep("^panelpick_", names(input), value = TRUE))
+      tryCatch(if (endsWith(nm, "_name")) updateTextInput(session, nm, value = "") else updateSelectizeInput(session, nm, selected = character(0)),
+               error = function(e) NULL)
+    for (nm in grep("^panelcfg_", names(input), value = TRUE))
+      tryCatch(if (grepl("_hide_(points|lines|errors)$", nm)) updateCheckboxInput(session, nm, value = FALSE)
+               else if (grepl("_(xmin|xmax|ymin|ymax)$", nm)) updateNumericInput(session, nm, value = NA)
+               else if (grepl("_legend$", nm)) updateSelectInput(session, nm, selected = "")
+               else updateTextInput(session, nm, value = ""), error = function(e) NULL)
     rv$imported_settings <- NULL
     rv$settings_status   <- list(
       type    = "ok",
@@ -14169,7 +14439,8 @@ server <- function(input, output, session) {
   # ── v2.22: Panels section and matrix-legend inputs ───────────────────────────
   # The panel sources: the typed Groups, a panel box per sample, or (long-format file) another column of the file.
   facet_source_choices <- reactive({
-    ch <- c("The Group typed in Variable Styling" = "group", "A panel name typed below" = "manual")
+    ch <- c("The Group typed in Variable Styling" = "group", "A panel name typed below" = "manual", "Each sample its own panel" = "each",
+            "Pick the samples for each panel" = "pick")
     if (isTRUE(rv$is_long_format) && !is.null(rv$data)) {
       cand <- setdiff(names(rv$data), c(rv$time_col, rv$value_col, rv$group_col, rv$replicate_col))
       if (length(cand) > 0) ch <- c(ch, setNames(cand, paste0("Column of the file: ", cand)))
@@ -14187,7 +14458,8 @@ server <- function(input, output, session) {
     samps <- sel_samples()
     if (is.null(samps) || length(samps) == 0) return(p(style = "font-size:.85em;color:#888;", "Select samples first."))
     tagList(
-      p(style = "font-size:.8em;color:#555;margin:6px 0 4px;", "Type the panel each sample belongs to; samples sharing a name share a panel."),
+      p(style = "font-size:.8em;color:#555;margin:6px 0 4px;", "Type the panel each sample belongs to; samples sharing a name share a panel. ",
+        "A sample in several panels: separate the names with ; (A; B)."),
       lapply(samps, function(vn) {
         vid <- safe_id(vn); imp <- isolate(rv$imported_settings$samples[[vn]])
         fluidRow(style = "margin-bottom:-14px;",
@@ -14215,8 +14487,178 @@ server <- function(input, output, session) {
   # ── v2.22: panel assignment, matrix legend, y limits ─────────────────────────
   # The panel of each sample for facet_by_group: the typed Groups (default), a text box per sample (facet_source
   # "manual", the Panels section) or a metadata column of a long file. NULL = no assignment (no facets).
+  # v2.26.0: the samples drawn in every panel (Panels section). Kept here (not as a plain input) so a settings file and Clear &
+  # Reset set it whatever the sample list is at that moment; the select shows the part that is in the data.
+  every_wanted <- reactiveVal(character(0))
+  observeEvent(input$facet_every, {
+    v <- as.character(input$facet_every %||% character(0))
+    if (!identical(sort(v), sort(intersect(every_wanted(), rv$od_vars %||% character(0))))) every_wanted(v)
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
+  observe({
+    ch <- rv$od_vars %||% character(0); want <- intersect(every_wanted(), ch)
+    lab <- tryCatch(vapply(ch, dname, ""), error = function(e) ch)
+    updateSelectizeInput(session, "facet_every", choices = setNames(ch, lab), selected = want)
+  })
+  panel_every_now <- function(samples) intersect(every_wanted(), samples)
+  # v2.26.0: "A legend in each panel": every panel is its own figure (own legend, title, axis titles and ranges), laid out
+  # in a grid with the panel letters. rv$panel_cfg holds what a settings file brought for panels not on screen yet.
+  panel_legend_mode <- function() isTRUE(input$facet_by_group) && identical(sel1("facet_legends", "shared"), "each")
+  panel_cfg_id <- function(g, f) paste0("panelcfg_", safe_id(g), "_", f)
+  panel_cfg_get <- function(g) {
+    st <- rv$panel_cfg[[g]] %||% list()
+    setNames(lapply(PANEL_CFG_FIELDS, function(f) { v <- input[[panel_cfg_id(g, f)]]; if (is.null(v)) st[[f]] else v }), PANEL_CFG_FIELDS)
+  }
+  panel_cfg_all <- function(levels) {
+    out <- list()
+    for (g in levels) {
+      cfg <- panel_cfg_get(g)
+      keep <- Filter(function(v) { if (is.logical(v)) return(isTRUE(v)); v <- as.character(if (is.null(v)) "" else v)[1]; !is.na(v) && nzchar(trimws(v)) && !identical(v, "NA") }, cfg)
+      keep <- lapply(keep, function(v) if (is.numeric(v) || is.logical(v)) v else trimws(as.character(v)[1]))
+      sm <- panel_smp_all(g); if (length(sm)) keep$samples <- sm
+      if (length(keep)) out[[g]] <- keep
+    }
+    out
+  }
+  # v2.26.0: each sample's style in one panel (inputs panelsmp_<panel>__<sample>_<field>; rv$panel_cfg[[panel]]$samples)
+  panel_smp_id <- function(g, x, f) paste0("panelsmp_", safe_id(g), "__", safe_id(x), "_", f)
+  panel_smp_get <- function(g, samples) {
+    st <- rv$panel_cfg[[g]]$samples %||% list(); out <- list()
+    for (x in samples) {
+      o <- setNames(lapply(PANEL_SAMPLE_FIELDS, function(f) { v <- input[[panel_smp_id(g, x, f)]]; if (is.null(v)) st[[x]][[f]] else v }), PANEL_SAMPLE_FIELDS)
+      o <- Filter(function(v) { v <- as.character(if (is.null(v)) "" else v)[1]; !is.na(v) && nzchar(trimws(v)) }, o)
+      if (length(o)) out[[x]] <- lapply(o, function(v) trimws(as.character(v)[1]))
+    }
+    out
+  }
+  panel_smp_all <- function(g) {
+    sm <- sel_samples(); if (!length(sm)) return(list())
+    c(panel_smp_get(g, sm), (rv$panel_cfg[[g]]$samples %||% list())[setdiff(names(rv$panel_cfg[[g]]$samples %||% list()), sm)])
+  }
+  output$panel_custom_ui <- renderUI({
+    if (!panel_legend_mode()) return(NULL)
+    samps <- sel_samples(); if (!length(samps)) return(NULL)
+    pm <- tryCatch(panel_membership_now(samps, resolve_aesthetics(samps)), error = function(e) NULL)
+    if (is.null(pm)) return(p(style = "font-size:.8em;color:#888;", "Assign the samples to two or more panels to set each panel."))
+    let <- sel1("facet_letters", "none")
+    L <- if (let %in% FACET_LETTER_STYLES) panel_letter(seq_along(pm$levels), let, input$panel_label) else rep("", length(pm$levels))
+    val <- function(g, f, d = "") { v <- isolate(input[[panel_cfg_id(g, f)]]) %||% rv$panel_cfg[[g]][[f]] %||% d; if (is.null(v) || (length(v) == 1L && is.na(v))) d else v }
+    num <- function(g, f) { v <- suppressWarnings(as.numeric(val(g, f, NA))); if (length(v) == 1L && is.finite(v)) v else NA }
+    tagList(
+      p(style = "font-size:.8em;color:#555;margin:6px 0 2px;", "Each panel (blank = as the whole figure):"),
+      lapply(seq_along(pm$levels), function(i) {
+        g <- pm$levels[i]
+        tags$details(class = "kc-panel-cfg", style = "margin:2px 0 4px;border-left:2px solid #dee2e6;padding-left:6px;",
+          tags$summary(style = "cursor:pointer;font-size:.88em;", if (nzchar(L[i])) tags$b(L[i], " "), g),
+          textInput(panel_cfg_id(g, "title"), "Title:", val(g, "title"), placeholder = g),
+          fluidRow(column(6, selectInput(panel_cfg_id(g, "legend"), "Legend:", PANEL_CFG_LEGEND_CHOICES, selected = val(g, "legend"))),
+                   column(6, textInput(panel_cfg_id(g, "legend_title"), "Legend title:", val(g, "legend_title")))),
+          fluidRow(column(6, textInput(panel_cfg_id(g, "xlab"), "X-axis label:", val(g, "xlab"))),
+                   column(6, textInput(panel_cfg_id(g, "ylab"), "Y-axis label:", val(g, "ylab")))),
+          fluidRow(column(3, numericInput(panel_cfg_id(g, "xmin"), "X min:", num(g, "xmin"))), column(3, numericInput(panel_cfg_id(g, "xmax"), "X max:", num(g, "xmax"))),
+                   column(3, numericInput(panel_cfg_id(g, "ymin"), "Y min:", num(g, "ymin"))), column(3, numericInput(panel_cfg_id(g, "ymax"), "Y max:", num(g, "ymax")))),
+          fluidRow(column(4, checkboxInput(panel_cfg_id(g, "hide_points"), "Hide points", isTRUE(val(g, "hide_points", FALSE)))),
+                   column(4, checkboxInput(panel_cfg_id(g, "hide_lines"), "Hide lines", isTRUE(val(g, "hide_lines", FALSE)))),
+                   column(4, checkboxInput(panel_cfg_id(g, "hide_errors"), "Hide error bars / bands", isTRUE(val(g, "hide_errors", FALSE))))),
+          { gs <- samps[vapply(samps, function(x) g %in% pm$map[[x]], NA)]; st <- isolate(rv$panel_cfg[[g]]$samples) %||% list()
+            sv <- function(x, f) { v <- isolate(input[[panel_smp_id(g, x, f)]]) %||% st[[x]][[f]] %||% ""; if (is.na(v[1])) "" else v }
+            tags$details(style = "margin:2px 0 6px;", tags$summary(style = "cursor:pointer;font-size:.85em;", "Samples in this panel (style here only)"),
+              lapply(gs, function(x) div(style = "border-top:1px dotted #ccc;padding-top:2px;",
+                tags$div(style = "font-size:.8em;font-weight:600;", dname(x)),
+                fluidRow(column(6, textInput(panel_smp_id(g, x, "name"), "Name:", sv(x, "name"), placeholder = dname(x))),
+                         column(6, textInput(panel_smp_id(g, x, "color"), "Colour:", sv(x, "color"), placeholder = "e.g. grey50 or #999999"))),
+                fluidRow(column(4, selectInput(panel_smp_id(g, x, "shape"), "Marker:", PANEL_SHAPE_CHOICES, selected = sv(x, "shape"))),
+                         column(4, selectInput(panel_smp_id(g, x, "filled"), "Fill:", PANEL_FILL_CHOICES, selected = sv(x, "filled"))),
+                         column(4, selectInput(panel_smp_id(g, x, "line"), "Line:", PANEL_LINE_CHOICES, selected = sv(x, "line"))))))) })
+      }))
+  })
+  # The panels as figures of their own, laid out like the composer (fixed panel size) or with patchwork (fit mode).
+  panel_composite <- function() {
+    plots <- main_group_plots(min_panels = 2L)
+    n <- length(plots); if (n < 2L) return(NULL)
+    let <- sel1("facet_letters", "none"); tags_on <- let %in% FACET_LETTER_STYLES; tag_case <- if (identical(let, "upper")) "A" else "a"
+    tag_labels <- if (tags_on) panel_letter(seq_len(n), let, input$panel_label) else NULL
+    whole <- trimws(input$panel_label %||% ""); if (identical(let, "prefixed") || is.na(whole)) whole <- ""   # one letter for the whole set (Panel label)
+    fnc <- suppressWarnings(as.numeric(input$facet_ncol)); nc <- if (length(fnc) == 1L && is.finite(fnc) && fnc >= 1) min(as.integer(fnc), n) else ggplot2::wrap_dims(n)[2]
+    nr <- ceiling(n / nc)
+    tsz <- nin("compose_tag_size", 8); fnt <- sel1("font_family", "Arial")
+    if (!fixed_mode()) return(compose_figure(plots, ncol = nc, tag_size = tsz, font = fnt, tag_case = tag_case, tags_on = tags_on,
+                                             tag_labels = tag_labels, whole_tag = whole, whole_size = nin("panel_label_size", 8)))
+    d <- panel_dims_mm("main"); fsm <- sel1("facet_size_mode", "share")
+    pd <- if (identical(fsm, "each")) d else if (identical(fsm, "share")) pmax(10, d / c(nc, nr)) else d
+    items <- lapply(plots, function(pg) fixed_panel_grob(pg, pd[1], pd[2]))
+    if (startsWith(fsm, "fit_")) {
+      fam <- sel1("journal_family", "nature")
+      tw <- journal_width_mm(fam, sub("^fit_", "", fsm), input$journal_custom_width_mm %||% 89)
+      if (!is.numeric(tw) || !is.finite(tw)) tw <- journal_width_mm(fam, "double", input$journal_custom_width_mm %||% 89)
+      mh <- if (fam %in% names(JOURNAL_PRESETS)) JOURNAL_PRESETS[[fam]]$max_h else NA
+      sz <- vapply(items, function(g) attr(g, "size_mm"), numeric(2))
+      ex <- c(max(sz[1, ]) - d[1], max(sz[2, ]) - d[2])
+      ps <- fit_panel_size(tw, if (is.numeric(mh)) mh else NA, d, c(nc * ex[1], nr * ex[2]), nc, nr)
+      items <- lapply(plots, function(pg) fixed_panel_grob(pg, ps[1], ps[2]))
+    }
+    out <- compose_fixed_figure(items, ncol = nc, tag_size = tsz, font = fnt, tag_case = tag_case, tags_on = tags_on,
+                                tag_labels = tag_labels, whole_tag = whole, whole_size = nin("panel_label_size", 8))
+    attr(out, "panel_mm") <- attr(items[[1]], "panel_mm"); attr(out, "n_panels") <- n
+    out
+  }
+  # The panels of the main figure (NULL = one panel): panel_membership() of the panel source, with the every-panel samples.
+  # v2.26.0: "Pick the samples for each panel": a name and the samples of each panel (rv$panel_picks holds what a settings
+  # file brought before the boxes exist). A sample picked for no panel (and not in every panel) is left off the figure.
+  pick_mode <- function() isTRUE(input$facet_by_group) && identical(sel1("facet_source", "group"), "pick")
+  n_panels_now <- function() { n <- suppressWarnings(as.integer(input$facet_n_panels %||% 2)); if (length(n) != 1L || !is.finite(n)) 2L else min(max(n, 1L), 26L) }
+  panel_picks_now <- function() {
+    n <- n_panels_now(); st <- rv$panel_picks %||% list(); out <- vector("list", n)
+    stk <- function(k) if (k <= length(st)) st[[k]] else list()
+    for (k in seq_len(n)) {
+      nm <- input[[paste0("panelpick_", k, "_name")]]; if (is.null(nm)) nm <- stk(k)$name %||% ""
+      nm <- gsub(";", ",", trimws(as.character(nm)[1]), fixed = TRUE); if (is.na(nm) || !nzchar(nm)) nm <- paste("Panel", k)
+      sm <- input[[paste0("panelpick_", k, "_samples")]]; if (is.null(sm) && is.null(input[[paste0("panelpick_", k, "_name")]])) sm <- unlist(stk(k)$samples)
+      out[[k]] <- list(name = nm, samples = as.character(sm %||% character(0)))
+    }
+    nms <- make.unique(vapply(out, `[[`, "", "name"), sep = " ")
+    for (k in seq_len(n)) out[[k]]$name <- nms[k]
+    out
+  }
+  # The samples the split figure draws: in pick mode the picked ones (and the every-panel ones); else all of them.
+  panel_samples_now <- function(samples) {
+    if (!pick_mode()) return(samples)
+    picked <- unique(c(unlist(lapply(panel_picks_now(), `[[`, "samples")), panel_every_now(samples)))
+    if (!length(intersect(picked, samples))) samples else samples[samples %in% picked]
+  }
+  output$facet_pick_ui <- renderUI({
+    if (!identical(sel1("facet_source", "group"), "pick")) return(NULL)
+    samps <- sel_samples()
+    if (!length(samps)) return(p(style = "font-size:.85em;color:#888;", "Select samples first."))
+    ch <- setNames(samps, vapply(samps, dname, "")); n <- n_panels_now(); st <- isolate(rv$panel_picks) %||% list()
+    stk <- function(k) if (k <= length(st)) st[[k]] else list()
+    tagList(
+      p(style = "font-size:.8em;color:#555;margin:6px 0 2px;", "Name each panel and pick its samples (a sample can be in several panels; one picked for none is left off)."),
+      lapply(seq_len(n), function(k) {
+        idn <- paste0("panelpick_", k, "_name"); ids <- paste0("panelpick_", k, "_samples")
+        nm0 <- isolate(input[[idn]]) %||% stk(k)$name %||% ""
+        sm0 <- isolate(input[[ids]]); if (is.null(sm0) && is.null(isolate(input[[idn]]))) sm0 <- unlist(stk(k)$samples)
+        div(style = "border-left:2px solid #dee2e6;padding-left:6px;margin:4px 0;",
+          textInput(idn, paste0("Panel ", k, " name:"), nm0, placeholder = paste("Panel", k)),
+          selectizeInput(ids, "Samples:", choices = ch, selected = intersect(sm0 %||% character(0), samps), multiple = TRUE,
+                         options = list(placeholder = "Pick samples", plugins = list("remove_button"))))
+      }))
+  })
+  panel_membership_now <- function(samples, aes_vals, min_panels = 2L) {
+    samples <- panel_samples_now(samples)
+    if (!length(samples)) return(NULL)
+    pm <- panel_membership(samples, panel_groups(samples, aes_vals), panel_every_now(samples), min_panels)
+    if (!is.null(pm) && pick_mode()) {                  # picked panels keep the order they were set up in
+      ord <- vapply(panel_picks_now(), `[[`, "", "name"); pm$levels <- c(intersect(ord, pm$levels), setdiff(pm$levels, ord))
+    }
+    pm
+  }
   panel_groups <- function(samples, aes_vals) {
     src <- sel1("facet_source", "group")
+    if (identical(src, "each")) return(setNames(vapply(samples, dname, ""), samples))   # v2.26.0: the display name is the panel
+    if (identical(src, "pick")) {                       # v2.26.0: the panels a sample was picked for, "A; B"
+      pk <- panel_picks_now()
+      return(setNames(vapply(samples, function(x) paste(unlist(lapply(pk, function(q) if (x %in% q$samples) q$name)), collapse = "; "), ""), samples))
+    }
     if (identical(src, "manual")) {
       man <- vapply(samples, function(vn) trimws(as.character(input[[paste0("facet_of_", safe_id(vn))]] %||% "")[1]), "")
       return(panel_assignment(samples, "manual", manual = man))
@@ -14324,7 +14766,7 @@ server <- function(input, output, session) {
 
   # ── Core plot builder ────────────────────────────────────────────────────────
   # highlight_samples: if non-NULL, all other samples are greyed out (not removed)
-  build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL) {
+  build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL, facets = TRUE) {
     shapes     <- aes_vals$shapes;     colors     <- aes_vals$colors
     line_types <- aes_vals$line_types; leg_labels <- aes_vals$leg_labels
     filled_map <- aes_vals$filled_map; n_vars     <- length(samples)
@@ -14334,9 +14776,9 @@ server <- function(input, output, session) {
     
     # v2.18: one panel per sample group (facet_by_group, >= 2 distinct non-empty groups). Every layer that
     # is built from plot_data carries the `group` column; layers without it are drawn in every panel.
-    grp_map <- if (isTRUE(input$facet_by_group)) sample_group_map(samples, panel_groups(samples, aes_vals)) else NULL
-    if (!is.null(grp_map))
-      plot_data$group <- factor(unname(grp_map[as.character(plot_data$variable)]), levels = attr(grp_map, "levels"))
+    # v2.26.0: a sample can be in several panels (the every-panel samples, "A; B"): its rows are repeated, once per panel.
+    grp_map <- if (isTRUE(facets) && isTRUE(input$facet_by_group)) panel_membership_now(samples, aes_vals) else NULL
+    if (!is.null(grp_map)) plot_data <- panel_expand(plot_data, grp_map)
     
     # Grey out non-highlighted samples while keeping axis scale stable
     display_colors <- colors
@@ -14422,7 +14864,7 @@ server <- function(input, output, session) {
         r <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
         if (!is.null(r) && nrow(r) > 0) {
           if (identical(sel1("y_scale_type"), "log")) r <- r[r$value > 0, , drop = FALSE]
-          if (!is.null(grp_map)) r$group <- factor(unname(grp_map[as.character(r$variable)]), levels = attr(grp_map, "levels"))
+          if (!is.null(grp_map)) r <- panel_expand(r, grp_map)
         } else r <- data.frame()
         rp_all <<- r
       }
@@ -14531,7 +14973,7 @@ server <- function(input, output, session) {
     if (identical(dm0, "quantile_bands")) {                 # v2.22: nested empirical bands, IQR inside 2.5-97.5 %
       qb <- replicate_bounds(get_rp())
       if (!is.null(qb) && nrow(qb) > 0) {
-        if (!is.null(grp_map)) qb$group <- factor(unname(grp_map[qb$variable]), levels = attr(grp_map, "levels"))
+        if (!is.null(grp_map)) qb <- panel_expand(qb, grp_map)
         if (identical(sel1("y_scale_type"), "log")) {
           y_fq <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1] else if (isTRUE(input$use_advanced_ticks)) 10^ylog_min_or() else 1e-9
           qb$q025 <- pmax(qb$q025, y_fq); qb$q975 <- pmax(qb$q975, y_fq); qb$q25 <- pmax(qb$q25, y_fq); qb$q75 <- pmax(qb$q75, y_fq)
@@ -14557,7 +14999,7 @@ server <- function(input, output, session) {
       rp <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
       if (!is.null(rp) && nrow(rp) > 0) {
         if (sel1("y_scale_type", APP_DEFAULTS$y_scale_type) == "log") rp <- rp[rp$value > 0, , drop = FALSE]
-        if (!is.null(grp_map)) rp$group <- factor(unname(grp_map[as.character(rp$variable)]), levels = attr(grp_map, "levels"))
+        if (!is.null(grp_map)) rp <- panel_expand(rp, grp_map)
         jit <- diff(range(plot_data$time, na.rm = TRUE)) * 0.006
         p <- p + geom_point(data = rp, aes(x = time, y = value, color = variable),
                             shape = 1, size = nin("shape_size") * 0.5, alpha = 0.55,
@@ -14569,7 +15011,7 @@ server <- function(input, output, session) {
       rx <- tryCatch(prepare_replicate_data(samples = samples, which = "excluded"), error = function(e) NULL)
       if (!is.null(rx) && nrow(rx) > 0) {
         if (sel1("y_scale_type", APP_DEFAULTS$y_scale_type) == "log") rx <- rx[rx$value > 0, , drop = FALSE]
-        if (!is.null(grp_map)) rx$group <- factor(unname(grp_map[as.character(rx$variable)]), levels = attr(grp_map, "levels"))
+        if (!is.null(grp_map)) rx <- panel_expand(rx, grp_map)
         if (nrow(rx) > 0)
           p <- p + geom_point(data = rx, aes(x = time, y = value), shape = 1, colour = "grey55",
                               size = nin("shape_size") * 0.5, alpha = 0.8,
@@ -14607,7 +15049,7 @@ server <- function(input, output, session) {
         fpos <- float_positions(samples); f_face <- { f <- sel1("legend_text_face", "plain"); if (f %in% c("bold", "italic", "bold.italic")) f else "plain" }
         for (i in seq_len(n_vars)) p <- p + f_one(leg_labels[[i]], fpos[[samples[i]]], display_colors[i], f_face, paste0("float_label_", i))
       }
-      f_notes <- figure_labels_now()
+      f_notes <- if (isTRUE(facets)) figure_labels_now() else character(0)   # v2.26.0: not repeated on each composed sub-figure
       if (length(f_notes)) { npos <- note_positions(f_notes)
         for (i in seq_along(f_notes)) p <- p + f_one(f_notes[i], npos[[f_notes[i]]], "black", "plain", paste0("float_note_", i)) }
     }
@@ -14788,9 +15230,20 @@ server <- function(input, output, session) {
       # v2.18: facet strips read as plain text at the axis-title size, no box; one key for all panels,
       # outside (an inside key would sit in a corner of the whole panel block, over one facet's curves)
       fsz <- suppressWarnings(as.numeric(input$facet_strip_size %||% NA)); if (!length(fsz) || !is.finite(fsz[1]) || fsz[1] <= 0) fsz <- nin("axis_label_font_size")
-      p <- p + facet_layers(attr(grp_map, "levels"), scales = input$facet_scales %||% "fixed", ncol = { fnc <- suppressWarnings(as.numeric(input$facet_ncol)); if (length(fnc) == 1L && is.finite(fnc) && fnc >= 1) fnc else NA },   # v2.22: columns, scales, strip style / size, parsed strips
+      p <- p + facet_layers(grp_map$levels, letters = sel1("facet_letters", "none"), prefix = input$panel_label, scales = input$facet_scales %||% "fixed", ncol = { fnc <- suppressWarnings(as.numeric(input$facet_ncol)); if (length(fnc) == 1L && is.finite(fnc) && fnc >= 1) fnc else NA },   # v2.22: columns, scales, strip style / size, parsed strips
                             strip_style = input$facet_strip_style %||% "plain", strip_size = fsz[1], axis_lw = pt2lw(nin("axis_line_pt", 1.07)))
       if (startsWith(sel1("legend_position", "right"), "inside-") || floating_mode()) p <- p + theme(legend.position = "right")   # v2.25.0: no floating labels over facets
+      fsm <- sel1("facet_size_mode", "share")
+      if (fsm %in% c("each", "fit_single", "fit_onehalf", "fit_double")) attr(p, "kc_panel_each") <- TRUE   # v2.26.0: read by fixed_panel_grob
+      if (startsWith(fsm, "fit_")) {                       # v2.26.0: the whole figure as wide as a journal column (fixed_figure sizes the panels)
+        fam <- sel1("journal_family", "nature"); col <- sub("^fit_", "", fsm)
+        tw <- journal_width_mm(fam, col, input$journal_custom_width_mm %||% 89)
+        if (!is.numeric(tw) || !is.finite(tw)) tw <- journal_width_mm(fam, "double", input$journal_custom_width_mm %||% 89)
+        mh <- if (fam %in% names(JOURNAL_PRESETS)) JOURNAL_PRESETS[[fam]]$max_h else NA
+        attr(p, "kc_panel_fit") <- c(width = tw, max_h = if (is.numeric(mh)) mh else NA_real_)
+      }
+      attr(p, "kc_panels") <- grp_map
+      if (identical(sel1("facet_letters", "none"), "prefixed")) pl_lab <- ""   # v2.26.0: the parts "A1, A2" carry the figure's letter
     }
     if (isTRUE(input$custom_aspect_ratio))
       p <- p + theme(aspect.ratio = 1 / input$aspect_ratio)
@@ -14840,18 +15293,24 @@ server <- function(input, output, session) {
   # v2.18: the composer panel "Lysis curve, one panel per group": one single-group main figure per group
   # (the group's samples only, group name as the title), in group order (first appearance, "Other" last),
   # named "main_by_group:<group>". An empty list when no sample has a group.
-  main_group_plots <- function() {
+  # v2.26.0: the panels of the Panels section (its source, the every-panel samples, "A; B"); the title is the panel name
+  # unless Panel names is "None". The composer's own letters (a, b, c) mark the panels.
+  main_group_plots <- function(min_panels = 1L) {
     samps <- sel_samples()
     aes_v <- resolve_aesthetics(samps)
-    gm    <- sample_group_map(samps, aes_v$groups, min_groups = 1L)
+    gm    <- panel_membership_now(samps, aes_v, min_panels = min_panels)
     if (is.null(gm)) return(list())
     pd    <- prepare_plot_data()
-    lv    <- attr(gm, "levels")
+    lv    <- gm$levels
+    show_names <- !identical(sel1("facet_strip_style", "plain"), "none")
     plots <- lapply(lv, function(g) {
-      gs    <- samps[gm == g]
+      gs    <- samps[vapply(samps, function(x) g %in% gm$map[[x]], NA)]
       aes_g <- list(shapes = aes_v$shapes[gs], colors = aes_v$colors[gs], line_types = aes_v$line_types[gs],
                     leg_labels = aes_v$leg_labels[gs], filled_map = aes_v$filled_map[gs])   # no groups: a plain panel
-      tryCatch(build_plot(pd[pd$variable %in% gs, , drop = FALSE], gs, aes_g) + labs(title = g),
+      aes_g <- apply_panel_samples(aes_g, panel_smp_get(g, gs))            # v2.26.0: the samples' styles in this panel
+      tryCatch({ pg <- build_plot(pd[pd$variable %in% gs, , drop = FALSE], gs, aes_g, facets = FALSE) + labs(tag = NULL)   # (the set's letter goes on the set)
+                 if (show_names) pg <- pg + labs(title = text_label(g))
+                 apply_panel_cfg(pg, panel_cfg_get(g), isTRUE(input$axis_subscripts)) },   # v2.26.0: the panel's own settings
                error = function(e) NULL)
     })
     names(plots) <- paste0("main_by_group:", lv)
@@ -14863,8 +15322,12 @@ server <- function(input, output, session) {
     tryCatch({
       pd <- plot_data_or_empty()
       if (plot_data_is_empty(pd)) return(empty_state_figure())    # hardening: all time points / readings / replicates filtered away
-      add_notes_caption(build_plot(pd, sel_samples(),
-                                   resolve_aesthetics(sel_samples())))},   # v2.22: + the notes caption when ticked
+      s_all <- sel_samples(); s_fig <- panel_samples_now(s_all); aes_all <- resolve_aesthetics(s_all)
+      if (!identical(s_fig, s_all)) {                     # v2.26.0: pick mode draws the picked samples only (colours as for all)
+        pd <- pd[as.character(pd$variable) %in% s_fig, , drop = FALSE]
+        aes_all <- lapply(aes_all, function(v) if (!is.null(names(v)) && all(s_fig %in% names(v))) v[s_fig] else v)
+      }
+      add_notes_caption(build_plot(pd, s_fig, aes_all))},   # v2.22: + the notes caption when ticked
       error = function(e) {
         # Return a blank ggplot with the error message rather than crashing the session
         plot_error_figure(friendly_error_message(e))
@@ -14953,9 +15416,23 @@ server <- function(input, output, session) {
   fixed_figure <- function(p, kind = "main") {
     d <- panel_dims_mm(kind)
     if (identical(kind, "compare")) d[1] <- d[1] * compare_panel_count(p)   # v2.22: a facet compare figure keeps the panel size per panel
+    fit <- attr(p, "kc_panel_fit")
+    if (!is.null(fit) && is.finite(fit[["width"]])) {     # v2.26.0: panels sized so the figure is the journal width
+      g0 <- fixed_panel_grob(p, d[1], d[2])
+      lay <- g0$layout[grepl("^panel", g0$layout$name), , drop = FALSE]
+      nc <- length(unique(lay$l)); nr <- length(unique(lay$t)); sz <- attr(g0, "size_mm")
+      if (nc >= 1L && nr >= 1L && length(sz) == 2L && all(is.finite(sz))) {
+        ps <- fit_panel_size(fit[["width"]], fit[["max_h"]], d, sz - c(nc * d[1], nr * d[2]), nc, nr)
+        return(fixed_panel_grob(p, ps[1], ps[2]))
+      }
+      return(g0)
+    }
     fixed_panel_grob(p, d[1], d[2])
   }
-  main_fixed_info    <- reactive(fixed_figure(generate_plot(), "main"))
+  main_fixed_info    <- reactive({
+    if (panel_legend_mode()) { pc <- tryCatch(panel_composite(), error = function(e) NULL); if (!is.null(pc)) return(pc) }   # v2.26.0
+    fixed_figure(generate_plot(), "main")
+  })
   analysis_fixed_info <- reactive(fixed_figure(generate_analysis_plot(sel1("analysis_type", "metric_summary")),
                                                sel1("analysis_type", "metric_summary")))
   # what the main / analysis figure is drawn as: the fixed-panel gtable, or the plain ggplot (fit mode)
@@ -14965,7 +15442,11 @@ server <- function(input, output, session) {
     if (is.null(ml)) return(p)
     tryCatch(attach_matrix_legend(kc_with_measure_device(ggplot2::ggplotGrob(p)), ml$grob, ml$placement), error = function(e) p)
   }
-  main_plot_obj     <- function() if (fixed_mode()) main_fixed_info() else drawable_figure(generate_plot())
+  main_plot_obj     <- function() {
+    if (fixed_mode()) return(main_fixed_info())
+    if (panel_legend_mode()) { pc <- tryCatch(panel_composite(), error = function(e) NULL); if (!is.null(pc)) return(pc) }   # v2.26.0
+    drawable_figure(generate_plot())
+  }
   analysis_plot_obj <- function() if (fixed_mode()) analysis_fixed_info()
                                   else generate_analysis_plot(sel1("analysis_type", "metric_summary"))
   size_from_grob <- function(g, kind) {
@@ -15269,11 +15750,22 @@ server <- function(input, output, session) {
       pd  <- panel_dims_mm("main")
       jp0 <- JOURNAL_PRESETS[[fam]]
       fit <- if (!is.null(jp0)) figure_fit_text(w_mm, jp0)
+      # v2.26.0: a figure split into panels: the size of one panel, how many, and whether the whole figure fits the page width
+      n_pan <- if (isTRUE(input$facet_by_group)) tryCatch({ sm <- sel_samples(); pm <- panel_membership_now(sm, resolve_aesthetics(sm)); if (is.null(pm)) 0L else length(pm$levels) }, error = function(e) 0L) else 0L
+      if (n_pan >= 2L) {
+        pmm <- tryCatch(attr(main_fixed_info(), "panel_mm"), error = function(e) NULL)
+        if (length(pmm) == 2L && all(is.finite(pmm))) pd <- pmm
+        if (!is.null(jp0) && !isTRUE(fit$fits) && is.finite(jp0$double %||% NA) && w_mm <= jp0$double + 0.6)
+          fit <- list(fits = TRUE, text = "fits: double column (page width)")
+      }
+      if (n_pan >= 2L && !is.null(fit) && !isTRUE(fit$fits))
+        fit <- list(fits = FALSE, text = "wider than the page: Panels > Panel size > Fit a double column")
       fit_txt <- if (is.null(fit)) NULL
                  else if (fit$fits) paste0(fit$text, " (", names_short(jp0), ")")
+                 else if (n_pan >= 2L) paste0(fit$text, " (", names_short(jp0), ")")
                  else paste0(fit$text, " (", names_short(jp0), "): smaller panel or legend inside")
-      txt <- sprintf("Panel %s \u00d7 %s mm \u00b7 figure %s \u00d7 %s mm%s \u00b7 %s %s / %s pt \u00b7 lines %s / %s pt \u00b7 %s",
-                     round(pd[1], 1), round(pd[2], 1), round(w), round(h),
+      txt <- sprintf("%s %s \u00d7 %s mm \u00b7 figure %s \u00d7 %s mm%s \u00b7 %s %s / %s pt \u00b7 lines %s / %s pt \u00b7 %s",
+                     if (n_pan >= 2L) paste0(n_pan, " panels, each") else "Panel", round(pd[1], 1), round(pd[2], 1), round(w), round(h),
                      if (!is.null(fit_txt)) paste0(" \u00b7 ", fit_txt) else "",
                      fnt, g(al), g(at), g(dl), g(xl), toupper(sel1("export_format", "svg")))
     } else
@@ -15441,7 +15933,7 @@ server <- function(input, output, session) {
                  if (!is.null(med))   paste0(" in ", med) else "",
                  if (!is.null(temp))  paste0(" at ", temp, " °C") else "", ".")
     # v2.23.1: each curve with its colour in words, its marker (only when points are drawn) and a non-solid line type
-    ss <- sel_samples(); lab_plain <- markup_to_plain(unname(aes_v$leg_labels[ss]))
+    ss <- panel_samples_now(sel_samples()); lab_plain <- markup_to_plain(unname(aes_v$leg_labels[ss]))   # v2.26.0: the samples drawn
     cw <- colour_words(unname(aes_v$colors[ss]))      # v2.23.6: "dark blue" / "light blue" when two curves share a colour word
     s2 <- paste0("Curves: ", paste(vapply(seq_along(ss), function(i)
             legend_sample_text(lab_plain[i], aes_v$colors[[ss[i]]], aes_v$shapes[[ss[i]]], aes_v$filled_map[[ss[i]]], aes_v$line_types[[ss[i]]],
@@ -15477,7 +15969,27 @@ server <- function(input, output, session) {
     tw_txt <- time_windows_text()
     s6 <- if (isTRUE(input$enable_time_filter) || nzchar(tw_txt)) "Only the displayed time window was analysed." else NULL
     if (nzchar(tw_txt)) s6 <- paste0(s6, " Per-sample time windows: ", tw_txt, ".")
-    paste(c(s1, s2, s3, s4, s5, s6), collapse = " ")
+    # v2.26.0: a multi-panel figure says what each panel holds: "(A) Ctrl: Control; (B) P1-4: Control, Phage 1, ..."
+    s2p <- tryCatch({
+      pm <- if (isTRUE(input$facet_by_group)) panel_membership_now(ss, aes_v) else NULL
+      if (is.null(pm)) NULL else {
+        let <- sel1("facet_letters", "none"); names_on <- !identical(sel1("facet_strip_style", "plain"), "none")
+        L <- if (let %in% FACET_LETTER_STYLES) panel_letter(seq_along(pm$levels), let, input$panel_label) else NULL
+        parts <- vapply(seq_along(pm$levels), function(i) {
+          g <- pm$levels[i]; who <- ss[vapply(ss, function(x) g %in% pm$map[[x]], NA)]
+          hd <- paste0(if (!is.null(L)) paste0("(", L[i], ")") else "", if (!is.null(L) && names_on) " " else "", if (names_on || is.null(L)) markup_to_plain(g) else "")
+          ov <- if (panel_legend_mode()) panel_smp_get(g, who) else list()       # a sample styled differently here: its look in words
+          ag <- apply_panel_samples(list(shapes = aes_v$shapes[who], colors = aes_v$colors[who], line_types = aes_v$line_types[who],
+                                         leg_labels = aes_v$leg_labels[who], filled_map = aes_v$filled_map[who]), ov)
+          nm_txt <- vapply(who, function(x) { lp <- markup_to_plain(unname(ag$leg_labels[[x]]))
+            if (is.null(ov[[x]])) lp else legend_sample_text(lp, ag$colors[[x]], ag$shapes[[x]], ag$filled_map[[x]], ag$line_types[[x]],
+                                                         show_points = isTRUE(input$show_points), show_lines = !isTRUE(input$hide_lines)) }, "")
+          paste0(hd, ": ", paste(nm_txt, collapse = ", "))
+        }, "")
+        paste0("Panels: ", paste(parts, collapse = "; "), ".")
+      }
+    }, error = function(e) NULL)
+    paste(c(s1, s2, s2p, s3, s4, s5, s6), collapse = " ")
   }
   output$figure_legend_text <- renderText({
     txt <- figure_legend_string()
@@ -15510,13 +16022,30 @@ server <- function(input, output, session) {
   # helpers. A figure with no legend of its own (the metric summary, the time-to-threshold bars ...) gets the main
   # figure's key: the colours, markers and names are by sample, so the key is the same.
   legend_key_for <- function(p) {
+    if (inherits(p, "gtable") && !is.null(attr(p, "width_in"))) return(p)   # v2.26.0: already a key (main_legend_key)
     k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
     if (is.null(k)) k <- legend_key_grob(generate_plot())
     k
   }
+  # v2.26.0: the main figure's key. When "A legend in each panel" draws a sample differently in some panel, the key is the
+  # panels' own keys stacked (each under its letter and name), so it matches what each panel shows.
+  main_legend_key <- function() {
+    if (panel_legend_mode()) {
+      sm <- sel_samples(); pm <- panel_membership_now(sm, resolve_aesthetics(sm))
+      if (!is.null(pm) && any(vapply(pm$levels, function(g) length(panel_smp_get(g, sm)) > 0L, NA))) {
+        pl <- main_group_plots(min_panels = 2L); lv <- sub("^main_by_group:", "", names(pl))
+        let <- sel1("facet_letters", "none")
+        L <- if (let %in% FACET_LETTER_STYLES) panel_letter(match(lv, pm$levels), let, input$panel_label) else rep("", length(lv))
+        k <- stack_legend_keys(lapply(pl, function(z) tryCatch(legend_key_grob(z), error = function(e) NULL)),
+                               trimws(paste(L, markup_to_plain(lv))), font = sel1("font_family", "sans"), size = nin("legend_font_size", 7))
+        if (!is.null(k)) return(k)
+      }
+    }
+    legend_key_for(generate_plot())
+  }
   legend_key_main <- reactive({
     plot_inputs_debounced(); req(rv$data, sel_samples())
-    tryCatch(legend_key_for(generate_plot()), error = function(e) NULL)
+    tryCatch(main_legend_key(), error = function(e) NULL)
   })
   # height follows the key (drawn at 1.5 x its true size so 6-7 pt text is readable); 1 to 12 samples fit
   output$legend_key_preview <- renderPlot({
@@ -15544,7 +16073,7 @@ server <- function(input, output, session) {
       fmt <- sel1("export_format", "svg")
       write_legend_key(k, file, fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
     })
-  output$downloadLegendKey         <- legend_key_download(function() "main", function() generate_plot())
+  output$downloadLegendKey         <- legend_key_download(function() "main", function() main_legend_key())
 
   # v2.23.8: the colours as drawn, in the format Load colour map reads: "Sample","Hex","Colour_Name" (display names, upper-case
   # hex, the same words as the legend text), UTF-8 without a BOM, quoted. A map downloaded here loads back unchanged.
@@ -16580,12 +17109,16 @@ server <- function(input, output, session) {
   # tag is removed, panels are free()d from alignment (an outside legend would
   # otherwise squeeze the panels beside it), and patchwork adds a, b, c tags in the
   # journal's panel-label style.
-  compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE) {
+  compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE,
+                             tag_labels = NULL, whole_tag = "", whole_size = 8) {
     if (!has_patchwork) stop("The figure composer needs the 'patchwork' package: install.packages('patchwork')")
     panels <- lapply(panels, function(p) patchwork::free(p + labs(tag = NULL)))
     w <- patchwork::wrap_plots(panels, ncol = ncol)
+    has_whole <- is.character(whole_tag) && length(whole_tag) == 1L && !is.na(whole_tag) && nzchar(whole_tag)   # v2.26.0
+    if (has_whole) w <- w + patchwork::plot_annotation(title = whole_tag,
+                                                        theme = theme(plot.title = element_text(size = whole_size, face = "bold", family = font, hjust = 0)))
     if (!isTRUE(tags_on)) return(w)    # v2.16: "Add panel letters" off: no a, b, c
-    w + patchwork::plot_annotation(tag_levels = tag_case) &
+    w + patchwork::plot_annotation(tag_levels = if (length(tag_labels)) list(tag_labels) else tag_case) &
       theme(plot.tag = element_text(size = tag_size, face = "bold", family = font))
   }
   is_placeholder_plot <- function(p) {
@@ -18468,7 +19001,7 @@ server <- function(input, output, session) {
       fold <- bundle_folder_name(); dir <- file.path(tmp, fold); dir.create(dir)
       made <- character(0)
       main_obj <- main_plot_obj()
-      main_key <- tryCatch(legend_key_for(generate_plot()), error = function(e) NULL)    # v2.23.1: the legend key, in the figure's formats
+      main_key <- tryCatch(main_legend_key(), error = function(e) NULL)    # v2.23.1: the legend key, in the figure's formats
       for (fmt in c("svg", "pdf")) {
         fn <- paste0("figure_main.", fmt)
         ggsave(file.path(dir, fn), plot = main_obj, device = export_device(fmt), width = sz[1], height = sz[2],
@@ -18600,7 +19133,7 @@ server <- function(input, output, session) {
         }
       }) else skipped <- c(skipped, "Composed figure: the 'patchwork' package is not installed.")
       attempt("Legend key", {          # v2.25.1: the key of the main figure, in the same two formats as every figure here
-        k <- legend_key_for(generate_plot())
+        k <- main_legend_key()
         if (is.null(k)) skipped <- c(skipped, "Legend key: the main figure has no legend to cut a key from.")
         else for (fmt in c("svg", "png"))
           write_legend_key(k, file.path(dir, paste0("legend_key.", fmt)), fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
@@ -19446,7 +19979,7 @@ server <- function(input, output, session) {
       attempt(lab, one_figure(lab, generate_analysis_plot(ty), ty, function(s) analysis_file_stem(ty, if (!is.null(s) && (fixed_mode() || !is.null(sz_custom))) s)))
     }
     if ("legend_key" %in% sel) attempt("Legend key", {      # v2.23.1
-      k <- legend_key_for(generate_plot())
+      k <- main_legend_key()
       if (is.null(k)) skip("Legend key", "the main figure has no legend.")
       else { f <- file.path(dir, paste0("legend_key_main.", fmt)); write_legend_key(k, f, fmt, dpi); written <- c(written, basename(f)) }
     })
