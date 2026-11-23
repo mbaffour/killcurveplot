@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.26.0 — 2026-11-23
+
+**One dataset, several panels, each set on its own.** (Panels section, after Axis Settings.)
+- **Split the lysis curve into panels** with a new source, **Each sample its own panel**, and **Show in every panel** for
+  the control: it is drawn in each panel beside its treatment (every error display: bars, shadow, spaghetti, quantile
+  bands, jitter, combo, replicate points). A sample typed into two panels is `A; B`.
+- **Any number of panels**; with 3, 5 or 7 the last row has a gap. **Panels per row** sets the grid.
+- **Panel letters** A, B, C, a, b, c, 1, 2, 3 or i, ii, iii, bold at the left of each panel's name; **Panel names: None**
+  leaves the letters alone (or nothing). **One letter for the whole set**: the Panel label (Figure Layout) is drawn once,
+  top-left of the whole figure, over parts lettered a, b, c / 1, 2, 3; or **A1, A2, A3**, the parts of panel A, which
+  carry the figure's letter themselves.
+- **Panel size:** shared (as before), **Fit one column / 1.5 columns / a double column** (the whole figure is the journal
+  width, the panels share it, and the height stays under the journal's maximum), or full size each.
+- **Legends: A legend in each panel.** Every panel becomes its own figure, with its own legend, laid out in the grid with
+  the panel letters; each panel's title, legend place and title, axis titles and x / y ranges can be set on its own
+  (blank = as the whole figure). The Compose tab's "Lysis curve, one panel per group" uses the same panels and settings.
+- **Pick the samples for each panel:** a **Number of panels**, and for each a name and the samples it shows (a sample in
+  several panels, or in none: then it is left off the figure, its key and the legend text).
+- **Each panel set on its own** (A legend in each panel): **Hide points / lines / error bars** per panel, and under
+  **Samples in this panel** a sample's name, colour, marker, fill and line type in that panel only. The legend key is then
+  each panel's key under its letter and name, and the legend text describes such a sample ("Uninfected (grey, filled
+  circles, dashed line)").
+- The Legend text adds "Panels: (A) Phage 1: Control, Phage 1; ..."; the legend key lists every sample once; Save
+  Settings keeps the every-panel samples (`panel_every`), the picked panels (`panel_picks`) and each panel's settings and
+  sample styles (`panel_settings`); Clear & Reset clears them.
+- Figures that do not use the new options are byte-identical to v2.25.1 (startup figure, faceted figures in every header
+  style, the composed figure). `tests/test_v226_panels.R` (53 checks).
+- **Illustrated tutorial** (`docs/TUTORIAL.md`, also the first guide in the Help tab): the whole app step by step, with 42
+  screenshots taken from the app (`docs/tutorial/`), recipes and troubleshooting.
+- Known: the default palette repeats after eight colours, so with twelve samples "Phage 8" is black like the first
+  sample; set its colour (or load a colour map) when the control is drawn in every panel.
+
 ## v2.25.1 — 2026-11-19
 
 **Fourth click-through round: floating labels crossed with every export, the other tabs, save / reset / load and odd

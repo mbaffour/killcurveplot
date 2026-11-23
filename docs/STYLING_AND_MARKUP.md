@@ -75,6 +75,12 @@ All modes work with the fixed panel size, the exports (SVG, PDF, PNG, TIFF, JPEG
 
 The **Panels** section (after Axis Settings) holds:
 
+* v2.26.0: **Split the lysis curve into panels** (was *One panel per group*), with the source *Each sample its own panel*,
+  **Show in every panel** (a control drawn in each), `A; B` for a sample in two panels, **Panel letters** (A, B, C / a, b, c / 1, 2, 3 / i, ii, iii /
+  A1, A2, A3, bold at the left of the header; with Panel names *None* the letter alone; the Panel label is one letter for the
+  whole set), **Panel size** (shared, fitted to one, 1.5 or
+  two journal columns, or full size each) and **Legends** (one for all, or a legend in each panel with per-panel title,
+  legend, axis titles and ranges).
 * *One panel per group* (moved here from Variable Styling) and the **panel source**: the Group typed for each sample in
   Variable Styling (default), a **panel name typed per sample** in this section, or, for a long-format file, **another
   column of the file** (the first non-blank value of the column for each sample). A blank entry goes to "Other".
@@ -106,7 +112,7 @@ The **Panels** section (after Axis Settings) holds:
 * **Open diamond** and **open down-triangle** point shapes (hollow whatever the Filled box says; codes 123 and 125).
 * **Floating labels** (v2.25.0; the companion app's drag-to-place legend labels). Legend position **Floating labels (drag
   each name)** replaces the legend box with the sample names, each in its colour, each dragged to its place on the inline
-  SVG preview; **Extra labels on the figure** (Label Options) adds free text placed the same way. Places are fractions of
+  SVG preview; **Extra labels on the figure** (Axis Settings > Figure Layout) adds free text placed the same way. Places are fractions of
   the panel, saved in the settings file (`label_positions`); a file from the companion app loads its `floating_labels`.
 
 ## Axes

@@ -26,7 +26,7 @@ has <- function(...) all(vapply(c(...), function(s) grepl(s, full, fixed = TRUE)
 cat("\n--- controls and helpers ---\n")
 check("Legend position offers 'Floating labels (drag each name)'", "floating" %in% env$SELECT_INPUT_CHOICES$legend_position && has("Floating labels (drag each name)"))
 check("'floating' is an accepted legend position in settings files", "floating" %in% env$LEGEND_POSITIONS_OK)
-check("Label Options has the extra-labels box; its default is appended at the end of APP_DEFAULTS, empty", has("id=\"figure_labels\"") && identical(tail(names(env$APP_DEFAULTS), 1), "figure_labels") && identical(env$APP_DEFAULTS$figure_labels, ""))
+check("Label Options has the extra-labels box; its default is appended at the end of APP_DEFAULTS, empty", has("id=\"figure_labels\"") && { nm <- names(env$APP_DEFAULTS); match("figure_labels", nm) == length(nm) - sum(nm %in% c("facet_letters", "facet_size_mode", "facet_legends", "facet_n_panels")) } && identical(env$APP_DEFAULTS$figure_labels, ""))
 check("parse_figure_labels: one label per line, blanks and repeats dropped, 40 at most, junk gives none",
       identical(env$parse_figure_labels(" *mltG* \n\nlysis onset\r\n*mltG*"), c("*mltG*", "lysis onset")) && length(env$parse_figure_labels(paste(seq_len(100), collapse = "\n"))) == 40L &&
       identical(env$parse_figure_labels(NULL), character(0)) && identical(env$parse_figure_labels(c("a", "b")), character(0)) && identical(env$parse_figure_labels(NA_character_), character(0)))
