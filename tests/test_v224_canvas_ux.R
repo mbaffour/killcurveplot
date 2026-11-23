@@ -95,7 +95,8 @@ testServer(app, {
   zz$wide <<- preview_zoom_for("compose_img", c(12, 4)); zz$wide_fit <<- 12 * 96 * zz$wide <= 1095 - 24 + 1e-6
 })
 check(sprintf("the analysis figures are shown at the main figure's zoom (%s), not stretched to the column", zz$main),
-      all(vapply(c("metric_summary", "growth_rate", "phases", "phenotype_heatmap"), function(a) identical(zz[[a]], zz$main), NA)))
+      all(vapply(c("growth_rate", "phases", "phenotype_heatmap"), function(a) identical(zz[[a]], zz$main), NA)) &&
+        zz$metric_summary <= zz$main)   # v2.27.3: the metric summary is two full panels wide; it is never shown larger than the main figure
 check("(the old rule filled the column: a larger zoom than the main figure's)", zz$old_fill > zz$main)
 check("a figure too wide for the column at that zoom is still shrunk to fit", zz$wide < zz$main && isTRUE(zz$wide_fit))
 
