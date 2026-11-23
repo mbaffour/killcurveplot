@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.27.2"
+APP_VERSION <- "2.27.3"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -2959,7 +2959,7 @@ densify_xy <- function(x, y, g, k = 8) {
 # Points per corner (named, in tie-break order); all zero for no finite points.
 # v2.27.2: yrange = the y axis limits (data units); the box is then placed against the axis, not the data's own range
 # (a log axis from 0.01 to 10 with curves at 0.2 to 3 has an empty bottom the data range cannot see)
-legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL, yrange = NULL) {
+legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL, yrange = NULL, xrange = NULL) {
   corners <- c("top-left", "top-right", "bottom-left", "bottom-right")
   ok <- is.finite(x) & is.finite(y)
   if (isTRUE(log_y)) ok <- ok & y > 0
@@ -2970,7 +2970,8 @@ legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL, yrange = NULL)
     right <- x > mean(range(x)); top <- y > mean(range(y))
     n <- c(sum(!right & top), sum(right & top), sum(!right & !top), sum(right & !top))
   } else {
-    u <- if (diff(range(x)) > 0) (x - min(x)) / diff(range(x)) else rep(0.5, length(x))
+    xr <- if (length(xrange) == 2L && all(is.finite(xrange)) && diff(range(xrange)) > 0) range(xrange) else range(x)   # v2.27.3: a shared x axis
+    u <- if (diff(xr) > 0) (x - xr[1]) / diff(xr) else rep(0.5, length(x))
     yr <- if (length(yrange) == 2L && all(is.finite(yrange)) && (!isTRUE(log_y) || all(yrange > 0))) { z <- sort(if (isTRUE(log_y)) log10(yrange) else yrange); if (diff(z) > 0) z else NULL }
     if (is.null(yr)) yr <- range(y)
     v <- if (diff(yr) > 0) (y - yr[1]) / diff(yr) else rep(0.5, length(y))
@@ -2986,6 +2987,29 @@ legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL, yrange = NULL)
 INSIDE_LEGEND_MAX_POINTS <- 2
 INSIDE_LEGEND_MAX_ENTRIES <- 4
 PANEL_INSIDE_MAX_ENTRIES  <- 8   # v2.27.2: a panel of a multi-panel figure keeps its key inside up to this many entries
+# v2.27.3: ONE legend for several panels (facet_wrap; "inside-auto"). An inside key sits in a corner of the whole block of
+# panels, so each corner belongs to one panel: top-left = the first, top-right = the last of the first row, bottom-left
+# = the first of the last row, bottom-right = the last cell of the grid (free when the last row is short). The corner
+# whose own panel holds the least data (lines followed between the points, against the shared axes) wins; ties go to
+# the first (top-left). x, y, series, panel: the plotted means (one row per point).
+facet_inside_corner <- function(x, y, series, panel, levels, ncol = NULL, log_y = FALSE, box = NULL, yrange = NULL) {
+  n <- length(levels); if (!n) return("top-left")
+  nc0 <- suppressWarnings(as.integer(ncol)); if (length(nc0) != 1L || !is.finite(nc0) || nc0 < 1L) nc0 <- NULL
+  dims <- ggplot2::wrap_dims(n, ncol = nc0); nr <- dims[1]; nc <- dims[2]
+  host <- c("top-left" = 1L, "top-right" = min(nc, n), "bottom-left" = (nr - 1L) * nc + 1L, "bottom-right" = nr * nc)
+  ok <- is.finite(x) & is.finite(y) & (!isTRUE(log_y) | y > 0)
+  xr <- if (any(ok)) range(x[ok]) else c(0, 1)
+  yy <- if (isTRUE(log_y)) log10(ifelse(ok, y, NA_real_)) else y
+  cnt <- vapply(names(host), function(cn) {
+    k <- host[[cn]]; if (k > n) return(0)
+    sel <- ok & !is.na(panel) & as.character(panel) == as.character(levels[k])
+    if (!any(sel)) return(0)
+    dd <- densify_xy(x[sel], yy[sel], as.character(series[sel]), k = 8)
+    if (is.null(dd) || !nrow(dd)) return(0)
+    as.numeric(legend_corner_counts(dd$x, if (isTRUE(log_y)) 10^dd$y else dd$y, log_y, box, yrange = yrange, xrange = xr)[[cn]])
+  }, 0)
+  names(cnt)[which.min(cnt)]
+}
 # Corner box a legend occupies, as fractions of the panel (x, y): about 9 % of
 # the height per entry, and 22 % + 1.7 % per label character of the width
 # (measured on 89 x 60 mm journal panels at 6 pt).
@@ -14644,7 +14668,12 @@ server <- function(input, output, session) {
   # log_y = y axis is log. Only used by legend_position "inside-auto".
   # v2.27.2: force_inside (a panel of a multi-panel figure): "inside-auto" always puts the key inside, in the corner with
   # the least data measured against the axis (yrange), instead of moving it outside the panel
+  # v2.27.3: while a multi-panel figure is being put together (Compose), every figure built is a panel of it: its key
+  # stays inside (panel_ctx$inside, set by with_panels_inside())
+  panel_ctx <- new.env(parent = emptyenv()); panel_ctx$inside <- FALSE
+  with_panels_inside <- function(expr) { old <- panel_ctx$inside; panel_ctx$inside <- TRUE; on.exit(panel_ctx$inside <- old, add = TRUE); expr }
   figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12, special_legend = FALSE, force_inside = FALSE, yrange = NULL) {
+    force_inside <- isTRUE(force_inside) || isTRUE(panel_ctx$inside)
     tf      <- if (isTRUE(input$bold_title))        "bold"   else "plain"
     af      <- if (isTRUE(input$italic_axis_labels)) "italic" else "plain"
     # v2.10: theme spacing (margins, gaps) follows the theme's base_size, which
@@ -15584,7 +15613,20 @@ server <- function(input, output, session) {
       fsz <- suppressWarnings(as.numeric(input$facet_strip_size %||% NA)); if (!length(fsz) || !is.finite(fsz[1]) || fsz[1] <= 0) fsz <- nin("axis_label_font_size")
       p <- p + facet_layers(grp_map$levels, letters = sel1("facet_letters", "none"), prefix = input$panel_label, scales = input$facet_scales %||% "fixed", ncol = { fnc <- suppressWarnings(as.numeric(input$facet_ncol)); if (length(fnc) == 1L && is.finite(fnc) && fnc >= 1) fnc else NA },   # v2.22: columns, scales, strip style / size, parsed strips
                             strip_style = input$facet_strip_style %||% "plain", strip_size = fsz[1], axis_lw = pt2lw(nin("axis_line_pt", 1.07)))
-      if (startsWith(sel1("legend_position", "right"), "inside-") || floating_mode()) p <- p + theme(legend.position = "right")   # v2.25.0: no floating labels over facets
+      # v2.27.3: one legend for all panels sits INSIDE the block of panels (the multi-panel agreement): "inside-auto" takes the
+      # corner whose own panel is emptiest (facet_inside_corner); a chosen inside corner or a dragged place is kept as set.
+      # Floating labels still give an outside legend (they cannot sit over several panels).
+      lp_f <- sel1("legend_position", "right")
+      if (floating_mode()) p <- p + theme(legend.position = "right")
+      else if (identical(lp_f, "inside-auto")) {
+        fnc_f <- suppressWarnings(as.numeric(input$facet_ncol)); if (!(length(fnc_f) == 1L && is.finite(fnc_f) && fnc_f >= 1)) fnc_f <- NA
+        corner <- if (n_vars > PANEL_INSIDE_MAX_ENTRIES) NULL else tryCatch(
+          facet_inside_corner(plot_data$time, plot_data$mean_value, plot_data$variable, plot_data$group, grp_map$levels, ncol = fnc_f,
+                              log_y = identical(sel1("y_scale_type"), "log"),
+                              box = inside_legend_box(n_vars, max(nchar(unname(leg_labels)), 1)), yrange = y_lims),
+          error = function(e) NULL)
+        p <- p + if (is.null(corner)) theme(legend.position = "right") else inside_legend_theme(corner)
+      }
       fsm <- sel1("facet_size_mode", "share")
       if (fsm %in% c("each", "fit_single", "fit_onehalf", "fit_double")) attr(p, "kc_panel_each") <- TRUE   # v2.26.0: read by fixed_panel_grob
       if (startsWith(fsm, "fit_")) {                       # v2.26.0: the whole figure as wide as a journal column (fixed_figure sizes the panels)
@@ -17424,6 +17466,7 @@ server <- function(input, output, session) {
     p <- p + (if (identical(type, "metric_summary") && isTRUE(input$metric_horizontal)) coord_flip(clip = "off") else coord_cartesian(clip = "off")) +
       labs(tag = if (nzchar(tag)) tag else NULL)
     if (length(fig_notes)) attr(p, "figure_note") <- fig_notes   # v2.21: shown by output$analysis_figure_note
+    if (inherits(p$facet, c("FacetWrap", "FacetGrid"))) attr(p, "kc_panel_each") <- TRUE   # v2.27.3: every panel at the full panel size (the figure grows)
     p
   }
   
@@ -17515,13 +17558,14 @@ server <- function(input, output, session) {
     req(rv$data, sel_samples())
     sel   <- input$compose_panels %||% character(0)
     types <- unname(COMPOSE_PANEL_CHOICES[COMPOSE_PANEL_CHOICES %in% sel])   # composed in checkbox order
-    # each requested type gives a named list of plots (one, or one per group for "main_by_group")
-    built <- lapply(setNames(types, types), function(ty) {
+    # each requested type gives a named list of plots (one, or one per group for "main_by_group"); v2.27.3: built as panels of
+    # one figure, so every key stays inside its own panel (the multi-panel agreement)
+    built <- with_panels_inside(lapply(setNames(types, types), function(ty) {
       if (identical(ty, "main_by_group")) return(tryCatch(main_group_plots(), error = function(e) list()))
       p <- tryCatch(if (identical(ty, "main")) generate_plot() else if (identical(ty, "compare")) generate_compare_plot() else generate_analysis_plot(ty),
                     error = function(e) NULL)
       if (is.null(p) || is_placeholder_plot(p)) list() else setNames(list(p), ty)
-    })
+    }))
     ok      <- vapply(built, length, integer(1)) > 0
     skipped <- names(COMPOSE_PANEL_CHOICES)[match(types[!ok], COMPOSE_PANEL_CHOICES)]
     plots   <- if (any(ok)) do.call(c, unname(built[ok])) else list()
@@ -20209,7 +20253,20 @@ server <- function(input, output, session) {
         p <- build_plot(pd, used, aes_f, rep_fn = rep_fn) +
           facet_wrap(~ dataset, nrow = 1, scales = "fixed", labeller = label_wrap_gen(width = 18)) +
           theme(strip.text = element_text(size = nin("axis_label_font_size"), face = "plain"), strip.background = element_blank())
-        if (startsWith(sel1("legend_position", "right"), "inside-") || floating_mode()) p <- p + theme(legend.position = "right")   # v2.25.0: no floating labels over facets
+        # v2.27.3: the legend inside the pair of panels (each file its own full-size panel), in the corner of the emptiest panel
+        lp_c <- sel1("legend_position", "right")
+        if (floating_mode()) p <- p + theme(legend.position = "right")
+        else if (identical(lp_c, "inside-auto")) {
+          corner <- if (length(used) > PANEL_INSIDE_MAX_ENTRIES) NULL else tryCatch(
+            facet_inside_corner(pd$time, pd$mean_value, pd$variable, pd$dataset, levels(pd$dataset), ncol = nlevels(pd$dataset),
+                                log_y = identical(sel1("y_scale_type"), "log"),
+                                box = inside_legend_box(length(used), max(nchar(unname(aes_f$leg_labels)), 1)),
+                                yrange = tryCatch({ l <- p$scales$get_scales("y")$limits   # the axis as drawn (transformed units on a log axis)
+                                                    if (is.numeric(l) && length(l) == 2L && all(is.finite(l))) (if (identical(sel1("y_scale_type"), "log")) 10^l else l) else NULL },
+                                                  error = function(e) NULL)),
+            error = function(e) NULL)
+          p <- p + if (is.null(corner)) theme(legend.position = "right") else inside_legend_theme(corner)
+        }
       } else {
         pdA$variable <- compare_key("A", pdA$variable); pdB$variable <- compare_key("B", pdB$variable)
         keys <- compare_keys_in_order(samples, ss$A, ss$B)

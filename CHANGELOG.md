@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.27.3 — 2026-11-23
+
+**The multi-panel agreement everywhere: every panel the size of a single figure's panel, all equal, legends inside.**
+- **Analysis figures with several panels** (the metric summary split by metric, the replicate panels): each panel is now
+  the full panel size (65 x 65 mm in the journal standard) and the figure grows; they used to share one panel's area.
+- **One legend for all panels** (split lysis curve) and **Compare side by side**: the single legend sits inside the block
+  of panels, in the corner of the emptiest panel (an empty cell of a short last row counts as free). A chosen inside
+  corner or a dragged place is kept; it used to be moved outside. Floating labels still use an outside legend.
+- **Compose**: every figure placed in a composition keeps its legend inside its own panel (the lysis curve used to fall
+  back to an outside legend when its corners held data); the figures keep their panel sizes.
+- Single figures are unchanged. `tests/test_v2273_panel_rule.R` (13 checks).
+
 ## v2.27.2 — 2026-11-23
 
 **Panels that look like the single figure: the same size each, with the legend inside each one.**

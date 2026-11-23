@@ -385,7 +385,7 @@ testServer(app, {
         length(wmm) == 2 && near(wmm, 60, 1e-6) && szF[1] > 2 * 60 && szF[1] < 2 * 60 + 40)
   session$setInputs(compare_mode = "overlay")
   szO <- attr(compare_fixed_info(), "size_mm")
-  check("compare overlay in fixed mode: one 60 x 60 mm panel; the figure is narrower than the facet one", szO[1] < szF[1] - 40 && szO[2] > 60)
+  check("compare overlay in fixed mode: one 60 x 60 mm panel; the figure is narrower than the facet one", szO[1] < szF[1] && szO[2] > 60)   # v2.27.3: the facet legend is inside now, so the gap is smaller
   check("compare_size_in follows the fixed figure", near(compare_size_in() * 25.4, szO, 0.01))
   session$setInputs(panel_size_mode = "fit", export_units = "mm", export_width = 89, export_height = 65, export_format = "svg")
   # composer

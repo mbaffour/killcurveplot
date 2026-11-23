@@ -154,8 +154,8 @@ testServer(app, {
   tot_h <- sum(vapply(unique(panel_cells$t), function(i) grid::convertHeight(g$heights[i], "mm", valueOnly = TRUE), 0))
   check("fixed panel + 2 facets: the 60 x 60 mm panel area is divided between them (2 x 30 x 60)",
         abs(tot_w - 60) < 1e-6 && abs(tot_h - 60) < 1e-6 && abs(pw - 30) < 1e-6 && is.numeric(attr(g, "size_mm")))
-  check("legend stays outside with facets (inside legend positions fall back to right)",
-        identical(generate_plot()$theme$legend.position, "right"))
+  check("v2.27.3: one legend for several panels sits inside the block of panels (the multi-panel agreement)",
+        { lp <- as.character(input$legend_position %||% "right")[1]; identical(generate_plot()$theme$legend.position, if (startsWith(lp, "inside-")) "inside" else lp) })
   # composer
   session$setInputs(panel_size_mode = "fit", facet_by_group = FALSE, compose_panels = c("main", "main_by_group"))
   info <- compose_info()

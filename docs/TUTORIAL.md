@@ -294,6 +294,10 @@ Or choose **A1, A2, A3**: each part carries the figure's letter, and the separat
 
 ![Parts lettered A1 to A5](tutorial/37_fig_panels_prefixed.jpg)
 
+> **One rule for every multi-panel figure** (v2.27.3): the split lysis curve, Compare side by side, the analysis figures
+> with several panels and the Compose tab all give each panel the size of a single figure's panel (all equal; the figure
+> grows), with each legend inside a panel. Fit a double column below is there when the figure must be page width.
+
 ### 9.3 Fit the figure to the page
 
 **Panel size** (since v2.27.2 the default is the first one: split a figure and every panel looks like a single figure):

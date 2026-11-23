@@ -318,7 +318,7 @@ testServer(app, {
   gm <- analysis_fixed_info()
   pan <- gm$layout[grepl("^panel", gm$layout$name), ]
   w_panels <- sum(as.numeric(grid::convertWidth(gm$widths[sort(unique(unlist(Map(seq, pan$l, pan$r))))], "mm")))
-  check("replicate facets share the panel area: the panels together are 65 mm wide", abs(w_panels - 65) < 0.5)
+  check("v2.27.3: replicate facets give each panel the full panel size: the panels together are n x 65 mm wide", abs(w_panels - 65 * nrow(pan)) < 0.5)
   session$setInputs(compose_panels = c("main", "od_at_times", "replicate_facets", "lysed_fraction", "time_to_threshold"), compose_ncol = "2")
   ci <- compose_info()
   check("the composer takes the new figures", ci$n == 5 && !length(ci$skipped))
