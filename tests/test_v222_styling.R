@@ -800,7 +800,7 @@ testServer(app, {
   session$setInputs(facet_by_group = TRUE, facet_source = "Strain")
   p <- generate_plot(); lay <- ggplot_build(p)$layout$layout
   check("panels by a metadata column: one panel per value, in first-appearance order", real_fig(p) && identical(as.character(lay$group), c("WT", "Mut")))
-  check("the samples of each panel come from the column (WT A and WT B share the WT panel)", identical(unname(panel_groups(rv$od_vars, resolve_aesthetics(rv$od_vars))), c("WT", "WT", "Mut", "Mut")))
+  check("the samples of each panel come from the column (WT A and WT B share the WT panel)", identical(unname(unlist(panel_groups(rv$od_vars, resolve_aesthetics(rv$od_vars)))), c("WT", "WT", "Mut", "Mut")))   # v2.26.1: a list (a value with ";" is one panel)
   d1 <- layer_data(generate_plot(), which(layer_classes(generate_plot()) == "GeomLine")[1])
   check("each panel holds its own samples' lines (2 + 2 lines)", identical(as.integer(tapply(d1$group, d1$PANEL, function(g) length(unique(g)))), c(2L, 2L)))
   session$setInputs(error_display_mode = "spaghetti", y_scale_type = "linear")
