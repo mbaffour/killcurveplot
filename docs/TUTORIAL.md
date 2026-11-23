@@ -320,7 +320,11 @@ The same figure fitted to a double column:
 legend listing only its samples, laid out on the grid with the panel letters. With the legend position *Inside:
 emptiest corner (auto)* each panel's legend always stays inside its panel, in the corner with the least data (measured
 against the axis, so the empty part of a log axis counts as free). *One legend for all panels* puts a single legend
-beside the grid instead.
+in the block of panels instead.
+
+**Move a panel's legend by dragging it** (v2.27.4): each panel's legend has its own handle on the figure. Drop it where
+you want it inside its panel (only that panel changes; its settings show *Inside: where dragged* with the x / y place),
+or outside the panel to put it on that side.
 
 ![A legend in each panel](tutorial/38_fig_panels_legend_each.jpg)
 
