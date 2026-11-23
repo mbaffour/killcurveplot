@@ -19,6 +19,29 @@
 - **Reading files:** date-times that read either way (dd/mm or mm/dd) take the order that reads more rows, then the
   shorter run: a run crossing midnight no longer jumps a month or loses rows. A column with "temp" in its name is a
   temperature trace only if its values look like one (15-60): "WT temp 30" holding OD readings is a sample.
+- **Variable Styling and settings:** hiding a sample or turning a page of the sample list no longer resets every other
+  sample's colour, marker and line type (the widgets are redrawn with what they hold; a settings file, theme, palette
+  change or Clear & Reset still sets them). Save Settings writes samples past the first 20 as drawn (they were saved
+  black, with no marker). Regions and time markers come back from a settings file even when their lists were closed.
+  A panel's title no longer lands in its legend-title box on load. A sample entry with only "shape_filled" keeps the
+  Filled box on. Sample names from a settings file are shown as text in the load status. Clear & Reset gives each
+  sample its startup colour (the default palette), and the figure, the sidebar and Reset share one default marker
+  cycle (a sample past the 7th no longer changes marker when the sidebar is opened).
+- **Panels:** a panel typed "Other" plus a sample with no panel no longer breaks the figure (duplicated level). With
+  "Each sample its own panel" a name containing ";" is one panel, a renamed sample keeps its panel's settings and a
+  sample later given the old name does not inherit them; panel names that differ only in punctuation have boxes of
+  their own. A per-panel Y (or X) min of 0 on a log axis is left automatic with a note instead of breaking the whole
+  figure. Quantile bands of a sample shown in every panel are computed over its own replicates (they pooled its rows
+  repeated once per panel).
+- **Compare:** each file's own replicates feed its range / IQR error bars, replicate traces, quantile bands and replicate
+  points (the second file's panel showed the first file's spread; in overlay, range bars were missing).
+- **Exports and legends:** the batch export's main figure and the composed figure keep the matrix legend and "a legend in
+  each panel", as the Download button does. Sample names with markup (`*E. coli*`) are drawn in the analysis figures'
+  legends. The legend text says "Symbols show the mean" when lines are hidden, and the "Samples as drawn" table lists
+  only the samples the figure draws (pick mode).
+- `tests/test_v2261_fixes.R` (64 checks). Figures with up to 8 samples (12 with the default colours) are byte-identical
+  to v2.26.0, except the quantile bands of a sample shown in every panel (fixed above).
+- Found by a three-part review of the whole app with Claude Fable 5.2.
 
 ## v2.26.0 — 2026-11-23
 
