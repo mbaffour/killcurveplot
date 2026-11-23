@@ -138,5 +138,59 @@ testServer(app, {
 check("a broken file, a settings file renamed .kcproj, a project with no data: refused, the data untouched", isTRUE(B$bad))
 check("the main file picker opens a project file (data, edits and source name restored)", isTRUE(B$picker))
 
+cat("\n--- odd files and real-world layouts ---\n")
+shapes <- c('{"kc_project":1,"data":"x"}', '{"kc_project":1,"data":{"loaded":{"names":["Time","A"],"types":["num","num"],"columns":[[0,1],[0.1]]}}}',
+            '[1,2,3]', '{"kc_project":1,"data":{"loaded":{"names":["Time","A","A"],"types":["num","num","num"],"columns":[[0,15,30],[0.1,0.2,0.3],[0.1,0.21,0.31]]}},"selection":"x","settings":[1],"colour_map":{"map":{"A":"not a colour","B":["#FF0000"]}}}')
+B2 <- new.env()
+testServer(app, {
+  ingest_data(mk(c("Keep")), "keep.csv"); before <- rv$data
+  r <- vapply(shapes, function(js) { f <- tempfile(fileext = ".kcproj"); writeLines(js, f); isTRUE(tryCatch(load_project(f, "odd.kcproj"), error = function(e) "ERR")) }, NA)
+  B2$r <- r; B2$after <- rv$data; B2$cmap <- rv$colour_map; B2$before <- before
+})
+check("odd shapes (data not a table, ragged columns, an array, selection / settings / colour map of the wrong shape): no error",
+      identical(unname(B2$r), c(FALSE, FALSE, FALSE, TRUE)))
+check("odd shapes: the last one loads its data; a colour map entry that is not a colour is dropped", ncol(B2$after) == 3 && is.null(B2$cmap))
+
+ing <- function(fx) file.path("tests", "fixtures", "ingest", fx)
+for (fx in c("U01_user_file.csv", "H03_blocks_repeated_headers.csv", "L07_time_well_od.csv", "F13_datetime_dmy_dots.csv")) {
+  if (!file.exists(ing(fx))) next
+  R <- new.env()
+  testServer(app, {
+    session$setInputs(file = list(name = fx, datapath = ing(fx), size = file.size(ing(fx)), type = "")); session$flushReact()
+    do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+    R$pd <- prepare_plot_data(); R$vars <- rv$od_vars; R$long <- rv$is_long_format; R$blocks <- rv$n_blocks
+    pf <- tempfile(fileext = ".kcproj"); write_project_file(pf); R$pf <- pf
+  })
+  Q <- new.env()
+  testServer(app, {
+    session$setInputs(file = list(name = "p.kcproj", datapath = R$pf, size = file.size(R$pf), type = "")); session$flushReact()
+    do.call(session$setInputs, env$APP_DEFAULTS); session$setInputs(selected_samples = rv$od_vars)
+    Q$pd <- prepare_plot_data(); Q$vars <- rv$od_vars; Q$long <- rv$is_long_format; Q$blocks <- rv$n_blocks
+  })
+  check(sprintf("%s through a project: same samples, layout (long / blocks) and plotted means", fx),
+        identical(Q$vars, R$vars) && identical(Q$long, R$long) && identical(Q$blocks, R$blocks) && isTRUE(all.equal(Q$pd, R$pd)))
+}
+
+cat("\n--- a hidden sample keeps its style; a loaded panel source does not come back later ---\n")
+H <- new.env()
+testServer(app, {
+  S <- session$setInputs
+  ingest_data(mk(c("Control", "Phage A", "Phage B")), "h.csv"); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars)
+  S(line_type_Phage_B = "dotted", color_selector_Phage_B = "custom", color_Phage_B = "#654321", qe_name_Phage_B = "Hidden one")
+  S(selected_samples = c("Control", "Phage A"))
+  pf <- tempfile(fileext = ".kcproj"); write_project_file(pf)
+  d <- fromJSON(pf, simplifyVector = FALSE)
+  H$hidden <- d$settings$sample_aesthetics[["Phage B"]]
+  # the panel source: a settings file with the source already in use, then a hand-picked one survives a menu refresh
+  S(facet_by_group = TRUE, facet_source = "each")
+  sf <- tempfile(fileext = ".json"); write_json(list(version = "2.27.0", styling_schema = 222L, global_settings = list(facet_source = "each")), sf, auto_unbox = TRUE)
+  load_settings_file(sf); session$flushReact()
+  S(facet_source = "group"); session$flushReact()
+  ingest_data(mk(c("Control", "Phage A", "Phage B"), seed = 4), "h2.csv", keep_state = TRUE); session$flushReact()
+  H$pending <- facet_pending$v
+})
+check("a hidden sample's style and name are saved in the project", identical(H$hidden$line_type, "dotted") && identical(toupper(H$hidden$color), "#654321") && identical(H$hidden$legend_label, "Hidden one"))
+check("a loaded panel source that was applied is not kept to come back over a later hand-picked one", is.null(H$pending))
+
 cat("\n", pass, "passed,", fail, "failed\n")
 if (fail > 0) quit(status = 1)

@@ -12387,6 +12387,7 @@ server <- function(input, output, session) {
   })
   
   # ── Time filter UI ───────────────────────────────────────────────────────────
+  slider_seen <- new.env(parent = emptyenv())
   output$time_range_slider_ui <- renderUI({
     tp <- rv$all_timepoints
     if (is.null(tp) || length(tp) < 2)
@@ -12396,8 +12397,13 @@ server <- function(input, output, session) {
     t_min  <- min(tp); t_max <- max(tp)
     t_step <- max(min(diff(tp)), 0.001)
     v0     <- c(t_min, t_max)
-    pt     <- isolate(rv$pending_trange)                   # v2.27.0: the range a project file was saved with
-    if (length(pt) == 2L && all(is.finite(pt))) { v0 <- c(max(t_min, min(pt)), min(t_max, max(pt))); rv$pending_trange <- NULL }
+    # v2.27.0: the range a project file was saved with (in the file's unit), else the range the slider had (converted
+    # when the display unit changed: it used to jump back to the full range), else the full range
+    pt     <- isolate(rv$pending_trange); cur <- isolate(input$time_filter_range); k0 <- slider_seen$k %||% k
+    if (length(pt) == 2L && all(is.finite(pt))) { v0 <- pt * k; rv$pending_trange <- NULL }
+    else if (isTRUE(slider_seen$data_version == isolate(rv$data_version)) && length(cur) == 2L && all(is.finite(cur))) v0 <- cur * k / k0
+    v0     <- c(max(t_min, min(v0)), min(t_max, max(v0))); if (v0[1] > v0[2]) v0 <- c(t_min, t_max)
+    slider_seen$k <- k; slider_seen$data_version <- isolate(rv$data_version)
     sliderInput("time_filter_range", label = NULL,
                 min = t_min, max = t_max, value = v0,
                 step = t_step, width = "100%")
@@ -13086,7 +13092,7 @@ server <- function(input, output, session) {
   # Explicitly excluded: file path, loaded CSV, sample selection, time filter range —
   # anything that belongs to the data rather than the visualization.
   # v2.17: the settings document as a list, shared by the Save Settings download and the figure bundle
-  settings_json_list <- function() {
+  settings_json_list <- function(all_samples = FALSE) {   # v2.27.0: all_samples = every loaded sample (a project keeps hidden ones too)
       all_inputs <- reactiveValuesToList(input)
       
       # Inputs that belong to the data/session — never saved
@@ -13125,7 +13131,7 @@ server <- function(input, output, session) {
       
       # Per-sample aesthetics keyed by sample name
       sample_aesthetics <- list()
-      samps <- isolate(sel_samples())
+      samps <- if (isTRUE(all_samples)) isolate(rv$od_vars) else isolate(sel_samples())
       if (!is.null(samps)) {
         ra <- resolve_aesthetics(samps)   # v2.26.1: what the figure draws, for a sample whose sidebar widgets were never built (page 2+)
         for (vn in samps) {
@@ -13213,19 +13219,28 @@ server <- function(input, output, session) {
       selection = list(selected_samples = as.list(sel_samples() %||% character(0)),
                        excluded_reps = as.list(excluded_rep_keys() %||% character(0)),
                        exclude_timepoints = as.character(input$exclude_timepoints %||% ""),
-                       time_filter_range = if (length(input$time_filter_range) == 2L) as.list(as.numeric(input$time_filter_range)),
+                       time_filter_range = if (length(input$time_filter_range) == 2L) as.list(as.numeric(input$time_filter_range) / time_conv_k()),   # in the file's unit
+                       time_filter_unit = "file",
                        compare_samples_b = as.list(as.character(input$compare_samples_b %||% character(0))),
                        cmp_samples = as.list(as.character(input$cmp_samples %||% character(0)))),
-      settings = settings_json_list())
+      settings = settings_json_list(all_samples = TRUE))
     doc$data <- Filter(Negate(is.null), doc$data); doc$selection <- Filter(Negate(is.null), doc$selection)
     if (!is.null(ds) && !is.null(ds$data)) doc$compare <- list(source = ds$data_source %||% "second file", frame = frame_to_doc(ds$data), time_col = ds$time_col)
     if (length(rv$colour_map)) doc$colour_map <- list(source = rv$colour_map_source %||% "", map = as.list(rv$colour_map))
     doc
   })
   load_project <- function(path, name = basename(path)) {
+    # the whole load is guarded: a file of any shape ends in a notification, never in an error that ends the session
+    tryCatch(load_project_body(path, name), error = function(e) {
+      reraise_time_limit(e)
+      guard_notify("project_read", sprintf("Could not open '%s' as a project: %s.", name, friendly_error_message(e)), "error")
+      invisible(FALSE)
+    })
+  }
+  load_project_body <- function(path, name) {
     fail <- function(why) { guard_notify("project_read", sprintf("Could not open '%s' as a project: %s. Nothing was changed.", name, why), "error"); invisible(FALSE) }
     doc <- tryCatch(jsonlite::fromJSON(path, simplifyVector = FALSE), error = function(e) NULL)
-    if (!is.list(doc) || is.null(doc$kc_project)) return(fail("it is not a project file of this app"))
+    if (!is.list(doc) || is.null(names(doc)) || is.null(doc$kc_project)) return(fail("it is not a project file of this app"))
     if (!is.list(doc$data) || !is.list(doc$data$loaded)) return(fail("it holds no data"))
     s1 <- function(x, d = "") { x <- unlist(x); if (length(x) && !is.na(x[1]) && nzchar(as.character(x[1]))) as.character(x[1]) else d }
     dl <- tryCatch(doc_to_frame(doc$data$loaded), error = function(e) NULL)
@@ -13247,25 +13262,25 @@ server <- function(input, output, session) {
       tryCatch(compare_load_frame(doc_to_frame(doc$compare$frame), s1(doc$compare$source, "second file")),
                error = function(e) guard_notify("project_compare", paste("The project's Compare file could not be restored:", friendly_error_message(e)), "warning"))
     # a loaded colour map
-    if (is.list(doc$colour_map) && length(doc$colour_map$map)) {
-      m <- unlist(doc$colour_map$map); m <- m[!is.na(m) & nzchar(names(m))]
+    if (is.list(doc$colour_map) && is.list(doc$colour_map$map) && length(doc$colour_map$map)) {
+      m <- unlist(lapply(doc$colour_map$map, function(v) if (is.atomic(v) && length(v) == 1L) as.character(v) else NA_character_))
+      m <- m[!is.na(m) & nzchar(names(m)) & grepl("^#[0-9A-Fa-f]{6}$", m)]   # the colours read_colour_map() accepts
       if (length(m)) { rv$colour_map <- setNames(toupper(as.character(m)), names(m)); rv$colour_map_source <- s1(doc$colour_map$source, name) }
     } else { rv$colour_map <- NULL; rv$colour_map_source <- NULL }
     # every setting and sample style, exactly as Load Settings applies them
-    if (is.list(doc$settings)) {
+    if (is.list(doc$settings) && !is.null(names(doc$settings))) {
       tf <- tempfile(fileext = ".json"); on.exit(unlink(tf), add = TRUE)
       jsonlite::write_json(doc$settings, tf, auto_unbox = TRUE, digits = NA, na = "null", null = "null")
       load_settings_file(tf)
     }
     # what was selected, excluded and filtered (the lists drawn later take their pending values)
-    sl <- doc$selection %||% list(); vars <- rv$od_vars
+    sl <- if (is.list(doc$selection) && !is.null(names(doc$selection))) doc$selection else list(); vars <- rv$od_vars
     sel <- intersect(as.character(unlist(sl$selected_samples)), vars)
     if (length(sel)) updateSelectInput(session, "selected_samples", choices = vars, selected = sel)
     updateTextInput(session, "exclude_timepoints", value = s1(sl$exclude_timepoints, ""))
     rv$pending_excl <- as.character(unlist(sl$excluded_reps))
     tr <- suppressWarnings(as.numeric(unlist(sl$time_filter_range)))
-    rv$pending_trange <- if (length(tr) == 2L && all(is.finite(tr))) tr else NULL
-    if (!is.null(rv$pending_trange) && !is.null(isolate(input$time_filter_range))) updateSliderInput(session, "time_filter_range", value = rv$pending_trange)
+    rv$pending_trange <- if (length(tr) == 2L && all(is.finite(tr))) tr else NULL       # in the file's unit; the slider converts
     if (!is.null(rv_cmp$ds) && length(cb <- intersect(as.character(unlist(sl$compare_samples_b)), rv_cmp$ds$od_vars)))
       updateSelectInput(session, "compare_samples_b", selected = cb)
     if (length(cs <- intersect(as.character(unlist(sl$cmp_samples)), vars))) updateSelectizeInput(session, "cmp_samples", selected = cs)
@@ -13329,7 +13344,12 @@ server <- function(input, output, session) {
     
     global <- migrate_styling_settings(global, s$styling_schema)   # v2.22: palette names of a pre-v2.22 file
     fs0 <- tryCatch(settings_unbox(global$facet_source), error = function(e) NULL)   # v2.27.0: kept until the data offers it
-    if (is.character(fs0) && length(fs0) == 1L && !is.na(fs0) && nzchar(fs0)) facet_pending$v <- fs0
+    if (is.character(fs0) && length(fs0) == 1L && !is.na(fs0) && nzchar(fs0)) {
+      facet_pending$v <- fs0
+      # offered already: the update below sets it, and the menu refresh of this same flush (a project's new data) keeps it;
+      # after the flush it is dropped, so it can never come back later over a source picked by hand
+      if (fs0 %in% isolate(facet_source_choices())) tryCatch(session$onFlushed(function() facet_pending$v <- NULL, once = TRUE), error = function(e) NULL)
+    }
     sample_aes <- lapply(sample_aes, sanitize_sample_aes)          # round 2 (F07): only values the widgets can take reach the sidebar rows
     rv$imported_settings <- list(global = global, samples = sample_aes)
     rv$panel_cfg <- list()                               # v2.26.0: each panel's settings (only known fields, one plain value each)
@@ -14750,10 +14770,11 @@ server <- function(input, output, session) {
     ch  <- facet_source_choices()
     cur <- isolate(sel1("facet_source", "group"))
     pv  <- facet_pending$v
-    sel <- if (!is.null(pv) && pv %in% ch) pv else if (cur %in% ch) cur else "group"
+    sel <- if (!is.null(pv) && pv %in% ch) { facet_pending$v <- NULL; pv } else if (cur %in% ch) cur else "group"   # applied once
     updateSelectInput(session, "facet_source", choices = ch, selected = sel)
   })
-  observeEvent(input$facet_source, if (identical(as.character(input$facet_source), facet_pending$v)) facet_pending$v <- NULL)
+  # a source the user picks by hand wins over one still waiting for its data
+  observeEvent(input$facet_source, { v <- as.character(input$facet_source %||% ""); if (length(v) == 1L && nzchar(v)) facet_pending$v <- NULL }, ignoreInit = TRUE)
   # One text box per selected sample for the panel it belongs to (samples typed with the same name share a panel).
   output$facet_manual_ui <- renderUI({
     if (!identical(sel1("facet_source", "group"), "manual")) return(NULL)
