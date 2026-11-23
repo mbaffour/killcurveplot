@@ -5,6 +5,8 @@
 > **Looking for the full analysis platform** (Analysis tab, 30+ metrics, statistics, heatmaps, curve fitting, virulence metrics)? That's the companion app: [mbaffour/lysis-curve-app](https://github.com/mbaffour/lysis-curve-app). This repo is the lightweight plotter.
 
 > **New to the app?** The [illustrated tutorial](docs/TUTORIAL.md) walks through every feature with screenshots (also in the app's Help tab).
+>
+> **Pick up where you left off:** **Save project** (Save / Load Settings, or the link under the file picker) keeps the data and everything you did with it in one `.kcproj` file; open it in the file picker and you are back where you were, without uploading the data again.
 
 ## Quick start — double-click to run (no command line)
 
@@ -648,4 +650,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.26.1 (2026-11-23) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.27.0 (2026-11-23) — Michael Baffour Awuah / Ramsey Lab*

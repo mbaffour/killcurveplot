@@ -9320,6 +9320,9 @@ build_help_tab <- function() {
         tags$li(strong("Names and gene names placed by hand:"), " Legend position ", strong("Floating labels (drag each name)"),
                 " turns every sample name into its own label that you drag onto the figure; ", strong("Extra labels on the figure"),
                 " (Axis Settings > Figure Layout) adds free text (", code("*mltG*"), " is an italic gene name), dragged the same way."),
+        tags$li(strong("Pick up where you left off:"), " ", strong("Save project"), " (Save / Load Settings, or the link under the file picker) ",
+                "keeps the data and everything done with it in one .kcproj file; open it in the file picker or with ", strong("Open project"),
+                ": no need to upload the data again."),   # v2.27.0
         tags$li(strong("Several panels from one dataset:"), " the ", strong("Panels"), " section: ", strong("Split the lysis curve into panels"),
                 ", ", strong("Each sample its own panel"), ", the control under ", strong("Show in every panel"), ", ", strong("Panel letters"),
                 " A, B, C, and ", strong("A legend in each panel"), " to set each panel on its own."),
@@ -10196,7 +10199,7 @@ ui <- fluidPage(
                          tags$button(type = "button", class = "btn btn-link btn-xs kc-collapse-all", "Collapse all"))),
                  
                  fileInput("file", "Choose CSV or Excel file", accept = c("text/csv", ".csv", ".xlsx", ".xls", ".kcproj")),
-                 div(style = "font-size:.78em;color:#555;margin:-12px 0 8px;",   # v2.27.0
+                 div(style = "font-size:.78em;color:#555;margin:0 0 10px;",   # v2.27.0
                      "A project file (.kcproj) opens here too, with everything restored. ",
                      downloadLink("saveProjectTop", "Save the project")),
                  uiOutput("sheet_ui"),
