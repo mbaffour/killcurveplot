@@ -14,9 +14,16 @@ If you have [R](https://cran.r-project.org/) installed, you don't need the termi
 
 | OS | Double-click |
 |----|--------------|
+| **macOS** | **`Lysis Curve Plotter.app`** (the app with the curve icon): opens in your browser, no Terminal window |
 | **Windows** | `Run Lysis Curve Plotter.bat` |
-| **macOS** | `Run Lysis Curve Plotter.command` |
+| **macOS** (with a Terminal window) | `Run Lysis Curve Plotter.command` |
 | **Linux** | `./run.sh` |
+
+**Lysis Curve Plotter.app** (v2.27.1): click it and the app opens in your default browser. Click it again while it runs
+and the same page opens again (it always uses http://127.0.0.1:8765). It stops by itself about 15 seconds after you close
+the last browser tab showing it. Drag it to the Dock to keep it one click away; after it has been opened once from this
+folder, a copy in Applications works too. If macOS says it is from an unidentified developer (a copy downloaded as a
+zip), right-click it and choose **Open** once. The log is `~/Library/Logs/LysisCurvePlotter.log`.
 
 The **first run** installs the required R packages (a few minutes); after that the app opens in your web browser instantly. You can also run it directly with `Rscript run_app.R`.
 
@@ -650,4 +657,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.27.0 (2026-11-23) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.27.1 (2026-11-23) — Michael Baffour Awuah / Ramsey Lab*

@@ -1,0 +1,48 @@
+#!/bin/bash
+# Lysis Curve Plotter.app: starts the app (R / Shiny) and opens it in your default browser, with no Terminal window.
+# Clicking it again while the app runs just opens the page again. The app stops by itself about 15 seconds after the last
+# browser tab showing it is closed. Log: ~/Library/Logs/LysisCurvePlotter.log
+export PATH="/opt/homebrew/bin:/usr/local/bin:/Library/Frameworks/R.framework/Resources/bin:$PATH"   # a Finder app does not get the shell's PATH
+TITLE="Lysis Curve Plotter"
+LOG="$HOME/Library/Logs/LysisCurvePlotter.log"
+CONF="$HOME/Library/Application Support/LysisCurvePlotter"
+alert() { osascript -e "display alert \"$TITLE\" message \"$1\"" >/dev/null 2>&1; }
+
+# the killcurveplot folder: the one this app sits in, else the one it was last opened from (an app copied to Applications)
+HERE="$(cd "$(dirname "$0")/../../.." && pwd)"
+if [ -f "$HERE/run_app.R" ]; then
+  REPO="$HERE"; mkdir -p "$CONF"; printf '%s' "$REPO" > "$CONF/repo_path"
+elif [ -f "$CONF/repo_path" ] && [ -f "$(cat "$CONF/repo_path")/run_app.R" ]; then
+  REPO="$(cat "$CONF/repo_path")"
+else
+  alert "Open this app once from the killcurveplot folder (next to run_app.R). After that a copy in Applications or the Dock works too."
+  exit 1
+fi
+
+# one port for this app: if it is already running there, open the page; a port taken by something else is skipped
+PORT="${KC_PORT:-8765}"
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  PAGE="$(curl -s --max-time 2 "http://127.0.0.1:$PORT/" 2>/dev/null)"
+  if printf '%s' "$PAGE" | grep -q "Optical Density"; then open "http://127.0.0.1:$PORT/"; exit 0; fi
+  if [ -z "$PAGE" ] && ! lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then break; fi
+  PORT=$((PORT + 1))
+done
+
+# R: the same search as "Run Lysis Curve Plotter.command" (R from CRAN, Homebrew or a conda environment)
+RS=""
+[ -n "$R_RSCRIPT" ] && [ -x "$R_RSCRIPT" ] && RS="$R_RSCRIPT"
+[ -z "$RS" ] && command -v Rscript >/dev/null 2>&1 && RS="$(command -v Rscript)"
+for C in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" "$HOME/mambaforge" /opt/miniconda3 /opt/anaconda3 /opt/homebrew/Caskroom/miniforge/base; do
+  [ -z "$RS" ] && [ -x "$C/bin/Rscript" ] && RS="$C/bin/Rscript"
+  [ -z "$RS" ] && [ -x "$C/envs/r/bin/Rscript" ] && RS="$C/envs/r/bin/Rscript"
+done
+if [ -z "$RS" ]; then
+  alert "R was not found. Install R from https://cran.r-project.org/ and open this app again."
+  open "https://cran.r-project.org/"; exit 1
+fi
+
+mkdir -p "$(dirname "$LOG")"
+cd "$REPO" || exit 1
+KC_PORT="$PORT" KC_AUTO_STOP=1 nohup "$RS" run_app.R > "$LOG" 2>&1 &
+osascript -e "display notification \"Starting: the app opens in your browser in a few seconds (the first run installs R packages, a few minutes).\" with title \"$TITLE\"" >/dev/null 2>&1
+exit 0
