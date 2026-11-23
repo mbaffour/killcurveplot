@@ -204,8 +204,8 @@ check("posthoc_table bonferroni / sidak: p_adj = min(1, m p) and 1 - (1 - p)^m",
       all(abs(bf$p_adj - pmin(1, 6 * bf$p_raw)) < 1e-12) && all(abs(sd_$p_adj - (1 - (1 - sd_$p_raw)^6)) < 1e-12))
 check("posthoc_table bonferroni: CI widened to 1 - 0.05 / m",
       { r <- bf[bf$group1 == "c" & bf$group2 == "a", ]; w <- t.test(xs[gs == "c"], xs[gs == "a"], conf.level = 1 - 0.05 / 6)$conf.int; near(r$ci_lo, w[1]) && near(r$ci_hi, w[2]) })
-check("posthoc_table sidak: CI at 1 - (1 - level)^(1/m)",
-      { r <- sd_[sd_$group1 == "c" & sd_$group2 == "a", ]; w <- t.test(xs[gs == "c"], xs[gs == "a"], conf.level = 1 - 0.05^(1 / 6))$conf.int; near(r$ci_lo, w[1]) })
+check("posthoc_table sidak: CI at level^(1/m) (v2.26.1; 99.15% for 6 pairs)",
+      { r <- sd_[sd_$group1 == "c" & sd_$group2 == "a", ]; w <- t.test(xs[gs == "c"], xs[gs == "a"], conf.level = 0.95^(1 / 6))$conf.int; near(r$ci_lo, w[1]) && near(r$ci_hi, w[2]) })
 dnt <- env$posthoc_table(xs, gs, "dunnett", reference = "a")
 if (has_pkg("mvtnorm")) {
   check("posthoc_table dunnett (mvtnorm available): 3 rows vs the reference, multivariate-t method label",

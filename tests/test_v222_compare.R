@@ -370,8 +370,11 @@ testServer(app, {
   session$setInputs(show_replicate_points = TRUE)
   pfr <- generate_compare_plot()
   is_rep <- function(l) inherits(l$geom, "GeomPoint") && identical(l$aes_params$shape, 1) && isFALSE(l$show.legend)
-  check("compare: the replicate-point layer (main data only) is not drawn in either layout, so it cannot sit in both panels",
-        !any(vapply(pfr$layers, is_rep, logical(1))) && any(vapply(generate_plot()$layers, is_rep, logical(1))))
+  # v2.26.1: build_plot() takes each file's own replicates (rep_fn), so the replicate points are drawn, each in its own file's panel
+  rl <- Filter(is_rep, pfr$layers)
+  check("compare: the replicate points come from each file (a dataset column with both runs), not the main data twice",
+        length(rl) == 1L && "dataset" %in% names(rl[[1]]$data) && setequal(unique(as.character(rl[[1]]$data$dataset)), c("Run 1", "Run 2")) &&
+        any(vapply(generate_plot()$layers, is_rep, logical(1))))
   session$setInputs(show_replicate_points = FALSE)
   # fixed panel size per panel
   session$setInputs(panel_size_mode = "fixed", panel_width_mm = 60, panel_height_mm = 60, panel_square = TRUE)

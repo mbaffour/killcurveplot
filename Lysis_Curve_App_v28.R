@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.26.0"
+APP_VERSION <- "2.26.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -933,10 +933,22 @@ parse_time_column <- function(x, name = NULL) {
   fmts <- c("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S",
             "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
             "%m/%d/%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d/%m/%Y %H:%M")
+  # v2.26.1: a day/month format is weighed against its month/day twin (and the other way round): the one that reads
+  # more rows wins, on a tie the shorter run (a 1 h step read the wrong way round is a jump of a month), so a run that
+  # crosses midnight on a day <= 12 no longer loses rows or jumps
+  swap_dm <- function(f) if (grepl("%d([/.])%m", f)) sub("%d([/.])%m", "%m\\1%d", f) else if (grepl("%m([/.])%d", f)) sub("%m([/.])%d", "%d\\1%m", f) else NA_character_
+  need <- if (sum(keep) == 1L) 1 else max(2, 0.8 * sum(keep))
   for (tx in unique(list(txt24, txt))) for (f in fmts) {          # (12-hour text first: its 24-hour rewrite)
     pt <- suppressWarnings(as.POSIXct(tx, format = f, tz = "UTC"))
-    if (sum(!is.na(pt)) >= (if (sum(keep) == 1L) 1 else max(2, 0.8 * sum(keep))))     # round 2 (#8): one data row is a datetime too (0 min)
+    if (sum(!is.na(pt)) >= need) {                                  # round 2 (#8): one data row is a datetime too (0 min)
+      f2 <- swap_dm(f)
+      if (!is.na(f2)) {
+        p2 <- suppressWarnings(as.POSIXct(tx, format = f2, tz = "UTC"))
+        span <- function(x) diff(range(as.numeric(x), na.rm = TRUE))
+        if (sum(!is.na(p2)) > sum(!is.na(pt)) || (sum(!is.na(p2)) == sum(!is.na(pt)) && span(p2) < span(pt))) pt <- p2
+      }
       return(conv(as.numeric(difftime(pt, min(pt, na.rm = TRUE), units = "mins"))))
+    }
   }
 
   # 4. whatever was already numeric; the caller decides what to do with the rest
@@ -1064,6 +1076,10 @@ wide_sample_columns <- function(data, time_col) {
   cand <- setdiff(seq_along(cn), which(cn == time_col))
   is_temp <- grepl(TEMP_COL_REGEX, cn[cand], ignore.case = TRUE, perl = TRUE)
   is_num  <- vapply(cand, function(i) is.numeric(data[[i]]), logical(1))
+  # v2.26.1: a header with the word temp is a temperature trace only when its values look like one (15-60, as for T600):
+  # "WT temp 30", "Temp-sensitive mutant" holding OD readings are samples
+  temp_vals <- vapply(cand, function(i) { x <- data[[i]]; if (!is.numeric(x)) return(TRUE); x <- x[is.finite(x)]; !length(x) || all(x >= 15 & x <= 60) }, logical(1))
+  is_temp <- is_temp & (temp_vals | grepl("^T°", cn[cand]))
   is_t600 <- is_num & grepl("^T\\s*[0-9]{3}$", cn[cand], ignore.case = TRUE) &
     vapply(cand, function(i) { x <- data[[i]]; x <- x[is.finite(x)]; length(x) > 0 && all(x >= 15 & x <= 60) }, logical(1))
   is_temp <- is_temp | is_t600
@@ -2042,6 +2058,10 @@ calculate_local_virulence <- function(pd, ref_sample, smooth_window = 5,
   rows <- lapply(split(seq_len(nrow(pd)), key, drop = TRUE), function(ix) {
     d  <- pd[ix, , drop = FALSE]
     Ai <- area_to(d$time, d$mean_value, t_stat)
+    # v2.26.1: a curve that stops before t_stat (or starts after the reference) has no comparable area: NA, not an
+    # area over a shorter range divided by the reference's full one (which inflated the virulence)
+    tf <- d$time[is.finite(d$time) & is.finite(d$mean_value)]
+    if (!length(tf) || max(tf) < t_stat - 1e-9 || min(tf) > t_ref[1] + 1e-9) Ai <- NA_real_
     r  <- data.frame(sample = d$variable[1],
                      local_virulence = if (is.finite(A0) && A0 > 0 && is.finite(Ai)) 1 - Ai / A0 else NA_real_,
                      t_stat_used = t_stat, stringsAsFactors = FALSE)
@@ -3189,7 +3209,8 @@ stats_long_table <- function(metric, sections, notes = character(0), info = NULL
     rows[[length(rows) + 1L]] <- data.frame(
       metric = as.character(metric)[1], section = sec, group1 = txt(pick(d, "group1", "sample")), group2 = txt(pick(d, "group2", "versus")),
       estimate = num(pick(d, "estimate", "difference", "statistic")), ci_lo = num(pick(d, "ci_lo", "ci_low")), ci_hi = num(pick(d, "ci_hi", "ci_high")),
-      p = num(pick(d, "p_raw", "p")), p_adj = num(pick(d, "p_adj", "p_adj_holm")), method = txt(pick(d, "method", "test")),
+      p = num(pick(d, "p_raw", "p")), p_adj = num(pick(d, "p_adj", "p_adj_holm", "p_adj_tukey")),
+      method = txt(if ("p_adj_tukey" %in% names(d) && !any(c("method", "test") %in% names(d))) rep("Tukey HSD", nrow(d)) else pick(d, "method", "test")),   # v2.26.1
       note = txt(pick(d, "note")), stringsAsFactors = FALSE)
   }
   extra <- c(if (!is.null(info)) setNames(info, rep("info", length(info))), setNames(notes, rep("note", length(notes))))
@@ -3646,10 +3667,17 @@ compare_replicate_metric <- function(rm, metric, ref_sample = NULL,
         om <- data.frame(test = "One-way ANOVA", statistic = s[["F value"]][1],
                          df1 = s[["Df"]][1], df2 = s[["Df"]][2], p = s[["Pr(>F)"]][1],
                          stringsAsFactors = FALSE)
+        # v2.26.1: Tukey on coded levels too, so each row names its two samples (group1 - group2) even when a sample
+        # name contains a hyphen; the CSV export (stats_long_table) needs them
+        lv  <- levels(d$sample); dc <- data.frame(value = d$value, g = factor(paste0("g", as.integer(d$sample)), levels = paste0("g", seq_along(lv))))
+        tkc <- tryCatch(TukeyHSD(aov(value ~ g, data = dc))$g, error = function(e) NULL)
         tk <- tryCatch(TukeyHSD(fit)$sample, error = function(e) NULL)
         if (!is.null(tk)) {
+          gi <- if (!is.null(tkc) && nrow(tkc) == nrow(tk)) do.call(rbind, strsplit(sub("^g", "", rownames(tkc)), "-g", fixed = TRUE)) else NULL
           ph <- data.frame(comparison = rownames(tk), difference = tk[, "diff"],
                            ci_low = tk[, "lwr"], ci_high = tk[, "upr"], p_adj_tukey = tk[, "p adj"],
+                           group1 = if (is.null(gi)) NA_character_ else lv[as.integer(gi[, 1])],
+                           group2 = if (is.null(gi)) NA_character_ else lv[as.integer(gi[, 2])],
                            row.names = NULL, stringsAsFactors = FALSE)
           ph$stars <- sig_stars(ph$p_adj_tukey)
         }
@@ -3877,6 +3905,41 @@ write_bundle_archive <- function(archive, root, folder, kind = bundle_archive_ki
 # n colours for a named palette. v2.17: "blues" and "blue_red" are dose gradients for MOI series:
 # the first sample (usually the uninfected control) is black and the n - 1 others run along the
 # ramp from low to high dose (light to dark blue, or blue to red).
+# v2.26.1: the named sets (Okabe-Ito, Set1, the "custom" default cycle) no longer repeat. Their own colours come first,
+# unchanged, so a figure with up to 8 (12 for the default cycle) samples is exactly as before; the next 6-8 colours are
+# chosen for distance (CIEDE2000) from those already used and each has a legend word of its own (purple, maroon, grey,
+# olive, navy, magenta ...); past those, more are generated from an HCL grid the same way. Only the first 8 Okabe-Ito
+# colours are colour-blind safe: the notification says so.
+OKABE_ITO_COLOURS     <- c("#000000","#E69F00","#56B4E9","#009E73","#F0E442","#0072B2","#D55E00","#CC79A7")
+OKABE_ITO_EXTRA       <- c("#800080","#800000","#808080","#999933","#222255","#FF00FF","#117733","#A6761D")
+SET1_COLOURS          <- c("#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#FFFF33","#A65628","#F781BF")
+SET1_EXTRA            <- c("#000000","#225522","#000080","#808000","#008080","#808080","#800000","#FF00FF")
+DEFAULT_SAMPLE_COLOURS <- c("#000000","#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#A65628","#F781BF",
+                            "#999999","#66C2A5","#FC8D62","#8DA0CB")
+DEFAULT_SAMPLE_EXTRA  <- c("#225522","#000080","#808000","#008080","#800000","#FF00FF")
+.distinct_cache <- new.env(parent = emptyenv())
+# n colours: base, then extras, then generated ones, none repeated (n is capped at 400; beyond that the list recycles).
+distinct_colours <- function(base, n, extras = character(0)) {
+  n <- suppressWarnings(as.integer(n)[1]); if (is.na(n) || n <= 0L) return(character(0))
+  pool <- unique(toupper(c(base, extras)))
+  if (n <= length(pool)) return(pool[seq_len(n)])
+  key <- paste(c(pool, min(n, 400L)), collapse = ",")
+  if (!is.null(got <- .distinct_cache[[key]])) return(rep_len(got, n))
+  grid <- expand.grid(h = seq(5, 355, 10), l = c(35, 50, 65), c = c(40, 70))
+  cand <- setdiff(unique(toupper(grDevices::hcl(grid$h, grid$c, grid$l, fixup = TRUE))), pool)
+  got <- pool
+  while (length(got) < min(n, 400L) && length(cand)) {
+    d <- farver::compare_colour(farver::decode_colour(cand), farver::decode_colour(got), "rgb", method = "cie2000")
+    j <- which.max(apply(d, 1, min)); got <- c(got, cand[j]); cand <- cand[-j]
+  }
+  assign(key, got, envir = .distinct_cache)
+  rep_len(got, n)
+}
+default_sample_colours <- function(n) distinct_colours(DEFAULT_SAMPLE_COLOURS, max(12L, n), DEFAULT_SAMPLE_EXTRA)
+# v2.26.1: ONE default marker cycle (the sidebar's, v2.21). The figure used another one (8th sample code 23, 10 long) until
+# the sidebar was opened, and Clear & Reset a third: a sample past the 7th changed marker with no edit.
+DEFAULT_SHAPE_CYCLE <- c(16, 15, 17, 18, 25, 4, 8, 16, 15, 17, 3, 10)
+default_sample_shape <- function(i) DEFAULT_SHAPE_CYCLE[1 + (as.integer(i) - 1L) %% length(DEFAULT_SHAPE_CYCLE)]
 get_palette_colors <- function(pal, n) {
   gradient <- function(ends) {
     if (n <= 1) return(rep_len("#000000", n))
@@ -3885,12 +3948,9 @@ get_palette_colors <- function(pal, n) {
   switch(pal,
          viridis     = scales::viridis_pal(option = "D")(n),
          plasma      = scales::viridis_pal(option = "C")(n),
-         colorblind  = rep_len(c("#000000","#E69F00","#56B4E9","#009E73",
-                                 "#F0E442","#0072B2","#D55E00","#CC79A7"), n),
-         publication = rep_len(c("#000000","#E69F00","#56B4E9","#009E73",     # v2.22: Okabe-Ito, what "publication" means in the N4 paper app
-                                 "#F0E442","#0072B2","#D55E00","#CC79A7"), n),
-         set1        = rep_len(c("#E41A1C","#377EB8","#4DAF4A","#984EA3",      # v2.22: what "publication" was before (ColorBrewer Set1)
-                                 "#FF7F00","#FFFF33","#A65628","#F781BF"), n),
+         colorblind  = distinct_colours(OKABE_ITO_COLOURS, n, OKABE_ITO_EXTRA),
+         publication = distinct_colours(OKABE_ITO_COLOURS, n, OKABE_ITO_EXTRA),   # v2.22: Okabe-Ito, what "publication" means in the N4 paper app
+         set1        = distinct_colours(SET1_COLOURS, n, SET1_EXTRA),             # v2.22: what "publication" was before (ColorBrewer Set1)
          rainbow     = rainbow(n),
          gray        = gray.colors(n, start = 0.15, end = 0.85),
          blues       = gradient(c("#c6dbef", "#08306b")),
@@ -4957,8 +5017,7 @@ compare_fits <- function(df, model = c("logistic", "gompertz", "baranyi"), param
     parts <- vector("list", ng); y0s <- numeric(ng); starts <- vector("list", ng); per_ok <- stats::setNames(rep(FALSE, ng), groups)
     for (i in seq_len(ng)) {
       sel <- g == groups[i]
-      xm  <- tapply(y[sel], x[sel], mean); tm <- as.numeric(names(xm)); xm <- as.numeric(xm)
-      o   <- order(tm); tm <- tm[o]; xm <- xm[o]
+      tm  <- sort(unique(x[sel])); xm <- vapply(tm, function(t0) mean(y[sel][x[sel] == t0]), 0)   # v2.26.1: exact times, not tapply's 15-digit names (hours lost the peak)
       kpk <- if (until == "peak") which.max(xm) else length(xm)
       tcut <- tm[kpk]
       keep <- sel & x <= tcut
@@ -5809,7 +5868,7 @@ omnibus_table <- function(values, groups) {
 #   tukey         pooled-variance Tukey-Kramer from TukeyHSD(aov()); p_raw NA (single-step); all-pairs family
 #   holm_welch    Welch t per pair, Holm-adjusted across the family; CI unadjusted
 #   bonferroni    Welch t per pair, Bonferroni p; CI widened to 1 - (1 - level) / m
-#   sidak         Welch t per pair, Sidak p;      CI at 1 - (1 - level)^(1 / m)
+#   sidak         Welch t per pair, Sidak p;      CI at level^(1 / m)  (v2.26.1: was 1 - (1 - level)^(1 / m), a 39% interval)
 #   games_howell  Welch df per pair, studentised-range (ptukey) p; estimate CI uses qtukey; p_raw NA
 #   dunn          Kruskal rank sums, tie-corrected z, Holm (or Bonferroni via `dunn_adjust`) p; estimate = mean-rank difference
 #   dunnett       each sample vs the reference, pooled-variance multivariate-t (needs mvtnorm); otherwise it falls back to
@@ -5945,7 +6004,7 @@ posthoc_table <- function(values, groups,
   }
 
   # Welch-based families: holm_welch, bonferroni, sidak (and the Dunnett fallback)
-  lv <- switch(method, bonferroni = 1 - (1 - level) / m, sidak = 1 - (1 - level)^(1 / m), level)
+  lv <- switch(method, bonferroni = 1 - (1 - level) / m, sidak = level^(1 / m), level)   # v2.26.1: Sidak's per-comparison level (0.95, 6 pairs -> 99.15%)
   ci_note <- if (method %in% c("bonferroni", "sidak")) "CIs widened for the family" else paste0("CIs unadjusted (", .s22_pct(level), "% for a single comparison)")
   rows <- lapply(pairs, function(pr) {
     a <- P$x[P$g == pr[1]]; b <- P$x[P$g == pr[2]]; w <- welch(a, b, lv)
@@ -6147,6 +6206,9 @@ grubbs_critical <- function(n, alpha = 0.05) {
 
 # Replicate-curve outliers: for each sample, the mean absolute deviation (over time) of every replicate curve from the
 # per-time MEDIAN curve of that sample, scaled by the median of those deviations; scaled distance > 3 is flagged.
+# v2.26.1: and only when the replicate is also more than 10% of the sample's mean level (the median curve's mean |OD|)
+# away from the median curve: with 3 replicates the scaled distance alone flagged ordinary 1% spreads (it only asks
+# "is one replicate 3x further out than the other").
 # Needs >= 3 replicates per sample. Columns: sample, replicate, well, abs_dev, distance (the scaled value), flagged, note.
 replicate_outlier_flags <- function(long, response = "od", time = "time", sample = "sample", id = "well") {
   na <- NA_real_
@@ -6166,7 +6228,8 @@ replicate_outlier_flags <- function(long, response = "od", time = "time", sample
     dist <- if (nzchar(note)) rep(na, length(wells)) else ad / md
     rows[[length(rows) + 1L]] <- data.frame(sample = s, replicate = g$replicate[match(wells, g$well)], well = wells,
                                             abs_dev = unname(ad), distance = unname(dist),
-                                            flagged = is.finite(dist) & dist > 3, note = note, stringsAsFactors = FALSE)
+                                            flagged = is.finite(dist) & dist > 3 & ad > 0.10 * mean(abs(medc), na.rm = TRUE),
+                                            note = note, stringsAsFactors = FALSE)
   }
   do.call(rbind, c(rows, list(make.row.names = FALSE)))
 }
@@ -6540,11 +6603,14 @@ s22_posthoc_for_metric <- function(rm, metric, method = "holm_welch", reference 
   ref <- if (!is.null(reference) && length(reference) == 1 && !is.na(reference) && nzchar(reference) && reference %in% keep) reference else NULL
   if (!is.null(reference) && length(reference) == 1 && !is.na(reference) && nzchar(reference) && is.null(ref))
     out$notes <- c(out$notes, paste0("The reference '", reference, "' has no usable values for this metric, so all pairs are compared."))
-  if (identical(method, "dunnett") && is.null(ref))
-    out$notes <- c(out$notes, "Dunnett's test compares each sample with one reference: set the reference sample under Stats & Reports; all pairs are compared meanwhile.")
   out$reference <- ref %||% ""
   out$omnibus <- omnibus_table(v[sel], g[sel])
   out$posthoc <- posthoc_table(v[sel], g[sel], method = method, reference = ref)
+  if (identical(method, "dunnett") && is.null(ref)) {   # v2.26.1: say which sample the engine used, not "all pairs"
+    used <- if (is.data.frame(out$posthoc) && "group2" %in% names(out$posthoc)) unique(as.character(out$posthoc$group2)) else character(0)
+    out$notes <- c(out$notes, paste0("Dunnett's test compares each sample with one reference: set the reference sample under Stats & Reports; ",
+                                     if (length(used) == 1L) paste0("'", used, "' (the first sample) is used meanwhile.") else "the first sample is used meanwhile."))
+  }
   out$n <- attr(out$posthoc, "n")
   if (any(ns[keep] < 3)) out$notes <- c(out$notes, "Some groups have n < 3.")
   out
@@ -8130,10 +8196,12 @@ write_legend_key <- function(plot, file, format = "svg", dpi = 300) {
 }
 
 # ── v2.23.1: colour and marker words for the legend text starter ─────────────
-# The nearest of twelve named colours by RGB distance ("#E69F00" -> "orange"); NA for something that is not a colour.
+# The nearest of sixteen named colours by RGB distance ("#E69F00" -> "orange"); NA for something that is not a colour.
 COLOUR_WORD_RGB <- list(black = c(0, 0, 0), white = c(255, 255, 255), grey = c(128, 128, 128), red = c(228, 26, 28),
                         orange = c(255, 127, 0), yellow = c(255, 215, 0), green = c(60, 170, 60), teal = c(0, 150, 136),
-                        blue = c(40, 100, 200), purple = c(130, 60, 160), pink = c(240, 130, 190), brown = c(150, 80, 30))
+                        blue = c(40, 100, 200), purple = c(130, 60, 160), pink = c(240, 130, 190), brown = c(150, 80, 30),
+                        # v2.26.1: four more words for the colours past the eighth sample (none is nearer an earlier palette colour)
+                        navy = c(0, 0, 128), olive = c(128, 128, 0), maroon = c(128, 0, 0), magenta = c(255, 0, 255))
 colour_word <- function(hex) {
   ref <- do.call(rbind, COLOUR_WORD_RGB)
   vapply(as.character(hex), function(h) {
@@ -8458,11 +8526,14 @@ error_spread <- function(v, type = "sem", mult = 1) {
 }
 # Per (time, sample) summary of a replicate frame (columns time, variable, value): n, mean and the bounds the error
 # types and the quantile bands need. Used by the main curve for range / iqr bars and the quantile bands.
+# v2.26.1: a `dataset` column (Compare tab: two files with the same sample names) and a `group` column (a sample drawn in
+# several panels: its rows repeated once per panel) are part of the key and kept, so neither pools rows it must not.
 replicate_bounds <- function(rp) {
   if (is.null(rp) || nrow(rp) == 0) return(NULL)
   rp <- rp[is.finite(rp$value), , drop = FALSE]
   if (nrow(rp) == 0) return(NULL)
-  key <- paste(rp$variable, format(rp$time, digits = 15), sep = "\r")
+  extra <- intersect(c("dataset", "group"), names(rp))
+  key <- do.call(paste, c(lapply(extra, function(k) as.character(rp[[k]])), list(rp$variable, format(rp$time, digits = 15), sep = "\r")))
   idx <- split(seq_len(nrow(rp)), factor(key, levels = unique(key)))
   rows <- lapply(idx, function(i) {
     v <- rp$value[i]
@@ -8470,7 +8541,10 @@ replicate_bounds <- function(rp) {
     data.frame(time = rp$time[i[1]], variable = as.character(rp$variable[i[1]]), n = length(v), mean = mean(v),
                min = min(v), max = max(v), q025 = q[1], q25 = q[2], q75 = q[3], q975 = q[4], stringsAsFactors = FALSE)
   })
-  do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  out <- do.call(rbind, c(rows, list(make.row.names = FALSE)))
+  first <- vapply(idx, `[`, 1L, 1L)
+  for (k in extra) out[[k]] <- rp[[k]][first]
+  out
 }
 # Lower / upper error bounds for the asymmetric types, aligned to the rows of `plot_data` (time, variable, mean_value):
 # data.frame(lo, hi) (NA where the point has fewer than 2 replicates). `bounds` = replicate_bounds().
@@ -8479,8 +8553,9 @@ asymmetric_error_bounds <- function(plot_data, bounds, type = "range", mult = 1)
   if (is.null(bounds) || !nr) return(out)
   # finding 27: format(x, digits = 15) pads to a common width / decimals PER VECTOR, so the keys of two different
   # vectors never matched (a plot_data subset got no error bars); sprintf() formats each time on its own.
-  k  <- match(paste(plot_data$variable, time_match_key(plot_data$time), sep = "\r"),
-              paste(bounds$variable, time_match_key(bounds$time), sep = "\r"))
+  ds <- if ("dataset" %in% names(plot_data) && "dataset" %in% names(bounds)) list(as.character(plot_data$dataset), as.character(bounds$dataset)) else list("", "")   # v2.26.1: Compare
+  k  <- match(paste(ds[[1]], plot_data$variable, time_match_key(plot_data$time), sep = "\r"),
+              paste(ds[[2]], bounds$variable, time_match_key(bounds$time), sep = "\r"))
   ok <- !is.na(k) & (bounds$n[k] >= 2 | is.na(bounds$n[k]))
   lo_b <- if (type == "range") bounds$min else bounds$q25
   hi_b <- if (type == "range") bounds$max else bounds$q75
@@ -8838,10 +8913,18 @@ apply_panel_cfg <- function(pg, cfg, subscripts = TRUE) {
   if (lg %in% c("right", "bottom", "top", "none")) pg <- pg + ggplot2::theme(legend.position = lg)
   else if (startsWith(lg, "inside-")) pg <- pg + inside_legend_theme(sub("^inside-", "", lg))
   xl <- c(n1(cfg$xmin), n1(cfg$xmax)); yl <- c(n1(cfg$ymin), n1(cfg$ymax))
+  # v2.26.1: a bound <= 0 on a log axis cannot be drawn (it broke the whole figure: "'from' must be a finite number");
+  # it is left blank (automatic) and the figure says so through attr "kc_cfg_note"
+  is_log <- function(a) { sc <- tryCatch(pg$scales$get_scales(a), error = function(e) NULL); if (is.null(sc)) return(FALSE)
+                          tr <- tryCatch(sc$get_transformation(), error = function(e) sc$trans); !is.null(tr) && grepl("log", tr$name %||% "") }
+  note <- character(0)
+  if (any(is.finite(xl) & xl <= 0) && is_log("x")) { xl[is.finite(xl) & xl <= 0] <- NA_real_; note <- c(note, "x") }
+  if (any(is.finite(yl) & yl <= 0) && is_log("y")) { yl[is.finite(yl) & yl <= 0] <- NA_real_; note <- c(note, "y") }
   if (all(is.finite(xl)) && xl[1] >= xl[2]) xl <- c(NA_real_, NA_real_)       # an impossible range is ignored
   if (all(is.finite(yl)) && yl[1] >= yl[2]) yl <- c(NA_real_, NA_real_)
   if (any(is.finite(c(xl, yl))))
     pg <- suppressMessages(pg + ggplot2::coord_cartesian(xlim = if (any(is.finite(xl))) xl else NULL, ylim = if (any(is.finite(yl))) yl else NULL))   # (clipped: a curve leaves the panel at the range's edge)
+  if (length(note)) attr(pg, "kc_cfg_note") <- note
   pg
 }
 # v2.26.0: a sample drawn differently in one panel ("A legend in each panel"): its name, colour, marker, fill and line there.
@@ -8918,17 +9001,23 @@ panel_letter <- function(i, case = "upper", prefix = "A") {
 # panels separated by ";", e.g. "A; B"); `every` = samples drawn in every panel (a control). The panels are the typed names
 # in first-appearance order, then "Other" for the samples with none. NULL when fewer than `min_panels` panels are named.
 # A plain one-panel-per-sample assignment gives exactly sample_group_map()'s panels and order.
+# v2.26.1: `panels` may also be a LIST (sample -> its panel name(s)), taken as they are: a display name or a picked panel
+# name that contains ";" ("WT; no phage") is one panel, not two. A catch-all "Other" merges with a panel typed "Other".
 panel_membership <- function(samples, panels, every = character(0), min_panels = 2L) {
   if (!length(samples)) return(NULL)
-  raw <- if (is.null(panels)) rep("", length(samples)) else as.character(unname(panels[samples]))
-  raw[is.na(raw)] <- ""
-  parts <- setNames(lapply(raw, function(x) { v <- trimws(strsplit(x, ";", fixed = TRUE)[[1]]); unique(v[nzchar(v)]) }), samples)
+  parts <- if (is.list(panels)) {
+    setNames(lapply(samples, function(x) { v <- trimws(as.character(unlist(panels[[x]]))); unique(v[!is.na(v) & nzchar(v)]) }), samples)
+  } else {
+    raw <- if (is.null(panels)) rep("", length(samples)) else as.character(unname(panels[samples]))
+    raw[is.na(raw)] <- ""
+    setNames(lapply(raw, function(x) { v <- trimws(strsplit(x, ";", fixed = TRUE)[[1]]); unique(v[nzchar(v)]) }), samples)
+  }
   every <- intersect(as.character(every), samples)
   own   <- setdiff(samples, every)
   named <- unique(unlist(parts[own], use.names = FALSE))
   if (length(named) < min_panels) return(NULL)
   none  <- own[lengths(parts[own]) == 0L]
-  lv    <- c(named, if (length(none)) "Other")
+  lv    <- unique(c(named, if (length(none)) "Other"))   # v2.26.1: a panel typed "Other" no longer duplicates the level
   map   <- setNames(lapply(samples, function(x) if (x %in% every) lv else if (length(parts[[x]])) parts[[x]] else "Other"), samples)
   list(map = map, levels = lv)
 }
@@ -12221,19 +12310,20 @@ server <- function(input, output, session) {
     pal <- palette_in()                                                         # round 3: one valid palette name, "custom" otherwise
     rv$palette_colors <- if (pal != "custom" && !is.null(rv$od_vars))
       get_palette_colors(pal, length(rv$od_vars)) else NULL
-    # v2.10: these two palettes have 8 distinct colours; beyond that they repeat.
-    if (pal %in% c("colorblind", "publication", "set1") &&
+    # v2.26.1: these palettes no longer repeat past 8 samples (distinct_colours()), but only Okabe-Ito's own 8 are
+    # colour-blind safe, so say so when more are drawn.
+    if (pal %in% c("colorblind", "publication") &&
         !is.null(rv$od_vars) && length(rv$od_vars) > 8)
-      showNotification(paste0("The '", pal, "' palette has 8 distinct colours but ",
-                              length(rv$od_vars), " samples are loaded, so colours will repeat. ",
-                              "Use Viridis, or set colours per sample."),
-                       type = "warning", duration = 10)
+      showNotification(paste0("Okabe-Ito has 8 colour-blind-safe colours; samples 9 to ", length(rv$od_vars),
+                              " get further distinct colours that are not all colour-blind safe. ",
+                              "Different markers or line types keep them apart for every reader."),
+                       type = "message", duration = 10)
   })
   
   output$palette_preview <- renderUI({
     pal <- palette_in()
     if (pal == "custom" || is.null(rv$od_vars)) return(NULL)
-    cols <- get_palette_colors(pal, min(8, length(rv$od_vars)))
+    cols <- get_palette_colors(pal, min(24, length(rv$od_vars)))   # v2.26.1: every sample's colour (up to 24), not just the first 8
     div(p("Preview:"),
         div(style = "margin-top:6px;",
             lapply(cols, function(col)
@@ -12976,6 +13066,7 @@ server <- function(input, output, session) {
       sample_aesthetics <- list()
       samps <- isolate(sel_samples())
       if (!is.null(samps)) {
+        ra <- resolve_aesthetics(samps)   # v2.26.1: what the figure draws, for a sample whose sidebar widgets were never built (page 2+)
         for (vn in samps) {
           vid     <- safe_id(vn)
           col_sel <- input[[paste0("color_selector_", vid)]]
@@ -12984,12 +13075,12 @@ server <- function(input, output, session) {
           else if (!is.null(col_sel) && col_sel == "custom")
             normalize_hex_color(input[[paste0("color_", vid)]])
           else if (!is.null(col_sel)) col_sel
-          else "#000000"
+          else unname(ra$colors[[vn]]) %||% "#000000"
           sample_aesthetics[[vn]] <- list(
             color        = color,
-            shape        = input[[paste0("shape_",        vid)]],
-            shape_filled = input[[paste0("shape_filled_", vid)]],
-            line_type    = input[[paste0("line_type_",    vid)]],
+            shape        = input[[paste0("shape_",        vid)]] %||% as.character(unname(ra$shapes[[vn]])),
+            shape_filled = input[[paste0("shape_filled_", vid)]] %||% unname(ra$filled_map[[vn]]),
+            line_type    = input[[paste0("line_type_",    vid)]] %||% unname(ra$line_types[[vn]]),
             legend_label = display_name_of(vn, rv$display_names),   # v2.21: the display name (the key stays the raw name)
             group        = trimws(input[[paste0("group_", vid)]] %||% ""),     # v2.18; a file with this key also carries the windows
             panel        = trimws(input[[paste0("facet_of_", vid)]] %||% ""),  # v2.22: the panel typed in the Panels section
@@ -13096,14 +13187,18 @@ server <- function(input, output, session) {
     for (nm in grep("^panelsmp_", names(input), value = TRUE)) {   # sample styles already on screen take the file's values
       hit <- NULL
       for (g in names(rv$panel_cfg)) for (x in names(rv$panel_cfg[[g]]$samples %||% list())) for (f in PANEL_SAMPLE_FIELDS)
-        if (identical(nm, panel_smp_id(g, x, f))) hit <- rv$panel_cfg[[g]]$samples[[x]][[f]]
+        if (identical(nm, smp_id_k(g, x, f))) hit <- rv$panel_cfg[[g]]$samples[[x]][[f]]
       tryCatch(if (grepl("_name$|_color$", nm)) updateTextInput(session, nm, value = hit %||% "") else updateSelectInput(session, nm, selected = hit %||% ""),
                error = function(e) NULL)
     }
+    # v2.26.1: each on-screen box is matched to (panel, field) by its exact id: the old regex read "..._legend_title" as the
+    # field "title", and a prefix test matched panel "WT" to the boxes of panel "WT 2"
+    cfg_ids <- list(); for (lv in names(rv$panel_cfg)) for (f0 in PANEL_CFG_FIELDS) cfg_ids[[cfg_id_k(lv, f0)]] <- c(lv, f0)
+    fields_long_first <- PANEL_CFG_FIELDS[order(-nchar(PANEL_CFG_FIELDS))]
     for (nm in grep("^panelcfg_", names(input), value = TRUE)) {   # panels already on screen take the file's values
-      g <- NULL; for (lv in names(rv$panel_cfg)) if (startsWith(nm, paste0("panelcfg_", safe_id(lv), "_"))) g <- lv
-      f <- sub("^panelcfg_.*_(title|legend|legend_title|xlab|ylab|xmin|xmax|ymin|ymax|hide_points|hide_lines|hide_errors)$", "\\1", nm)
-      v <- if (is.null(g)) NULL else rv$panel_cfg[[g]][[f]]
+      hit <- cfg_ids[[nm]]
+      f <- if (!is.null(hit)) hit[2] else { e <- fields_long_first[endsWith(nm, paste0("_", fields_long_first))]; if (length(e)) e[1] else next }
+      v <- if (is.null(hit)) NULL else rv$panel_cfg[[hit[1]]][[f]]
       tryCatch(if (startsWith(f, "hide_")) updateCheckboxInput(session, nm, value = isTRUE(v))
                else if (f %in% c("xmin", "xmax", "ymin", "ymax")) updateNumericInput(session, nm, value = if (is.null(v)) NA else v)
                else if (identical(f, "legend")) updateSelectInput(session, nm, selected = v %||% "")
@@ -13171,7 +13266,7 @@ server <- function(input, output, session) {
     for (pfx in sample_prefixes) is_sample_key <- is_sample_key | startsWith(gkeys, pfx)
     is_sample_key <- is_sample_key & !(gkeys %in% global_exceptions)
     skip_key <- gkeys %in% data_inputs | is_sample_key | is_table_state_key(gkeys)
-    unk_key  <- !skip_key & !(gkeys %in% inp_names)
+    unk_key  <- !skip_key & !(gkeys %in% inp_names) & !grepl("^(region|marker)_.*_[0-9]+$", gkeys)   # v2.26.1: drawn later from the file (dyn_init)
     ignored_unknown <- gkeys[unk_key]
     for (gi in which(!skip_key & !unk_key)) {
       nm <- gkeys[gi]
@@ -13224,10 +13319,10 @@ server <- function(input, output, session) {
     
     details_html <- if (length(saved_names) > 0) {
       match_lines   <- if (length(matched)   > 0)
-        paste0("<li style='color:#155724'>&#10003; ", matched, "</li>", collapse = "")
+        paste0("<li style='color:#155724'>&#10003; ", html_escape(matched), "</li>", collapse = "")   # v2.26.1: names from the file are text, not HTML
       else ""
       unmatch_lines <- if (length(unmatched) > 0)
-        paste0("<li style='color:#856404'>&#9675; ", unmatched,
+        paste0("<li style='color:#856404'>&#9675; ", html_escape(unmatched),
                " <em>(not in current data)</em></li>", collapse = "")
       else ""
       paste0("<ul class='match-list'>", match_lines, unmatch_lines, "</ul>")
@@ -13321,14 +13416,18 @@ server <- function(input, output, session) {
     
     # ── Reset per-sample aesthetics to position-based defaults ───────────────
     cur_samps  <- isolate(sel_samples())
-    def_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00",
-                    "#A65628","#F781BF","#999999","#66C2A5","#FC8D62","#8DA0CB")
-    shape_opts <- c(16, 15, 17, 18, 25, 4, 8, 23, 3, 10)
+    # v2.26.1: the colours the default palette (the journal standard's Okabe-Ito) gives each sample by its place in the file,
+    # as at startup; it wrote the "custom" cycle (red, blue ...) while the palette menu said Okabe-Ito
+    def_pal    <- as.character(APP_DEFAULTS$color_palette %||% "custom")
+    vars_all   <- isolate(rv$od_vars)
+    pal_cols   <- if (!identical(def_pal, "custom")) get_palette_colors(def_pal, length(vars_all)) else NULL
+    def_colors <- default_sample_colours(length(cur_samps))
     if (!is.null(cur_samps)) {
       for (i in seq_along(cur_samps)) {
         vn        <- cur_samps[i]; vid <- safe_id(vn)
-        def_col   <- def_colors[(i - 1) %% length(def_colors) + 1]
-        def_shape <- as.character(shape_opts[(i - 1) %% length(shape_opts) + 1])
+        k         <- match(vn, vars_all)
+        def_col   <- if (!is.null(pal_cols) && !is.na(k)) pal_cols[k] else def_colors[i]
+        def_shape <- as.character(default_sample_shape(i))
         tryCatch({
           updateSelectInput(session,   paste0("color_selector_", vid), selected = "custom")
           updateTextInput(session,     paste0("color_",          vid), value    = def_col)
@@ -13399,8 +13498,15 @@ server <- function(input, output, session) {
     rv$style_page <- min(n_pages, rv$style_page + 1L)
   })
   
+  # v2.26.1: a redraw of the sample widgets (another selection, another page) keeps what each widget holds; only a new
+  # settings file / theme / Clear & Reset (rv$imported_settings) or a palette change sets them from their source again.
+  # It used to rebuild every widget from its default, so hiding one sample undid every other sample's colour and marker.
+  var_settings_key <- NULL
   output$var_settings <- renderUI({
     req(rv$od_vars, sel_samples())
+    vs_key <- list(rv$imported_settings$samples, rv$palette_colors)
+    keep_inputs <- !is.null(var_settings_key) && identical(vs_key, var_settings_key)
+    var_settings_key <<- vs_key
     all_samps <- sel_samples()
     n_total   <- length(all_samps)
     n_pages   <- ceiling(n_total / PAGE_SIZE)
@@ -13412,9 +13518,7 @@ server <- function(input, output, session) {
     # v2.23.9: one Shape menu of base forms and ONE Filled box (off = the open marker); the old "Open ..." entries are gone
     shape_opts <- c("Circle" = 16, "Square" = 15, "Triangle Up" = 17, "Triangle Down" = 25, "Diamond" = 18,
                     "Cross" = 4, "X" = 8, "Plus" = 3, "Star" = 10)
-    default_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
-                        "#984EA3","#FF7F00","#A65628","#F781BF",
-                        "#999999","#66C2A5","#FC8D62","#8DA0CB")
+    default_colors <- default_sample_colours(n_total)   # v2.26.1: no repeat past the twelfth sample
     named_colors   <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
                         "#984EA3","#FF7F00","#FFFF33","#A65628",
                         "#F781BF","#999999","#009E73")
@@ -13438,14 +13542,19 @@ server <- function(input, output, session) {
       i   <- idx_start + j - 1L   # global index across all samples
       vn  <- page_samps[j]
       vid <- safe_id(vn)
-      shape_def <- as.character(c(16, 15, 17, 18, 25, 4, 8, 16, 15, 17, 3, 10)[1 + (i - 1L) %% 12L])   # the default cycle of v2.21 (its "open" entries drew solid markers: the base form)
+      shape_def <- as.character(default_sample_shape(i))   # the default cycle of v2.21 (its "open" entries drew solid markers: the base form)
       
       imp_aes <- rv$imported_settings$samples[[vn]]
       qe_c    <- isolate(rv$qe_colors[[vn]])   # v2.21: a colour picked in the quick-edit strip (isolated: this UI must not redraw on every pick)
+      cur     <- function(pfx) if (keep_inputs) isolate(input[[paste0(pfx, vid)]]) else NULL   # v2.26.1: what the widget holds now
+      cur_sel <- cur("color_selector_")
       
       if (!is.null(qe_c)) {
         color_def <- qe_c
         sel_def   <- "custom"
+      } else if (!is.null(cur_sel)) {                 # v2.26.1: a redraw (selection, page) keeps the colour chosen
+        sel_def   <- cur_sel
+        color_def <- if (identical(cur_sel, "custom")) normalize_hex_color(cur("color_") %||% "#000000") else cur_sel
       } else if (!is.null(imp_aes)) {
         color_def <- imp_aes$color %||% default_colors[1]
         sel_def   <- "custom"
@@ -13462,11 +13571,15 @@ server <- function(input, output, session) {
       }
       if (is.na(color_def) || is.null(color_def)) color_def <- "#000000"
       
-      imp_mk         <- if (!is.null(imp_aes$shape)) normalise_marker(imp_aes$shape, imp_aes$shape_filled %||% TRUE) else NULL   # v2.23.9: an old code shows as its base form + the Filled box
+      imp_mk         <- if (!is.null(imp_aes[["shape"]])) normalise_marker(imp_aes[["shape"]], imp_aes[["shape_filled"]] %||% TRUE) else NULL   # v2.23.9: an old code shows as its base form + the Filled box ([[ ]]: $shape would match shape_filled)
       default_shape  <- if (!is.null(imp_mk))              as.character(imp_mk$shape)     else shape_def
-      default_lt     <- if (!is.null(imp_aes$line_type))    imp_aes$line_type              else "solid"
-      default_filled <- if (!is.null(imp_mk))              imp_mk$filled                  else if (!is.null(imp_aes$shape_filled)) imp_aes$shape_filled else TRUE
-      default_grp    <- if (!is.null(imp_aes$group))        as.character(imp_aes$group)    else ""   # v2.18
+      default_lt     <- if (!is.null(imp_aes[["line_type"]])) imp_aes[["line_type"]]      else "solid"
+      default_filled <- if (!is.null(imp_mk))              imp_mk$filled                  else if (!is.null(imp_aes[["shape_filled"]])) imp_aes[["shape_filled"]] else TRUE
+      default_grp    <- if (!is.null(imp_aes[["group"]]))  as.character(imp_aes[["group"]]) else ""   # v2.18
+      default_shape  <- as.character(cur("shape_") %||% default_shape)     # v2.26.1: a redraw keeps what the widgets hold
+      default_lt     <- cur("line_type_")    %||% default_lt
+      default_filled <- cur("shape_filled_") %||% default_filled
+      default_grp    <- cur("group_")        %||% default_grp
       
       div(
         style = "margin-bottom:12px;padding:10px;border:1px solid #ddd;border-radius:6px;background:#fafafa;",
@@ -13703,64 +13816,82 @@ server <- function(input, output, session) {
   })
 
   # ── Dynamic UI: region / marker settings ────────────────────────────────────
+  # v2.26.1: these inputs only exist once their list is drawn, so a settings file loaded with the switch off used to lose
+  # them (unknown keys). Each box now starts from the loaded file's value when that file is newer than the list, else from
+  # the value it had (so changing the count keeps the others), else the default.
+  dyn_seen <- new.env(parent = emptyenv())
+  dyn_init <- function(which) {
+    imp <- rv$imported_settings$global
+    fresh <- !is.null(imp) && !identical(imp, dyn_seen[[which]]); assign(which, imp, envir = dyn_seen)
+    function(id, def) {
+      v <- if (fresh) tryCatch(settings_unbox(imp[[id]]), error = function(e) NULL) else NULL
+      if (is.null(v) || length(v) != 1L || is.list(v) || is.na(v)) v <- isolate(input[[id]])
+      if (is.null(v) || length(v) != 1L || is.list(v) || is.na(v)) return(def)
+      if (is.numeric(def)) { v <- suppressWarnings(as.numeric(v)); if (is.finite(v)) v else def }
+      else if (is.logical(def)) isTRUE(as.logical(v))
+      else as.character(v)
+    }
+  }
   output$region_settings <- renderUI({
     req(count_in("region_count", 5L), input$enable_highlighting)
+    iv <- dyn_init("region")
     do.call(tagList, lapply(seq_len(count_in("region_count", 5L)), function(i) {
       div(style = "border:1px solid #ddd;padding:10px;margin-bottom:8px;border-radius:5px;",
           h5(paste("Region", i)),
           fluidRow(
-            column(6, numericInput(paste0("region_x_min_", i), "X min:", 0)),
-            column(6, numericInput(paste0("region_x_max_", i), "X max:", 60))
+            column(6, numericInput(paste0("region_x_min_", i), "X min:", iv(paste0("region_x_min_", i), 0))),
+            column(6, numericInput(paste0("region_x_max_", i), "X max:", iv(paste0("region_x_max_", i), 60)))
           ),
           fluidRow(
-            column(6, numericInput(paste0("region_y_min_", i), "Y min:", 0.01)),
-            column(6, numericInput(paste0("region_y_max_", i), "Y max:", 1))
+            column(6, numericInput(paste0("region_y_min_", i), "Y min:", iv(paste0("region_y_min_", i), 0.01))),
+            column(6, numericInput(paste0("region_y_max_", i), "Y max:", iv(paste0("region_y_max_", i), 1)))
           ),
           selectInput(paste0("region_color_", i), "Fill Color:",
                       choices  = c("Light Gray"   = "#ebebeb", "Light Blue"  = "#e6f3ff",
                                    "Light Red"    = "#ffebeb", "Light Green" = "#ebffeb",
                                    "Light Yellow" = "#ffffeb", "Custom"      = "custom"),
-                      selected = "#ebebeb"),
+                      selected = iv(paste0("region_color_", i), "#ebebeb")),
           conditionalPanel(
             condition = paste0("input['region_color_", i, "'] == 'custom'"),
-            textInput(paste0("region_color_custom_", i), "HEX:", "#ebebeb")
+            textInput(paste0("region_color_custom_", i), "HEX:", iv(paste0("region_color_custom_", i), "#ebebeb"))
           ),
-          sliderInput(paste0("region_alpha_", i), "Transparency:", 0, 1, 0.3, 0.05)
+          sliderInput(paste0("region_alpha_", i), "Transparency:", 0, 1, iv(paste0("region_alpha_", i), 0.3), 0.05)
       )
     }))
   })
   
   output$time_marker_settings <- renderUI({
     req(count_in("marker_count", 10L), input$enable_time_markers)
+    iv <- dyn_init("marker")
     do.call(tagList, lapply(seq_len(count_in("marker_count", 10L)), function(i) {
       div(style = "border:1px solid #ddd;padding:10px;margin-bottom:8px;border-radius:5px;",
           h5(paste("Marker", i)),
-          numericInput(paste0("marker_time_", i), "Time Point:", 30),
+          numericInput(paste0("marker_time_", i), "Time Point:", iv(paste0("marker_time_", i), 30)),
           selectInput(paste0("marker_line_type_", i), "Line Type:",
                       choices  = c("Dashed" = "dashed", "Solid" = "solid",
                                    "Dotted" = "dotted", "DotDash" = "dotdash",
                                    "LongDash" = "longdash", "TwoDash" = "twodash"),
-                      selected = "dashed"),
+                      selected = iv(paste0("marker_line_type_", i), "dashed")),
           selectInput(paste0("marker_color_", i), "Color:",
                       choices  = c("Black" = "#000000", "Red"   = "#E41A1C",
                                    "Blue"  = "#377EB8", "Green" = "#4DAF4A",
                                    "Purple" = "#984EA3", "Orange" = "#FF7F00",
                                    "Gray"  = "#999999", "Custom" = "custom"),
-                      selected = "#000000"),
+                      selected = iv(paste0("marker_color_", i), "#000000")),
           conditionalPanel(
             condition = paste0("input['marker_color_", i, "'] == 'custom'"),
-            textInput(paste0("marker_color_custom_", i), "HEX:", "#000000")
+            textInput(paste0("marker_color_custom_", i), "HEX:", iv(paste0("marker_color_custom_", i), "#000000"))
           ),
-          sliderInput(paste0("marker_size_", i), "Width:", 0.1, 3, 1, 0.1),
-          checkboxInput(paste0("marker_label_", i), "Add Label", FALSE),
+          sliderInput(paste0("marker_size_", i), "Width:", 0.1, 3, iv(paste0("marker_size_", i), 1), 0.1),
+          checkboxInput(paste0("marker_label_", i), "Add Label", iv(paste0("marker_label_", i), FALSE)),
           conditionalPanel(
             condition = paste0("input['marker_label_", i, "'] == true"),
-            textInput(paste0("marker_text_", i),           "Label:",    paste0("t=", 30)),
-            numericInput(paste0("marker_label_size_", i),  "Size:",     4, 2, 12),
+            textInput(paste0("marker_text_", i),           "Label:",    iv(paste0("marker_text_", i), paste0("t=", 30))),
+            numericInput(paste0("marker_label_size_", i),  "Size:",     iv(paste0("marker_label_size_", i), 4), 2, 12),
             selectInput(paste0("marker_label_position_", i), "Position:",
                         choices = c("Top" = "top", "Middle" = "middle", "Bottom" = "bottom"),
-                        selected = "top"),
-            numericInput(paste0("marker_label_hjust_", i), "H-Offset:", 0, -5, 5, 0.1)
+                        selected = iv(paste0("marker_label_position_", i), "top")),
+            numericInput(paste0("marker_label_hjust_", i), "H-Offset:", iv(paste0("marker_label_hjust_", i), 0), -5, 5, 0.1)
           )
       )
     }))
@@ -14154,16 +14285,12 @@ server <- function(input, output, session) {
     leg_labels <- setNames(character(n), samples)
     filled_map <- setNames(logical(n),   samples)
     groups     <- setNames(character(n), samples)   # v2.18: free-text sample group ("" = none)
-    def_colors <- c("#000000","#E41A1C","#377EB8","#4DAF4A",
-                    "#984EA3","#FF7F00","#A65628","#F781BF",
-                    "#999999","#66C2A5","#FC8D62","#8DA0CB")
-    def_shapes <- c(16, 15, 17, 18, 25, 4, 8, 23, 3, 10)
-    
+    def_colors <- default_sample_colours(n)   # v2.26.1: no repeat past the twelfth sample
     for (i in seq_len(n)) {
       vn  <- samples[i]; vid <- safe_id(vn)
       si  <- input[[paste0("shape_", vid)]]
       fi <- input[[paste0("shape_filled_", vid)]]
-      mk <- normalise_marker(if (!is.null(si)) si else def_shapes[(i - 1) %% length(def_shapes) + 1],     # v2.23.9: one rule, here
+      mk <- normalise_marker(if (!is.null(si)) si else default_sample_shape(i),     # v2.23.9: one rule, here (v2.26.1: the sidebar's cycle)
                              if (!is.null(fi)) fi else TRUE)
       shapes[i] <- mk$shape
       filled_map[i] <- mk$filled
@@ -14302,7 +14429,7 @@ server <- function(input, output, session) {
       if (!is.null(isolate(rv$qe_colors[[nm]]))) next
       col <- isolate(paper_colour_of(nm)) %||%
         (if (!is.null(isolate(rv$palette_colors)) && !is.na(isolate(rv$palette_colors[i]))) isolate(rv$palette_colors[i]) else NULL) %||%
-        c("#000000","#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#A65628","#F781BF","#999999","#66C2A5","#FC8D62","#8DA0CB")[1 + (i - 1L) %% 12L]
+        default_sample_colours(length(vars))[i]
       vid <- safe_id(nm)
       tryCatch({
         updateSelectInput(session, paste0("color_selector_", vid), selected = "custom")
@@ -14503,9 +14630,27 @@ server <- function(input, output, session) {
   # v2.26.0: "A legend in each panel": every panel is its own figure (own legend, title, axis titles and ranges), laid out
   # in a grid with the panel letters. rv$panel_cfg holds what a settings file brought for panels not on screen yet.
   panel_legend_mode <- function() isTRUE(input$facet_by_group) && identical(sel1("facet_legends", "shared"), "each")
-  panel_cfg_id <- function(g, f) paste0("panelcfg_", safe_id(g), "_", f)
+  # v2.26.1: where a panel's settings live. With "Each sample its own panel" the panel is the sample's DISPLAY name, so its
+  # settings are kept under the raw sample name (pkey): renaming a sample keeps its panel's title, ranges and styles, and
+  # a sample later given the old name does not inherit them. The box ids come from panel_idp(), which gives names that
+  # differ only in punctuation ("MOI 1", "MOI_1", "MOI-1") ids of their own.
+  pkey <- function(g) {
+    if (!identical(sel1("facet_source", "group"), "each") || is.null(rv$od_vars)) return(g)
+    hit <- rv$od_vars[vapply(rv$od_vars, dname, "") == g]
+    if (length(hit) == 1L) hit else g
+  }
+  panel_id_reg <- new.env(parent = emptyenv())
+  panel_idp <- function(k) {
+    k <- as.character(k)[1]; got <- panel_id_reg[[paste0("n:", k)]]; if (!is.null(got)) return(got)
+    base <- gsub("[^A-Za-z0-9_]", "_", k); used <- unlist(mget(ls(panel_id_reg), envir = panel_id_reg), use.names = FALSE)
+    id <- base; j <- 1L; while (id %in% used) { j <- j + 1L; id <- paste0(base, "_", j) }
+    assign(paste0("n:", k), id, envir = panel_id_reg); id
+  }
+  cfg_id_k <- function(k, f) paste0("panelcfg_", panel_idp(k), "_", f)
+  smp_id_k <- function(k, x, f) paste0("panelsmp_", panel_idp(k), "__", safe_id(x), "_", f)
+  panel_cfg_id <- function(g, f) cfg_id_k(pkey(g), f)
   panel_cfg_get <- function(g) {
-    st <- rv$panel_cfg[[g]] %||% list()
+    st <- rv$panel_cfg[[pkey(g)]] %||% list()
     setNames(lapply(PANEL_CFG_FIELDS, function(f) { v <- input[[panel_cfg_id(g, f)]]; if (is.null(v)) st[[f]] else v }), PANEL_CFG_FIELDS)
   }
   panel_cfg_all <- function(levels) {
@@ -14515,14 +14660,14 @@ server <- function(input, output, session) {
       keep <- Filter(function(v) { if (is.logical(v)) return(isTRUE(v)); v <- as.character(if (is.null(v)) "" else v)[1]; !is.na(v) && nzchar(trimws(v)) && !identical(v, "NA") }, cfg)
       keep <- lapply(keep, function(v) if (is.numeric(v) || is.logical(v)) v else trimws(as.character(v)[1]))
       sm <- panel_smp_all(g); if (length(sm)) keep$samples <- sm
-      if (length(keep)) out[[g]] <- keep
+      if (length(keep)) out[[pkey(g)]] <- keep
     }
     out
   }
   # v2.26.0: each sample's style in one panel (inputs panelsmp_<panel>__<sample>_<field>; rv$panel_cfg[[panel]]$samples)
-  panel_smp_id <- function(g, x, f) paste0("panelsmp_", safe_id(g), "__", safe_id(x), "_", f)
+  panel_smp_id <- function(g, x, f) smp_id_k(pkey(g), x, f)
   panel_smp_get <- function(g, samples) {
-    st <- rv$panel_cfg[[g]]$samples %||% list(); out <- list()
+    st <- rv$panel_cfg[[pkey(g)]]$samples %||% list(); out <- list()
     for (x in samples) {
       o <- setNames(lapply(PANEL_SAMPLE_FIELDS, function(f) { v <- input[[panel_smp_id(g, x, f)]]; if (is.null(v)) st[[x]][[f]] else v }), PANEL_SAMPLE_FIELDS)
       o <- Filter(function(v) { v <- as.character(if (is.null(v)) "" else v)[1]; !is.na(v) && nzchar(trimws(v)) }, o)
@@ -14532,7 +14677,8 @@ server <- function(input, output, session) {
   }
   panel_smp_all <- function(g) {
     sm <- sel_samples(); if (!length(sm)) return(list())
-    c(panel_smp_get(g, sm), (rv$panel_cfg[[g]]$samples %||% list())[setdiff(names(rv$panel_cfg[[g]]$samples %||% list()), sm)])
+    st <- rv$panel_cfg[[pkey(g)]]$samples %||% list()
+    c(panel_smp_get(g, sm), st[setdiff(names(st), sm)])
   }
   output$panel_custom_ui <- renderUI({
     if (!panel_legend_mode()) return(NULL)
@@ -14541,7 +14687,7 @@ server <- function(input, output, session) {
     if (is.null(pm)) return(p(style = "font-size:.8em;color:#888;", "Assign the samples to two or more panels to set each panel."))
     let <- sel1("facet_letters", "none")
     L <- if (let %in% FACET_LETTER_STYLES) panel_letter(seq_along(pm$levels), let, input$panel_label) else rep("", length(pm$levels))
-    val <- function(g, f, d = "") { v <- isolate(input[[panel_cfg_id(g, f)]]) %||% rv$panel_cfg[[g]][[f]] %||% d; if (is.null(v) || (length(v) == 1L && is.na(v))) d else v }
+    val <- function(g, f, d = "") { v <- isolate(input[[panel_cfg_id(g, f)]]) %||% rv$panel_cfg[[pkey(g)]][[f]] %||% d; if (is.null(v) || (length(v) == 1L && is.na(v))) d else v }
     num <- function(g, f) { v <- suppressWarnings(as.numeric(val(g, f, NA))); if (length(v) == 1L && is.finite(v)) v else NA }
     tagList(
       p(style = "font-size:.8em;color:#555;margin:6px 0 2px;", "Each panel (blank = as the whole figure):"),
@@ -14559,7 +14705,7 @@ server <- function(input, output, session) {
           fluidRow(column(4, checkboxInput(panel_cfg_id(g, "hide_points"), "Hide points", isTRUE(val(g, "hide_points", FALSE)))),
                    column(4, checkboxInput(panel_cfg_id(g, "hide_lines"), "Hide lines", isTRUE(val(g, "hide_lines", FALSE)))),
                    column(4, checkboxInput(panel_cfg_id(g, "hide_errors"), "Hide error bars / bands", isTRUE(val(g, "hide_errors", FALSE))))),
-          { gs <- samps[vapply(samps, function(x) g %in% pm$map[[x]], NA)]; st <- isolate(rv$panel_cfg[[g]]$samples) %||% list()
+          { gs <- samps[vapply(samps, function(x) g %in% pm$map[[x]], NA)]; st <- isolate(rv$panel_cfg[[pkey(g)]]$samples) %||% list()
             sv <- function(x, f) { v <- isolate(input[[panel_smp_id(g, x, f)]]) %||% st[[x]][[f]] %||% ""; if (is.na(v[1])) "" else v }
             tags$details(style = "margin:2px 0 6px;", tags$summary(style = "cursor:pointer;font-size:.85em;", "Samples in this panel (style here only)"),
               lapply(gs, function(x) div(style = "border-top:1px dotted #ccc;padding-top:2px;",
@@ -14654,10 +14800,10 @@ server <- function(input, output, session) {
   }
   panel_groups <- function(samples, aes_vals) {
     src <- sel1("facet_source", "group")
-    if (identical(src, "each")) return(setNames(vapply(samples, dname, ""), samples))   # v2.26.0: the display name is the panel
-    if (identical(src, "pick")) {                       # v2.26.0: the panels a sample was picked for, "A; B"
+    if (identical(src, "each")) return(setNames(as.list(vapply(samples, dname, "")), samples))   # v2.26.0: the display name is the panel (v2.26.1: a list, never split at ";")
+    if (identical(src, "pick")) {                       # v2.26.0: the panels a sample was picked for (v2.26.1: a list of names, not "A; B")
       pk <- panel_picks_now()
-      return(setNames(vapply(samples, function(x) paste(unlist(lapply(pk, function(q) if (x %in% q$samples) q$name)), collapse = "; "), ""), samples))
+      return(setNames(lapply(samples, function(x) unlist(lapply(pk, function(q) if (x %in% q$samples) q$name))), samples))
     }
     if (identical(src, "manual")) {
       man <- vapply(samples, function(vn) trimws(as.character(input[[paste0("facet_of_", safe_id(vn))]] %||% "")[1]), "")
@@ -14666,7 +14812,7 @@ server <- function(input, output, session) {
     if (!identical(src, "group") && isTRUE(rv$is_long_format) && !is.null(rv$data) && !is.null(rv$group_col) && src %in% names(rv$data)) {
       gv <- as.character(rv$data[[rv$group_col]]); col <- as.character(rv$data[[src]])
       meta <- vapply(samples, function(vn) { hit <- col[gv == vn]; hit <- hit[!is.na(hit) & nzchar(hit)]; if (length(hit)) hit[1] else "" }, "")
-      return(panel_assignment(samples, "meta", meta = meta))
+      return(as.list(panel_assignment(samples, "meta", meta = meta)))   # v2.26.1: a file's value is one panel
     }
     aes_vals$groups
   }
@@ -14766,7 +14912,9 @@ server <- function(input, output, session) {
 
   # ── Core plot builder ────────────────────────────────────────────────────────
   # highlight_samples: if non-NULL, all other samples are greyed out (not removed)
-  build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL, facets = TRUE) {
+  build_plot <- function(plot_data, samples, aes_vals, highlight_samples = NULL, facets = TRUE, rep_fn = NULL) {
+    # v2.26.1: the replicate frame comes from rep_fn when given (Compare: each file's own replicates), else the main data
+    rep_data <- function(samples, which = "kept") if (is.null(rep_fn)) prepare_replicate_data(samples = samples, which = which) else rep_fn(samples, which)
     shapes     <- aes_vals$shapes;     colors     <- aes_vals$colors
     line_types <- aes_vals$line_types; leg_labels <- aes_vals$leg_labels
     filled_map <- aes_vals$filled_map; n_vars     <- length(samples)
@@ -14861,7 +15009,7 @@ server <- function(input, output, session) {
     rp_all <- NULL                                         # the replicate frame, fetched once for every mode that needs it
     get_rp <- function() {
       if (is.null(rp_all)) {
-        r <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
+        r <- tryCatch(rep_data(samples = samples), error = function(e) NULL)
         if (!is.null(r) && nrow(r) > 0) {
           if (identical(sel1("y_scale_type"), "log")) r <- r[r$value > 0, , drop = FALSE]
           if (!is.null(grp_map)) r <- panel_expand(r, grp_map)
@@ -14914,7 +15062,7 @@ server <- function(input, output, session) {
       plot_data$err_lo <- lo_val
       plot_data$err_hi <- plot_data$mean_value + err_vals * em
       if (sel1("error_type", APP_DEFAULTS$error_type) %in% c("range", "iqr")) {          # v2.22: asymmetric about the mean (min-max / 25th-75th percentile)
-        rpb <- replicate_bounds(tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL))
+        rpb <- replicate_bounds(tryCatch(rep_data(samples = samples), error = function(e) NULL))
         ab  <- asymmetric_error_bounds(plot_data, rpb, sel1("error_type"), em)
         lo_a <- ab$lo
         if (identical(sel1("y_scale_type"), "log")) {
@@ -14973,7 +15121,7 @@ server <- function(input, output, session) {
     if (identical(dm0, "quantile_bands")) {                 # v2.22: nested empirical bands, IQR inside 2.5-97.5 %
       qb <- replicate_bounds(get_rp())
       if (!is.null(qb) && nrow(qb) > 0) {
-        if (!is.null(grp_map)) qb <- panel_expand(qb, grp_map)
+        if (!is.null(grp_map) && !"group" %in% names(qb)) qb <- panel_expand(qb, grp_map)   # v2.26.1: get_rp() rows are per panel already
         if (identical(sel1("y_scale_type"), "log")) {
           y_fq <- if (isTRUE(input$custom_y_limits)) eff_limits("y", plot_data)[1] else if (isTRUE(input$use_advanced_ticks)) 10^ylog_min_or() else 1e-9
           qb$q025 <- pmax(qb$q025, y_fq); qb$q975 <- pmax(qb$q975, y_fq); qb$q25 <- pmax(qb$q25, y_fq); qb$q75 <- pmax(qb$q75, y_fq)
@@ -14996,7 +15144,7 @@ server <- function(input, output, session) {
                             inherit.aes = FALSE, show.legend = FALSE)
     }
     if (isTRUE(input$show_replicate_points) && !identical(dm0, "jitter")) {
-      rp <- tryCatch(prepare_replicate_data(samples = samples), error = function(e) NULL)
+      rp <- tryCatch(rep_data(samples = samples), error = function(e) NULL)
       if (!is.null(rp) && nrow(rp) > 0) {
         if (sel1("y_scale_type", APP_DEFAULTS$y_scale_type) == "log") rp <- rp[rp$value > 0, , drop = FALSE]
         if (!is.null(grp_map)) rp <- panel_expand(rp, grp_map)
@@ -15008,7 +15156,7 @@ server <- function(input, output, session) {
                             inherit.aes = FALSE, show.legend = FALSE)
       }
       # v2.22: replicates the user excluded stay visible as hollow grey circles (they no longer enter any mean)
-      rx <- tryCatch(prepare_replicate_data(samples = samples, which = "excluded"), error = function(e) NULL)
+      rx <- tryCatch(rep_data(samples = samples, which = "excluded"), error = function(e) NULL)
       if (!is.null(rx) && nrow(rx) > 0) {
         if (sel1("y_scale_type", APP_DEFAULTS$y_scale_type) == "log") rx <- rx[rx$value > 0, , drop = FALSE]
         if (!is.null(grp_map)) rx <- panel_expand(rx, grp_map)
@@ -15310,7 +15458,10 @@ server <- function(input, output, session) {
       aes_g <- apply_panel_samples(aes_g, panel_smp_get(g, gs))            # v2.26.0: the samples' styles in this panel
       tryCatch({ pg <- build_plot(pd[pd$variable %in% gs, , drop = FALSE], gs, aes_g, facets = FALSE) + labs(tag = NULL)   # (the set's letter goes on the set)
                  if (show_names) pg <- pg + labs(title = text_label(g))
-                 apply_panel_cfg(pg, panel_cfg_get(g), isTRUE(input$axis_subscripts)) },   # v2.26.0: the panel's own settings
+                 pg <- apply_panel_cfg(pg, panel_cfg_get(g), isTRUE(input$axis_subscripts))   # v2.26.0: the panel's own settings
+                 if (!is.null(ax <- attr(pg, "kc_cfg_note")))
+                   guard_notify(paste0("panel_log_", g), paste0("Panel '", g, "': a ", paste(ax, collapse = " / "), " range limit of 0 or below cannot be drawn on a log axis, so it is left automatic."), "message")
+                 pg },
                error = function(e) NULL)
     })
     names(plots) <- paste0("main_by_group:", lv)
@@ -15946,7 +16097,8 @@ server <- function(input, output, session) {
     dmod <- sel1("error_display_mode", "bars")
     if (dmod %in% ERROR_MODES_WITHOUT_STAT) err <- NULL        # v2.22: those modes do not draw the SD / SEM
     mult <- nin("error_multiplier", 1)
-    s3 <- paste0(if (isTRUE(input$show_points)) "Symbols and lines" else "Lines",
+    sp3 <- isTRUE(input$show_points); sl3 <- !isTRUE(input$hide_lines)   # v2.26.1: say only what is drawn
+    s3 <- paste0(if (sp3 && sl3) "Symbols and lines" else if (sp3) "Symbols" else "Lines",
                  " show the mean of ", n_txt, " replicates",
                  if (!is.null(nb("nb_replicate"))) paste0(" (", nb("nb_replicate"), ")") else "",
                  if (!is.null(err)) paste0(
@@ -15997,8 +16149,9 @@ server <- function(input, output, session) {
   })
 
   # v2.23.3: one row per plotted sample: name, colour (swatch, word, hex), marker, line type, as drawn in the figure
-  legend_samples_df <- function() {
+  legend_samples_df <- function(drawn = TRUE) {
     ss <- sel_samples(); if (is.null(rv$data) || !length(ss)) return(NULL)
+    if (isTRUE(drawn)) ss <- panel_samples_now(ss)   # v2.26.1: the samples the figure draws (a sample picked for no panel is left off, as in the legend text and key)
     aes_v <- resolve_aesthetics(ss); hex <- toupper(unname(aes_v$colors[ss]))
     sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
     mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
@@ -16086,7 +16239,7 @@ server <- function(input, output, session) {
         stop(structure(class = c("kc_refused", "error", "condition"), list(message = msg, call = NULL)))
       }
       refuse_if_empty()
-      d <- legend_samples_df()
+      d <- legend_samples_df(drawn = FALSE)   # the colour map keeps every selected sample
       q <- function(x) paste0('"', gsub('"', '""', enc2utf8(as.character(x)), fixed = TRUE), '"')
       con <- file(file, open = "wb"); on.exit(close(con), add = TRUE)
       writeLines(c('"Sample","Hex","Colour_Name"', paste(q(d$name), q(d$hex), q(d$colour), sep = ",")), con, sep = "\n", useBytes = TRUE)
@@ -16165,19 +16318,20 @@ server <- function(input, output, session) {
     samps  <- sel_samples()
     aes_v  <- resolve_aesthetics(samps)
     cols   <- setNames(aes_v$colors, samps); labs_v <- aes_v$leg_labels
+    labs_m <- markup_labels(labs_v)   # v2.26.1: legend keys draw *italic* / ^sup^ markup as the main figure does (labs_v stays the plain text)
     lts    <- aes_v$line_types;              shp    <- aes_v$shapes
     tunit  <- time_unit_from_label(xlab_now())
     lw     <- nin("line_thickness", 1)
     ptsz   <- nin("shape_size", 3)
     tag    <- trimws(input$analysis_panel_label %||% "")
     ref    <- sel1("metrics_ref_sample", "")
-    base_scales <- list(scale_color_manual(   values = cols, labels = labs_v, name = NULL),
+    base_scales <- list(scale_color_manual(   values = cols, labels = labs_m, name = NULL),
                         # Fills are matched on the RAW sample key (names(cols)). The default limits function warns "No shared
                         # levels" whenever a figure has no fill mapped at all (replicate overlay, normalised OD: supervisor
                         # finding 2); this one returns the shared levels, possibly none, silently (same result otherwise).
-                        scale_fill_manual(    values = cols, labels = labs_v, name = NULL,
+                        scale_fill_manual(    values = cols, labels = labs_m, name = NULL,
                                               limits = function(x) intersect(x, names(cols))),
-                        scale_linetype_manual(values = lts,  labels = labs_v, name = NULL))
+                        scale_linetype_manual(values = lts,  labels = labs_m, name = NULL))
     base_scales_nf <- base_scales[-2]    # v2.23.9: colour + linetype only; figures that draw sample markers add marker_scales() (shape + fill)
     col_of <- function(x) unname(cols[as.character(x)])   # a band / bar filled with the sample colour: fill = I(col_of(sample)), bypassing the marker fill scale
     p <- switch(type,
@@ -16387,7 +16541,7 @@ server <- function(input, output, session) {
                        shape = variable, fill = variable, group = variable)) +
           geom_hline(yintercept = 1, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed") +
           geom_line(linewidth = lw) + geom_point(size = ptsz * 0.7) +
-          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           labs(x = x_label_obj(), y = axis_y_label(paste0(input$y_axis_label, " relative to ", ref_lab)))
       },
       replicate_overlay = {
@@ -16447,7 +16601,7 @@ server <- function(input, output, session) {
           geom_point(data = d, aes(x = moi, y = value, color = sample), shape = 21, fill = "white",
                      size = ptsz * 0.6, stroke = pt2lw(0.5)) +
           geom_point(aes(color = sample, shape = sample, fill = sample), size = ptsz) +
-          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           scale_x_log10(labels = scales::label_number(drop0trailing = TRUE, big.mark = ""),
                         expand = if (length(series_levels) > 1) expansion(mult = c(0.05, 0.35)) else waiver()) +
           labs(x = "MOI", y = axis_y_label(metric_axis_label(metric, tunit = tunit, ylab = input$y_axis_label %||% "OD")))
@@ -16575,8 +16729,8 @@ server <- function(input, output, session) {
         g <- g +
           geom_line(data = pd, aes(x = time, y = mean_value, color = variable, linetype = variable, group = variable),
                     linewidth = lw) +
-          scale_color_manual(   values = cols, labels = labs_v, name = NULL) +
-          scale_linetype_manual(values = lts,  labels = labs_v, name = NULL) +
+          scale_color_manual(   values = cols, labels = labs_m, name = NULL) +
+          scale_linetype_manual(values = lts,  labels = labs_m, name = NULL) +
           scale_fill_manual(values = PHASE_COLORS, breaks = intersect(PHASE_LEVELS, as.character(ph$phase)),
                             drop = TRUE, name = if (strips) "Phase (strips top\u2192bottom\nin legend order)" else "Phase") +
           guides(color = guide_legend(order = 1), linetype = guide_legend(order = 1),
@@ -16614,7 +16768,7 @@ server <- function(input, output, session) {
                                 stroke = pt2lw(0.5), show.legend = FALSE, inherit.aes = FALSE)   # an asterisk marker, readable at any font size
           }
         }
-        g + base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+        g + base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           scale_y_continuous(expand = expansion(mult = c(0.06, 0.14))) +
           labs(x = x_label_obj(),
                y = axis_y_label(if (identical(mode, "log2_ratio")) paste0("log2 (", input$y_axis_label, " / ", ref_lab, ")")
@@ -16665,7 +16819,7 @@ server <- function(input, output, session) {
                              size = (nin("axis_text_font_size", 8)) / ggplot2::.pt,
                              family = if (nzchar(sel1("font_family", ""))) sel1("font_family") else "")
         num_lab <- scales::label_number(drop0trailing = TRUE, big.mark = "")
-        g <- g + base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+        g <- g + base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           (if (logx) scale_x_log10(labels = num_lab, expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))
            else scale_x_continuous(expand = expansion(mult = if (isTRUE(input$explorer_labels)) c(0.05, 0.25) else 0.08))) +
           (if (logy) scale_y_log10(labels = num_lab, expand = expansion(mult = 0.08))
@@ -16742,7 +16896,7 @@ server <- function(input, output, session) {
         g <- g + geom_point(data = pin, aes(x = time, y = mean_value, color = variable, shape = variable, fill = variable),
                             size = ptsz) +
           scale_color_manual(values = cols, labels = labs_v, limits = sample_levels(samps), name = NULL) +
-          marker_scales(samps, aes_v, labs_v, limits = sample_levels(samps)) +   # same limits: one merged key
+          marker_scales(samps, aes_v, labs_m, limits = sample_levels(samps)) +   # same limits: one merged key
           labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
         # v2.22: optional overlays (Curve fitting tab): the growth-fit band, the fitted lysis decay, the exponential window; none by default
         ov <- s22_fit_overlay(fr, logy, lw, yr = range(c(pd$mean_value, pd$lo, pd$hi)[is.finite(c(pd$mean_value, pd$lo, pd$hi))]))   # the window spans the plotted data (-Inf is not drawn on a log axis)
@@ -16844,7 +16998,7 @@ server <- function(input, output, session) {
         if (sty == "dot")
           g <- g + geom_point(data = summ, aes(x = xpos, y = mean, color = sample, shape = sample, fill = sample), size = ptsz)
         x_ang_ok <- x_angle_in() == 0
-        g <- g + (if (sty == "dot") list(base_scales_nf, marker_scales(samps, aes_v, labs_v)) else list(base_scales, scale_shape_manual(values = shp, labels = labs_v, name = NULL))) +
+        g <- g + (if (sty == "dot") list(base_scales_nf, marker_scales(samps, aes_v, labs_m)) else list(base_scales, scale_shape_manual(values = shp, labels = labs_m, name = NULL))) +
           scale_x_continuous(breaks = seq_along(tms), labels = as.character(tms), expand = expansion(add = 0.5),
                              guide = if (x_ang_ok && length(tms) >= 6) guide_axis(angle = 45) else waiver()) +
           labs(x = x_label_obj(), y = axis_y_label(y_axis_label_now()))
@@ -16950,7 +17104,7 @@ server <- function(input, output, session) {
         t50f <- t50[is.finite(t50$time), , drop = FALSE]
         t50f$y <- rep(0.5, nrow(t50f))       # (a zero-row frame: no sample reaches half lysed) the point sits where the curve's rise crosses the dashed 0.5 line
         if (nrow(t50f)) g <- g + geom_point(data = t50f, aes(x = time, y = y, color = variable, shape = variable, fill = variable), size = ptsz, inherit.aes = FALSE)
-        g + base_scales_nf + marker_scales(samps, aes_v, labs_v, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
+        g + base_scales_nf + marker_scales(samps, aes_v, labs_m, limits = levels(lf$variable)[levels(lf$variable) %in% lf$sample]) +
           scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = expansion(mult = 0.03)) +
           labs(x = x_label_obj(), y = "Fraction of replicates lysed")
       },
@@ -16997,7 +17151,7 @@ server <- function(input, output, session) {
         g <- g + ggrepel::geom_text_repel(data = lab, aes(x = time, y = mean_value, label = name, color = variable), hjust = 0, direction = "y", min.segment.length = Inf,
                                           box.padding = 0.25, point.padding = 0, seed = 1, show.legend = FALSE, inherit.aes = FALSE,
                                           size = (nin("legend_font_size", 14)) / ggplot2::.pt) +
-          base_scales_nf + marker_scales(samps, aes_v, labs_v) +
+          base_scales_nf + marker_scales(samps, aes_v, labs_m) +
           scale_x_continuous(expand = expansion(mult = c(0.02, 0.32))) +
           labs(x = input$x_axis_label, y = axis_y_label(y_axis_label_now()))
         if (logy) g + scale_y_log10(labels = y_tick_labels(), oob = y_oob_fn()) else g + scale_y_continuous(expand = expansion(mult = c(0.04, 0.12)))
@@ -17112,7 +17266,11 @@ server <- function(input, output, session) {
   compose_figure <- function(panels, ncol = 2, tag_size = 8, font = "Arial", tag_case = "a", tags_on = TRUE,
                              tag_labels = NULL, whole_tag = "", whole_size = 8) {
     if (!has_patchwork) stop("The figure composer needs the 'patchwork' package: install.packages('patchwork')")
-    panels <- lapply(panels, function(p) patchwork::free(p + labs(tag = NULL)))
+    panels <- lapply(panels, function(p) {
+      ml <- attr(p, "matrix_legend"); p <- p + labs(tag = NULL)
+      if (is.null(ml)) return(patchwork::free(p))
+      attr(p, "matrix_legend") <- ml; patchwork::wrap_elements(full = drawable_figure(p))   # v2.26.1: the matrix legend comes along
+    })
     w <- patchwork::wrap_plots(panels, ncol = ncol)
     has_whole <- is.character(whole_tag) && length(whole_tag) == 1L && !is.na(whole_tag) && nzchar(whole_tag)   # v2.26.0
     if (has_whole) w <- w + patchwork::plot_annotation(title = whole_tag,
@@ -17170,7 +17328,9 @@ server <- function(input, output, session) {
     h_mm    <- max(rows, 1L) * num_or(input$compose_panel_height_mm, 60, 20, 250)
     fig <- if (n >= 1 && fixed_mode()) {
       # v2.15: every panel keeps its fixed panel size; the grid is as wide / tall as its cells need
-      items <- lapply(names(plots), function(nm) fixed_figure(plots[[nm]] + labs(tag = NULL), sub(":.*$", "", nm)))
+      items <- lapply(names(plots), function(nm) { p0 <- plots[[nm]]; ml <- attr(p0, "matrix_legend"); p0 <- p0 + labs(tag = NULL)
+                                                   if (!is.null(ml)) attr(p0, "matrix_legend") <- ml   # v2.26.1: kept through + labs()
+                                                   fixed_figure(p0, sub(":.*$", "", nm)) })
       g <- compose_fixed_figure(items, ncol = ncol, tag_size = nin("compose_tag_size", 8),
                                 font = sel1("font_family", "Arial"), tag_case = input$compose_tag_case %||% "a",
                                 tags_on = isTRUE(input$compose_tags %||% TRUE))
@@ -19624,17 +19784,17 @@ server <- function(input, output, session) {
         updateTextInput(session,   paste0("color_",          vid), value   = hex)
         updateTextInput(session,   paste0("hex_color_",      vid), value   = hex)
       }
-      if (!is.null(aes$shape)) {                  # v2.23.9: an old code (21, 123 ...) sets its base form AND the Filled box
-        mk <- normalise_marker(aes$shape, aes$shape_filled %||% TRUE)
-        legacy <- !(suppressWarnings(as.integer(aes$shape)) %in% c(16L, 15L, 17L, 18L, 25L, 4L, 8L, 3L, 10L))
+      if (!is.null(aes[["shape"]])) {                  # v2.23.9: an old code (21, 123 ...) sets its base form AND the Filled box ([[ ]]: $shape partially matches shape_filled)
+        mk <- normalise_marker(aes[["shape"]], aes[["shape_filled"]] %||% TRUE)
+        legacy <- !(suppressWarnings(as.integer(aes[["shape"]])) %in% c(16L, 15L, 17L, 18L, 25L, 4L, 8L, 3L, 10L))
         imp$samples[[vn]]$shape <- as.numeric(mk$shape)
         updateSelectInput(session, paste0("shape_", vid), selected = as.character(mk$shape))
-        if (legacy || !is.null(aes$shape_filled)) {
+        if (legacy || !is.null(aes[["shape_filled"]])) {
           imp$samples[[vn]]$shape_filled <- mk$filled
           updateCheckboxInput(session, paste0("shape_filled_", vid), value = mk$filled)
         }
-      } else if (!is.null(aes$shape_filled))
-        updateCheckboxInput(session, paste0("shape_filled_", vid), value = aes$shape_filled)
+      } else if (!is.null(aes[["shape_filled"]]))
+        updateCheckboxInput(session, paste0("shape_filled_", vid), value = aes[["shape_filled"]])
       if (!is.null(aes$line_type))
         updateSelectInput(session, paste0("line_type_", vid), selected = aes$line_type)
       if (!is.null(aes$legend_label) && nzchar(trimws(as.character(aes$legend_label)))) {   # the display name (the quick-edit strip's name box)
@@ -19827,12 +19987,21 @@ server <- function(input, output, session) {
       if (is.null(pdB) || nrow(pdB) == 0) return(compare_unavailable("the second dataset has no rows (or no data for the chosen samples)."))
       samples <- unique(c(ss$A, ss$B))
       aes_u <- resolve_aesthetics(samples)
+      # v2.26.1: each file's own replicates (range / IQR error bars, replicate traces, quantile bands, replicate points);
+      # build_plot() read the MAIN file's for both, so B's panel showed A's spread
+      repA <- function(which) tryCatch(prepare_replicate_data(samples = ss$A, which = which), error = function(e) NULL)
+      repB <- function(which) tryCatch(sc$prepare_replicate_data(samples = ss$B, which = which), error = function(e) NULL)
       if (identical(input$compare_mode %||% "overlay", "facet")) {
         pd <- dplyr::bind_rows(dplyr::mutate(pdA, dataset = lab[["A"]]), dplyr::mutate(pdB, dataset = lab[["B"]]))
         pd$dataset <- factor(pd$dataset, levels = unname(lab))
         used <- samples[samples %in% unique(as.character(pd$variable))]
         aes_f <- lapply(aes_u[c("shapes", "colors", "line_types", "leg_labels", "filled_map")], function(x) x[used])
-        p <- build_plot(pd, used, aes_f) +
+        rep_fn <- function(samples, which) {
+          a <- repA(which); b <- repB(which)
+          dplyr::bind_rows(if (!is.null(a) && nrow(a)) dplyr::mutate(a, dataset = factor(lab[["A"]], levels = unname(lab))),
+                           if (!is.null(b) && nrow(b)) dplyr::mutate(b, dataset = factor(lab[["B"]], levels = unname(lab))))
+        }
+        p <- build_plot(pd, used, aes_f, rep_fn = rep_fn) +
           facet_wrap(~ dataset, nrow = 1, scales = "fixed", labeller = label_wrap_gen(width = 18)) +
           theme(strip.text = element_text(size = nin("axis_label_font_size"), face = "plain"), strip.background = element_blank())
         if (startsWith(sel1("legend_position", "right"), "inside-") || floating_mode()) p <- p + theme(legend.position = "right")   # v2.25.0: no floating labels over facets
@@ -19842,11 +20011,14 @@ server <- function(input, output, session) {
         aes_k <- compare_overlay_aesthetics(keys, aes_u, lab, aes_u$leg_labels,
                                             style = input$compare_overlay_style %||% "linetype",
                                             alpha_b = suppressWarnings(as.numeric(input$compare_alpha_b %||% 0.5)))
-        p <- build_plot(dplyr::bind_rows(pdA, pdB), keys, aes_k)
+        rep_fn <- function(samples, which) {
+          a <- repA(which); b <- repB(which)
+          if (!is.null(a) && nrow(a)) a$variable <- compare_key("A", a$variable)
+          if (!is.null(b) && nrow(b)) b$variable <- compare_key("B", b$variable)
+          dplyr::bind_rows(a, b)
+        }
+        p <- build_plot(dplyr::bind_rows(pdA, pdB), keys, aes_k, rep_fn = rep_fn)
       }
-      # the replicate-point layer of build_plot() reads the MAIN data only (it would sit in both panels): not drawn here
-      is_rep_points <- function(l) inherits(l$geom, "GeomPoint") && identical(l$aes_params$shape, 1) && isFALSE(l$show.legend)
-      p$layers <- Filter(Negate(is_rep_points), p$layers)
       add_notes_caption(p)
     }, error = function(e) {
       if (inherits(e, "shiny.silent.error")) stop(e)
@@ -19972,8 +20144,16 @@ server <- function(input, output, session) {
       else { s <- export_size_in(); put(p, stem_fun(NULL), s[1], s[2]) }
     }
     sel <- as.character(outputs)
-    if ("main" %in% sel) attempt("Lysis curve (main)",
-      one_figure("Lysis curve (main)", generate_plot(), "main", function(s) if (is.null(s)) main_file_stem() else paste0("lysis_curve_main_", export_size_tag(s))))
+    # v2.26.1: the main figure as the Download button writes it (main_plot_obj(): the matrix legend, a legend in each panel);
+    # it was generate_plot(), which has neither
+    if ("main" %in% sel) attempt("Lysis curve (main)", {
+      p <- generate_plot(); stem <- function(s) if (is.null(s)) main_file_stem() else paste0("lysis_curve_main_", export_size_tag(s))
+      if (is_placeholder_plot(p)) skip("Lysis curve (main)", placeholder_reason(p))
+      else if (!is.null(sz_custom)) {
+        obj <- (if (panel_legend_mode()) tryCatch(panel_composite(), error = function(e) NULL)) %||% drawable_figure(p)
+        put(obj, stem(sz_custom), sz_custom[1], sz_custom[2])
+      } else { s <- export_size_in(); put(main_plot_obj(), stem(if (fixed_mode()) s), s[1], s[2]) }
+    })
     for (ty in sub("^analysis:", "", sel[startsWith(sel, "analysis:")])) {
       lab <- names(ANALYSIS_FIGURE_CHOICES)[match(ty, ANALYSIS_FIGURE_CHOICES)]
       attempt(lab, one_figure(lab, generate_analysis_plot(ty), ty, function(s) analysis_file_stem(ty, if (!is.null(s) && (fixed_mode() || !is.null(sz_custom))) s)))

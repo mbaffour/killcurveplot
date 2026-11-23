@@ -92,7 +92,7 @@ finite values are excluded and the note says so.
 | `dunn` | Kruskal-Wallis rank sums, tie-corrected z | mean-rank difference; no CI | 2 pnorm(-|z|) | Holm (or Bonferroni) | Dunn | after Kruskal-Wallis |
 | `dunnett` | each sample vs one reference, pooled MSE, multivariate t | diff; simultaneous CI | NA | multivariate-t integral | Dunnett | many treatments vs one control |
 | `bonferroni` | Welch t per pair | diff; CI at 1 - alpha/m | Welch p | min(1, m p) | Bonferroni | few comparisons, conservative |
-| `sidak` | Welch t per pair | diff; CI at 1 - (1 - alpha)^(1/m) | Welch p | 1 - (1 - p)^m | Sidak | as Bonferroni, slightly less conservative |
+| `sidak` | Welch t per pair | diff; CI at (1 - alpha)^(1/m) | Welch p | 1 - (1 - p)^m | Sidak | as Bonferroni, slightly less conservative |
 
 Details and caveats:
 
