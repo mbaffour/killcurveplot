@@ -301,7 +301,7 @@ testServer(app, {
   session$setInputs(selected_samples = smp, error_type = "sem", exclude_timepoints = "", metrics_ref_sample = smp[1], y_scale_type = "linear")
   rpd <- prepare_replicate_data(); nrep <- length(unique(rpd$replicate)); rb <- env$replicate_bounds(rpd)
   p_bars <- generate_plot()
-  check("default: error bars, the mean line, the points", real_fig(p_bars) && identical(layer_classes(p_bars), c("GeomErrorbar", "GeomLine", "GeomPoint")))
+  check("default: error bars, the mean line, the points", real_fig(p_bars) && identical(layer_classes(p_bars), c("GeomErrorbar", "GeomKcCapPastMarker", "GeomLine", "GeomPoint")))   # v2.28.1: + the caps for bars the marker hides
   session$setInputs(error_display_mode = "shadow")
   check("shadow: a ribbon instead of the error bars", identical(layer_classes(generate_plot()), c("GeomRibbon", "GeomLine", "GeomPoint")))
   session$setInputs(error_display_mode = "spaghetti")
@@ -337,7 +337,7 @@ testServer(app, {
   session$setInputs(error_display_mode = "jitter", show_replicate_points = TRUE)
   check("jitter mode takes over from the replicate-points alias (drawn once)", sum(layer_classes(generate_plot()) == "GeomPoint") == 2)
   session$setInputs(error_display_mode = "bars", error_type = "sem", show_replicate_points = TRUE)
-  check("the show_replicate_points alias still draws the open circles behind the mean", identical(layer_classes(generate_plot()), c("GeomErrorbar", "GeomPoint", "GeomLine", "GeomPoint")))
+  check("the show_replicate_points alias still draws the open circles behind the mean", identical(layer_classes(generate_plot()), c("GeomErrorbar", "GeomKcCapPastMarker", "GeomPoint", "GeomLine", "GeomPoint")))   # v2.28.1: + the caps layer
   session$setInputs(show_replicate_points = FALSE, error_display_mode = "combo")
   pC <- generate_plot()
   check("combo: a lighter ribbon, the replicate traces, the line and the points", real_fig(pC) && identical(layer_classes(pC), c("GeomRibbon", "GeomLine", "GeomLine", "GeomPoint")) &&

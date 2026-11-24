@@ -14,7 +14,7 @@
 - **"Drop readings outside the axis"** (*Readings below the axis floor: drop*) deleted a whole error bar when one end
   ran past an axis limit even though its mean was on the axis. Such a bar now runs to the frame. Readings (and bars) whose
   mean is off the axis are still left out.
-- A panel's *Hide points* also removes these caps. `tests/test_v2275_error_bars.R` (14 checks).
+- A panel's *Hide points* also removes these caps. `tests/test_v2281_error_bars.R` (14 checks).
 
 ## v2.28.0 — 2026-11-23
 

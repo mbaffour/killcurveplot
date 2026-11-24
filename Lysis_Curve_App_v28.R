@@ -3897,7 +3897,7 @@ APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # 
                   list(figure_labels = ""),                                     # v2.25.0: extra labels on the figure, one per line
                   list(facet_letters = "none", facet_size_mode = "each", facet_legends = "each", facet_n_panels = 2),   # v2.26.0: panel letters, panel size, legends (Panels section); v2.27.2: each panel full size with its own legend inside
                   list(panel_style_match = "own"),   # v2.28.0: sample styles across panels (appended at the end)
-                  list(error_cap_past_marker = TRUE))                        # v2.27.5: a bar the marker would cover gets caps that reach past it
+                  list(error_cap_past_marker = TRUE))                        # v2.28.1: a bar the marker would cover gets caps that reach past it
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -8871,7 +8871,7 @@ marker_scales <- function(samps, aes_v, labels, name = NULL, limits = NULL, colo
        do.call(ggplot2::scale_fill_manual,  c(list(values = fill), a)))
 }
 
-# ── v2.27.5: error bars hidden by their marker ───────────────────────────────
+# ── v2.28.1: error bars hidden by their marker ───────────────────────────────
 # A T-shaped bar whose half-length is shorter than the marker's half-height, with a cap narrower than the marker, lies
 # entirely under the (opaque) marker: the bar is drawn but cannot be seen. In the journal look the marker is 2.9 pt wide
 # and the cap 2.6 pt, so tight replicates (often the last points of a falling log-axis curve) showed no bar at all.
@@ -9063,7 +9063,7 @@ apply_panel_cfg <- function(pg, cfg, subscripts = TRUE) {
   tru <- function(v) isTRUE(v) || identical(toupper(as.character(v)[1]), "TRUE")
   if (tru(cfg$hide_errors)) pg <- drop(function(l) inherits(l$geom, c("GeomErrorbar", "GeomRibbon", "GeomLinerange", "GeomPointrange", "GeomCrossbar")) || rep_layer(l))
   if (tru(cfg$hide_points)) pg <- drop(function(l) (inherits(l$geom, "GeomPoint") && !rep_layer(l) && "shape" %in% names(l$mapping)) ||
-                                          inherits(l$geom, "GeomKcCapPastMarker"))   # v2.27.5: no marker, nothing to reach past
+                                          inherits(l$geom, "GeomKcCapPastMarker"))   # v2.28.1: no marker, nothing to reach past
   if (tru(cfg$hide_lines))  pg <- drop(function(l) inherits(l$geom, "GeomLine") && !rep_layer(l))
   s1 <- function(v) { v <- as.character(if (is.null(v)) "" else v)[1]; if (is.na(v)) "" else trimws(v) }
   n1 <- function(v) { v <- suppressWarnings(as.numeric(if (is.null(v)) NA else v)[1]); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
@@ -15591,7 +15591,7 @@ server <- function(input, output, session) {
           p <- p + do.call(geom_errorbar, c(list(data = eb_data, mapping = eb_aes,
                                  width = cap_w, linewidth = nin("error_bar_thickness"),
                                  linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed, kg))
-          # v2.27.5: a bar the marker would cover gets caps that reach past the marker (decided at drawing time, in points)
+          # v2.28.1: a bar the marker would cover gets caps that reach past the marker (decided at drawing time, in points)
           if (isTRUE(input$show_points) && isTRUE(input$error_cap_past_marker %||% TRUE) && nrow(eb_data) > 0) {
             mk <- marker_extent_pt(samples, aes_vals, colours = display_colors, size = nin("shape_size"), stroke = nin("point_stroke"))
             eb_mk <- eb_data; ix <- match(as.character(eb_mk$variable), mk$variable)
@@ -15872,7 +15872,7 @@ server <- function(input, output, session) {
       yb <- y_interval_scale_args(plot_data, y_lims)
       p <- p + do.call(scale_y_continuous, c(list(limits = y_lims, expand = y_exp, oob = y_oob), yb))
     }
-    # v2.27.5: "drop readings outside the axis" drops READINGS. An error bar whose mean is on the axis but one end runs past
+    # v2.28.1: "drop readings outside the axis" drops READINGS. An error bar whose mean is on the axis but one end runs past
     # a limit was deleted whole (ggplot removes the row); it now runs to the frame, as it does with "squish".
     if (identical(input$y_oob, "censor") && length(y_lims) == 2L && all(is.finite(y_lims))) {
       yl <- sort(y_lims)

@@ -186,7 +186,7 @@ Open **Error Bars / Shadow**:
 * **Error Multiplier** (e.g. 2 x SEM), **Floor errors at zero**, **Error colour**, **Bar Style** (T-shaped or plain),
   **Cap width** and **Bar Thickness**.
 * On a log axis, a bar that would cross zero is drawn down to the axis minimum (it used to vanish).
-* **Show bars shorter than the marker** (on by default, v2.27.5): a bar shorter than its marker used to lie entirely
+* **Show bars shorter than the marker** (on by default, v2.28.1): a bar shorter than its marker used to lie entirely
   under it, cap included (in the journal look the marker is about 2.9 pt wide and the cap 2.6 pt), so points with tight
   replicates showed no bar. Such a bar now gets caps that reach 1 pt past the marker on each side, at the bar's true ends.
   Bars that were visible are drawn exactly as before. Switch it off for the old look.

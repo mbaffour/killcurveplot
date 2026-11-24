@@ -1,23 +1,23 @@
 # ============================================================================
-# v2.27.5: error bars that went missing.
+# v2.28.1: error bars that went missing.
 #   1. A bar shorter than its marker, with a cap narrower than the marker, lay entirely under the marker. Such a bar now
 #      gets caps that reach past the marker (decided at drawing time, in points); every other element is unchanged.
 #   2. With "drop readings outside the axis" (y_oob = censor) a bar whose mean is on the axis but one end runs past a
 #      limit was deleted whole; it now runs to the frame.
-# Run from the repository root:  Rscript tests/test_v2275_error_bars.R
+# Run from the repository root:  Rscript tests/test_v2281_error_bars.R
 # ============================================================================
 suppressPackageStartupMessages({
   library(shiny); library(tidyverse); library(ggpubr); library(scales)
   library(ggrepel); library(ggprism); library(svglite); library(jsonlite)
 })
-if (!file.exists("Lysis_Curve_App_v28.R")) stop("Run from the repository root: Rscript tests/test_v2275_error_bars.R")
+if (!file.exists("Lysis_Curve_App_v28.R")) stop("Run from the repository root: Rscript tests/test_v2281_error_bars.R")
 Sys.setenv(CFU_PAPER_STYLE = file.path(tempdir(), "no_paper_style_here.json"))
 pass <- 0L; fail <- 0L
 check <- function(desc, cond) { if (isTRUE(cond)) { pass <<- pass + 1L; cat("PASS:", desc, "\n") } else { fail <<- fail + 1L; cat("FAIL:", desc, "\n") } }
 env <- new.env(); app <- source("Lysis_Curve_App_v28.R", local = env)$value
-check("APP_VERSION is 2.27.5 or later", package_version(env$APP_VERSION) >= "2.27.5")
-check("the switch is appended to APP_DEFAULTS (after the v2.26 panel keys), on by default",
-      match("error_cap_past_marker", names(env$APP_DEFAULTS)) > match("facet_n_panels", names(env$APP_DEFAULTS)) && isTRUE(env$APP_DEFAULTS$error_cap_past_marker))
+check("APP_VERSION is 2.28.1 or later", package_version(env$APP_VERSION) >= "2.28.1")
+check("the switch is appended to APP_DEFAULTS (after v2.28.0's panel_style_match), on by default",
+      match("error_cap_past_marker", names(env$APP_DEFAULTS)) > match("panel_style_match", names(env$APP_DEFAULTS)) && isTRUE(env$APP_DEFAULTS$error_cap_past_marker))
 pg0 <- ggplot2::ggplot(data.frame(time = 1:3, mean_value = 1:3, err_lo = 0.9 * (1:3), err_hi = 1.1 * (1:3), variable = "a", kc_mk = 2, kc_mv = 2)) +
   ggplot2::geom_errorbar(ggplot2::aes(time, ymin = err_lo, ymax = err_hi)) +
   ggplot2::layer(mapping = ggplot2::aes(x = time, ymin = err_lo, ymax = err_hi, kc_mk = kc_mk, kc_mv = kc_mv), stat = "identity", geom = env$GeomKcCapPastMarker, position = "identity") +
