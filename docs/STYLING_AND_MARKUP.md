@@ -126,8 +126,10 @@ The **Panels** section (after Axis Settings) holds:
   file's times are multiplied for the plotted and exported curves, every analysis figure, the curve and replicate metric
   tables (lysis onset, time of the peak, doubling time ... are in the new unit, labelled with it) and the exports; the unit
   word of the X-axis label follows ("Time (minutes)" becomes "Time (hours)"; the typed label is unchanged). The data
-  themselves stay in the file's unit. The time filter, the per-sample time windows and *Exclude time points* still use the
-  file's unit; axis limits, tick intervals, marker times and the times typed for *OD at chosen times* use the converted unit.
+  themselves stay in the file's unit. The per-sample time windows still use the file's unit. The time-range slider and
+  *Exclude time points* use the unit the figure shows; changing the unit converts the numbers typed in *Exclude time
+  points*, so the same readings stay excluded (v2.28.3). Axis limits, tick intervals, marker times and the times typed for
+  *OD at chosen times* use the converted unit.
   Bootstrap and fit tables are computed from the converted times.
 * **Marker label height**: the Top / Middle / Bottom position can be placed by the axis limits (top = 0.95 x the upper limit,
   bottom = 1.05 x the lower limit, middle = geometric mean on a log axis) instead of a fraction of the plotted data.

@@ -13,7 +13,7 @@ contrast (41 axe failures to 0 on the start page), and reduced motion turns tran
 
 *The legend-key rule on every figure tab.* Analysis, Curve fitting, Compose and Compare each have a "Place the key on
 the figure" switch and a legend text starter next to their "Download legend key". Download all figures and the batch
-export write a key for every figure (`<figure>_legend_key.svg`), not only the main one.
+export write a key for every figure (`legend_key_<figure>.svg`), not only the main one.
 
 *Figure.* On a log time axis error-bar caps are a share of the log range (they were decades wide) and time 0 being left
 out is said. Journal preset: a narrow column (Science single, 55 mm) gets a smaller panel so the figure fits, and the
@@ -22,8 +22,8 @@ a log axis, a threshold a log axis cannot show, a typed number outside its range
 "Lines" error bars no longer add a bar glyph to the key; the default time-marker line is 0.5; #CC0066-like colours are
 "crimson"; x tick labels print each on its own ("0.83", not "0.8333333").
 
-*Data.* Exclude time points is read in the file's own time unit (as documented), so changing the figure's time unit no
-longer moves the excluded points; a word or a snapped value in the box is reported. Load Settings leaves the time filter
+*Data.* Changing the figure's time unit converts the numbers in Exclude time points (30 min becomes 0.5 h), so the same
+readings stay excluded (they were re-read in the new unit); a word or a snapped value in the box is reported. Load Settings leaves the time filter
 and the per-sample windows alone (a project restores them). A blank sample comes back when it stops being the blank.
 Data-tab cells: "0,25" is 0.25 (it was 25), Escape cancels, text over a number is reported. A time column named in hours
 sets "Time (hours)". The summary says "3 replicates: 3 stacked time blocks", not "(1 col)". Two samples with the same

@@ -34,7 +34,7 @@ cat("\n--- statistics ---\n")
 rm <- data.frame(sample = rep(c("A", "B"), each = 3), replicate = rep(1:3, 2), m = c(1, 2, 3, 10, 11, 12))
 mw <- env$compare_replicate_metric(rm, "m", method = "nonparametric")
 check("Mann-Whitney 3 vs 3, fully separated: exact p = 0.1 (was the normal approximation 0.081)",
-      isTRUE(all.equal(mw$pairwise$p[1], 0.1)) && grepl("exact", mw$pairwise$test[1]))
+      isTRUE(all.equal(mw$pairwise$p[1], 0.1)) && identical(mw$pairwise$test[1], "Mann-Whitney"))
 check("p values below 1e-16 (or exactly 0) read '< 1e-16'; others keep 3 significant digits",
       identical(env$fmt_stats_df(data.frame(p = c(0, 1e-30, 0.0312), stringsAsFactors = FALSE))$p, c("< 1e-16", "< 1e-16", "0.0312")))
 check("4-digit tables: a tiny p is '< 1e-16', a tiny value is in e notation (no 100-digit decimals)",
@@ -61,7 +61,7 @@ testServer(app, {
   S(analysis_key_on_figure = FALSE); pa <- generate_analysis_plot("replicate_overlay")
   R$hidden <- identical(pa$theme$legend.position, "none"); R$key_still <- !is.null(tryCatch(env$legend_key_grob(pa), error = function(e) NULL))
   S(analysis_key_on_figure = TRUE)
-  S(time_convert = "min_to_h", enable_time_filter = TRUE, exclude_timepoints = "30")
+  S(time_convert = "min_to_h", enable_time_filter = TRUE, exclude_timepoints = "0.5")
   R$excl_file_unit <- excluded_timepoints_file()
   S(time_convert = "none", enable_time_filter = FALSE, exclude_timepoints = "")
   S(blank_mode = "sample", blank_sample = "WT"); session$flushReact()
@@ -69,7 +69,7 @@ testServer(app, {
 check("log x axis: the error-bar cap is a share of the log10 range (not minutes in log units)", isTRUE(R$cap_log < 0.1) && isTRUE(R$cap_lin > 1))
 check("legend text starter names each sample with colour and marker", grepl("WT (black, filled circles", R$legtxt, fixed = TRUE) && grepl("; M1 (", R$legtxt, fixed = TRUE))
 check("'Place the key on the figure' off hides the analysis legend; the key download still has a key", isTRUE(R$hidden) && isTRUE(R$key_still))
-check("excluded time points are read in the file's time unit: 30 stays 30 min after converting to hours", identical(R$excl_file_unit, 30))
+check("excluded time points are typed in the unit the figure shows (F29): 0.5 h is the 30-min reading", identical(R$excl_file_unit, 30))
 check("journal preset: a 55 mm column gets a panel that fits (55 - 12 mm); 89 mm keeps the 65 mm panel",
       { pw <- function(w) if (w - env$JOURNAL_AXES_MM < 65) max(30, floor(w - env$JOURNAL_AXES_MM)) else 65; pw(55) == 43 && pw(89) == 65 })
 
@@ -77,7 +77,7 @@ cat("\n--- help ---\n")
 f <- tempfile(fileext = ".md"); writeLines(c("# T", "", "See [x](#stats--reports-new).", "", "## Stats & Reports new", "", "[License](LICENSE)"), f)
 hh <- env$render_help_doc(f, base = "root", prefix = "help_R")
 check("a heading with '&' gets the GitHub id its link uses; a root file link goes to kc_root/",
-      grepl('id="help_R-stats--reports-new"', hh, fixed = TRUE) && grepl('href="#help_R-stats--reports-new"', hh, fixed = TRUE) && grepl('href="kc_root/LICENSE"', hh, fixed = TRUE))
+      grepl('id="help_R-stats--reports-new"', hh, fixed = TRUE) && grepl('href="#help_R-stats--reports-new"', hh, fixed = TRUE) && grepl("href=\"kc_root/LICENSE.txt\"", hh, fixed = TRUE))
 
 cat("\n", pass, "passed,", fail, "failed\n")
 if (fail > 0) quit(status = 1)

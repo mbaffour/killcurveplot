@@ -379,10 +379,9 @@ testServer(app, {
   # fixed panel size per panel
   session$setInputs(panel_size_mode = "fixed", panel_width_mm = 60, panel_height_mm = 60, panel_square = TRUE)
   gF <- compare_fixed_info(); szF <- attr(gF, "size_mm")
-  pcols <- gF$layout[grepl("^panel", gF$layout$name), ]
-  wmm <- vapply(sort(unique(pcols$l)), function(i) as.numeric(gF$widths[i]), 0)
+  # v2.28.3: side by side is two panels of their own (each with its own legend), composed at the fixed panel size
   check("compare facet in fixed mode: every panel keeps the fixed 60 x 60 mm panel (two panels, figure wider than one panel)",
-        length(wmm) == 2 && near(wmm, 60, 1e-6) && szF[1] > 2 * 60 && szF[1] < 2 * 60 + 40)
+        length(compare_facet_plots()) == 2 && isTRUE(all.equal(unname(attr(gF, "panel_mm")), c(60, 60))) && szF[1] > 2 * 60 && szF[1] < 2 * 60 + 60)
   session$setInputs(compare_mode = "overlay")
   szO <- attr(compare_fixed_info(), "size_mm")
   check("compare overlay in fixed mode: one 60 x 60 mm panel; the figure is narrower than the facet one", szO[1] < szF[1] && szO[2] > 60)   # v2.27.3: the facet legend is inside now, so the gap is smaller

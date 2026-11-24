@@ -3690,7 +3690,7 @@ compare_replicate_metric <- function(rm, metric, ref_sample = NULL,
     data.frame(sample = pr[1], versus = pr[2], n = length(a), n_versus = length(b),
                mean = mean(a), mean_versus = mean(b), difference = mean(a) - mean(b),
                ci_low = ci[1], ci_high = ci[2], hedges_g = hedges_g(a, b),
-               test = if (method == "welch") "Welch t" else if (mw_exact) "Mann-Whitney (exact)" else "Mann-Whitney (normal approx., ties)",
+               test = if (method == "welch") "Welch t" else "Mann-Whitney",   # (exact p when there are no ties; see mw_exact)
                p = if (is.null(tt)) NA_real_ else unname(tt$p.value),
                stringsAsFactors = FALSE)
   })
@@ -9339,7 +9339,7 @@ KC_A11Y_CSS <- paste(
   "h1.kc-title { font-size:30px; margin:20px 0 10px; font-weight:500; }",
   ".input-group-btn:focus-within .btn, .irs-line:focus, .irs:focus-within .irs-handle { outline:2px solid #1a73e8; outline-offset:2px; }",
   ".kc-qe-note, .kc-mk-label, .panel-section > p, .analysis-controls p, #fit_table_ui > p, .help-block { color:#595959 !important; }",
-  ".dash-card-title, .dash-card-sub { color:#595959 !important; } .kc-help-file { color:#595959 !important; }",
+  ".dash-card-title, .dash-card-sub, .kc-leg-help { color:#595959 !important; } .kc-help-file { color:#595959 !important; }",
   "[style*='color:#777'], [style*='color: #777'], [style*='color:#888'], [style*='color:#999'], [style*='color:#6c757d'], [style*='color:#aaa'] { color:#595959 !important; }",
   "body.kc-night [style*='color:#777'], body.kc-night [style*='color: #777'], body.kc-night [style*='color:#888'], body.kc-night [style*='color:#999'], body.kc-night [style*='color:#6c757d'], body.kc-night [style*='color:#aaa'], body.kc-night [style*='color:#555'] { color:#b9c2cc !important; }",
   ".kc-collapse-all, #clear_colour_map, #kc_qe_toggle, #saveProjectTop { color:#1f5f99 !important; }",
@@ -9357,7 +9357,20 @@ KC_A11Y_CSS <- paste(
   "body.kc-night .well, body.kc-night .panel-section p, body.kc-night small, body.kc-night .text-muted { color:#c4ccd6; }",
   "body.kc-night #clear_colour_map, body.kc-night #clear_colour_map .action-label, body.kc-night #kc_qe_toggle, body.kc-night #saveProjectTop, body.kc-night .kc-collapse-all { color:#8cc4ff !important; }",
   "body.kc-night .kc-project-box p, body.kc-night .kc-project-box span { color:#c4ccd6 !important; }",
-    "@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }",
+    "body.kc-night #main_panel, body.kc-night .tab-content, body.kc-night .tab-pane { background:#14171c !important; color:#d7dce2 !important; }",
+  "body.kc-night table, body.kc-night table.dataTable tbody tr, body.kc-night .table > tbody > tr, body.kc-night .table > thead > tr { background:#1b2028 !important; color:#d7dce2 !important; }",
+  "body.kc-night .table-striped > tbody > tr:nth-of-type(odd), body.kc-night table.dataTable.stripe tbody tr.odd, body.kc-night table.dataTable tbody tr.odd { background:#222831 !important; }",
+  "body.kc-night table td, body.kc-night table th { color:#d7dce2 !important; border-color:#3a4450 !important; }",
+  "body.kc-night .dataTables_wrapper, body.kc-night .dataTables_info, body.kc-night .dataTables_length, body.kc-night .dataTables_filter, body.kc-night .dataTables_paginate { color:#d7dce2 !important; }",
+  "body.kc-night .dataTables_paginate .paginate_button { color:#d7dce2 !important; }",
+  "body.kc-night .kc-help-body th, body.kc-night .kc-help-body code, body.kc-night code { background:#222831 !important; color:#e6ebf1 !important; }",
+  "body.kc-night .alert, body.kc-night .excl-preview, body.kc-night .stats-note, body.kc-night .kc-leg-help { color:#e6ebf1 !important; }",
+  "body.kc-night [style*='color:#856404'], body.kc-night [style*='color: #856404'] { color:#f2dba0 !important; }",
+  "body.kc-night [style*='color:#666'], body.kc-night [style*='color:#444'], body.kc-night [style*='color:#333'], body.kc-night [style*='color:#2C3E50'], body.kc-night [style*='color:#6c757d'] { color:#c4ccd6 !important; }",
+  "body.kc-night [style*='background:#f'], body.kc-night [style*='background: #f'], body.kc-night [style*='background-color:#f'] { background:#1b2028 !important; color:#d7dce2 !important; }",
+  "body.kc-night #compose_note p, body.kc-night #compose_note strong, body.kc-night .dash-card-value, body.kc-night #fit_table_ui > p, body.kc-night .analysis-controls p, body.kc-night .kc-leg-help { color:#e6ebf1 !important; }",
+  "body.kc-night [style*='color:#b02a37'], body.kc-night [style*='color: #b02a37'], body.kc-night [style*='color:#dc3545'], body.kc-night [style*='color:#c0392b'] { color:#ff9a9a !important; }",
+  "@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }",
   sep = "\n")
 # v2.28.3: the legend-key rule on every figure tab: one "place the key on the figure" switch and one legend text starter
 # (the key itself is the tab's "Download legend key"). `k` = analysis / fit / compose / compare.
@@ -9376,7 +9389,8 @@ KC_A11Y_JS <- "
       var box = inp.parentElement, line = box && box.querySelector('.irs-line'); if (!line) return;
       var s = window.jQuery ? jQuery(inp).data('ionRangeSlider') : null, o = s ? s.options : null;
       line.setAttribute('role', 'slider');
-      var lb = document.getElementById(inp.id + '-label'); if (lb && (lb.textContent || '').trim()) line.setAttribute('aria-labelledby', lb.id); else nm(line, inp.id);
+      var lb = document.getElementById(inp.id + '-label'); if (lb && (lb.textContent || '').trim()) line.setAttribute('aria-labelledby', lb.id);
+      else nm(line, inp.id === 'time_filter_range' ? 'Time range' : inp.id.replace(/_/g, ' '));
       if (o) { line.setAttribute('aria-valuemin', o.min); line.setAttribute('aria-valuemax', o.max);
                line.setAttribute('aria-valuenow', o.from); if (o.type === 'double') line.setAttribute('aria-valuetext', o.from + ' to ' + o.to); }
     });
@@ -9391,7 +9405,8 @@ KC_A11Y_JS <- "
     document.querySelectorAll('.tab-pane input[type=checkbox]:not([id])').forEach(function(c) {
       var li = c.closest('li'); nm(c, li ? (li.textContent || 'Checklist item').trim().slice(0, 80) : 'Checklist item');
     });
-    document.querySelectorAll('.dataTables_scrollBody, .kc-scroll').forEach(function(d) { if (!d.hasAttribute('tabindex')) { d.setAttribute('tabindex', '0'); nm(d, 'Scrollable table'); } });
+    Array.prototype.filter.call(document.querySelectorAll('.dataTables_scrollBody, .kc-scroll, div[style]'), function(d) {
+      return !d.hasAttribute('style') || d.style.overflowX === 'auto' || d.style.overflow === 'auto' || d.classList.contains('dataTables_scrollBody'); }).forEach(function(d) { if (!d.hasAttribute('tabindex')) { d.setAttribute('tabindex', '0'); nm(d, 'Scrollable table'); } });
     var np = document.getElementById('shiny-notification-panel');
     if (np) { np.setAttribute('role', 'status'); np.setAttribute('aria-live', 'polite'); }
     document.querySelectorAll('.shiny-notification-error, .shiny-notification-warning').forEach(function(n) { n.setAttribute('role', 'alert'); });
@@ -9415,6 +9430,26 @@ KC_A11Y_JS <- "
     jQuery(document).on('shiny:value shiny:idle shiny:bound', function() { window.requestAnimationFrame(fix); });
     jQuery(document).on('change', 'input.js-range-slider', function() { window.requestAnimationFrame(sliders); });
   }
+  // v2.28.3: keyboard for every slider, the two-handle ones too (Arrow = the first handle, Shift+Arrow = the second;
+  // PageUp/PageDown = 10 steps; Home/End); ion.rangeSlider's own keys did not move a two-handle slider
+  document.addEventListener('keydown', function(ev) {
+    var line = ev.target; if (!line || !line.classList || !line.classList.contains('irs-line')) return;
+    var box = line.closest('.shiny-input-container') || line.closest('.form-group'), inp = box && box.querySelector('input.js-range-slider');
+    var s = inp && window.jQuery ? jQuery(inp).data('ionRangeSlider') : null; if (!s) return;
+    var o = s.options, st = o.step || 1, k = ev.key, d = 0;
+    if (k === 'ArrowRight' || k === 'ArrowUp') d = st; else if (k === 'ArrowLeft' || k === 'ArrowDown') d = -st;
+    else if (k === 'PageUp') d = 10 * st; else if (k === 'PageDown') d = -10 * st;
+    else if (k !== 'Home' && k !== 'End') return;
+    ev.preventDefault(); ev.stopPropagation();
+    var clamp = function(v) { return Math.min(o.max, Math.max(o.min, Math.round(v / st) * st)); };
+    if (o.type === 'double') {
+      if (ev.shiftKey) { var t = k === 'Home' ? o.from : k === 'End' ? o.max : clamp(o.to + d); s.update({to: Math.max(t, o.from)}); }
+      else { var f = k === 'Home' ? o.min : k === 'End' ? o.to : clamp(o.from + d); s.update({from: Math.min(f, o.to)}); }
+    } else { s.update({from: k === 'Home' ? o.min : k === 'End' ? o.max : clamp(o.from + d)}); }
+    jQuery(inp).trigger('change');
+    var nl = box.querySelector('.irs-line'); if (nl && document.activeElement !== nl) nl.focus();   // the update rebuilt the slider: keep the focus on it
+    window.requestAnimationFrame(sliders);
+  }, true);
   if (window.Shiny) Shiny.addCustomMessageHandler('kcFigAlt', function(t) { alt = String(t || ''); figAlt(); });
   new MutationObserver(function(ms) { for (var i = 0; i < ms.length; i++) if (ms[i].addedNodes.length) { window.requestAnimationFrame(fix); break; } })
     .observe(document.documentElement, { childList: true, subtree: true });
@@ -9516,7 +9551,7 @@ render_help_doc <- function(path, anchors = list(), base = "docs", prefix = NULL
   else {
     html <- gsub('(src|href)="docs/', '\\1="kc_docs/', html, perl = TRUE)
     # v2.28.3: the files next to the app (LICENSE, CITATION.cff, CHANGELOG.md ...) are served as kc_root/ (they were 404s)
-    html <- gsub('(src|href)="(?!(?:https?:|#|mailto:|kc_docs/|kc_root/))([^"/]+)"', '\\1="kc_root/\\2"', html, perl = TRUE)
+    html <- gsub('(src|href)="(?!(?:https?:|#|mailto:|kc_docs/|kc_root/))([^"/#]+)"', '\\1="kc_root/\\2.txt" target="_blank"', html, perl = TRUE)
   }
   html
 }
@@ -9534,7 +9569,7 @@ help_guides_ui <- function() {
   root_files <- root_files[file.exists(root_files)]
   if (length(root_files)) {
     rd <- file.path(tempdir(), "kc_root"); dir.create(rd, showWarnings = FALSE)
-    file.copy(root_files, rd, overwrite = TRUE)
+    file.copy(root_files, file.path(rd, paste0(basename(root_files), ".txt")), overwrite = TRUE)   # served as text (LICENSE had no type and downloaded)
     shiny::addResourcePath("kc_root", rd)
   }
   ids <- vapply(guides, function(g) help_anchor(g$file), "")
@@ -10964,7 +10999,7 @@ ui <- fluidPage(lang = "en",
                                         uiOutput("time_range_slider_ui"),
                                         hr(style = "margin:10px 0;"),
                                         h5("Exclude Specific Time Points", style = "margin:8px 0 4px;"),
-                                        p(style = "font-size:.82em;color:#666;", "Comma-separated values to remove (e.g. 0, 5, 180), in the data file's own time unit."),
+                                        p(style = "font-size:.82em;color:#666;", "Comma-separated values to remove (e.g. 0, 5, 180), in the time unit the figure shows."),
                                         textInput("exclude_timepoints", label = NULL, value = "", placeholder = "e.g. 0, 5, 180"),
                                         uiOutput("excluded_timepoints_preview")
                        ),
@@ -12809,9 +12844,24 @@ server <- function(input, output, session) {
   })
   outputOptions(output, "time_range_slider_ui", suspendWhenHidden = FALSE)   # v2.27.0: a project's time filter applies with the section closed
   
+  # v2.28.3: the excluded times are typed in the unit the figure shows; when that unit changes (minutes <-> hours) the
+  # numbers in the box are converted, so the same readings stay excluded (they were re-read in the new unit: 30 min
+  # became 30 h). Not right after a settings / project load, which sets the unit and the box together.
+  tc_prev <- reactiveVal(NULL)
+  observeEvent(input$time_convert, {
+    k_new <- time_convert_factor(sel1("time_convert", "none")); k_old <- isolate(tc_prev()); tc_prev(k_new)
+    if (is.null(k_old) || isTRUE(all.equal(k_old, k_new))) return(invisible(NULL))
+    ls <- isolate(rv$load_stamp)
+    if (!is.null(ls) && as.numeric(difftime(Sys.time(), ls, units = "secs")) < 5) return(invisible(NULL))
+    txt <- isolate(input$exclude_timepoints %||% "")
+    if (!is.character(txt) || length(txt) != 1L || is.na(txt) || !nzchar(trimws(txt))) return(invisible(NULL))
+    toks <- strsplit(trimws(txt), "[,; ]+")[[1]]; v <- suppressWarnings(as.numeric(toks))
+    new <- vapply(seq_along(toks), function(i) if (is.finite(v[i])) format(signif(v[i] / k_old * k_new, 8), trim = TRUE, drop0trailing = TRUE, scientific = FALSE) else toks[i], "")
+    updateTextInput(session, "exclude_timepoints", value = paste(new, collapse = ", "))
+  }, ignoreInit = FALSE, ignoreNULL = FALSE)
   output$excluded_timepoints_preview <- renderUI({
     if (is.null(rv$all_timepoints)) return(NULL)
-    excl <- parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints)   # v2.28.3: the FILE's time unit (as documented), so a unit change does not move them
+    excl <- parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints * time_conv_k())   # displayed unit (F29)
     um   <- attr(excl, "unmatched")
     if (length(excl) == 0 && !length(um)) return(NULL)
     div(class = "excl-preview",
@@ -13267,7 +13317,9 @@ server <- function(input, output, session) {
     output$data_view_table <- DT::renderDT({
       req(rv$data)
       rv$data_version                     # a new load re-draws the table; a cell edit only replaces its data
-      DT::datatable(isolate(data_table_display()), editable = "cell", rownames = FALSE, selection = "none",
+      # v2.28.3: text editors (numeric = "none"): DT's number box swallowed "0,25" as 025 and "zzz" as empty, so the
+      # decimal comma and the "not a number" notice never reached the server; apply_cell_edit() parses the text
+      DT::datatable(isolate(data_table_display()), editable = list(target = "cell", numeric = "none"), rownames = FALSE, selection = "none",
                     options = list(scrollX = TRUE, scrollY = "480px", pageLength = 50, stateSave = TRUE),
                     class = "compact stripe hover")
     })
@@ -13698,7 +13750,7 @@ server <- function(input, output, session) {
     if (is.list(doc$settings) && !is.null(names(doc$settings))) {
       tf <- tempfile(fileext = ".json"); on.exit(unlink(tf), add = TRUE)
       jsonlite::write_json(doc$settings, tf, auto_unbox = TRUE, digits = NA, na = "null", null = "null")
-      load_ctx$project <- TRUE; on.exit(load_ctx$project <- FALSE, add = TRUE)
+      load_ctx$project <- TRUE; on.exit(load_ctx$project <- FALSE, add = TRUE); rv$load_stamp <- Sys.time()
       load_settings_file(tf)
       load_ctx$project <- FALSE
     }
@@ -13731,6 +13783,7 @@ server <- function(input, output, session) {
   # Never touches: file input, sample selection, time filter range.
   # v2.27.0: the body of Load Settings as a function of the file's path, so a project file applies its settings the same way
   load_settings_file <- function(sf) {
+    rv$load_stamp <- Sys.time()   # v2.28.3: the unit-change rescale of excluded times stands down while a file sets both
     # Hardening round 1 (finding 34): the whole body is guarded. A settings file that parses to a scalar, an array or
     # something this app cannot read used to raise an error in the observer, which ENDS the Shiny session.
     tryCatch({
@@ -14521,12 +14574,12 @@ server <- function(input, output, session) {
   # table; this gives the excluded time points in the FILE's unit, snapped to real points (half the minimum step). A typed value
   # that matches no point is reported and ignored.
   excluded_timepoints_file <- function() {
-    tp <- rv$all_timepoints
+    k <- time_conv_k(); tp <- rv$all_timepoints
     if (is.null(tp)) return(numeric(0))
-    ex <- parse_excluded_timepoints(input$exclude_timepoints, tp)   # v2.28.3: in the file's time unit (STYLING_AND_MARKUP.md), not the converted one
+    ex <- parse_excluded_timepoints(input$exclude_timepoints, tp * k)   # the displayed unit (hardening F29)
     um <- attr(ex, "unmatched")
     if (length(um)) guard_notify("time_unmatched", paste(um, collapse = ". "), "message")
-    as.numeric(ex)
+    as.numeric(ex) / k
   }
   apply_time_filters <- function(d, time_col) {
     d[[time_col]] <- suppressWarnings(as.numeric(as.character(d[[time_col]])))
@@ -18038,7 +18091,7 @@ server <- function(input, output, session) {
   }
   # v2.28.3: the legend text starter of any figure: its samples (those in its colour / fill / shape legend), each with the
   # colour, marker and line it is drawn with, in words: "WT (black, filled circles); lysA (orange, filled squares)"
-  figure_legend_text_for <- function(p) {
+  figure_legend_text_for <- function(p, drawn = FALSE) {
     if (!inherits(p, "ggplot") || is_placeholder_plot(p)) return("")
     b <- tryCatch(kc_with_scratch_device(function() ggplot2::ggplot_build(p)), error = function(e) NULL)
     if (is.null(b)) return("")
@@ -18048,8 +18101,16 @@ server <- function(input, output, session) {
       if (!is.null(sc)) { br <- tryCatch(as.character(sc$get_breaks()), error = function(e) character(0)); keys <- c(keys, intersect(br[!is.na(br)], all_s)) }
     }
     keys <- unique(keys)
-    if (!length(keys)) return("")
-    av <- resolve_aesthetics(keys)
+    if (!length(keys)) {   # v2.28.3: a figure whose legend entries are not sample names (Compare overlay keys): its colour legend as drawn
+      sc <- b$plot$scales$get_scales("colour") %||% b$plot$scales$get_scales("fill")
+      if (is.null(sc)) return("")
+      br <- tryCatch(sc$get_breaks(), error = function(e) NULL); br <- br[!is.na(br)]
+      if (!length(br)) return("")
+      lb <- tryCatch(sc$get_labels(br), error = function(e) as.character(br)); cl <- tryCatch(sc$map(br), error = function(e) rep(NA, length(br)))
+      lb <- vapply(lb, function(x) markup_to_plain(paste(as.character(x), collapse = "")), "")
+      return(paste0(paste(paste0(lb, " (", colour_words(cl), ")"), collapse = "; "), "."))
+    }
+    av <- if (isTRUE(drawn)) resolve_aesthetics_drawn(keys) else resolve_aesthetics(keys)   # v2.28.3: the lysis curve as drawn (matched panels)
     geoms <- vapply(p$layers, function(l) class(l$geom)[1], "")
     pts <- any(geoms %in% c("GeomPoint", "GeomPointrange")); lns <- any(geoms %in% c("GeomLine", "GeomPath", "GeomStep"))
     cw <- colour_words(unname(av$colors[keys]))
@@ -18057,8 +18118,8 @@ server <- function(input, output, session) {
                                                                         av$shapes[[keys[i]]], av$filled_map[[keys[i]]], av$line_types[[keys[i]]],
                                                                         show_points = pts, show_lines = lns, word = cw[i]), ""), collapse = "; "), ".")
   }
-  key_text_ui <- function(fig) {
-    txt <- tryCatch(figure_legend_text_for(fig), error = function(e) "")
+  key_text_ui <- function(fig, drawn = FALSE) {
+    txt <- tryCatch(figure_legend_text_for(fig, drawn), error = function(e) "")
     if (!nzchar(txt)) return(p(class = "kc-leg-help", style = "font-size:.8em;", "No legend on this figure to describe."))
     tagList(tags$label(style = "font-size:.85em;margin-top:4px;", "Legend text starter (copy and edit):"),
             tags$textarea(class = "form-control", readonly = NA, rows = 3, style = "font-size:.82em;", `aria-label` = "Legend text starter", txt))
@@ -18066,7 +18127,7 @@ server <- function(input, output, session) {
   output$analysis_legend_text <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot(sel1("analysis_type", "metric_summary"))) })
   output$fit_legend_text      <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot("fit_overlay")) })
   output$compare_legend_text  <- renderUI({ req(rv$data, sel_samples(), rv_cmp$ds); key_text_ui(generate_compare_plot()) })
-  output$compose_legend_text  <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_plot()) })
+  output$compose_legend_text  <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_plot(), drawn = TRUE) })
   generate_analysis_plot <- function(type = sel1("analysis_type", "metric_summary")) {
     req(rv$data, sel_samples())
     tryCatch({
@@ -20120,11 +20181,11 @@ server <- function(input, output, session) {
       }
       attempt <- function(label, expr) tryCatch(expr, error = function(e)
         skipped <<- c(skipped, paste0(label, ": ", friendly_error_message(e))))
-      # v2.28.3: every figure's own legend key next to it (<stem>_legend_key.svg / .png), per the legend-key rule
+      # v2.28.3: every figure's own legend key next to it (legend_key_<stem>.svg / .png), per the legend-key rule
       key_pair <- function(p, stem) {
         k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
         if (!is.null(k)) for (fmt in c("svg", "png"))
-          write_legend_key(k, file.path(dir, paste0(stem, "_legend_key.", fmt)), fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
+          write_legend_key(k, file.path(dir, paste0("legend_key_", stem, ".", fmt)), fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
       }
       attempt("Lysis curve (main)", { sz <- export_size_in(); write_pair(main_plot_obj(), main_file_stem(), sz[1], sz[2]) })
       for (ty in unname(ANALYSIS_FIGURE_CHOICES)) {
@@ -20179,7 +20240,7 @@ server <- function(input, output, session) {
     samps <- sel_samples()
     filter_txt <- if (isTRUE(input$enable_time_filter)) {
       rng  <- input$time_filter_range
-      excl <- as.numeric(parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints))   # v2.28.3: file unit
+      excl <- as.numeric(parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints * time_conv_k()))
       paste0("range ", if (!is.null(rng)) paste0(rng[1], "–", rng[2]) else "full",
              if (length(excl)) paste0("; excluded points: ", paste(sort(excl), collapse = ", "))
              else "")
@@ -20939,7 +21000,9 @@ server <- function(input, output, session) {
     tsz <- nin("compose_tag_size", 8); fnt <- sel1("font_family", "Arial")
     if (!fixed_mode()) return(compose_figure(pl, ncol = 2, tag_size = tsz, font = fnt, tags_on = FALSE))
     d <- panel_dims_mm("main")
-    compose_fixed_figure(lapply(pl, function(pg) fixed_panel_grob(pg, d[1], d[2])), ncol = 2, tag_size = tsz, font = fnt, tags_on = FALSE)
+    g <- compose_fixed_figure(lapply(pl, function(pg) fixed_panel_grob(pg, d[1], d[2])), ncol = 2, tag_size = tsz, font = fnt, tags_on = FALSE)
+    attr(g, "panel_mm") <- d
+    g
   }
   compare_panel_count <- function(p) {
     if (inherits(p$facet, "FacetNull")) return(1L)
@@ -21059,10 +21122,10 @@ server <- function(input, output, session) {
     attempt <- function(label, expr) tryCatch(expr, error = function(e) skip(label, friendly_error_message(e)))
     sz_custom <- if (!is.null(size_mm)) size_mm / 25.4 else NULL
     # one figure: p = the ggplot, kind = its panel kind, stem = the file stem
-    # v2.28.3: with "Legend key" ticked, every exported figure gets its own key (<stem>_legend_key.<fmt>), not only the main one
+    # v2.28.3: with "Legend key" ticked, every exported figure gets its own key (legend_key_<stem>.<fmt>), not only the main one
     key_for <- function(p, stem) if ("legend_key" %in% as.character(outputs)) {
       k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
-      if (!is.null(k)) { f <- file.path(dir, paste0(stem, "_legend_key.", fmt)); write_legend_key(k, f, fmt, dpi); written <<- c(written, basename(f)) }
+      if (!is.null(k)) { f <- file.path(dir, paste0("legend_key_", stem, ".", fmt)); write_legend_key(k, f, fmt, dpi); written <<- c(written, basename(f)) }
     }
     one_figure <- function(label, p, kind, stem_fun) {
       if (is_placeholder_plot(p)) return(skip(label, placeholder_reason(p)))
