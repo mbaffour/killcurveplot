@@ -1706,12 +1706,13 @@ first_local_peak_index <- function(peak_vec) {
   }
   which.max(peak_vec)
 }
+LYSIS_COMPLETE_OD <- 0.1   # v2.28.3: the lab's "lysis complete" OD (the engine's default; the app passes its setting)
 compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
                                       smooth_window = 5, peak_smooth_window = 1,
                                       peak_mode = c("global", "first_local"),
                                       lysis_threshold = 0.05,
                                       extinction_threshold = 0.05,
-                                      lysis_complete_od = attr(lysis_threshold, "complete_od"),
+                                      lysis_complete_od = if (is.null(attr(lysis_threshold, "complete_od"))) LYSIS_COMPLETE_OD else attr(lysis_threshold, "complete_od"),
                                       require_complete = isTRUE(attr(lysis_threshold, "require_complete"))) {
     # v2.28.3 (the lab's definitions): lysis ONSET is the first sustained drop after the curve's high point (below);
     # lysis is COMPLETE when the OD after the peak falls below lysis_complete_od (0.1 in the app) -> lysis_complete_time.
