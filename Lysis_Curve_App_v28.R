@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.28.1"
+APP_VERSION <- "2.28.2"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3896,7 +3896,7 @@ APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # 
                   list(legend_inside_x = 0.98, legend_inside_y = 0.98),        # v2.23.4: appended at the end (the dragged legend, top-right)
                   list(figure_labels = ""),                                     # v2.25.0: extra labels on the figure, one per line
                   list(facet_letters = "none", facet_size_mode = "each", facet_legends = "each", facet_n_panels = 2),   # v2.26.0: panel letters, panel size, legends (Panels section); v2.27.2: each panel full size with its own legend inside
-                  list(panel_style_match = "own"),   # v2.28.0: sample styles across panels (appended at the end)
+                  list(panel_style_match = "line"),   # v2.28.0: sample styles across panels (appended at the end); v2.28.2: matched, line type by panel, by default
                   list(error_cap_past_marker = TRUE))                        # v2.28.1: a bar the marker would cover gets caps that reach past it
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
@@ -9012,17 +9012,19 @@ facet_layers <- function(levels, scales = "fixed", ncol = NA, strip_style = "pla
 FACET_LEGEND_CHOICES <- c("A legend in each panel (each panel its own figure)" = "each", "One legend for all panels" = "shared")   # v2.27.2: each first (the default)
 # v2.28.0: Sample styles across panels. The k-th sample of every panel can take the colour, marker, fill and line of the
 # k-th sample of the first panel, so the panels look alike and differ by one thing only (or by nothing but their names).
-PANEL_STYLE_MATCH_CHOICES <- c("Each sample its own style" = "own", "Same in every panel, line type changes by panel" = "line",
+PANEL_STYLE_MATCH_CHOICES <- c("Same in every panel, line type changes by panel" = "line", "Each sample its own style" = "own",   # v2.28.2: line first (the default)
                                "Same in every panel, markers filled / open by panel" = "fill", "Same in every panel" = "same")
 PANEL_STYLE_LINES <- c("solid", "dashed", "dotted", "dotdash", "longdash", "twodash")
 # Who follows whom: for every sample drawn in exactly one panel, the sample at the same place (k-th, in `samples` order)
 # in the first panel that has a k-th sample, and the number of its own panel. Samples shown in several panels (a control in
-# every panel) keep their own style. list(leader = named chr, panel = named int); empty without two panels.
+# every panel) keep their own style. list(leader = named chr, panel = named int); empty without two panels, or when no
+# panel has two samples of its own (one curve per panel: nothing to pair).
 panel_style_leaders <- function(samples, pm) {
   out <- list(leader = setNames(character(0), character(0)), panel = setNames(integer(0), character(0)))
   if (is.null(pm) || length(pm$levels) < 2L) return(out)
   one <- samples[vapply(samples, function(x) length(pm$map[[x]]) == 1L, NA)]
   members <- lapply(pm$levels, function(g) one[vapply(one, function(x) identical(pm$map[[x]][1], g), NA)])
+  if (max(lengths(members)) < 2L) return(out)   # v2.28.2: one curve per panel ("Each sample its own panel"): nothing to pair, each keeps its colour
   for (j in seq_along(members)) for (k in seq_along(members[[j]])) {
     x <- members[[j]][k]
     src <- members[[which(lengths(members) >= k)[1]]][k]

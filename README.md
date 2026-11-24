@@ -657,4 +657,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.28.1 (2026-11-23) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.28.2 (2026-11-24) — Michael Baffour Awuah / Ramsey Lab*

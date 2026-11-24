@@ -13,9 +13,9 @@ pass <- 0L; fail <- 0L
 check <- function(desc, cond) { if (isTRUE(cond)) { pass <<- pass + 1L; cat("PASS:", desc, "\n") } else { fail <<- fail + 1L; cat("FAIL:", desc, "\n") } }
 env <- new.env(); app <- source("Lysis_Curve_App_v28.R", local = env)$value
 check("APP_VERSION is 2.28.0 or later", package_version(env$APP_VERSION) >= "2.28.0")
-check("the choice is appended at the end of APP_DEFAULTS (v2.28.1 appends after it) and is off by default (each sample its own style)",
-      { nm <- names(env$APP_DEFAULTS); all(nm[-seq_len(match("panel_style_match", nm))] %in% c("error_cap_past_marker")) } && identical(env$APP_DEFAULTS$panel_style_match, "own") &&
-        identical(unname(env$PANEL_STYLE_MATCH_CHOICES), c("own", "line", "fill", "same")))
+check("the choice is appended at the end of APP_DEFAULTS (v2.28.1 appends after it) and is on by default (v2.28.2: matched, line type by panel)",
+      { nm <- names(env$APP_DEFAULTS); all(nm[-seq_len(match("panel_style_match", nm))] %in% c("error_cap_past_marker")) } && identical(env$APP_DEFAULTS$panel_style_match, "line") &&
+        identical(unname(env$PANEL_STYLE_MATCH_CHOICES), c("line", "own", "fill", "same")))
 rt <- htmltools::renderTags(env$ui); h <- paste(rt$head, rt$html)
 check("the Panels section has the menu 'Sample styles across panels'", grepl('id="panel_style_match"', h, fixed = TRUE))
 
@@ -26,6 +26,8 @@ check("k-th sample of each panel follows the k-th of panel 1; a 3rd sample with 
       identical(unname(ld$leader[c("a1", "a2", "b1", "b2", "b3", "c1")]), c("a1", "a2", "a1", "a2", "b3", "a1")) &&
         identical(unname(ld$panel[c("a1", "b2", "c1")]), c(1L, 2L, 3L)))
 check("a sample shown in every panel (the control) keeps its own style", !"ctl" %in% names(ld$leader))
+check("one curve per panel (each sample its own panel, a control in every panel): nobody follows, each keeps its colour",
+      length(env$panel_style_leaders(c("ctl", "p1", "p2", "p3"), list(map = list(ctl = c("A", "B", "C"), p1 = "A", p2 = "B", p3 = "C"), levels = c("A", "B", "C")))$leader) == 0)
 check("one panel only: nobody follows", length(env$panel_style_leaders(c("x", "y"), list(map = list(x = "A", y = "A"), levels = "A"))$leader) == 0)
 
 cat("\n--- the lysis curve, two panels of the same five strains (-/+ a drug) ---\n")
@@ -43,6 +45,8 @@ testServer(app, {
   ingest_data(d, "d.csv"); do.call(S, env$APP_DEFAULTS); S(selected_samples = rv$od_vars, export_format = "svg")
   S(facet_by_group = TRUE, facet_source = "pick", facet_n_panels = 2,
     panelpick_1_name = "- drug", panelpick_1_samples = strains, panelpick_2_name = "+ drug", panelpick_2_samples = paste(strains, "+ drug"))
+  r$def_panels <- lapply(main_group_plots(min_panels = 2L), aes_of)   # the default: matched, line type by panel
+  S(panel_style_match = "own")
   own <- resolve_aesthetics(rv$od_vars)
   r$own_panels <- lapply(main_group_plots(min_panels = 2L), aes_of)
   r$own_differ <- !identical(own$colors[["EV"]], own$colors[["EV + drug"]])
@@ -57,7 +61,8 @@ testServer(app, {
   r$off <- resolve_aesthetics_drawn(rv$od_vars); r$own2 <- resolve_aesthetics(rv$od_vars)
   r$doc <- settings_json_list()$global_settings$panel_style_match
 })
-check("each sample its own style (default): the two panels use different colours", isTRUE(r$own_differ) && !identical(r$own_panels[[1]]$col, r$own_panels[[2]]$col))
+check("the default (v2.28.2): both panels have the same colours, panel 2 dashed", identical(r$def_panels[[1]]$col, r$def_panels[[2]]$col) && identical(r$def_panels[[2]]$lt, "dashed"))
+check("each sample its own style: the two panels use different colours", isTRUE(r$own_differ) && !identical(r$own_panels[[1]]$col, r$own_panels[[2]]$col))
 for (m in c("line", "fill", "same")) {
   a <- r[[m]]$a
   check(paste0(m, ": every '+ drug' strain has the colour and marker of the same strain in panel 1"),
