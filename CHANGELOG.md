@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.28.0 — 2026-11-23
+
+**Panels that look alike: one choice gives the matching samples of every panel the same colour and marker.**
+- **Sample styles across panels** (Panels section): *Each sample its own style* (the default, unchanged), *Same in
+  every panel, line type changes by panel* (solid, dashed, dotted ...), *Same in every panel, markers filled / open by
+  panel*, or *Same in every panel*. The k-th sample of every panel takes the colour, marker, fill and line of the k-th
+  sample of the first panel, so the panels differ by one thing only. Samples are matched by their place in the panel,
+  not by name. A sample shown in every panel keeps its own style; a panel's own sample styles still apply on top.
+- The sidebar, the quick-edit strip, saved settings, project files and the analysis figures keep each sample's own
+  style; the lysis curve, its legends, the legend key, the legend text and the samples-as-drawn table follow the choice.
+- With the default every figure is byte-identical to v2.27.4. `tests/test_v228_panel_styles.R` (24 checks).
+
 ## v2.27.4 — 2026-11-23
 
 **Each panel's legend is moved on its own; the last error bar keeps its cap at the end of a typed x range.**
