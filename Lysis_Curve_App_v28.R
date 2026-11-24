@@ -9062,7 +9062,8 @@ apply_panel_cfg <- function(pg, cfg, subscripts = TRUE) {
   drop <- function(test) { keep <- !vapply(pg$layers, test, NA); if (!all(keep)) pg$layers <- pg$layers[keep]; pg }
   tru <- function(v) isTRUE(v) || identical(toupper(as.character(v)[1]), "TRUE")
   if (tru(cfg$hide_errors)) pg <- drop(function(l) inherits(l$geom, c("GeomErrorbar", "GeomRibbon", "GeomLinerange", "GeomPointrange", "GeomCrossbar")) || rep_layer(l))
-  if (tru(cfg$hide_points)) pg <- drop(function(l) inherits(l$geom, "GeomPoint") && !rep_layer(l) && "shape" %in% names(l$mapping))
+  if (tru(cfg$hide_points)) pg <- drop(function(l) (inherits(l$geom, "GeomPoint") && !rep_layer(l) && "shape" %in% names(l$mapping)) ||
+                                          inherits(l$geom, "GeomKcCapPastMarker"))   # v2.27.5: no marker, nothing to reach past
   if (tru(cfg$hide_lines))  pg <- drop(function(l) inherits(l$geom, "GeomLine") && !rep_layer(l))
   s1 <- function(v) { v <- as.character(if (is.null(v)) "" else v)[1]; if (is.na(v)) "" else trimws(v) }
   n1 <- function(v) { v <- suppressWarnings(as.numeric(if (is.null(v)) NA else v)[1]); if (length(v) == 1L && is.finite(v)) v else NA_real_ }

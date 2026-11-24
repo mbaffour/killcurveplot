@@ -16,8 +16,16 @@ pass <- 0L; fail <- 0L
 check <- function(desc, cond) { if (isTRUE(cond)) { pass <<- pass + 1L; cat("PASS:", desc, "\n") } else { fail <<- fail + 1L; cat("FAIL:", desc, "\n") } }
 env <- new.env(); app <- source("Lysis_Curve_App_v28.R", local = env)$value
 check("APP_VERSION is 2.27.5 or later", package_version(env$APP_VERSION) >= "2.27.5")
-check("the switch is appended at the end of APP_DEFAULTS, on by default",
-      identical(tail(names(env$APP_DEFAULTS), 1), "error_cap_past_marker") && isTRUE(env$APP_DEFAULTS$error_cap_past_marker))
+check("the switch is appended to APP_DEFAULTS (after the v2.26 panel keys), on by default",
+      match("error_cap_past_marker", names(env$APP_DEFAULTS)) > match("facet_n_panels", names(env$APP_DEFAULTS)) && isTRUE(env$APP_DEFAULTS$error_cap_past_marker))
+pg0 <- ggplot2::ggplot(data.frame(time = 1:3, mean_value = 1:3, err_lo = 0.9 * (1:3), err_hi = 1.1 * (1:3), variable = "a", kc_mk = 2, kc_mv = 2)) +
+  ggplot2::geom_errorbar(ggplot2::aes(time, ymin = err_lo, ymax = err_hi)) +
+  ggplot2::layer(mapping = ggplot2::aes(x = time, ymin = err_lo, ymax = err_hi, kc_mk = kc_mk, kc_mv = kc_mv), stat = "identity", geom = env$GeomKcCapPastMarker, position = "identity") +
+  ggplot2::geom_point(ggplot2::aes(time, mean_value, shape = variable))
+geoms <- function(p) unname(vapply(p$layers, function(l) class(l$geom)[1], ""))
+check("a panel's 'Hide points' also drops the caps that reach past the marker; 'Hide error bars' drops both bar layers",
+      !"GeomKcCapPastMarker" %in% geoms(env$apply_panel_cfg(pg0, list(hide_points = TRUE))) && "GeomErrorbar" %in% geoms(env$apply_panel_cfg(pg0, list(hide_points = TRUE))) &&
+        identical(geoms(env$apply_panel_cfg(pg0, list(hide_errors = TRUE))), "GeomPoint"))
 check("marker sizes: a solid circle is R's 0.375 x fontsize; open symbols and unfilled 21-25 hide nothing; a white-filled 21 does",
       identical(env$marker_half_extent(16), c(0.375, 0.375)) && identical(env$marker_half_extent(1), c(0, 0)) &&
         identical(env$marker_half_extent(21, NA), c(0, 0)) && identical(env$marker_half_extent(21, "white"), c(0.375, 0.375)) &&
