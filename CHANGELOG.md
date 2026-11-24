@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.28.2 — 2026-11-24
+
+**Matched panels by default.** *Sample styles across panels* now starts on *Same in every panel, line type changes by
+panel*: in a figure split into panels, the k-th sample of every panel has the colour and marker of the k-th sample of
+panel 1, panel 1 drawn with solid lines, panel 2 dashed, panel 3 dotted. *Each sample its own style* (the old look) is
+one click away in the same menu. With one curve per panel (*Each sample its own panel*) nothing is paired and every
+sample keeps its own colour. Figures without panels are unchanged (the startup figure is byte-identical); split
+figures change as intended. Projects and settings files saved before v2.28.2 open with the new default.
+
 ## v2.28.1 — 2026-11-23
 
 **Error bars that were there but could not be seen now show.**

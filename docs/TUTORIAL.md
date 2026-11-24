@@ -381,17 +381,18 @@ When every panel holds the same set of strains under a different condition (with
 infected), **Sample styles across panels** (Panels section) makes the panels match, so a reader can go from one panel to
 the next without relearning the colours:
 
-* **Each sample its own style** (the default): every sample keeps the colour and marker it has in the sidebar.
-* **Same in every panel, line type changes by panel**: the first sample of every panel looks like the first sample of
+* **Same in every panel, line type changes by panel** (the default since v2.28.2): the first sample of every panel looks like the first sample of
   panel 1, the second like the second, and so on; panel 1 is drawn with solid lines, panel 2 dashed, panel 3 dotted.
+* **Each sample its own style**: every sample keeps the colour and marker it has in the sidebar (the look before
+  v2.28.2).
 * **Same in every panel, markers filled / open by panel**: as above, with filled markers in panel 1 and open markers in
   panel 2 (crosses, X, plus and stars have no open form).
 * **Same in every panel**: the panels are drawn alike and only their names tell them apart.
 
 Samples are matched by their place in the panel (in the order they are listed), not by name, so "EV" and
 "EV + drug" or "pRE" and "pRE_phage" pair up however they are named. Change a sample's colour or marker in the first
-panel and the matching sample of every panel follows. A sample shown in every panel (a control) keeps its own style, and
-a panel's own sample styles (9.4) still apply on top. The sidebar and saved settings keep each sample's own style, so
+panel and the matching sample of every panel follows. A sample shown in every panel (a control) keeps its own style; with one curve per panel (*Each sample its own
+panel*) there is nothing to pair, so every sample keeps its own colour. A panel's own sample styles (9.4) still apply on top. The sidebar and saved settings keep each sample's own style, so
 switching back to *Each sample its own style* brings it back. The legends, the legend key and the legend text follow
 what is drawn.
 
