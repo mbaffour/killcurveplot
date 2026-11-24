@@ -375,7 +375,7 @@ settings and sample styles) is kept by **Save Settings**, cleared by **Clear & R
 
 ---
 
-### 9.5 Panels that look alike (sample styles across panels)
+### 9.7 Panels that look alike (sample styles across panels)
 
 When every panel holds the same set of strains under a different condition (without and with a drug, uninfected and
 infected), **Sample styles across panels** (Panels section) makes the panels match, so a reader can go from one panel to
