@@ -13,8 +13,8 @@ pass <- 0L; fail <- 0L
 check <- function(desc, cond) { if (isTRUE(cond)) { pass <<- pass + 1L; cat("PASS:", desc, "\n") } else { fail <<- fail + 1L; cat("FAIL:", desc, "\n") } }
 env <- new.env(); app <- source("Lysis_Curve_App_v28.R", local = env)$value
 check("APP_VERSION is 2.28.0 or later", package_version(env$APP_VERSION) >= "2.28.0")
-check("the choice is appended at the end of APP_DEFAULTS and is off by default (each sample its own style)",
-      identical(tail(names(env$APP_DEFAULTS), 1), "panel_style_match") && identical(env$APP_DEFAULTS$panel_style_match, "own") &&
+check("the choice is appended at the end of APP_DEFAULTS (v2.28.1 appends after it) and is off by default (each sample its own style)",
+      { nm <- names(env$APP_DEFAULTS); all(nm[-seq_len(match("panel_style_match", nm))] %in% c("error_cap_past_marker")) } && identical(env$APP_DEFAULTS$panel_style_match, "own") &&
         identical(unname(env$PANEL_STYLE_MATCH_CHOICES), c("own", "line", "fill", "same")))
 rt <- htmltools::renderTags(env$ui); h <- paste(rt$head, rt$html)
 check("the Panels section has the menu 'Sample styles across panels'", grepl('id="panel_style_match"', h, fixed = TRUE))
