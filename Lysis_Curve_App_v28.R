@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.27.4"
+APP_VERSION <- "2.28.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3895,7 +3895,8 @@ n4_preset_settings <- function()
 APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # v2.16: no panel letter unless the user sets one
                   list(legend_inside_x = 0.98, legend_inside_y = 0.98),        # v2.23.4: appended at the end (the dragged legend, top-right)
                   list(figure_labels = ""),                                     # v2.25.0: extra labels on the figure, one per line
-                  list(facet_letters = "none", facet_size_mode = "each", facet_legends = "each", facet_n_panels = 2))   # v2.26.0: panel letters, panel size, legends (Panels section); v2.27.2: each panel full size with its own legend inside
+                  list(facet_letters = "none", facet_size_mode = "each", facet_legends = "each", facet_n_panels = 2),   # v2.26.0: panel letters, panel size, legends (Panels section); v2.27.2: each panel full size with its own legend inside
+                  list(panel_style_match = "own"))   # v2.28.0: sample styles across panels (appended at the end)
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -8947,6 +8948,41 @@ facet_layers <- function(levels, scales = "fixed", ncol = NA, strip_style = "pla
 }
 # v2.26.0: panel letters, panel size and legends of a multi-panel figure.
 FACET_LEGEND_CHOICES <- c("A legend in each panel (each panel its own figure)" = "each", "One legend for all panels" = "shared")   # v2.27.2: each first (the default)
+# v2.28.0: Sample styles across panels. The k-th sample of every panel can take the colour, marker, fill and line of the
+# k-th sample of the first panel, so the panels look alike and differ by one thing only (or by nothing but their names).
+PANEL_STYLE_MATCH_CHOICES <- c("Each sample its own style" = "own", "Same in every panel, line type changes by panel" = "line",
+                               "Same in every panel, markers filled / open by panel" = "fill", "Same in every panel" = "same")
+PANEL_STYLE_LINES <- c("solid", "dashed", "dotted", "dotdash", "longdash", "twodash")
+# Who follows whom: for every sample drawn in exactly one panel, the sample at the same place (k-th, in `samples` order)
+# in the first panel that has a k-th sample, and the number of its own panel. Samples shown in several panels (a control in
+# every panel) keep their own style. list(leader = named chr, panel = named int); empty without two panels.
+panel_style_leaders <- function(samples, pm) {
+  out <- list(leader = setNames(character(0), character(0)), panel = setNames(integer(0), character(0)))
+  if (is.null(pm) || length(pm$levels) < 2L) return(out)
+  one <- samples[vapply(samples, function(x) length(pm$map[[x]]) == 1L, NA)]
+  members <- lapply(pm$levels, function(g) one[vapply(one, function(x) identical(pm$map[[x]][1], g), NA)])
+  for (j in seq_along(members)) for (k in seq_along(members[[j]])) {
+    x <- members[[j]][k]
+    src <- members[[which(lengths(members) >= k)[1]]][k]
+    out$leader[x] <- src; out$panel[x] <- j
+  }
+  out
+}
+# The figure's styles (resolve_aesthetics() output for `samples`) with each follower given its leader's style from `full`
+# (the styles of all the figure's samples), then the one thing that changes by panel.
+panel_style_apply <- function(a, full, ld, mode) {
+  if (!mode %in% c("line", "fill", "same") || !length(ld$leader)) return(a)
+  for (x in intersect(names(a$colors), names(ld$leader))) {
+    src <- ld$leader[[x]]; j <- ld$panel[[x]]
+    if (src %in% names(full$colors)) {
+      a$colors[x] <- full$colors[[src]]; a$shapes[x] <- full$shapes[[src]]
+      a$filled_map[x] <- full$filled_map[[src]]; a$line_types[x] <- full$line_types[[src]]
+    }
+    if (identical(mode, "line")) a$line_types[x] <- PANEL_STYLE_LINES[(j - 1L) %% length(PANEL_STYLE_LINES) + 1L]
+    if (identical(mode, "fill")) a$filled_map[x] <- (j %% 2L) == 1L
+  }
+  a
+}
 # The per-panel settings of "A legend in each panel" (Panels section): blank = as the whole figure.
 PANEL_CFG_FIELDS <- c("title", "legend", "legend_title", "xlab", "ylab", "xmin", "xmax", "ymin", "ymax", "hide_points", "hide_lines", "hide_errors",
                       "legend_x", "legend_y")   # v2.27.4: where the panel's legend was dragged (fractions of its panel)
@@ -10672,6 +10708,12 @@ ui <- fluidPage(
                          column(6, selectInput("facet_letters", "Panel letters:", choices = FACET_LETTER_CHOICES, selected = APP_DEFAULTS$facet_letters)),
                          column(6, selectInput("facet_size_mode", "Panel size:", choices = FACET_SIZE_CHOICES, selected = APP_DEFAULTS$facet_size_mode))),
                        selectInput("facet_legends", "Legends:", choices = FACET_LEGEND_CHOICES, selected = APP_DEFAULTS$facet_legends),
+                       selectInput("panel_style_match", "Sample styles across panels:", choices = PANEL_STYLE_MATCH_CHOICES, selected = APP_DEFAULTS$panel_style_match),
+                       conditionalPanel("input.panel_style_match != 'own'",
+                         p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                           "The first sample of every panel looks like the first sample of panel 1, the second like the second, and so on ",
+                           "(in the order the samples are listed). Change a sample's colour or marker in the first panel and every panel follows. ",
+                           "A sample shown in every panel keeps its own style. Crosses, X, plus and stars have no open form.")),
                        uiOutput("panel_custom_ui"),
                        fluidRow(
                          column(6, numericInput("facet_ncol", "Panels per row (blank = auto):", APP_DEFAULTS$facet_ncol, 1, 8, 1)),
@@ -14648,6 +14690,20 @@ server <- function(input, output, session) {
     list(shapes = shapes, colors = colors, line_types = line_types,
          leg_labels = leg_labels, filled_map = filled_map, groups = groups)
   }
+  # v2.28.0: the styles as the lysis curve DRAWS them: with panels on and a "Same in every panel" choice, each panel's k-th
+  # sample takes the first panel's k-th style. Saving, the sidebar, the quick-edit strip and the analysis figures keep
+  # resolve_aesthetics() (each sample's own style), so turning the choice off brings every sample's own look back.
+  resolve_aesthetics_drawn <- function(samples) {
+    a <- resolve_aesthetics(samples)
+    mode <- sel1("panel_style_match", "own")
+    if (!isTRUE(input$facet_by_group) || !mode %in% c("line", "fill", "same")) return(a)
+    tryCatch({
+      full <- sel_samples(); fa <- resolve_aesthetics(full)
+      drawn <- panel_samples_now(full)
+      pm <- panel_membership_now(drawn, fa, min_panels = 2L)
+      panel_style_apply(a, fa, panel_style_leaders(drawn, pm), mode)
+    }, error = function(e) a)
+  }
   
   # ── Paper style (v2.23.4) ────────────────────────────────────────────────────
   # paper_style.json from CFU Plot Studio, read once after the first flush (so the inputs exist) and on the Reload button.
@@ -15843,7 +15899,7 @@ server <- function(input, output, session) {
   # unless Panel names is "None". The composer's own letters (a, b, c) mark the panels.
   main_group_plots <- function(min_panels = 1L) {
     samps <- sel_samples()
-    aes_v <- resolve_aesthetics(samps)
+    aes_v <- resolve_aesthetics_drawn(samps)   # v2.28.0: the styles across panels
     gm    <- panel_membership_now(samps, aes_v, min_panels = min_panels)
     if (is.null(gm)) return(list())
     pd    <- prepare_plot_data()
@@ -15871,7 +15927,7 @@ server <- function(input, output, session) {
     tryCatch({
       pd <- plot_data_or_empty()
       if (plot_data_is_empty(pd)) return(empty_state_figure())    # hardening: all time points / readings / replicates filtered away
-      s_all <- sel_samples(); s_fig <- panel_samples_now(s_all); aes_all <- resolve_aesthetics(s_all)
+      s_all <- sel_samples(); s_fig <- panel_samples_now(s_all); aes_all <- resolve_aesthetics_drawn(s_all)
       if (!identical(s_fig, s_all)) {                     # v2.26.0: pick mode draws the picked samples only (colours as for all)
         pd <- pd[as.character(pd$variable) %in% s_fig, , drop = FALSE]
         aes_all <- lapply(aes_all, function(v) if (!is.null(names(v)) && all(s_fig %in% names(v))) v[s_fig] else v)
@@ -16470,7 +16526,7 @@ server <- function(input, output, session) {
     if (is.null(rv$data) || is.null(sel_samples())) return("")
     pd <- tryCatch(prepare_plot_data(), error = function(e) NULL)
     if (is.null(pd) || nrow(pd) == 0) return("")
-    aes_v <- resolve_aesthetics(sel_samples())
+    aes_v <- resolve_aesthetics_drawn(sel_samples())   # v2.28.0: as drawn
     nb    <- function(id) { v <- input[[id]]
                             if (is.null(v) || !nzchar(trimws(as.character(v)))) NULL else trimws(as.character(v)) }
     pl    <- nb("panel_label"); host <- nb("nb_host_strain"); phage <- nb("nb_phage_plasmid")
@@ -16552,7 +16608,7 @@ server <- function(input, output, session) {
   legend_samples_df <- function(drawn = TRUE) {
     ss <- sel_samples(); if (is.null(rv$data) || !length(ss)) return(NULL)
     if (isTRUE(drawn)) ss <- panel_samples_now(ss)   # v2.26.1: the samples the figure draws (a sample picked for no panel is left off, as in the legend text and key)
-    aes_v <- resolve_aesthetics(ss); hex <- toupper(unname(aes_v$colors[ss]))
+    aes_v <- if (isTRUE(drawn)) resolve_aesthetics_drawn(ss) else resolve_aesthetics(ss); hex <- toupper(unname(aes_v$colors[ss]))
     sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
     mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
     lt <- vapply(ss, function(s) if (!sl) NA_character_ else { w <- legend_line_words(aes_v$line_types[[s]]); if (is.na(w)) "solid line" else w }, "", USE.NAMES = FALSE)
