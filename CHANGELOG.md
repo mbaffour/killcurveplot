@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.28.1 — 2026-11-23
+
+**Error bars that were there but could not be seen now show.**
+- **Bars shorter than the marker**: a bar whose half-length is less than the marker's half-height, with a cap narrower
+  than the marker, lay entirely under the marker. In the journal look the marker is about 2.9 pt wide and the cap 2.6 pt,
+  so points with tight replicates had no visible bar (in the demo figure, all 39 bars). These bars now get caps
+  that reach 1 pt past the marker on each side, at the bar's true ends. The test is made when the figure is drawn, in
+  points, so the data, the axes and every bar that was already visible are unchanged; in the reference figures the only
+  difference is the added caps. *Error Bars / Shadow → Show bars shorter than the marker* (on by default; off gives the
+  old look byte for byte). Open (white-filled) markers count; capless bar styles and bands are not changed. Saved with
+  settings and in project files.
+- **"Drop readings outside the axis"** (*Readings below the axis floor: drop*) deleted a whole error bar when one end
+  ran past an axis limit even though its mean was on the axis. Such a bar now runs to the frame. Readings (and bars) whose
+  mean is off the axis are still left out.
+- A panel's *Hide points* also removes these caps. `tests/test_v2281_error_bars.R` (14 checks).
+
 ## v2.28.0 — 2026-11-23
 
 **Panels that look alike: one choice gives the matching samples of every panel the same colour and marker.**

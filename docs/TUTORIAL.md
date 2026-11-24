@@ -186,6 +186,12 @@ Open **Error Bars / Shadow**:
 * **Error Multiplier** (e.g. 2 x SEM), **Floor errors at zero**, **Error colour**, **Bar Style** (T-shaped or plain),
   **Cap width** and **Bar Thickness**.
 * On a log axis, a bar that would cross zero is drawn down to the axis minimum (it used to vanish).
+* **Show bars shorter than the marker** (on by default, v2.28.1): a bar shorter than its marker used to lie entirely
+  under it, cap included (in the journal look the marker is about 2.9 pt wide and the cap 2.6 pt), so points with tight
+  replicates showed no bar. Such a bar now gets caps that reach 1 pt past the marker on each side, at the bar's true ends.
+  Bars that were visible are drawn exactly as before. Switch it off for the old look.
+* With *Readings below the axis floor: drop*, a bar whose mean is on the axis but one end runs past a limit is drawn up to
+  the frame (it used to be deleted whole).
 
 The legend text (section 8) always says which measure the bars show and the n behind it.
 
@@ -605,7 +611,7 @@ Download figure bundle (.zip): figure, legend key, legend text, methods, statist
 | Problem | What to do |
 |---|---|
 | A sample is missing from the figure | Check *Select Samples* (Variable Styling), the *show* box in the strip, and, with *Pick the samples for each panel*, that it is picked for a panel. |
-| Error bars are missing at some points | n = 1 at that time point (no spread), or the bar fell below a log axis' floor; switch on *draw bars that cross zero*. |
+| Error bars are missing at some points | n = 1 at that time point (no spread); or the bar is shorter than the marker (keep *Show bars shorter than the marker* on, the default); or the bar fell below a log axis' floor (switch on *draw bars that cross zero*). |
 | The figure is wider than the journal column | The size bar says so. Move the legend inside, shorten names, or for panels use *Panel size: Fit a double column*. |
 | Text looks huge on screen | The preview shows the true print size scaled to the screen; the exported file is correct. Use *True export size* to check. |
 | Two samples share a colour | Since v2.26.1 the palettes no longer repeat: samples past the eighth (twelfth for the default colours) get further distinct colours (purple, maroon, grey, olive, navy, magenta ...). Two samples that still look alike were most likely given the same colour by hand or by a colour map: set the colour in Variable Styling. Only Okabe-Ito's first eight colours are colour-blind safe, so with more samples give them different markers or line types too. |

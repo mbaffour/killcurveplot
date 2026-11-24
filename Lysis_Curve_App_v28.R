@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.28.0"
+APP_VERSION <- "2.28.1"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3896,7 +3896,8 @@ APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # 
                   list(legend_inside_x = 0.98, legend_inside_y = 0.98),        # v2.23.4: appended at the end (the dragged legend, top-right)
                   list(figure_labels = ""),                                     # v2.25.0: extra labels on the figure, one per line
                   list(facet_letters = "none", facet_size_mode = "each", facet_legends = "each", facet_n_panels = 2),   # v2.26.0: panel letters, panel size, legends (Panels section); v2.27.2: each panel full size with its own legend inside
-                  list(panel_style_match = "own"))   # v2.28.0: sample styles across panels (appended at the end)
+                  list(panel_style_match = "own"),   # v2.28.0: sample styles across panels (appended at the end)
+                  list(error_cap_past_marker = TRUE))                        # v2.28.1: a bar the marker would cover gets caps that reach past it
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -8870,6 +8871,67 @@ marker_scales <- function(samps, aes_v, labels, name = NULL, limits = NULL, colo
        do.call(ggplot2::scale_fill_manual,  c(list(values = fill), a)))
 }
 
+# ── v2.28.1: error bars hidden by their marker ───────────────────────────────
+# A T-shaped bar whose half-length is shorter than the marker's half-height, with a cap narrower than the marker, lies
+# entirely under the (opaque) marker: the bar is drawn but cannot be seen. In the journal look the marker is 2.9 pt wide
+# and the cap 2.6 pt, so tight replicates (often the last points of a falling log-axis curve) showed no bar at all.
+# The fix is decided where it can be measured: at drawing time, in points. A second layer draws, for those hidden bars
+# only, caps that reach MARKER_CAP_MARGIN_PT past the marker on each side (at the bar's true ends; the data are not
+# changed). Every other bar, and the x / y scales, stay exactly as before.
+MARKER_CAP_MARGIN_PT <- 1
+# Half-width (h) and half-height (v) of an R plotting symbol as a fraction of its fontsize, measured on svglite output
+# (circle, square 15 and diamond 18 = R's RADIUS 0.375; square 22 0.332; diamond 23 0.47; a triangle is 0.505 wide each
+# side and reaches 0.583 above its centre). Only solid or filled symbols hide what lies under them; open ones are 0.
+marker_half_extent <- function(pch, fill = NA) {
+  pch <- as.integer(pch)
+  hv <- switch(as.character(pch),
+               "15" = , "16" = , "18" = , "19" = , "21" = c(0.375, 0.375), "20" = c(0.25, 0.25),
+               "17" = , "24" = , "25" = c(0.505, 0.583), "22" = c(0.332, 0.332), "23" = c(0.47, 0.47),
+               c(0, 0))
+  if (pch %in% 21:25 && (is.na(fill) || identical(tolower(as.character(fill)), "transparent"))) hv <- c(0, 0)
+  hv
+}
+# Per sample: the marker's half-width / half-height in points (bigpts, 1/72 in), as ggplot2 draws geom_point(size, stroke).
+marker_extent_pt <- function(samps, aes_v, colours = NULL, size = 1.5, stroke = 0.5) {
+  colours <- colours %||% aes_v$colors
+  at <- function(x, i) if (!is.null(names(x)) && samps[i] %in% names(x)) x[[samps[i]]] else x[[i]]
+  fs <- size * ggplot2::.pt + stroke * ggplot2::.stroke / 2
+  out <- lapply(seq_along(samps), function(i) {
+    r <- tryCatch(resolve_point_shape(at(aes_v$shapes, i), at(aes_v$filled_map, i), unname(at(colours, i))), error = function(e) NULL)
+    hv <- if (is.null(r)) c(0, 0) else marker_half_extent(r$shape, r$fill)
+    border <- if (!is.null(r) && as.integer(r$shape) %in% c(19L, 21:25) && hv[1] > 0) stroke * ggplot2::.stroke / 2 * 0.75 / 2 else 0   # the outline's outer half (lwd 1 = 0.75 pt)
+    hv * fs + border * (hv > 0)
+  })
+  data.frame(variable = samps, kc_mk = vapply(out, `[`, 0, 1), kc_mv = vapply(out, `[`, 0, 2), stringsAsFactors = FALSE)
+}
+GeomKcCapPastMarker <- ggplot2::ggproto(
+  "GeomKcCapPastMarker", ggplot2::GeomErrorbar,
+  default_aes  = ggplot2::aes(!!!c(unclass(ggplot2::GeomErrorbar$default_aes), list(kc_mk = 0, kc_mv = 0))),
+  extra_params = c(ggplot2::GeomErrorbar$extra_params, "kc_margin_pt"),
+  draw_key     = ggplot2::draw_key_blank,
+  draw_panel   = function(self, data, panel_params, coord, lineend = "butt", width = NULL, flipped_aes = FALSE, kc_margin_pt = MARKER_CAP_MARGIN_PT) {
+    data <- data[is.finite(data$kc_mk) & data$kc_mk > 0 & is.finite(data$ymin) & is.finite(data$ymax), , drop = FALSE]
+    if (!nrow(data)) return(ggplot2::zeroGrob())
+    d <- coord$transform(data, panel_params)
+    grid::gTree(kc = d[, c("x", "xmin", "xmax", "ymin", "ymax", "colour", "alpha", "linewidth", "linetype", "kc_mk", "kc_mv")],
+                kc_margin = kc_margin_pt, kc_lineend = lineend, cl = "kc_cap_past_marker")
+  })
+# Drawing time: the panel's size is known, so the bar's half-length and cap half-width are measured in points.
+makeContent_kc_cap_past_marker <- function(x) {
+  d <- x$kc
+  h <- grid::convertHeight(grid::unit(abs(d$ymax - d$ymin) / 2, "npc"), "bigpts", valueOnly = TRUE)
+  w <- grid::convertWidth(grid::unit(abs(d$xmax - d$xmin) / 2, "npc"), "bigpts", valueOnly = TRUE)
+  hid <- is.finite(h) & is.finite(w) & h < d$kc_mv & w < d$kc_mk
+  if (!any(hid)) return(grid::setChildren(x, grid::gList()))
+  d <- d[hid, , drop = FALSE]; e <- rep(d$kc_mk + x$kc_margin, 2); xc <- rep(d$x, 2)
+  cap <- grid::segmentsGrob(x0 = grid::unit(xc, "npc") - grid::unit(e, "bigpts"), x1 = grid::unit(xc, "npc") + grid::unit(e, "bigpts"),
+                            y0 = grid::unit(c(d$ymin, d$ymax), "npc"), y1 = grid::unit(c(d$ymin, d$ymax), "npc"), name = "caps",
+                            gp = grid::gpar(col = scales::alpha(rep(d$colour, 2), rep(d$alpha, 2)), lwd = rep(d$linewidth, 2) * ggplot2::.pt,
+                                            lty = rep(d$linetype, 2), lineend = x$kc_lineend))
+  grid::setChildren(x, grid::gList(cap))
+}
+registerS3method("makeContent", "kc_cap_past_marker", makeContent_kc_cap_past_marker, envir = asNamespace("grid"))
+
 # ── v2.25.0: floating labels ─────────────────────────────────────────────────
 # Text placed on the panel by panel FRACTION (0,0 = bottom-left, 1,1 = top-right), so a position means the same on a log
 # axis, with custom limits, on screen and in every export. annotation_custom() cannot be used: its -Inf / Inf bounds go
@@ -9000,7 +9062,8 @@ apply_panel_cfg <- function(pg, cfg, subscripts = TRUE) {
   drop <- function(test) { keep <- !vapply(pg$layers, test, NA); if (!all(keep)) pg$layers <- pg$layers[keep]; pg }
   tru <- function(v) isTRUE(v) || identical(toupper(as.character(v)[1]), "TRUE")
   if (tru(cfg$hide_errors)) pg <- drop(function(l) inherits(l$geom, c("GeomErrorbar", "GeomRibbon", "GeomLinerange", "GeomPointrange", "GeomCrossbar")) || rep_layer(l))
-  if (tru(cfg$hide_points)) pg <- drop(function(l) inherits(l$geom, "GeomPoint") && !rep_layer(l) && "shape" %in% names(l$mapping))
+  if (tru(cfg$hide_points)) pg <- drop(function(l) (inherits(l$geom, "GeomPoint") && !rep_layer(l) && "shape" %in% names(l$mapping)) ||
+                                          inherits(l$geom, "GeomKcCapPastMarker"))   # v2.28.1: no marker, nothing to reach past
   if (tru(cfg$hide_lines))  pg <- drop(function(l) inherits(l$geom, "GeomLine") && !rep_layer(l))
   s1 <- function(v) { v <- as.character(if (is.null(v)) "" else v)[1]; if (is.na(v)) "" else trimws(v) }
   n1 <- function(v) { v <- suppressWarnings(as.numeric(if (is.null(v)) NA else v)[1]); if (length(v) == 1L && is.finite(v)) v else NA_real_ }
@@ -10925,6 +10988,7 @@ ui <- fluidPage(
                                                                      selected = "T"),
                                                          sliderInput("error_bar_width",     "Cap width:", 0.01, 50, APP_DEFAULTS$error_bar_width, 0.01),
                                                          checkboxInput("error_cap_relative", "Cap width is % of the x range (same look at any time scale)", APP_DEFAULTS$error_cap_relative),
+                                                         checkboxInput("error_cap_past_marker", "Show bars shorter than the marker (their caps reach past it)", APP_DEFAULTS$error_cap_past_marker),
                                                          sliderInput("error_bar_thickness", "Bar Thickness (1 = 2.1 pt):", 0.1,  2, APP_DEFAULTS$error_bar_thickness, 0.05),
                                                          selectInput("error_bar_position", "Position:",
                                                                      choices  = c("Middle" = "middle", "Dodge" = "dodge"),
@@ -15527,6 +15591,18 @@ server <- function(input, output, session) {
           p <- p + do.call(geom_errorbar, c(list(data = eb_data, mapping = eb_aes,
                                  width = cap_w, linewidth = nin("error_bar_thickness"),
                                  linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed, kg))
+          # v2.28.1: a bar the marker would cover gets caps that reach past the marker (decided at drawing time, in points)
+          if (isTRUE(input$show_points) && isTRUE(input$error_cap_past_marker %||% TRUE) && nrow(eb_data) > 0) {
+            mk <- marker_extent_pt(samples, aes_vals, colours = display_colors, size = nin("shape_size"), stroke = nin("point_stroke"))
+            eb_mk <- eb_data; ix <- match(as.character(eb_mk$variable), mk$variable)
+            eb_mk$kc_mk <- ifelse(is.na(ix), 0, mk$kc_mk[ix]); eb_mk$kc_mv <- ifelse(is.na(ix), 0, mk$kc_mv[ix])
+            mk_aes <- if (eb_col == "sample") aes(x = time, ymin = err_lo, ymax = err_hi, color = variable, kc_mk = kc_mk, kc_mv = kc_mv)
+                      else aes(x = time, ymin = err_lo, ymax = err_hi, group = variable, kc_mk = kc_mk, kc_mv = kc_mv)
+            if (any(eb_mk$kc_mk > 0))
+              p <- p + ggplot2::layer(data = eb_mk, mapping = mk_aes, stat = "identity", geom = GeomKcCapPastMarker, position = pos,
+                                      inherit.aes = FALSE, show.legend = FALSE,
+                                      params = c(list(width = cap_w, linewidth = nin("error_bar_thickness"), linetype = blt), eb_fixed))
+          }
         } else {
           p <- p + do.call(geom_linerange, c(list(data = eb_data, mapping = eb_aes,
                                   linewidth = nin("error_bar_thickness"),
@@ -15796,7 +15872,19 @@ server <- function(input, output, session) {
       yb <- y_interval_scale_args(plot_data, y_lims)
       p <- p + do.call(scale_y_continuous, c(list(limits = y_lims, expand = y_exp, oob = y_oob), yb))
     }
-    
+    # v2.28.1: "drop readings outside the axis" drops READINGS. An error bar whose mean is on the axis but one end runs past
+    # a limit was deleted whole (ggplot removes the row); it now runs to the frame, as it does with "squish".
+    if (identical(input$y_oob, "censor") && length(y_lims) == 2L && all(is.finite(y_lims))) {
+      yl <- sort(y_lims)
+      for (li in seq_along(p$layers)) {
+        ly <- p$layers[[li]]
+        if (!inherits(ly$geom, c("GeomErrorbar", "GeomLinerange")) || !is.data.frame(ly$data) || !all(c("err_lo", "err_hi", "mean_value") %in% names(ly$data))) next
+        dd <- ly$data; on <- is.finite(dd$mean_value) & dd$mean_value >= yl[1] & dd$mean_value <= yl[2]
+        dd$err_lo[on] <- pmin(pmax(dd$err_lo[on], yl[1]), yl[2]); dd$err_hi[on] <- pmin(pmax(dd$err_hi[on], yl[1]), yl[2])
+        ly$data <- dd
+      }
+    }
+
     bs     <- num_or(input$theme_base_pt, 0, 0, 30)
     pl_lab <- trimws(input$panel_label %||% "")
     p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value, g = plot_data$variable),
