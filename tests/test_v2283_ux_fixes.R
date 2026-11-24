@@ -26,9 +26,9 @@ cat("\n--- the legend-key rule on every figure tab ---\n")
 check("Analysis, Curve fitting, Compose and Compare each have a 'Place the key on the figure' switch and a legend text starter",
       all(vapply(c("analysis", "fit", "compose", "compare"), function(k) grepl(paste0('id="', k, '_key_on_figure"'), h, fixed = TRUE) &&
                    grepl(paste0('id="', k, '_legend_text"'), h, fixed = TRUE), NA)))
-check("the four switches are appended to APP_DEFAULTS, on", identical(tail(names(env$APP_DEFAULTS), 4),
-      c("analysis_key_on_figure", "fit_key_on_figure", "compose_key_on_figure", "compare_key_on_figure")) &&
-        all(vapply(tail(env$APP_DEFAULTS, 4), isTRUE, NA)))
+check("the four switches are appended to APP_DEFAULTS, on (then the lysis OD floor)", identical(tail(names(env$APP_DEFAULTS), 5),
+      c("analysis_key_on_figure", "fit_key_on_figure", "compose_key_on_figure", "compare_key_on_figure", "lysis_floor_od")) &&
+        all(vapply(tail(env$APP_DEFAULTS, 5)[1:4], isTRUE, NA)) && identical(env$APP_DEFAULTS$lysis_floor_od, 0.1))
 
 cat("\n--- statistics ---\n")
 rm <- data.frame(sample = rep(c("A", "B"), each = 3), replicate = rep(1:3, 2), m = c(1, 2, 3, 10, 11, 12))
@@ -72,6 +72,17 @@ check("'Place the key on the figure' off hides the analysis legend; the key down
 check("excluded time points are typed in the unit the figure shows (F29): 0.5 h is the 30-min reading", identical(R$excl_file_unit, 30))
 check("journal preset: a 55 mm column gets a panel that fits (55 - 12 mm); 89 mm keeps the 65 mm panel",
       { pw <- function(w) if (w - env$JOURNAL_AXES_MM < 65) max(30, floor(w - env$JOURNAL_AXES_MM)) else 65; pw(55) == 43 && pw(89) == 65 })
+
+cat("\n--- the lab's lysis rule: no lysis unless the OD falls below 0.1 ---\n")
+tt <- seq(0, 200, 10); up <- 0.05 * exp(0.04 * tt[tt <= 100])
+half <- c(up, rev(seq(0.6, max(up) * 0.95, length.out = sum(tt > 100))))          # falls by ~70 % but stays above 0.1
+crash <- c(up, seq(max(up) * 0.9, 0.03, length.out = sum(tt > 100)))               # falls below 0.1
+m <- function(od, fl) env$compute_one_curve_metrics(tt, od, "x", lysis_threshold = structure(0.05, floor_od = fl))
+check("a decline that stays above 0.1 is not lysis with the 0.1 floor, and is lysis without it",
+      is.na(m(half, 0.1)$lysis_time) && is.finite(m(half, NA)$lysis_time))
+check("a crash below 0.1 is lysis with the floor (same onset as without it)",
+      is.finite(m(crash, 0.1)$lysis_time) && isTRUE(all.equal(m(crash, 0.1)$lysis_time, m(crash, NA)$lysis_time)))
+check("a plain threshold (no floor attached) behaves as before", identical(env$compute_one_curve_metrics(tt, half, "x", lysis_threshold = 0.05)$lysis_time, m(half, NA)$lysis_time))
 
 cat("\n--- help ---\n")
 f <- tempfile(fileext = ".md"); writeLines(c("# T", "", "See [x](#stats--reports-new).", "", "## Stats & Reports new", "", "[License](LICENSE)"), f)

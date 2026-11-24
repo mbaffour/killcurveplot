@@ -181,4 +181,10 @@ cause; set `ALLOW_SKIP=1` to downgrade that to a visibly-printed skip
 instead.
 
 
+**The lab's OD floor (v2.28.3).** A decline only counts as lysis when the OD after the peak falls below *Lysis also
+needs the OD to fall below* (Curve metrics settings; default **0.1**, the Ramsey lab standard). A curve that drops from
+3 to 2, or dips after a reading above the reader's linear range, is not lysing, and all the lysis metrics (onset, rate,
+OD drop, residual OD, efficiency, recovery slope) are NA for it. Blank the box for no floor. It applies to the measured
+(blank-corrected) OD; with a transform (fold change, % of maximum, ln) the floor is not used.
+
 **Series ending in a crash.** If the decline after the peak exceeds half of the peak, lysis onset is reported even when fewer than two post-peak points exist (a sample read only until it lysed). The sustained-run rule exists to reject noise, not an unambiguous collapse.

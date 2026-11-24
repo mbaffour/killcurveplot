@@ -37,7 +37,7 @@ cat("\n--- controls and defaults ---\n")
 check("the Panels section: split box, 'Each sample its own panel', every-panel samples, letters, size, legends, names",
       has("Split the lysis curve into panels", "Each sample its own panel", "id=\"facet_every\"", "id=\"facet_letters\"", "id=\"facet_size_mode\"",
           "id=\"facet_legends\"", "A legend in each panel", "Panel names:", "Fit a double column (page width)"))
-tl <- setdiff(tail(names(env$APP_DEFAULTS), 10), c("panel_style_match", "error_cap_past_marker", "analysis_key_on_figure", "fit_key_on_figure", "compose_key_on_figure", "compare_key_on_figure"))   # v2.28.0 and v2.28.1 append after them
+tl <- setdiff(tail(names(env$APP_DEFAULTS), 11), c("panel_style_match", "error_cap_past_marker", "analysis_key_on_figure", "fit_key_on_figure", "compose_key_on_figure", "compare_key_on_figure", "lysis_floor_od"))   # v2.28.0 and v2.28.1 append after them
 check("new defaults are appended at the end: letters none, size shared, one legend, 2 picked panels (the faceted figure is unchanged)",
       identical(tl, c("facet_letters", "facet_size_mode", "facet_legends", "facet_n_panels")) && identical(env$APP_DEFAULTS$facet_n_panels, 2) && identical(env$APP_DEFAULTS$facet_letters, "none") &&
         identical(env$APP_DEFAULTS$facet_size_mode, "each") && identical(env$APP_DEFAULTS$facet_legends, "each"))   # v2.27.2: full-size panels, a legend in each
