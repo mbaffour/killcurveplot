@@ -2321,10 +2321,15 @@ qc_flags <- function(rep_pd, pd, ref_sample = NULL, ceiling = 2.5) {
 #   method       "welch" | "nonparametric"
 # Same formatting as the app's on-screen statistics tables (3 significant
 # figures, an em dash for non-finite values).
+# v2.28.3: a p value too small to compute exactly (0, or below the double-precision limit) reads "< 1e-16", not "0"
+is_p_col <- function(nm) grepl("^(p|p[._ ].*|.*_p|p_adj.*|p value.*)$", nm, ignore.case = TRUE)
+fmt_p_tiny <- function(v) ifelse(is.finite(v) & v < 1e-16, "< 1e-16", NA_character_)
 fmt_stats_df <- function(df) {
   if (is.null(df) || nrow(df) == 0) return(NULL)
-  for (cc in names(df)) if (is.numeric(df[[cc]]))
-    df[[cc]] <- ifelse(is.finite(df[[cc]]), formatC(signif(df[[cc]], 3), format = "g"), "—")
+  for (cc in names(df)) if (is.numeric(df[[cc]])) {
+    tiny <- if (is_p_col(cc)) fmt_p_tiny(df[[cc]]) else rep(NA_character_, nrow(df))
+    df[[cc]] <- ifelse(!is.na(tiny), tiny, ifelse(is.finite(df[[cc]]), formatC(signif(df[[cc]], 3), format = "g"), "—"))
+  }
   df
 }
 
@@ -3676,13 +3681,16 @@ compare_replicate_metric <- function(rm, metric, ref_sample = NULL,
   }
   rows <- lapply(pairs, function(pr) {
     a  <- d$value[d$sample == pr[1]]; b <- d$value[d$sample == pr[2]]
-    tt <- tryCatch(if (method == "welch") t.test(a, b) else wilcox.test(a, b, exact = FALSE),
+    # v2.28.3: the exact Mann-Whitney p when it exists (no ties, small n), as R's wilcox.test() gives by default; the
+    # normal approximation (exact = FALSE) gave p = 0.081 for 3 vs 3 fully separated, below the smallest attainable 0.1
+    mw_exact <- length(unique(c(a, b))) == length(c(a, b)) && length(a) + length(b) < 50
+    tt <- tryCatch(if (method == "welch") t.test(a, b) else suppressWarnings(wilcox.test(a, b, exact = mw_exact)),
                    error = function(e) NULL)
     ci <- if (!is.null(tt) && !is.null(tt$conf.int)) tt$conf.int else c(NA_real_, NA_real_)
     data.frame(sample = pr[1], versus = pr[2], n = length(a), n_versus = length(b),
                mean = mean(a), mean_versus = mean(b), difference = mean(a) - mean(b),
                ci_low = ci[1], ci_high = ci[2], hedges_g = hedges_g(a, b),
-               test = if (method == "welch") "Welch t" else "Mann-Whitney",
+               test = if (method == "welch") "Welch t" else if (mw_exact) "Mann-Whitney (exact)" else "Mann-Whitney (normal approx., ties)",
                p = if (is.null(tt)) NA_real_ else unname(tt$p.value),
                stringsAsFactors = FALSE)
   })
@@ -3903,7 +3911,8 @@ APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # 
                   list(figure_labels = ""),                                     # v2.25.0: extra labels on the figure, one per line
                   list(facet_letters = "none", facet_size_mode = "each", facet_legends = "each", facet_n_panels = 2),   # v2.26.0: panel letters, panel size, legends (Panels section); v2.27.2: each panel full size with its own legend inside
                   list(panel_style_match = "line"),   # v2.28.0: sample styles across panels (appended at the end); v2.28.2: matched, line type by panel, by default
-                  list(error_cap_past_marker = TRUE))                        # v2.28.1: a bar the marker would cover gets caps that reach past it
+                  list(error_cap_past_marker = TRUE),                        # v2.28.1: a bar the marker would cover gets caps that reach past it
+                  list(analysis_key_on_figure = TRUE, fit_key_on_figure = TRUE, compose_key_on_figure = TRUE, compare_key_on_figure = TRUE))   # v2.28.3: the key switch of every figure tab
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -6460,9 +6469,11 @@ stats_method_sentence <- function(result, kind = c("posthoc", "describe", "norma
   kind <- match.arg(kind); level <- .s22_level(level); pct <- paste0(.s22_pct(level), "%")
   if (is.null(what) || !length(what) || is.na(what[1]) || !nzchar(trimws(as.character(what[1])))) what <- "The measured quantity"   # finding 43
   what <- as.character(what[1])
+  what <- sub("^The auc\\b", "The AUC", sub("^auc\\b", "AUC", what))   # v2.28.3: "The auc was compared"
   n <- if (!is.null(n)) n else attr(result, "n")
   ntxt <- if (is.null(n) || !length(n) || all(!is.finite(.s22_num(n)))) "" else {
-    nn <- .s22_num(n); nn <- nn[is.finite(nn)]
+    nn <- .s22_num(n); nn <- nn[is.finite(nn) & nn > 0]   # v2.28.3: a sample with no value is not "n = 0-3"
+    if (!length(nn)) "" else
     paste0(" (n = ", if (min(nn) == max(nn)) min(nn) else paste0(min(nn), "–", max(nn)), " biological replicates per sample)")
   }
   meth <- if (is.data.frame(result) && "method" %in% names(result)) as.character(result$method[1])
@@ -6597,8 +6608,13 @@ s22_parse_assignments <- function(txt) {
 # Format helpers --------------------------------------------------------------------------------------------------------
 s22_sig <- function(df, sig = 4) {   # 4 significant digits as text, "NA" for missing; integers stay whole
   if (is.null(df) || !is.data.frame(df)) return(df)
-  for (cc in names(df)) if (is.numeric(df[[cc]]))
-    df[[cc]] <- vapply(df[[cc]], function(v) if (is.finite(v)) format(signif(v, sig), trim = TRUE, scientific = FALSE) else "NA", "")
+  pc <- is_p_col(names(df))
+  for (k in seq_along(df)) { cc <- names(df)[k]; if (is.numeric(df[[cc]]))
+    df[[cc]] <- vapply(df[[cc]], function(v) {
+      if (!is.finite(v)) return("NA")
+      if (pc[k] && v < 1e-16) return("< 1e-16")                          # v2.28.3: "0" / a 100-digit decimal before
+      if (v != 0 && abs(v) < 1e-4) return(formatC(signif(v, sig), format = "e", digits = sig - 1))   # v2.28.3: tiny values in e notation
+      format(signif(v, sig), trim = TRUE, scientific = FALSE) }, "") }
   df
 }
 s22_ci_text <- function(est, lo, hi, sig = 3) {
@@ -9339,8 +9355,16 @@ KC_A11Y_CSS <- paste(
   "body.kc-night .panel-section > p, body.kc-night .kc-qe-note, body.kc-night .kc-mk-label, body.kc-night #paper_style_status, body.kc-night #colour_map_status, body.kc-night .help-block, body.kc-night .dash-card-title, body.kc-night .dash-card-sub, body.kc-night .kc-help-file { color:#b9c2cc !important; }",
   "body.kc-night .tab-content, body.kc-night .tab-pane { color:#d7dce2; } body.kc-night .table, body.kc-night table { color:#d7dce2; }",
   "body.kc-night .well, body.kc-night .panel-section p, body.kc-night small, body.kc-night .text-muted { color:#c4ccd6; }",
-  "@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }",
+  "body.kc-night #clear_colour_map, body.kc-night #clear_colour_map .action-label, body.kc-night #kc_qe_toggle, body.kc-night #saveProjectTop, body.kc-night .kc-collapse-all { color:#8cc4ff !important; }",
+  "body.kc-night .kc-project-box p, body.kc-night .kc-project-box span { color:#c4ccd6 !important; }",
+    "@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }",
   sep = "\n")
+# v2.28.3: the legend-key rule on every figure tab: one "place the key on the figure" switch and one legend text starter
+# (the key itself is the tab's "Download legend key"). `k` = analysis / fit / compose / compare.
+figure_key_tools_ui <- function(k)
+  div(class = "kc-key-tools", style = "margin-top:8px;",
+      checkboxInput(paste0(k, "_key_on_figure"), "Place the key on the figure", TRUE),
+      uiOutput(paste0(k, "_legend_text")))
 # Names for controls that have none, sliders as ARIA sliders, notifications announced, dialogs named, focus returned after a
 # dialog, scrollable tables reachable by keyboard, and the figure as an image whose name is the figure legend text.
 KC_A11Y_JS <- "
@@ -9478,7 +9502,8 @@ render_help_doc <- function(path, anchors = list(), base = "docs", prefix = NULL
   if (is.character(prefix) && length(prefix) == 1L && nzchar(prefix)) {
     # v2.26.0: headings get GitHub-style ids (prefixed with the guide's own anchor), and the guide's "#section" links point at
     # them, so a table of contents works in the Help tab as on GitHub
-    slug <- function(t) { t <- tolower(gsub("<[^>]+>", "", t)); t <- gsub("[^a-z0-9 -]", "", t); gsub(" ", "-", trimws(t)) }
+    slug <- function(t) { t <- tolower(gsub("<[^>]+>", "", t)); t <- gsub("&[a-z]+;|&#[0-9]+;", "", t)   # v2.28.3: "&amp;" gave "-amp-" (GitHub drops it)
+                          t <- gsub("[^a-z0-9 -]", "", t); gsub(" ", "-", trimws(t)) }
     hs <- regmatches(html, gregexpr("<h[2-4]>.*?</h[2-4]>", html, perl = TRUE))[[1]]
     for (h in unique(hs)) {
       lvl <- substr(h, 3L, 3L); inner <- sub("^<h[2-4]>(.*)</h[2-4]>$", "\\1", h)
@@ -9488,8 +9513,11 @@ render_help_doc <- function(path, anchors = list(), base = "docs", prefix = NULL
   }
   if (identical(base, "docs"))
     html <- gsub('(src|href)="(?!(?:https?:|#|mailto:|kc_docs/))', '\\1="kc_docs/', html, perl = TRUE)
-  else
+  else {
     html <- gsub('(src|href)="docs/', '\\1="kc_docs/', html, perl = TRUE)
+    # v2.28.3: the files next to the app (LICENSE, CITATION.cff, CHANGELOG.md ...) are served as kc_root/ (they were 404s)
+    html <- gsub('(src|href)="(?!(?:https?:|#|mailto:|kc_docs/|kc_root/))([^"/]+)"', '\\1="kc_root/\\2"', html, perl = TRUE)
+  }
   html
 }
 
@@ -9501,6 +9529,14 @@ help_guides_ui <- function() {
   if (!length(guides))
     return(p(style = "color:#999;", "The guides live in the docs/ folder of the repository, which was not found next to the app."))
   if (dir.exists(docs_dir)) shiny::addResourcePath("kc_docs", docs_dir)
+  # v2.28.3: the repository's top-level text files the README links to (only those: the app's folder is not served)
+  root_files <- file.path(root, c("LICENSE", "CITATION.cff", "CHANGELOG.md", "AUDIT-2026-09.md", "PUBLICATION_QUALITY_NOTES.md"))
+  root_files <- root_files[file.exists(root_files)]
+  if (length(root_files)) {
+    rd <- file.path(tempdir(), "kc_root"); dir.create(rd, showWarnings = FALSE)
+    file.copy(root_files, rd, overwrite = TRUE)
+    shiny::addResourcePath("kc_root", rd)
+  }
   ids <- vapply(guides, function(g) help_anchor(g$file), "")
   from_docs <- setNames(as.list(ids), vapply(guides, function(g)
     if (startsWith(g$file, "docs/")) sub("^docs/", "", g$file) else paste0("../", g$file), ""))
@@ -11735,6 +11771,7 @@ ui <- fluidPage(lang = "en",
                 downloadButton("downloadAnalysisPlot", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadAnalysisLegendKey", "Download legend key", style = "width:100%;"),
+                figure_key_tools_ui("analysis"),
                 br(), br(),
                 downloadButton("downloadAnalysisStatsCSV", "Download statistics (CSV)", style = "width:100%;")
               )
@@ -11792,7 +11829,8 @@ ui <- fluidPage(lang = "en",
                 downloadButton("downloadComposedFigure", "Download composed figure",
                                style = "background:#2C3E50;color:white;border:none;width:100%;"),
                 br(), br(),
-                downloadButton("downloadComposeLegendKey", "Download legend key", style = "width:100%;"))),
+                downloadButton("downloadComposeLegendKey", "Download legend key", style = "width:100%;"),
+                figure_key_tools_ui("compose"))),
             uiOutput("compose_note"),
             p(style = "font-size:.8em;color:#777;",
               "Panels are rendered at their native single-column size, so text stays 6\u20138 pt ",
@@ -11831,6 +11869,7 @@ ui <- fluidPage(lang = "en",
                 downloadButton("downloadCompare", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadCompareLegendKey", "Download legend key", style = "width:100%;"),
+                figure_key_tools_ui("compare"),
                 uiOutput("compare_note")))),
           uiOutput("compare_container")),
         tabPanel("Dashboard", br(),
@@ -12152,6 +12191,7 @@ ui <- fluidPage(lang = "en",
                 downloadButton("downloadFitFigure", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadFitLegendKey", "Download legend key", style = "width:100%;"),
+                figure_key_tools_ui("fit"),
                 br(), br(),
                 downloadButton("downloadFitsCSV", "Parameters (CSV)", style = "width:100%;")))),
           # v2.22: what is drawn over the fitted figure, and how the fits are weighted / their intervals computed
@@ -13439,7 +13479,10 @@ server <- function(input, output, session) {
       per  <- if (ntp > 0) round(as.numeric(cnts) / ntp, 1) else NA
       paste0(names(cnts), " (~", per, " rep/time)", collapse = ", ")
     } else {
-      paste0(names(rv$col_map), " (", lengths(rv$col_map),
+      nb <- suppressWarnings(as.integer(rv$n_blocks %||% 1L)); if (!length(nb) || is.na(nb)) nb <- 1L
+      if (nb > 1L)   # v2.28.3: stacked time blocks are the replicates; "(1 col)" read as no replicates
+        paste0(names(rv$col_map), " (", lengths(rv$col_map) * nb, " replicates: ", nb, " stacked time blocks)", collapse = ", ")
+      else paste0(names(rv$col_map), " (", lengths(rv$col_map),
              ifelse(lengths(rv$col_map) > 1, " replicate cols)", " col)"),
              collapse = ", ")
     }
@@ -17251,7 +17294,9 @@ server <- function(input, output, session) {
       growth_rate = {
         gr <- compute_growth_rate_curves(prepare_replicate_data(), window = smooth_win())
         if (is.null(gr)) stop("Growth rate needs at least 3 positive OD points per curve.")
-        gr$variable <- factor(gr$variable, levels = sample_levels(samps))
+        gr <- gr[is.finite(gr$mu_mean), , drop = FALSE]   # v2.28.3: a sample without a rate is left out of the legend too
+        if (!nrow(gr) || length(unique(gr$time)) < 2) stop("Growth rate needs more readings per curve than the rate window (smoothing) spans.")
+        gr$variable <- droplevels(factor(gr$variable, levels = sample_levels(samps)))
         # band = the main figure's error measure (compute_growth_rate_curves gives SD and n)
         et <- sel1("error_type", "sem"); em <- nin("error_multiplier", 1)
         gr$mu_sd <- if (et == "none") NA_real_ else em * switch(et,
@@ -17273,7 +17318,9 @@ server <- function(input, output, session) {
         # lyses; a zero crossing marks the peak.
         gr <- compute_od_rate_curves(prepare_replicate_data(), window = smooth_win())
         if (is.null(gr)) stop("The rate of OD change needs at least 3 readings per replicate curve.")
-        gr$variable <- factor(gr$variable, levels = sample_levels(samps))
+        gr <- gr[is.finite(gr$rate_mean), , drop = FALSE]   # v2.28.3
+        if (!nrow(gr) || length(unique(gr$time)) < 2) stop("The rate of OD change needs more readings per curve than the rate window (smoothing) spans.")
+        gr$variable <- droplevels(factor(gr$variable, levels = sample_levels(samps)))
         leg_xy <- list(x = gr$time, y = gr$rate_mean, g = gr$variable)
         g <- ggplot(gr, aes(x = time, y = rate_mean, color = variable, linetype = variable, group = variable)) +
           geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed")
@@ -17980,11 +18027,51 @@ server <- function(input, output, session) {
     p
   }
   
+  # v2.28.3: a figure tab's "Place the key on the figure" switch: off hides the legend on the figure (the downloaded key
+  # is still cut from the same legend, so the two always match); attributes (figure notes, a matrix legend) are kept
+  key_switch <- function(p, k) {
+    if (isTRUE(input[[paste0(k, "_key_on_figure")]] %||% TRUE) || !inherits(p, "ggplot") || is_placeholder_plot(p)) return(p)
+    at <- attributes(p); q <- p + ggplot2::theme(legend.position = "none")
+    for (nm in setdiff(names(at), names(attributes(q)))) attr(q, nm) <- at[[nm]]
+    attr(q, "matrix_legend") <- NULL
+    q
+  }
+  # v2.28.3: the legend text starter of any figure: its samples (those in its colour / fill / shape legend), each with the
+  # colour, marker and line it is drawn with, in words: "WT (black, filled circles); lysA (orange, filled squares)"
+  figure_legend_text_for <- function(p) {
+    if (!inherits(p, "ggplot") || is_placeholder_plot(p)) return("")
+    b <- tryCatch(kc_with_scratch_device(function() ggplot2::ggplot_build(p)), error = function(e) NULL)
+    if (is.null(b)) return("")
+    all_s <- sel_samples(); keys <- character(0)
+    for (ae in c("colour", "fill", "shape")) {
+      sc <- b$plot$scales$get_scales(ae)
+      if (!is.null(sc)) { br <- tryCatch(as.character(sc$get_breaks()), error = function(e) character(0)); keys <- c(keys, intersect(br[!is.na(br)], all_s)) }
+    }
+    keys <- unique(keys)
+    if (!length(keys)) return("")
+    av <- resolve_aesthetics(keys)
+    geoms <- vapply(p$layers, function(l) class(l$geom)[1], "")
+    pts <- any(geoms %in% c("GeomPoint", "GeomPointrange")); lns <- any(geoms %in% c("GeomLine", "GeomPath", "GeomStep"))
+    cw <- colour_words(unname(av$colors[keys]))
+    paste0(paste(vapply(seq_along(keys), function(i) legend_sample_text(markup_to_plain(unname(av$leg_labels[[keys[i]]])), av$colors[[keys[i]]],
+                                                                        av$shapes[[keys[i]]], av$filled_map[[keys[i]]], av$line_types[[keys[i]]],
+                                                                        show_points = pts, show_lines = lns, word = cw[i]), ""), collapse = "; "), ".")
+  }
+  key_text_ui <- function(fig) {
+    txt <- tryCatch(figure_legend_text_for(fig), error = function(e) "")
+    if (!nzchar(txt)) return(p(class = "kc-leg-help", style = "font-size:.8em;", "No legend on this figure to describe."))
+    tagList(tags$label(style = "font-size:.85em;margin-top:4px;", "Legend text starter (copy and edit):"),
+            tags$textarea(class = "form-control", readonly = NA, rows = 3, style = "font-size:.82em;", `aria-label` = "Legend text starter", txt))
+  }
+  output$analysis_legend_text <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot(sel1("analysis_type", "metric_summary"))) })
+  output$fit_legend_text      <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot("fit_overlay")) })
+  output$compare_legend_text  <- renderUI({ req(rv$data, sel_samples(), rv_cmp$ds); key_text_ui(generate_compare_plot()) })
+  output$compose_legend_text  <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_plot()) })
   generate_analysis_plot <- function(type = sel1("analysis_type", "metric_summary")) {
     req(rv$data, sel_samples())
     tryCatch({
       if (plot_data_is_empty(plot_data_or_empty())) return(empty_state_figure())    # hardening: nothing left after the filters
-      build_analysis_plot(type)
+      key_switch(build_analysis_plot(type), if (identical(type, "fit_overlay")) "fit" else "analysis")   # v2.28.3
     }, error = function(e) {
       ggplot() +
         annotate("text", x = 0.5, y = 0.5,
@@ -18085,6 +18172,7 @@ server <- function(input, output, session) {
     skipped <- vapply(types[!ok], function(ty) { nm <- names(COMPOSE_PANEL_CHOICES)[match(ty, COMPOSE_PANEL_CHOICES)]
                                                  r <- why[[ty]]; if (is.character(r) && length(r) == 1L && nzchar(r)) paste0(nm, " (", sub("\\.$", "", r), ")") else nm }, "", USE.NAMES = FALSE)
     plots   <- if (any(ok)) do.call(c, unname(built[ok])) else list()
+    plots   <- lapply(plots, key_switch, "compose")   # v2.28.3: the Compose tab's "Place the key on the figure"
     n <- length(plots)
     ncol    <- min(num_or(sel1("compose_ncol"), 2, 1, 12), max(n, 1L))      # (round 3: 1 / 2 in the box; never NA)
     rows    <- if (n) ceiling(n / ncol) else 0L
@@ -18176,7 +18264,8 @@ server <- function(input, output, session) {
                         if (nzchar(sel1("metrics_ref_sample", ""))) paste0("Each sample vs reference '", dname(sel1("metrics_ref_sample")), "'. ") else "All pairs. ",
                         "p values Holm-adjusted; Hedges' g = standardized mean difference; ",
                         "95% CI of the difference (Welch)."), notes)
-    else notes <- c("No comparison possible yet: load data with 2+ replicates per sample.", notes)
+    else notes <- c(paste0("No comparison possible for this metric: it needs two or more samples that each have a value in 2+ replicates. ",
+                           "A metric such as lysis onset is empty for a sample that does not lyse; choose another metric, or check the replicates."), notes)   # v2.28.3
     cav <- technical_rep_caveat()      # v2.22: pseudoreplication banner
     tagList(if (!is.null(cav)) div(class = "settings-status warn", style = "margin-bottom:8px;", cav),
             div(lapply(notes, function(n) div(class = "stats-note", n))))
@@ -19105,7 +19194,7 @@ server <- function(input, output, session) {
       geom_point(aes(color = sample, shape = sample, fill = sample), size = nin("shape_size", 3) * 0.8) +
       scale_color_manual(values = cols, labels = labs_v, limits = lim_q, name = NULL) +
       marker_scales(samps, aes_v, labs_v, limits = lim_q) +
-      labs(x = "Theoretical normal quantile", y = axis_y_label(paste0("Residual: ", metric_axis_label(m, tunit = time_unit_from_label(input$x_axis_label), ylab = input$y_axis_label %||% "OD"))))
+      labs(x = "Theoretical normal quantile", y = axis_y_label(paste0("Residual: ", metric_axis_label(m, tunit = time_unit_from_label(xlab_now()), ylab = input$y_axis_label %||% "OD"))))
     s22_finish_figure(p, xy = list(x = d$theoretical, y = d$residual, g = d$sample))
   }
   s22_qq_fig <- s22_figure_shell(s22_qq_build, "qq", "s22_qq_container", "s22_qq_img", "s22_qq_plot", "downloadQQFigure", "qq_plot")
@@ -19190,7 +19279,7 @@ server <- function(input, output, session) {
     s22_note(paste0("Trapezoid area of max(", input$y_axis_label %||% "OD", " - baseline, 0) over ",
                     if (nzchar(trimws(input$auc_from %||% "")) || nzchar(trimws(input$auc_to %||% ""))) "the typed window" else "the whole curve",
                     "; baseline: ", c(none = "none (0)", first = "the first reading of each replicate", value = "the fixed value", min = "the minimum of each replicate")[[s22_choice(input$auc_baseline, c("none", "first", "value", "min"), "none")]], ". ",
-                    "Units: ", input$y_axis_label %||% "OD", " x ", time_unit_from_label(input$x_axis_label), "."),
+                    "Units: ", input$y_axis_label %||% "OD", " x ", time_unit_from_label(xlab_now()), "."),
              if (isTRUE(input$auc_relative %||% TRUE) && !nzchar(s22_ref())) "Set the reference sample (Stats & Reports) for the relative AUC." else NA_character_,
              if (length(nts)) paste0("Notes: ", paste(utils::head(nts, 4), collapse = "; "), ".") else NA_character_,
              "The relative AUC is the ratio of mean AUCs (log-delta CI, approximate at n = 3). The comparison below uses the post-hoc method chosen above.")
@@ -19548,7 +19637,7 @@ server <- function(input, output, session) {
     av <- if (!is.null(a) && focus %in% a$sample && is.finite(a$mean[a$sample == focus])) formatC(signif(a$mean[a$sample == focus], 3), format = "g") else "—"
     e <- tryCatch(exp_window_by_group(s22_curves()$pd, NULL, "mean", input$expwin_mode %||% "auto", input$expwin_from, input$expwin_to, input$expwin_min_points %||% 4), error = function(e) NULL)
     ev <- if (!is.null(e) && focus %in% e$sample && is.finite(e$doubling_time[e$sample == focus])) formatC(signif(e$doubling_time[e$sample == focus], 3), format = "g") else "—"
-    unit <- time_unit_from_label(input$x_axis_label)
+    unit <- time_unit_from_label(xlab_now())
     list(card("AUC", av, paste0(dname(focus), ", ", input$y_axis_label %||% "OD", " x ", unit)),
          card("Doubling time (exp. window)", ev, paste0(dname(focus), ", ", unit)))
   }
@@ -20811,7 +20900,7 @@ server <- function(input, output, session) {
         }
         p <- build_plot(dplyr::bind_rows(pdA, pdB), keys, aes_k, rep_fn = rep_fn)
       }
-      add_notes_caption(p)
+      key_switch(add_notes_caption(p), "compare")   # v2.28.3
     }, error = function(e) {
       if (inherits(e, "shiny.silent.error")) stop(e)
       plot_error_figure(friendly_error_message(e))
@@ -20834,11 +20923,16 @@ server <- function(input, output, session) {
     }
     repA <- function(samples, which) tryCatch(prepare_replicate_data(samples = ss$A, which = which), error = function(e) NULL)
     repB <- function(samples, which) tryCatch(sc$prepare_replicate_data(samples = ss$B, which = which), error = function(e) NULL)
-    pa <- one(pdA, ss$A, repA, lab[["A"]]); pb <- one(pdB, ss$B, repB, lab[["B"]])
-    # the same axes in both panels (as the faceted figure had: scales fixed)
-    yr <- range(c(pdA$mean_value, pdB$mean_value), na.rm = TRUE); xr <- range(c(pdA$time, pdB$time), na.rm = TRUE)
-    lims <- list(ggplot2::expand_limits(x = xr, y = if (identical(sel1("y_scale_type"), "log")) yr[yr > 0] else yr))
-    setNames(list(pa + lims, pb + lims), c("compare:A", "compare:B"))
+    # the same axes and ticks in both panels (as the faceted figure had: scales fixed): each panel gets the other's first
+    # and last time as empty rows, so its automatic ticks run over the same range
+    xr <- range(c(pdA$time, pdB$time), na.rm = TRUE)
+    pad <- function(pd) { e <- pd[c(1L, 1L), , drop = FALSE]; e$time <- xr
+                          for (cl in setdiff(names(e), c("time", "variable"))) if (is.numeric(e[[cl]])) e[[cl]] <- NA_real_
+                          rbind(pd, e) }
+    pa <- one(pad(pdA), ss$A, repA, lab[["A"]]); pb <- one(pad(pdB), ss$B, repB, lab[["B"]])
+    yr <- range(c(pdA$mean_value, pdB$mean_value), na.rm = TRUE)
+    lims <- list(ggplot2::expand_limits(y = if (identical(sel1("y_scale_type"), "log")) yr[yr > 0] else yr))
+    setNames(list(key_switch(suppressWarnings(pa + lims), "compare"), key_switch(suppressWarnings(pb + lims), "compare")), c("compare:A", "compare:B"))
   }
   compare_facet_composite <- function() {
     pl <- compare_facet_plots(); if (is.null(pl)) return(NULL)

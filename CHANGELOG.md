@@ -1,5 +1,47 @@
 # Changelog
 
+## v2.28.3 — 2026-11-24
+
+**A five-tester click-through (data, figure, panels / Compose / Compare, analysis, accessibility): what did not work now does.**
+
+*Accessibility (WCAG 2.1 AA).* `lang="en"`, one `<h1>`, a "Skip to the figure" link and a main landmark; every slider is
+an ARIA slider named by its label (arrow keys already moved it); unnamed controls (Jump to a section, Demo data set, the
+file boxes, the Help checklists) have names; notifications are announced (`role=status` / `alert`); dialogs are named
+and give focus back to the button that opened them; scrollable tables take keyboard focus; the figure is an image whose
+text is the figure legend text. Grey notes and links meet 4.5:1, links in text are underlined, night mode was given full
+contrast (41 axe failures to 0 on the start page), and reduced motion turns transitions off.
+
+*The legend-key rule on every figure tab.* Analysis, Curve fitting, Compose and Compare each have a "Place the key on
+the figure" switch and a legend text starter next to their "Download legend key". Download all figures and the batch
+export write a key for every figure (`<figure>_legend_key.svg`), not only the main one.
+
+*Figure.* On a log time axis error-bar caps are a share of the log range (they were decades wide) and time 0 being left
+out is said. Journal preset: a narrow column (Science single, 55 mm) gets a smaller panel so the figure fits, and the
+message gives the real size. Ignored settings are now said, not silent: minimum above maximum, equal limits, a 0 limit on
+a log axis, a threshold a log axis cannot show, a typed number outside its range, an inverted OD range or time window.
+"Lines" error bars no longer add a bar glyph to the key; the default time-marker line is 0.5; #CC0066-like colours are
+"crimson"; x tick labels print each on its own ("0.83", not "0.8333333").
+
+*Data.* Exclude time points is read in the file's own time unit (as documented), so changing the figure's time unit no
+longer moves the excluded points; a word or a snapped value in the box is reported. Load Settings leaves the time filter
+and the per-sample windows alone (a project restores them). A blank sample comes back when it stops being the blank.
+Data-tab cells: "0,25" is 0.25 (it was 25), Escape cancels, text over a number is reported. A time column named in hours
+sets "Time (hours)". The summary says "3 replicates: 3 stacked time blocks", not "(1 col)". Two samples with the same
+display name are reported. Download methods writes the drafted paragraph when the box is empty.
+
+*Panels, Compose, Compare.* Compose's lysis curve follows "A legend in each panel". Compare side by side draws each file
+as its own panel with its own legend (only its samples) and the same axes. The samples-as-drawn table adds a row for a
+sample restyled in one panel. Panel range boxes are two per row; the Panels help text is current; Compose says why a
+panel was left out.
+
+*Analysis.* Mann-Whitney p values are exact when there are no ties (3 vs 3 separated: 0.1, not 0.081). A p value below
+1e-16 reads "< 1e-16" (it read "0" or a 100-digit decimal). AUC and other notes use the time unit the figure shows. The
+growth-rate figures leave out a sample with no rate (and its legend entry) and say when the series is too short. The
+"no comparison" note gives the real reason. Help: heading links with "&" work, and LICENSE / CITATION.cff / CHANGELOG
+open. Methods text: no "n = 0", "AUC" capitalised.
+
+`tests/test_v2283_ux_fixes.R` (17 checks). With the defaults, every reference figure is byte-identical to v2.28.2.
+
 ## v2.28.2 — 2026-11-24
 
 **Matched panels by default.** *Sample styles across panels* now starts on *Same in every panel, line type changes by

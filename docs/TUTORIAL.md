@@ -243,6 +243,8 @@ Open the **Legend text** tab:
   key*, and the figure bundle, *Download all figures* and the batch export include it.
 * **Place the key on the figure**: one switch. Off = no legend on the figure (keep the key as a separate image); on = the
   legend comes back where it was.
+* **The other figure tabs** (Analysis, Curve fitting, Compose, Compare) have the same: *Download legend key*, *Place the
+  key on the figure* and a legend text starter for that figure, and Download all figures writes every figure's own key.
 * **Download colour map (CSV)**: the colours as drawn (`"Sample","Hex","Colour_Name"`). **Load colour map** (Save / Load
   Settings) reads it back, so the same strain keeps the same colour across figures and projects.
 
