@@ -1711,11 +1711,13 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
                                       peak_mode = c("global", "first_local"),
                                       lysis_threshold = 0.05,
                                       extinction_threshold = 0.05,
-                                      lysis_floor_od = attr(lysis_threshold, "floor_od")) {
-    # v2.28.3: lysis_floor_od (the lab's rule): a decline only counts as lysis when the OD after the peak falls below
-    # this value (0.1 in the app); NULL / NA = no floor. The app carries it on lysis_threshold (attr "floor_od"), so
-    # every caller that forwards lysis_threshold applies it without a new argument.
-    force(lysis_floor_od); lysis_threshold <- as.numeric(lysis_threshold)[1]   # (the attribute must not reach the results)
+                                      lysis_complete_od = attr(lysis_threshold, "complete_od"),
+                                      require_complete = isTRUE(attr(lysis_threshold, "require_complete"))) {
+    # v2.28.3 (the lab's definitions): lysis ONSET is the first sustained drop after the curve's high point (below);
+    # lysis is COMPLETE when the OD after the peak falls below lysis_complete_od (0.1 in the app) -> lysis_complete_time.
+    # require_complete = TRUE counts only complete lysis (a drop that never reaches that OD is not lysis). The app carries
+    # both on lysis_threshold (attrs "complete_od", "require_complete"), so every caller that forwards it applies them.
+    force(lysis_complete_od); force(require_complete); lysis_threshold <- as.numeric(lysis_threshold)[1]   # (attributes must not reach the results)
     peak_mode <- match.arg(peak_mode)
     n_pts  <- length(t_vec)
     peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
@@ -1797,7 +1799,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
     #     the first sampled point already past the threshold -- late by up to
     #     one acquisition interval and not comparable across sampling rates.
     # rate  = linear-regression slope from peak to the post-peak trough
-    lysis_time <- NA_real_; lysis_rate <- NA_real_
+    lysis_time <- NA_real_; lysis_rate <- NA_real_; lysis_complete_time <- NA_real_
     od_drop <- NA_real_; residual_od <- NA_real_; recovery_slope <- NA_real_
     noise_sd <- curve_noise_sd(od_vec)
     if (max_idx < n_pts) {
@@ -1820,10 +1822,13 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
         big <- is.finite(od_decline) & od_decline > 0.5 * max_od
         if (any(big)) onset <- which(big)[1]
       }
-      fl <- suppressWarnings(as.numeric(lysis_floor_od))
-      if (!is.na(onset) && length(fl) == 1L && is.finite(fl)) {   # v2.28.3: no OD below the floor after the peak: not lysis
-        pm <- suppressWarnings(min(od_vec[post_peak], na.rm = TRUE))
-        if (!is.finite(pm) || pm >= fl) onset <- NA_integer_
+      fl <- suppressWarnings(as.numeric(lysis_complete_od))
+      if (!is.na(onset) && length(fl) == 1L && is.finite(fl)) {   # v2.28.3: lysis complete = the OD after the peak falls below fl
+        k <- which(is.finite(od_vec[post_peak]) & od_vec[post_peak] < fl)
+        if (length(k)) {
+          j <- post_peak[k[1]]; y0 <- od_vec[j - 1L]; y1 <- od_vec[j]
+          lysis_complete_time <- if (is.finite(y0) && y0 >= fl && y0 > y1) t_vec[j - 1L] + (t_vec[j] - t_vec[j - 1L]) * (y0 - fl) / (y0 - y1) else t_vec[j]
+        } else if (isTRUE(require_complete)) onset <- NA_integer_   # only complete lysis counts: this drop is not lysis
       }
       if (!is.na(onset)) {
         # the report level is crossed at or before the sustained run starts
@@ -1946,6 +1951,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       extinction_note = extinction_note,
       centroid_x      = unname(cen[["x"]]),
       centroid_y      = unname(cen[["y"]]),
+      lysis_complete_time = lysis_complete_time,   # v2.28.3 (last column: earlier columns keep their places)
       stringsAsFactors = FALSE
     )
 }
@@ -2215,6 +2221,7 @@ METRIC_DEFINITIONS <- c(
   extinction_time = "First time the mean falls below the extinction floor (0.05 OD), linearly interpolated between the last point at or above it and the first below; extinction is a crossing from above, so a curve that starts below the floor and never rises to it and falls again is NA, as is one that never falls below (Blazanin et al., PNAS 2025)",
   centroid_x      = "Time coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
   centroid_y      = "OD coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
+  lysis_complete_time = "Lysis complete: first time after the peak at which the curve falls below the 'lysis complete' OD (0.1 by default; linear interpolation); NA if lysis never completes or is not detected",
   relative_growth    = "auc / auc(reference sample)",
   infection_strength = "1 - auc / auc(reference sample)",
   relative_mu_max    = "mu_max / mu_max(reference sample)",
@@ -3454,7 +3461,8 @@ ANALYSIS_METRIC_LABELS <- c(
   centroid_x         = "Centroid time",
   centroid_y         = "Centroid OD",
   centroid_index     = "Centroid index",
-  local_virulence    = "Local virulence"
+  local_virulence    = "Local virulence",
+  lysis_complete_time = "Lysis complete"   # v2.28.3: time the OD falls below the 'lysis complete' OD (0.1)
 )
 # The analysis figures, with the labels the Analysis tab and the figure composer both use.
 ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
@@ -3506,7 +3514,7 @@ PHENO_DEFAULT_METRICS <- c("lysis_time", "od_drop", "lysis_efficiency", "mu_max"
 metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
   base <- metric_label(m)
   if (m %in% c("lysis_time", "t_half_max_decline", "doubling_time", "lag_phase", "time_max_od",
-               "t_first_peak", "extinction_time", "centroid_x"))
+               "t_first_peak", "extinction_time", "centroid_x", "lysis_complete_time"))
     paste0(base, " (", tunit, ")")
   else if (m == "mu_max") paste0("\u03bcmax (", tunit, "\u207b\u00b9)")
   else if (m %in% c("lysis_rate", "recovery_slope"))
@@ -3923,7 +3931,7 @@ APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # 
                   list(panel_style_match = "line"),   # v2.28.0: sample styles across panels (appended at the end); v2.28.2: matched, line type by panel, by default
                   list(error_cap_past_marker = TRUE),                        # v2.28.1: a bar the marker would cover gets caps that reach past it
                   list(analysis_key_on_figure = TRUE, fit_key_on_figure = TRUE, compose_key_on_figure = TRUE, compare_key_on_figure = TRUE),   # v2.28.3: the key switch of every figure tab
-                  list(lysis_floor_od = 0.1))   # v2.28.3: the lab's rule: no lysis unless the OD falls below 0.1
+                  list(lysis_complete_od = 0.1, lysis_require_complete = FALSE))   # v2.28.3: the lab's definitions: lysis is complete at OD 0.1
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -11520,12 +11528,14 @@ ui <- fluidPage(lang = "en",
                          "Default 5 % (the paper's definition). A larger value ignores small dips ",
                          "after the peak; it changes lysis onset, lysis rate, OD drop, residual OD, ",
                          "lysis efficiency and recovery slope."),
-                       numericInput("lysis_floor_od", "Lysis also needs the OD to fall below (blank = no such rule):", APP_DEFAULTS$lysis_floor_od,
+                       numericInput("lysis_complete_od", "Lysis is complete at OD (blank = not used):", APP_DEFAULTS$lysis_complete_od,
                                     min = 0, step = 0.01),
+                       checkboxInput("lysis_require_complete", "Count only complete lysis (a drop that never reaches that OD is not lysis)", APP_DEFAULTS$lysis_require_complete),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
-                         "Default 0.1: a curve whose OD never falls below this after its peak is not lysing, however much it ",
-                         "declines (a dip after a reading above the reader's linear range, for example). Applies to the measured ",
-                         "OD; with a transform (fold change, % of maximum, ln) it is not used."),
+                         "Lysis onset is the first drop after the curve's high point; lysis is complete when the OD falls below this ",
+                         "value (default 0.1), reported as 'Lysis complete'. Tick the box to score a drop that never gets there (a dip ",
+                         "after readings above the reader's linear range, for example) as no lysis. Uses the measured OD; not applied ",
+                         "after a transform (fold change, % of maximum, ln)."),
                        numericInput("extinction_threshold", "Extinction floor (OD):", APP_DEFAULTS$extinction_threshold,
                                     min = 0, step = 0.01),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
@@ -17121,15 +17131,15 @@ server <- function(input, output, session) {
 
   # ── Analysis figures (v2.11) ─────────────────────────────────────────────────
   # v2.12.4: lysis-onset threshold as a fraction (input is a percentage; default 5 %)
-  # v2.28.3: with the lab's OD floor attached (attr "floor_od"; only on the measured OD scale, not after a transform)
-  lysis_floor_current <- function() {
-    v <- suppressWarnings(as.numeric(input$lysis_floor_od %||% APP_DEFAULTS$lysis_floor_od))
+  # v2.28.3: with the lab's "lysis complete" OD and the only-complete-lysis switch attached (attrs; measured OD scale only)
+  lysis_floor_current <- function() {   # the "lysis complete" OD (NA: off, or a transform is applied)
+    v <- suppressWarnings(as.numeric(input$lysis_complete_od %||% APP_DEFAULTS$lysis_complete_od))
     if (length(v) != 1L || !is.finite(v) || v <= 0 || !identical(transform_mode_current(), "none")) NA_real_ else v
   }
   lysis_threshold_current <- function() {
     p <- input$metrics_lysis_threshold_pct %||% 5
     if (!is.numeric(p) || !is.finite(p)) p <- 5
-    structure(min(max(p, 1), 50) / 100, floor_od = lysis_floor_current())
+    structure(min(max(p, 1), 50) / 100, complete_od = lysis_floor_current(), require_complete = isTRUE(input$lysis_require_complete))
   }
   replicate_metric_rows_current <- function() {
     compute_replicate_metric_rows(prepare_replicate_data(),
@@ -20284,7 +20294,7 @@ server <- function(input, output, session) {
                   "Blank/media OD subtracted",
                   "Data handling (OD range, excluded replicates, blank, transform)",
                   "μmax smoothing window", "Peak-detection smoothing window",
-                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Lysis needs OD below", "Reference sample",
+                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Lysis complete at OD", "Reference sample",
                   "R vector memory limit", "Figure raster size"),
       value = c(sel1("x_scale_type", ""), sel1("y_scale_type", ""),
                 input$x_axis_label, input$y_axis_label, palette_in(),
@@ -20299,7 +20309,7 @@ server <- function(input, output, session) {
                 if (identical(sel1("metrics_peak_mode", "global"), "first_local"))
                   "first peak before a > 10 % decline" else "global maximum",
                 input$metrics_lysis_threshold_pct %||% 5,
-                { fl <- lysis_floor_current(); if (is.finite(fl)) fl else "no floor" },
+                { fl <- lysis_floor_current(); if (!is.finite(fl)) "not used" else paste0(fl, if (isTRUE(input$lysis_require_complete)) " (only complete lysis counts)" else "") },
                 if (nzchar(sel1("metrics_ref_sample", ""))) display_mapping_text(sel1("metrics_ref_sample"), rv$display_names)
                 else "none (infection metrics omitted)",
                 # v2.14.1 memory diagnostics: the limit R runs under and the pixel sizes used

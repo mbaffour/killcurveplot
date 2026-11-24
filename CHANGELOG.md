@@ -4,10 +4,11 @@
 
 **A five-tester click-through (data, figure, panels / Compose / Compare, analysis, accessibility): what did not work now does.**
 
-*Lysis needs the OD to fall below 0.1* (the lab's standard; Curve metrics settings, `lysis_floor_od`, appended to
-APP_DEFAULTS). A decline that never takes the OD below the floor is not lysis: an uninfected control whose readings
-spike above the reader's range and then dip is no longer scored as lysing (and no longer gets a significance star
-against the infected samples). Blank the box for the old behaviour; not applied after a transform.
+*Lysis onset and lysis complete* (the lab's definitions). Onset stays the first sustained drop after the curve's high
+point; the new metric **Lysis complete** (`lysis_complete_time`) is the time the OD falls below the *Lysis is complete at
+OD* value (default 0.1; Curve metrics settings), NA when lysis never completes. *Count only complete lysis* (off by
+default) scores a drop that never reaches that OD as no lysis, e.g. an uninfected control whose readings spike above the
+reader's range and then dip. Both appended to APP_DEFAULTS; not applied after a transform.
 
 *Accessibility (WCAG 2.1 AA).* `lang="en"`, one `<h1>`, a "Skip to the figure" link and a main landmark; every slider is
 an ARIA slider named by its label (arrow keys already moved it); unnamed controls (Jump to a section, Demo data set, the
