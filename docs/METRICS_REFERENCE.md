@@ -181,4 +181,12 @@ cause; set `ALLOW_SKIP=1` to downgrade that to a visibly-printed skip
 instead.
 
 
+**Lysis onset and lysis complete (v2.28.3, the Ramsey lab definitions).** Lysis onset is the first sustained drop after
+the curve's high point (above). Lysis is **complete** when the OD after the peak falls below *Lysis is complete at OD*
+(Curve metrics settings; default **0.1**): `lysis_complete_time`, linearly interpolated at the crossing, NA if the curve
+never gets there (incomplete lysis) or no lysis is detected. With *Count only complete lysis* ticked, a drop that never
+reaches that OD is not lysis at all (every lysis metric NA), which keeps a control that dips after readings above the
+reader's linear range from being scored as lysing. Both use the measured (blank-corrected) OD; with a transform (fold
+change, % of maximum, ln) they are not used.
+
 **Series ending in a crash.** If the decline after the peak exceeds half of the peak, lysis onset is reported even when fewer than two post-peak points exist (a sample read only until it lysed). The sustained-run rule exists to reject noise, not an unambiguous collapse.

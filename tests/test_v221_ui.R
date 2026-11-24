@@ -38,7 +38,7 @@ ui_html <- gsub("> <", "><", gsub("[ \t\r\n]+", " ", paste(rt$head, rt$html)))  
 check("kc_main_class: sticky adds kc-sticky, off drops it",
       identical(env$kc_main_class(TRUE), "kc-main kc-sticky") && identical(env$kc_main_class(FALSE), "kc-main"))
 check("the main panel keeps id main_panel and starts with the sticky class",
-      grepl('<div id="main_panel" class="kc-main kc-sticky">', ui_html, fixed = TRUE))
+      grepl('<div id="main_panel" class="kc-main kc-sticky"', ui_html, fixed = TRUE))   # v2.28.3: + role="main" (accessibility)
 check("the sticky checkbox is the first control of the sidebar, checked",
       grepl('<input id="sticky_figure" type="checkbox" class="shiny-input-checkbox" checked="checked"/>', ui_html, fixed = TRUE) &&
       regexpr('id="sticky_figure"', ui_html, fixed = TRUE) < regexpr('id="file"', ui_html, fixed = TRUE))

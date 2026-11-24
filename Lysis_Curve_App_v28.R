@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.28.2"
+APP_VERSION <- "2.28.3"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -994,6 +994,7 @@ parse_excluded_timepoints <- function(text, all_timepoints) {
   if (is.null(text) || !is.character(text) || length(text) != 1L || is.na(text) || nchar(trimws(text)) == 0) return(numeric(0))
   parts <- strsplit(trimws(text), "[,; ]+")[[1]]
   vals  <- suppressWarnings(as.numeric(parts))
+  junk  <- parts[is.na(vals) & nzchar(parts)]                    # v2.28.3: reported, not dropped silently
   vals  <- vals[!is.na(vals)]
   if (!is.null(all_timepoints)) all_timepoints <- all_timepoints[is.finite(all_timepoints)]   # finding 39: NA time points
   if (length(vals) == 0 || !length(all_timepoints)) return(numeric(0))
@@ -1003,13 +1004,16 @@ parse_excluded_timepoints <- function(text, all_timepoints) {
   tp   <- sort(unique(all_timepoints))
   step <- if (length(tp) >= 2L) min(diff(tp)) else max(abs(tp), 1) * 1e-3
   tol  <- step / 2 * (1 - 1e-9)
-  unmatched <- character(0)
+  unmatched <- if (length(junk)) sprintf("'%s' is not a number and is ignored", junk) else character(0)
   matched <- vapply(vals, function(v) {
     diffs <- abs(tp - v); i <- which.min(diffs)
-    if (diffs[i] < tol) return(tp[i])
+    if (diffs[i] < tol) {
+      if (diffs[i] > step * 1e-6) unmatched <<- c(unmatched, sprintf("%s is read as the time point %s", format(v, digits = 10), format(tp[i], digits = 10)))   # v2.28.3
+      return(tp[i])
+    }
     lo <- suppressWarnings(max(tp[tp < v])); hi <- suppressWarnings(min(tp[tp > v]))
     near <- unique(c(if (is.finite(lo)) lo, if (is.finite(hi)) hi))
-    unmatched <<- c(unmatched, sprintf("Time point %s is not in the data; nearest %s %s", format(v, digits = 10),
+    unmatched <<- c(unmatched, sprintf("Time point %s is not in the data and is ignored; nearest %s %s", format(v, digits = 10),
                                        if (length(near) == 1L) "is" else "are", paste(format(near, digits = 10), collapse = " and ")))
     NA_real_
   }, numeric(1))
@@ -1412,7 +1416,8 @@ curation_description <- function(s) {
     out <- c(out, sprintf("a constant blank of %s was subtracted", format(s$blank_od)))
   out <- c(out, switch(s$transform %||% "none",
     t0      = "each replicate was divided by its own first reading (t0)",
-    control = sprintf("each reading was divided by the mean curve of the control sample '%s'", s$control %||% ""),
+    control = if (nzchar(s$control %||% "")) sprintf("each reading was divided by the mean curve of the control sample '%s'", s$control)
+              else "no control sample is chosen yet, so the readings were not normalised",   # v2.28.3: it named an empty control
     pct_max = "each sample was scaled to 0-100 % of the maximum of its own mean curve",
     ln      = "readings were transformed to ln(OD)",
     character(0)))
@@ -1701,11 +1706,19 @@ first_local_peak_index <- function(peak_vec) {
   }
   which.max(peak_vec)
 }
+LYSIS_COMPLETE_OD <- 0.1   # v2.28.3: the lab's "lysis complete" OD (the engine's default; the app passes its setting)
 compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
                                       smooth_window = 5, peak_smooth_window = 1,
                                       peak_mode = c("global", "first_local"),
                                       lysis_threshold = 0.05,
-                                      extinction_threshold = 0.05) {
+                                      extinction_threshold = 0.05,
+                                      lysis_complete_od = if (is.null(attr(lysis_threshold, "complete_od"))) LYSIS_COMPLETE_OD else attr(lysis_threshold, "complete_od"),
+                                      require_complete = isTRUE(attr(lysis_threshold, "require_complete"))) {
+    # v2.28.3 (the lab's definitions): lysis ONSET is the first sustained drop after the curve's high point (below);
+    # lysis is COMPLETE when the OD after the peak falls below lysis_complete_od (0.1 in the app) -> lysis_complete_time.
+    # require_complete = TRUE counts only complete lysis (a drop that never reaches that OD is not lysis). The app carries
+    # both on lysis_threshold (attrs "complete_od", "require_complete"), so every caller that forwards it applies them.
+    force(lysis_complete_od); force(require_complete); lysis_threshold <- as.numeric(lysis_threshold)[1]   # (attributes must not reach the results)
     peak_mode <- match.arg(peak_mode)
     n_pts  <- length(t_vec)
     peak_vec <- if (peak_smooth_window > 1) moving_average(od_vec, peak_smooth_window) else od_vec
@@ -1787,7 +1800,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
     #     the first sampled point already past the threshold -- late by up to
     #     one acquisition interval and not comparable across sampling rates.
     # rate  = linear-regression slope from peak to the post-peak trough
-    lysis_time <- NA_real_; lysis_rate <- NA_real_
+    lysis_time <- NA_real_; lysis_rate <- NA_real_; lysis_complete_time <- NA_real_
     od_drop <- NA_real_; residual_od <- NA_real_; recovery_slope <- NA_real_
     noise_sd <- curve_noise_sd(od_vec)
     if (max_idx < n_pts) {
@@ -1809,6 +1822,14 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       if (is.na(onset)) {
         big <- is.finite(od_decline) & od_decline > 0.5 * max_od
         if (any(big)) onset <- which(big)[1]
+      }
+      fl <- suppressWarnings(as.numeric(lysis_complete_od))
+      if (!is.na(onset) && length(fl) == 1L && is.finite(fl)) {   # v2.28.3: lysis complete = the OD after the peak falls below fl
+        k <- which(is.finite(od_vec[post_peak]) & od_vec[post_peak] < fl)
+        if (length(k)) {
+          j <- post_peak[k[1]]; y0 <- od_vec[j - 1L]; y1 <- od_vec[j]
+          lysis_complete_time <- if (is.finite(y0) && y0 >= fl && y0 > y1) t_vec[j - 1L] + (t_vec[j] - t_vec[j - 1L]) * (y0 - fl) / (y0 - y1) else t_vec[j]
+        } else if (isTRUE(require_complete)) onset <- NA_integer_   # only complete lysis counts: this drop is not lysis
       }
       if (!is.na(onset)) {
         # the report level is crossed at or before the sustained run starts
@@ -1931,6 +1952,7 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       extinction_note = extinction_note,
       centroid_x      = unname(cen[["x"]]),
       centroid_y      = unname(cen[["y"]]),
+      lysis_complete_time = lysis_complete_time,   # v2.28.3 (last column: earlier columns keep their places)
       stringsAsFactors = FALSE
     )
 }
@@ -2200,6 +2222,7 @@ METRIC_DEFINITIONS <- c(
   extinction_time = "First time the mean falls below the extinction floor (0.05 OD), linearly interpolated between the last point at or above it and the first below; extinction is a crossing from above, so a curve that starts below the floor and never rises to it and falls again is NA, as is one that never falls below (Blazanin et al., PNAS 2025)",
   centroid_x      = "Time coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
   centroid_y      = "OD coordinate of the centroid of the area under the mean curve (exact trapezoid-strip centroid)",
+  lysis_complete_time = "Lysis complete: first time after the peak at which the curve falls below the 'lysis complete' OD (0.1 by default; linear interpolation); NA if lysis never completes or is not detected",
   relative_growth    = "auc / auc(reference sample)",
   infection_strength = "1 - auc / auc(reference sample)",
   relative_mu_max    = "mu_max / mu_max(reference sample)",
@@ -2316,10 +2339,15 @@ qc_flags <- function(rep_pd, pd, ref_sample = NULL, ceiling = 2.5) {
 #   method       "welch" | "nonparametric"
 # Same formatting as the app's on-screen statistics tables (3 significant
 # figures, an em dash for non-finite values).
+# v2.28.3: a p value too small to compute exactly (0, or below the double-precision limit) reads "< 1e-16", not "0"
+is_p_col <- function(nm) grepl("^(p|p[._ ].*|.*_p|p_adj.*|p value.*)$", nm, ignore.case = TRUE)
+fmt_p_tiny <- function(v) ifelse(is.finite(v) & v < 1e-16, "< 1e-16", NA_character_)
 fmt_stats_df <- function(df) {
   if (is.null(df) || nrow(df) == 0) return(NULL)
-  for (cc in names(df)) if (is.numeric(df[[cc]]))
-    df[[cc]] <- ifelse(is.finite(df[[cc]]), formatC(signif(df[[cc]], 3), format = "g"), "—")
+  for (cc in names(df)) if (is.numeric(df[[cc]])) {
+    tiny <- if (is_p_col(cc)) fmt_p_tiny(df[[cc]]) else rep(NA_character_, nrow(df))
+    df[[cc]] <- ifelse(!is.na(tiny), tiny, ifelse(is.finite(df[[cc]]), formatC(signif(df[[cc]], 3), format = "g"), "—"))
+  }
   df
 }
 
@@ -3021,6 +3049,7 @@ inside_legend_box <- function(n_entries, label_chars = 12)
 # Text 6-8 pt (Nature: 5-7 pt max, Cell: 6-8 pt), data lines 0.75 pt, axes and
 # error bars 0.5 pt (Nature: 0.25-1 pt), Okabe-Ito palette (Nature's own
 # recommendation), legend inside the panel, SVG for Inkscape, 600 dpi rasters.
+JOURNAL_AXES_MM <- 12   # v2.28.3: the width the axes, tick labels and title take beside a journal-standard panel (77 - 65 mm)
 journal_preset_settings <- function(width_mm, height_mm, panel_label = "", x_range = NULL) {
   s <- list(
     export_units = "mm", export_width = width_mm, export_height = height_mm,
@@ -3433,7 +3462,8 @@ ANALYSIS_METRIC_LABELS <- c(
   centroid_x         = "Centroid time",
   centroid_y         = "Centroid OD",
   centroid_index     = "Centroid index",
-  local_virulence    = "Local virulence"
+  local_virulence    = "Local virulence",
+  lysis_complete_time = "Lysis complete"   # v2.28.3: time the OD falls below the 'lysis complete' OD (0.1)
 )
 # The analysis figures, with the labels the Analysis tab and the figure composer both use.
 ANALYSIS_FIGURE_CHOICES <- c("Metric summary (replicates, mean \u00b1 SD)" = "metric_summary",
@@ -3485,7 +3515,7 @@ PHENO_DEFAULT_METRICS <- c("lysis_time", "od_drop", "lysis_efficiency", "mu_max"
 metric_axis_label <- function(m, tunit = "min", ylab = "OD") {
   base <- metric_label(m)
   if (m %in% c("lysis_time", "t_half_max_decline", "doubling_time", "lag_phase", "time_max_od",
-               "t_first_peak", "extinction_time", "centroid_x"))
+               "t_first_peak", "extinction_time", "centroid_x", "lysis_complete_time"))
     paste0(base, " (", tunit, ")")
   else if (m == "mu_max") paste0("\u03bcmax (", tunit, "\u207b\u00b9)")
   else if (m %in% c("lysis_rate", "recovery_slope"))
@@ -3670,13 +3700,16 @@ compare_replicate_metric <- function(rm, metric, ref_sample = NULL,
   }
   rows <- lapply(pairs, function(pr) {
     a  <- d$value[d$sample == pr[1]]; b <- d$value[d$sample == pr[2]]
-    tt <- tryCatch(if (method == "welch") t.test(a, b) else wilcox.test(a, b, exact = FALSE),
+    # v2.28.3: the exact Mann-Whitney p when it exists (no ties, small n), as R's wilcox.test() gives by default; the
+    # normal approximation (exact = FALSE) gave p = 0.081 for 3 vs 3 fully separated, below the smallest attainable 0.1
+    mw_exact <- length(unique(c(a, b))) == length(c(a, b)) && length(a) + length(b) < 50
+    tt <- tryCatch(if (method == "welch") t.test(a, b) else suppressWarnings(wilcox.test(a, b, exact = mw_exact)),
                    error = function(e) NULL)
     ci <- if (!is.null(tt) && !is.null(tt$conf.int)) tt$conf.int else c(NA_real_, NA_real_)
     data.frame(sample = pr[1], versus = pr[2], n = length(a), n_versus = length(b),
                mean = mean(a), mean_versus = mean(b), difference = mean(a) - mean(b),
                ci_low = ci[1], ci_high = ci[2], hedges_g = hedges_g(a, b),
-               test = if (method == "welch") "Welch t" else "Mann-Whitney",
+               test = if (method == "welch") "Welch t" else "Mann-Whitney",   # (exact p when there are no ties; see mw_exact)
                p = if (is.null(tt)) NA_real_ else unname(tt$p.value),
                stringsAsFactors = FALSE)
   })
@@ -3897,7 +3930,9 @@ APP_DEFAULTS <- c(modifyList(LEGACY_BASE, journal_preset_settings(89, 65)),   # 
                   list(figure_labels = ""),                                     # v2.25.0: extra labels on the figure, one per line
                   list(facet_letters = "none", facet_size_mode = "each", facet_legends = "each", facet_n_panels = 2),   # v2.26.0: panel letters, panel size, legends (Panels section); v2.27.2: each panel full size with its own legend inside
                   list(panel_style_match = "line"),   # v2.28.0: sample styles across panels (appended at the end); v2.28.2: matched, line type by panel, by default
-                  list(error_cap_past_marker = TRUE))                        # v2.28.1: a bar the marker would cover gets caps that reach past it
+                  list(error_cap_past_marker = TRUE),                        # v2.28.1: a bar the marker would cover gets caps that reach past it
+                  list(analysis_key_on_figure = TRUE, fit_key_on_figure = TRUE, compose_key_on_figure = TRUE, compare_key_on_figure = TRUE),   # v2.28.3: the key switch of every figure tab
+                  list(lysis_complete_od = 0.1, lysis_require_complete = FALSE))   # v2.28.3: the lab's definitions: lysis is complete at OD 0.1
 # ── Sample groups (v2.18) ─────────────────────────────────────────────────────
 # The group of each sample as a named character vector (names = samples; a blank group is "Other"), or
 # NULL when fewer than `min_groups` distinct non-blank groups exist. attr(, "levels") = the groups in
@@ -6454,9 +6489,11 @@ stats_method_sentence <- function(result, kind = c("posthoc", "describe", "norma
   kind <- match.arg(kind); level <- .s22_level(level); pct <- paste0(.s22_pct(level), "%")
   if (is.null(what) || !length(what) || is.na(what[1]) || !nzchar(trimws(as.character(what[1])))) what <- "The measured quantity"   # finding 43
   what <- as.character(what[1])
+  what <- sub("^The auc\\b", "The AUC", sub("^auc\\b", "AUC", what))   # v2.28.3: "The auc was compared"
   n <- if (!is.null(n)) n else attr(result, "n")
   ntxt <- if (is.null(n) || !length(n) || all(!is.finite(.s22_num(n)))) "" else {
-    nn <- .s22_num(n); nn <- nn[is.finite(nn)]
+    nn <- .s22_num(n); nn <- nn[is.finite(nn) & nn > 0]   # v2.28.3: a sample with no value is not "n = 0-3"
+    if (!length(nn)) "" else
     paste0(" (n = ", if (min(nn) == max(nn)) min(nn) else paste0(min(nn), "–", max(nn)), " biological replicates per sample)")
   }
   meth <- if (is.data.frame(result) && "method" %in% names(result)) as.character(result$method[1])
@@ -6591,8 +6628,13 @@ s22_parse_assignments <- function(txt) {
 # Format helpers --------------------------------------------------------------------------------------------------------
 s22_sig <- function(df, sig = 4) {   # 4 significant digits as text, "NA" for missing; integers stay whole
   if (is.null(df) || !is.data.frame(df)) return(df)
-  for (cc in names(df)) if (is.numeric(df[[cc]]))
-    df[[cc]] <- vapply(df[[cc]], function(v) if (is.finite(v)) format(signif(v, sig), trim = TRUE, scientific = FALSE) else "NA", "")
+  pc <- is_p_col(names(df))
+  for (k in seq_along(df)) { cc <- names(df)[k]; if (is.numeric(df[[cc]]))
+    df[[cc]] <- vapply(df[[cc]], function(v) {
+      if (!is.finite(v)) return("NA")
+      if (pc[k] && v < 1e-16) return("< 1e-16")                          # v2.28.3: "0" / a 100-digit decimal before
+      if (v != 0 && abs(v) < 1e-4) return(formatC(signif(v, sig), format = "e", digits = sig - 1))   # v2.28.3: tiny values in e notation
+      format(signif(v, sig), trim = TRUE, scientific = FALSE) }, "") }
   df
 }
 s22_ci_text <- function(est, lo, hi, sig = 3) {
@@ -8270,7 +8312,8 @@ COLOUR_WORD_RGB <- list(black = c(0, 0, 0), white = c(255, 255, 255), grey = c(1
                         orange = c(255, 127, 0), yellow = c(255, 215, 0), green = c(60, 170, 60), teal = c(0, 150, 136),
                         blue = c(40, 100, 200), purple = c(130, 60, 160), pink = c(240, 130, 190), brown = c(150, 80, 30),
                         # v2.26.1: four more words for the colours past the eighth sample (none is nearer an earlier palette colour)
-                        navy = c(0, 0, 128), olive = c(128, 128, 0), maroon = c(128, 0, 0), magenta = c(255, 0, 255))
+                        navy = c(0, 0, 128), olive = c(128, 128, 0), maroon = c(128, 0, 0), magenta = c(255, 0, 255),
+                        crimson = c(220, 20, 60))   # v2.28.3: #CC0066-like colours were called "red"
 colour_word <- function(hex) {
   ref <- do.call(rbind, COLOUR_WORD_RGB)
   vapply(as.character(hex), function(h) {
@@ -9308,6 +9351,132 @@ migrate_styling_settings <- function(global, styling_schema = NULL) {
 }
 # ── end v2.22 figure styling helpers ──
 
+# v2.28.3: accessibility (WCAG 2.1 AA pass): skip link, focus rings, contrast, underlined links, night-mode contrast,
+# reduced motion. Page only: figures and exports are untouched.
+KC_A11Y_CSS <- paste(
+  ".kc-skip { position:absolute; left:-9999px; top:0; z-index:10000; background:#fff; color:#1f5f99; padding:6px 10px; border:2px solid #1a73e8; }",
+  ".kc-skip:focus { left:8px; top:8px; }",
+  "h1.kc-title { font-size:30px; margin:20px 0 10px; font-weight:500; }",
+  ".input-group-btn:focus-within .btn, .irs-line:focus, .irs:focus-within .irs-handle { outline:2px solid #1a73e8; outline-offset:2px; }",
+  ".kc-qe-note, .kc-mk-label, .panel-section > p, .analysis-controls p, #fit_table_ui > p, .help-block { color:#595959 !important; }",
+  ".dash-card-title, .dash-card-sub, .kc-leg-help { color:#595959 !important; } .kc-help-file { color:#595959 !important; }",
+  "[style*='color:#777'], [style*='color: #777'], [style*='color:#888'], [style*='color:#999'], [style*='color:#6c757d'], [style*='color:#aaa'] { color:#595959 !important; }",
+  "body.kc-night [style*='color:#777'], body.kc-night [style*='color: #777'], body.kc-night [style*='color:#888'], body.kc-night [style*='color:#999'], body.kc-night [style*='color:#6c757d'], body.kc-night [style*='color:#aaa'], body.kc-night [style*='color:#555'] { color:#b9c2cc !important; }",
+  ".kc-collapse-all, #clear_colour_map, #kc_qe_toggle, #saveProjectTop { color:#1f5f99 !important; }",
+  ".well a, .tab-pane p a, .tab-pane li a { text-decoration:underline; }",
+  ".irs--shiny .irs-single, .irs--shiny .irs-from, .irs--shiny .irs-to, .irs--shiny .irs-bar { background-color:#2c6fb0 !important; }",
+  "body.kc-night details > summary { background:#222831 !important; color:#e6ebf1 !important; }",
+  "body.kc-night .nav-tabs > li > a { background:#1b2028; color:#c4ccd6; } body.kc-night .nav-tabs > li > a:hover { background:#222831; }",
+  "body.kc-night .selectize-input, body.kc-night .selectize-input input, body.kc-night .selectize-input .item, body.kc-night .selectize-dropdown { color:#e6ebf1 !important; background:#14171c !important; }",
+  "body.kc-night .selectize-dropdown .active { background:#2c6fb0 !important; color:#fff !important; }",
+  "body.kc-night .kc-project-box { background:#1b2028 !important; border-color:#3a4450 !important; } body.kc-night .kc-project-box b, body.kc-night #loadProject-label { color:#e6ebf1 !important; }",
+  "body.kc-night .btn-default { background:#2a313b; color:#e6ebf1; border-color:#3a4450; } body.kc-night .btn-default:hover { background:#333b47; color:#fff; }",
+  "body.kc-night a, body.kc-night .btn-link, body.kc-night #saveProjectTop, body.kc-night .kc-collapse-all { color:#8cc4ff !important; }",
+  "body.kc-night .panel-section > p, body.kc-night .kc-qe-note, body.kc-night .kc-mk-label, body.kc-night #paper_style_status, body.kc-night #colour_map_status, body.kc-night .help-block, body.kc-night .dash-card-title, body.kc-night .dash-card-sub, body.kc-night .kc-help-file { color:#b9c2cc !important; }",
+  "body.kc-night .tab-content, body.kc-night .tab-pane { color:#d7dce2; } body.kc-night .table, body.kc-night table { color:#d7dce2; }",
+  "body.kc-night .well, body.kc-night .panel-section p, body.kc-night small, body.kc-night .text-muted { color:#c4ccd6; }",
+  "body.kc-night #clear_colour_map, body.kc-night #clear_colour_map .action-label, body.kc-night #kc_qe_toggle, body.kc-night #saveProjectTop, body.kc-night .kc-collapse-all { color:#8cc4ff !important; }",
+  "body.kc-night .kc-project-box p, body.kc-night .kc-project-box span { color:#c4ccd6 !important; }",
+    "body.kc-night #main_panel, body.kc-night .tab-content, body.kc-night .tab-pane { background:#14171c !important; color:#d7dce2 !important; }",
+  "body.kc-night table, body.kc-night table.dataTable tbody tr, body.kc-night .table > tbody > tr, body.kc-night .table > thead > tr { background:#1b2028 !important; color:#d7dce2 !important; }",
+  "body.kc-night .table-striped > tbody > tr:nth-of-type(odd), body.kc-night table.dataTable.stripe tbody tr.odd, body.kc-night table.dataTable tbody tr.odd { background:#222831 !important; }",
+  "body.kc-night table td, body.kc-night table th { color:#d7dce2 !important; border-color:#3a4450 !important; }",
+  "body.kc-night .dataTables_wrapper, body.kc-night .dataTables_info, body.kc-night .dataTables_length, body.kc-night .dataTables_filter, body.kc-night .dataTables_paginate { color:#d7dce2 !important; }",
+  "body.kc-night .dataTables_paginate .paginate_button { color:#d7dce2 !important; }",
+  "body.kc-night .kc-help-body th, body.kc-night .kc-help-body code, body.kc-night code { background:#222831 !important; color:#e6ebf1 !important; }",
+  "body.kc-night .alert, body.kc-night .excl-preview, body.kc-night .stats-note, body.kc-night .kc-leg-help { color:#e6ebf1 !important; }",
+  "body.kc-night [style*='color:#856404'], body.kc-night [style*='color: #856404'] { color:#f2dba0 !important; }",
+  "body.kc-night [style*='color:#666'], body.kc-night [style*='color:#444'], body.kc-night [style*='color:#333'], body.kc-night [style*='color:#2C3E50'], body.kc-night [style*='color:#6c757d'] { color:#c4ccd6 !important; }",
+  "body.kc-night [style*='background:#f'], body.kc-night [style*='background: #f'], body.kc-night [style*='background-color:#f'] { background:#1b2028 !important; color:#d7dce2 !important; }",
+  "body.kc-night #compose_note p, body.kc-night #compose_note strong, body.kc-night .dash-card-value, body.kc-night #fit_table_ui > p, body.kc-night .analysis-controls p, body.kc-night .kc-leg-help { color:#e6ebf1 !important; }",
+  "body.kc-night [style*='color:#b02a37'], body.kc-night [style*='color: #b02a37'], body.kc-night [style*='color:#dc3545'], body.kc-night [style*='color:#c0392b'] { color:#ff9a9a !important; }",
+  "@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }",
+  sep = "\n")
+# v2.28.3: the legend-key rule on every figure tab: one "place the key on the figure" switch and one legend text starter
+# (the key itself is the tab's "Download legend key"). `k` = analysis / fit / compose / compare.
+figure_key_tools_ui <- function(k)
+  div(class = "kc-key-tools", style = "margin-top:8px;",
+      checkboxInput(paste0(k, "_key_on_figure"), "Place the key on the figure", TRUE),
+      uiOutput(paste0(k, "_legend_text")))
+# Names for controls that have none, sliders as ARIA sliders, notifications announced, dialogs named, focus returned after a
+# dialog, scrollable tables reachable by keyboard, and the figure as an image whose name is the figure legend text.
+KC_A11Y_JS <- "
+(function() {
+  function nm(el, label) { if (el && !el.getAttribute('aria-label')) el.setAttribute('aria-label', label); }
+  function lblOf(id) { var l = document.querySelector('label[for=\"' + id + '\"]'); return l ? (l.textContent || '').trim() : ''; }
+  function sliders() {
+    document.querySelectorAll('input.js-range-slider').forEach(function(inp) {
+      var box = inp.parentElement, line = box && box.querySelector('.irs-line'); if (!line) return;
+      var s = window.jQuery ? jQuery(inp).data('ionRangeSlider') : null, o = s ? s.options : null;
+      line.setAttribute('role', 'slider');
+      var lb = document.getElementById(inp.id + '-label'); if (lb && (lb.textContent || '').trim()) line.setAttribute('aria-labelledby', lb.id);
+      else nm(line, inp.id === 'time_filter_range' ? 'Time range' : inp.id.replace(/_/g, ' '));
+      if (o) { line.setAttribute('aria-valuemin', o.min); line.setAttribute('aria-valuemax', o.max);
+               line.setAttribute('aria-valuenow', o.from); if (o.type === 'double') line.setAttribute('aria-valuetext', o.from + ' to ' + o.to); }
+    });
+  }
+  function fix() {
+    nm(document.getElementById('sidebar_jump'), 'Jump to a section');
+    nm(document.getElementById('demo_scenario-selectized'), 'Demo data set');
+    document.querySelectorAll('.input-group input.form-control[readonly], .input-group input.form-control[type=text]').forEach(function(t) {
+      var f = t.closest('.form-group') && t.closest('.form-group').querySelector('input[type=file]');
+      if (f) { t.setAttribute('tabindex', '-1'); nm(t, 'Chosen file for ' + (lblOf(f.id) || f.id)); }
+    });
+    document.querySelectorAll('.tab-pane input[type=checkbox]:not([id])').forEach(function(c) {
+      var li = c.closest('li'); nm(c, li ? (li.textContent || 'Checklist item').trim().slice(0, 80) : 'Checklist item');
+    });
+    Array.prototype.filter.call(document.querySelectorAll('.dataTables_scrollBody, .kc-scroll, div[style]'), function(d) {
+      return !d.hasAttribute('style') || d.style.overflowX === 'auto' || d.style.overflow === 'auto' || d.classList.contains('dataTables_scrollBody'); }).forEach(function(d) { if (!d.hasAttribute('tabindex')) { d.setAttribute('tabindex', '0'); nm(d, 'Scrollable table'); } });
+    var np = document.getElementById('shiny-notification-panel');
+    if (np) { np.setAttribute('role', 'status'); np.setAttribute('aria-live', 'polite'); }
+    document.querySelectorAll('.shiny-notification-error, .shiny-notification-warning').forEach(function(n) { n.setAttribute('role', 'alert'); });
+    var fh = document.getElementById('od_plot_svg'); if (fh) fh.removeAttribute('aria-live');
+    sliders(); figAlt();
+  }
+  var alt = '';
+  function figAlt() {
+    var svg = document.querySelector('#od_plot_svg svg'); if (!svg) return;
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Figure: ' + (alt || 'the lysis curve'));
+  }
+  var opener = null;
+  if (window.jQuery) {
+    jQuery(document).on('show.bs.modal', function(ev) {
+      opener = document.activeElement;
+      var m = ev.target; m.setAttribute('role', 'dialog'); m.setAttribute('aria-modal', 'true');
+      var t = m.querySelector('.modal-title'); if (t) { if (!t.id) t.id = 'kc_modal_title'; m.setAttribute('aria-labelledby', t.id); }
+    });
+    jQuery(document).on('hidden.bs.modal', function() { if (opener && document.body.contains(opener)) { try { opener.focus(); } catch (e) {} } opener = null; });
+    jQuery(document).on('shiny:value shiny:idle shiny:bound', function() { window.requestAnimationFrame(fix); });
+    jQuery(document).on('change', 'input.js-range-slider', function() { window.requestAnimationFrame(sliders); });
+  }
+  // v2.28.3: keyboard for every slider, the two-handle ones too (Arrow = the first handle, Shift+Arrow = the second;
+  // PageUp/PageDown = 10 steps; Home/End); ion.rangeSlider's own keys did not move a two-handle slider
+  document.addEventListener('keydown', function(ev) {
+    var line = ev.target; if (!line || !line.classList || !line.classList.contains('irs-line')) return;
+    var box = line.closest('.shiny-input-container') || line.closest('.form-group'), inp = box && box.querySelector('input.js-range-slider');
+    var s = inp && window.jQuery ? jQuery(inp).data('ionRangeSlider') : null; if (!s) return;
+    var o = s.options, st = o.step || 1, k = ev.key, d = 0;
+    if (k === 'ArrowRight' || k === 'ArrowUp') d = st; else if (k === 'ArrowLeft' || k === 'ArrowDown') d = -st;
+    else if (k === 'PageUp') d = 10 * st; else if (k === 'PageDown') d = -10 * st;
+    else if (k !== 'Home' && k !== 'End') return;
+    ev.preventDefault(); ev.stopPropagation();
+    var clamp = function(v) { return Math.min(o.max, Math.max(o.min, Math.round(v / st) * st)); };
+    if (o.type === 'double') {
+      if (ev.shiftKey) { var t = k === 'Home' ? o.from : k === 'End' ? o.max : clamp(o.to + d); s.update({to: Math.max(t, o.from)}); }
+      else { var f = k === 'Home' ? o.min : k === 'End' ? o.to : clamp(o.from + d); s.update({from: Math.min(f, o.to)}); }
+    } else { s.update({from: k === 'Home' ? o.min : k === 'End' ? o.max : clamp(o.from + d)}); }
+    jQuery(inp).trigger('change');
+    var nl = box.querySelector('.irs-line'); if (nl && document.activeElement !== nl) nl.focus();   // the update rebuilt the slider: keep the focus on it
+    window.requestAnimationFrame(sliders);
+  }, true);
+  if (window.Shiny) Shiny.addCustomMessageHandler('kcFigAlt', function(t) { alt = String(t || ''); figAlt(); });
+  new MutationObserver(function(ms) { for (var i = 0; i < ms.length; i++) if (ms[i].addedNodes.length) { window.requestAnimationFrame(fix); break; } })
+    .observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener('DOMContentLoaded', fix);
+})();
+"
+
 # ── Optional UI widgets — must be pre-computed before fluidPage() ─────────────
 
 pptx_ui <- if (has_officer && has_rvg) {
@@ -9388,7 +9557,8 @@ render_help_doc <- function(path, anchors = list(), base = "docs", prefix = NULL
   if (is.character(prefix) && length(prefix) == 1L && nzchar(prefix)) {
     # v2.26.0: headings get GitHub-style ids (prefixed with the guide's own anchor), and the guide's "#section" links point at
     # them, so a table of contents works in the Help tab as on GitHub
-    slug <- function(t) { t <- tolower(gsub("<[^>]+>", "", t)); t <- gsub("[^a-z0-9 -]", "", t); gsub(" ", "-", trimws(t)) }
+    slug <- function(t) { t <- tolower(gsub("<[^>]+>", "", t)); t <- gsub("&[a-z]+;|&#[0-9]+;", "", t)   # v2.28.3: "&amp;" gave "-amp-" (GitHub drops it)
+                          t <- gsub("[^a-z0-9 -]", "", t); gsub(" ", "-", trimws(t)) }
     hs <- regmatches(html, gregexpr("<h[2-4]>.*?</h[2-4]>", html, perl = TRUE))[[1]]
     for (h in unique(hs)) {
       lvl <- substr(h, 3L, 3L); inner <- sub("^<h[2-4]>(.*)</h[2-4]>$", "\\1", h)
@@ -9398,8 +9568,11 @@ render_help_doc <- function(path, anchors = list(), base = "docs", prefix = NULL
   }
   if (identical(base, "docs"))
     html <- gsub('(src|href)="(?!(?:https?:|#|mailto:|kc_docs/))', '\\1="kc_docs/', html, perl = TRUE)
-  else
+  else {
     html <- gsub('(src|href)="docs/', '\\1="kc_docs/', html, perl = TRUE)
+    # v2.28.3: the files next to the app (LICENSE, CITATION.cff, CHANGELOG.md ...) are served as kc_root/ (they were 404s)
+    html <- gsub('(src|href)="(?!(?:https?:|#|mailto:|kc_docs/|kc_root/))([^"/#]+)"', '\\1="kc_root/\\2.txt" target="_blank"', html, perl = TRUE)
+  }
   html
 }
 
@@ -9411,6 +9584,14 @@ help_guides_ui <- function() {
   if (!length(guides))
     return(p(style = "color:#999;", "The guides live in the docs/ folder of the repository, which was not found next to the app."))
   if (dir.exists(docs_dir)) shiny::addResourcePath("kc_docs", docs_dir)
+  # v2.28.3: the repository's top-level text files the README links to (only those: the app's folder is not served)
+  root_files <- file.path(root, c("LICENSE", "CITATION.cff", "CHANGELOG.md", "AUDIT-2026-09.md", "PUBLICATION_QUALITY_NOTES.md"))
+  root_files <- root_files[file.exists(root_files)]
+  if (length(root_files)) {
+    rd <- file.path(tempdir(), "kc_root"); dir.create(rd, showWarnings = FALSE)
+    file.copy(root_files, file.path(rd, paste0(basename(root_files), ".txt")), overwrite = TRUE)   # served as text (LICENSE had no type and downloaded)
+    shiny::addResourcePath("kc_root", rd)
+  }
   ids <- vapply(guides, function(g) help_anchor(g$file), "")
   from_docs <- setNames(as.list(ids), vapply(guides, function(g)
     if (startsWith(g$file, "docs/")) sub("^docs/", "", g$file) else paste0("../", g$file), ""))
@@ -9536,13 +9717,33 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
       "(the CSV files carry it in a sample_raw column). Untick show to leave a sample out of the figure.")))
 
 # ── UI ────────────────────────────────────────────────────────────────────────
-ui <- fluidPage(
-  titlePanel("Optical Density (OD) Time-Series Visualization"),
+ui <- fluidPage(lang = "en",
+  tags$a(class = "kc-skip", href = "#main_panel", "Skip to the figure"),          # v2.28.3: accessibility
+  tags$head(tags$title("Optical Density (OD) Time-Series Visualization"), tags$style(HTML(KC_A11Y_CSS)), tags$script(HTML(KC_A11Y_JS))),
+  tags$h1(class = "kc-title", "Optical Density (OD) Time-Series Visualization"),   # v2.28.3: the page's one h1 (was titlePanel's h2)
   
   tags$head(tags$link(rel = "icon", href = "data:,")),   # v2.24.0: no favicon request (it was a 404 in the browser console)
   # v2.24.2: Enter applies an edit in the data table. The table's editor saves when the box loses focus only, so Enter
   # did nothing and the edit looked lost until something else was clicked.
-  tags$script(HTML("document.addEventListener('keydown', function(ev) { if (ev.key === 'Enter' && ev.target && ev.target.matches && ev.target.matches('#data_view_table td input')) ev.target.blur(); }, true);")),
+  # v2.28.3: a decimal comma is read as a decimal point (it reached the server as 0,25 -> 25), Escape cancels the edit (it
+  # applied it), and text typed over a number is reported (it emptied the cell silently)
+  tags$script(HTML("(function() {
+    function isCell(t) { return t && t.matches && t.matches('#data_view_table td input'); }
+    var numRe = /^[-+]?(\\d+[.,]?\\d*|[.,]\\d+)([eE][-+]?\\d+)?$/;
+    function fixVal(t) {
+      var v = (t.value || '').trim();
+      if (/^[-+]?\\d*,\\d+$/.test(v)) { t.value = v.replace(',', '.'); return; }
+      var o = (t.getAttribute('data-kc-orig') || '').trim();
+      if (v && o && numRe.test(o) && !numRe.test(v) && window.Shiny) Shiny.setInputValue('kc_cell_text', v, {priority: 'event'});
+    }
+    document.addEventListener('focusin', function(ev) { if (isCell(ev.target)) ev.target.setAttribute('data-kc-orig', ev.target.value); }, true);
+    document.addEventListener('keydown', function(ev) {
+      var t = ev.target; if (!isCell(t)) return;
+      if (ev.key === 'Escape') { t.value = t.getAttribute('data-kc-orig') || t.value; ev.preventDefault(); ev.stopPropagation(); t.blur(); return; }
+      if (ev.key === 'Enter') { fixVal(t); t.blur(); }
+    }, true);
+    document.addEventListener('blur', function(ev) { if (isCell(ev.target)) fixVal(ev.target); }, true);
+  })();")),
   tags$head(
     tags$script(HTML(
       "Shiny.addCustomMessageHandler('updateColorPreview', function(msg) {
@@ -10769,10 +10970,9 @@ ui <- fluidPage(
                        uiOutput("facet_pick_ui"),
                        selectizeInput("facet_every", "Show in every panel (e.g. the control):", choices = NULL, multiple = TRUE,
                                       options = list(placeholder = "No sample")),
-                       fluidRow(
-                         column(6, selectInput("facet_letters", "Panel letters:", choices = FACET_LETTER_CHOICES, selected = APP_DEFAULTS$facet_letters)),
-                         column(6, selectInput("facet_size_mode", "Panel size:", choices = FACET_SIZE_CHOICES, selected = APP_DEFAULTS$facet_size_mode))),
-                       selectInput("facet_legends", "Legends:", choices = FACET_LEGEND_CHOICES, selected = APP_DEFAULTS$facet_legends),
+                       selectInput("facet_letters", "Panel letters:", choices = FACET_LETTER_CHOICES, selected = APP_DEFAULTS$facet_letters),
+                       selectInput("facet_size_mode", "Panel size:", choices = FACET_SIZE_CHOICES, selected = APP_DEFAULTS$facet_size_mode, width = "100%"),   # v2.28.3: full width (the long choices were cut off)
+                       selectInput("facet_legends", "Legends:", choices = FACET_LEGEND_CHOICES, selected = APP_DEFAULTS$facet_legends, width = "100%"),
                        selectInput("panel_style_match", "Sample styles across panels:", choices = PANEL_STYLE_MATCH_CHOICES, selected = APP_DEFAULTS$panel_style_match),
                        conditionalPanel("input.panel_style_match != 'own'",
                          p(style = "font-size:.78em;color:#777;margin-top:-6px;",
@@ -10791,9 +10991,10 @@ ui <- fluidPage(
                          "(3, 5 or 7 panels leave a gap). Samples without a panel go to \u2018Other\u2019. Panel letters put A, B, C at the left of each ",
                          "panel's name; Panel names \u2018None\u2019 hides the names (letters alone, or nothing). One letter for the whole set: ",
                          "type it as the Panel label (Figure Layout); with A1, A2, A3 the parts carry it instead. ",
-                         "For a legend in each panel, use \u2018Lysis curve, one panel per group\u2019 on the Compose figure tab: the same panels. ",
+                         "Each panel is the size of a single figure's panel and the figure grows to hold them; each panel has its own legend inside it ",
+                         "(Legends), which you can drag on the figure. Panel size can instead share one panel's area or fit a journal column. ",
                          "Panel names accept the figure markup (*italic*, A_{550}). With a long-format file the panel can also come from another ",
-                         "column of the file. In the fixed panel size the panel area is shared by the sub-panels, so the figure keeps the same panel size.")
+                         "column of the file.")
                    ),
                    div(class = "panel-section",
                        h4("Axis frame", class = "panel-title"),
@@ -10818,7 +11019,7 @@ ui <- fluidPage(
                                         uiOutput("time_range_slider_ui"),
                                         hr(style = "margin:10px 0;"),
                                         h5("Exclude Specific Time Points", style = "margin:8px 0 4px;"),
-                                        p(style = "font-size:.82em;color:#666;", "Comma-separated values to remove (e.g. 0, 5, 180)."),
+                                        p(style = "font-size:.82em;color:#666;", "Comma-separated values to remove (e.g. 0, 5, 180), in the time unit the figure shows."),
                                         textInput("exclude_timepoints", label = NULL, value = "", placeholder = "e.g. 0, 5, 180"),
                                         uiOutput("excluded_timepoints_preview")
                        ),
@@ -11328,6 +11529,14 @@ ui <- fluidPage(
                          "Default 5 % (the paper's definition). A larger value ignores small dips ",
                          "after the peak; it changes lysis onset, lysis rate, OD drop, residual OD, ",
                          "lysis efficiency and recovery slope."),
+                       numericInput("lysis_complete_od", "Lysis is complete at OD (blank = not used):", APP_DEFAULTS$lysis_complete_od,
+                                    min = 0, step = 0.01),
+                       checkboxInput("lysis_require_complete", "Count only complete lysis (a drop that never reaches that OD is not lysis)", APP_DEFAULTS$lysis_require_complete),
+                       p(style = "font-size:.78em;color:#777;margin-top:-6px;",
+                         "Lysis onset is the first drop after the curve's high point; lysis is complete when the OD falls below this ",
+                         "value (default 0.1), reported as 'Lysis complete'. Tick the box to score a drop that never gets there (a dip ",
+                         "after readings above the reader's linear range, for example) as no lysis. Uses the measured OD; not applied ",
+                         "after a transform (fold change, % of maximum, ln)."),
                        numericInput("extinction_threshold", "Extinction floor (OD):", APP_DEFAULTS$extinction_threshold,
                                     min = 0, step = 0.01),
                        p(style = "font-size:.78em;color:#777;margin-top:-6px;",
@@ -11386,7 +11595,7 @@ ui <- fluidPage(
                  
     )), # end sidebar
     
-    div(id = "main_panel", class = kc_main_class(APP_DEFAULTS$sticky_figure),
+    div(id = "main_panel", class = kc_main_class(APP_DEFAULTS$sticky_figure), role = "main", tabindex = "-1",   # v2.28.3: the main landmark (skip-link target)
       uiOutput("figure_standard_bar"),
       tabsetPanel(id = "main_tabs",
         tabPanel("Lysis curve", br(), uiOutput("plot_container"), quick_edit_ui),
@@ -11625,6 +11834,7 @@ ui <- fluidPage(
                 downloadButton("downloadAnalysisPlot", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadAnalysisLegendKey", "Download legend key", style = "width:100%;"),
+                figure_key_tools_ui("analysis"),
                 br(), br(),
                 downloadButton("downloadAnalysisStatsCSV", "Download statistics (CSV)", style = "width:100%;")
               )
@@ -11682,7 +11892,8 @@ ui <- fluidPage(
                 downloadButton("downloadComposedFigure", "Download composed figure",
                                style = "background:#2C3E50;color:white;border:none;width:100%;"),
                 br(), br(),
-                downloadButton("downloadComposeLegendKey", "Download legend key", style = "width:100%;"))),
+                downloadButton("downloadComposeLegendKey", "Download legend key", style = "width:100%;"),
+                figure_key_tools_ui("compose"))),
             uiOutput("compose_note"),
             p(style = "font-size:.8em;color:#777;",
               "Panels are rendered at their native single-column size, so text stays 6\u20138 pt ",
@@ -11721,6 +11932,7 @@ ui <- fluidPage(
                 downloadButton("downloadCompare", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadCompareLegendKey", "Download legend key", style = "width:100%;"),
+                figure_key_tools_ui("compare"),
                 uiOutput("compare_note")))),
           uiOutput("compare_container")),
         tabPanel("Dashboard", br(),
@@ -12042,6 +12254,7 @@ ui <- fluidPage(
                 downloadButton("downloadFitFigure", "Download figure", style = "width:100%;"),
                 br(), br(),
                 downloadButton("downloadFitLegendKey", "Download legend key", style = "width:100%;"),
+                figure_key_tools_ui("fit"),
                 br(), br(),
                 downloadButton("downloadFitsCSV", "Parameters (CSV)", style = "width:100%;")))),
           # v2.22: what is drawn over the fitted figure, and how the fits are weighted / their intervals computed
@@ -12334,7 +12547,13 @@ server <- function(input, output, session) {
       df <- APP_DEFAULTS[[id]]; df <- if (is.numeric(df) && length(df) == 1L && is.finite(df)) df else if (is.finite(lo)) max(lo, min(0, hi)) else 0
       r <- c(min(max(df, lo), hi), lo, hi)
     }
-    num_or(v, r[1], r[2], r[3])
+    out <- num_or(v, r[1], r[2], r[3])
+    # v2.28.3: a typed number outside the control's range is replaced; say so (once per value) instead of silently
+    v1 <- suppressWarnings(as.numeric(v))
+    if (length(v1) == 1L && is.finite(v1) && is.finite(out) && !isTRUE(all.equal(v1, out)))
+      guard_notify(paste0("range_", id), sprintf("'%s' = %s is outside its range (%s to %s); %s is used.", id, format(v1, digits = 6),
+                                                 format(r[2], digits = 6), format(r[3], digits = 6), format(out, digits = 6)), "message")
+    out
   }
   # Round 3: a select / radio value read as ONE string. NULL, NA, a list, anything that is not a plain value and (for a static control)
   # anything that is not one of its choices come back as `d` (NULL unless given, so `sel1("id") %||% "default"` falls to its default);
@@ -12653,14 +12872,29 @@ server <- function(input, output, session) {
   })
   outputOptions(output, "time_range_slider_ui", suspendWhenHidden = FALSE)   # v2.27.0: a project's time filter applies with the section closed
   
+  # v2.28.3: the excluded times are typed in the unit the figure shows; when that unit changes (minutes <-> hours) the
+  # numbers in the box are converted, so the same readings stay excluded (they were re-read in the new unit: 30 min
+  # became 30 h). Not right after a settings / project load, which sets the unit and the box together.
+  tc_prev <- reactiveVal(NULL)
+  observeEvent(input$time_convert, {
+    k_new <- time_convert_factor(sel1("time_convert", "none")); k_old <- isolate(tc_prev()); tc_prev(k_new)
+    if (is.null(k_old) || isTRUE(all.equal(k_old, k_new))) return(invisible(NULL))
+    ls <- isolate(rv$load_stamp)
+    if (!is.null(ls) && as.numeric(difftime(Sys.time(), ls, units = "secs")) < 5) return(invisible(NULL))
+    txt <- isolate(input$exclude_timepoints %||% "")
+    if (!is.character(txt) || length(txt) != 1L || is.na(txt) || !nzchar(trimws(txt))) return(invisible(NULL))
+    toks <- strsplit(trimws(txt), "[,; ]+")[[1]]; v <- suppressWarnings(as.numeric(toks))
+    new <- vapply(seq_along(toks), function(i) if (is.finite(v[i])) format(signif(v[i] / k_old * k_new, 8), trim = TRUE, drop0trailing = TRUE, scientific = FALSE) else toks[i], "")
+    updateTextInput(session, "exclude_timepoints", value = paste(new, collapse = ", "))
+  }, ignoreInit = FALSE, ignoreNULL = FALSE)
   output$excluded_timepoints_preview <- renderUI({
     if (is.null(rv$all_timepoints)) return(NULL)
-    excl <- parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints * time_conv_k())   # displayed unit
+    excl <- parse_excluded_timepoints(input$exclude_timepoints, rv$all_timepoints * time_conv_k())   # displayed unit (F29)
     um   <- attr(excl, "unmatched")
     if (length(excl) == 0 && !length(um)) return(NULL)
     div(class = "excl-preview",
         if (length(excl)) paste0("Will exclude ", length(excl), " point(s): ", paste(sort(as.numeric(excl)), collapse = ", ")),
-        if (length(um)) div(style = "color:#856404;", paste0(paste(um, collapse = ". "), ". Ignored.")))
+        if (length(um)) div(style = "color:#856404;", paste0(paste(um, collapse = ". "), ".")))
   })
   
   # ── Data loading ─────────────────────────────────────────────────────────────
@@ -12987,6 +13221,16 @@ server <- function(input, output, session) {
     all_t <- sort(unique(suppressWarnings(as.numeric(as.character(data[[rv$time_col]])))))
     rv$all_timepoints <- all_t[is.finite(all_t)]
     if (!keep_state) updateTextInput(session, "exclude_timepoints", value = "")
+    # v2.28.3: a time column named in hours (Hours, Time (h), hrs ...) sets the x-axis label to "Time (hours)" when it still
+    # has the default "Time (minutes)"; it used to say minutes whatever the file held
+    if (!keep_state) {
+      tcn <- tolower(trimws(as.character(rv$time_col %||% "")))
+      if (grepl("(^|[^a-z])(h|hr|hrs|hour|hours)([^a-z]|$)", tcn) && identical(isolate(input$x_axis_label), "Time (minutes)") &&
+          identical(isolate(sel1("time_convert", "none")), "none")) {
+        updateTextInput(session, "x_axis_label", value = "Time (hours)")
+        guard_notify("time_unit_hours", sprintf("The time column '%s' looks like hours: the x-axis label is now 'Time (hours)'.", rv$time_col), "message")
+      }
+    }
 
     if (palette_in() != "custom")
       rv$palette_colors <- get_palette_colors(palette_in(), length(rv$od_vars))
@@ -13101,7 +13345,9 @@ server <- function(input, output, session) {
     output$data_view_table <- DT::renderDT({
       req(rv$data)
       rv$data_version                     # a new load re-draws the table; a cell edit only replaces its data
-      DT::datatable(isolate(data_table_display()), editable = "cell", rownames = FALSE, selection = "none",
+      # v2.28.3: text editors (numeric = "none"): DT's number box swallowed "0,25" as 025 and "zzz" as empty, so the
+      # decimal comma and the "not a number" notice never reached the server; apply_cell_edit() parses the text
+      DT::datatable(isolate(data_table_display()), editable = list(target = "cell", numeric = "none"), rownames = FALSE, selection = "none",
                     options = list(scrollX = TRUE, scrollY = "480px", pageLength = 50, stateSave = TRUE),
                     class = "compact stripe hover")
     })
@@ -13128,6 +13374,9 @@ server <- function(input, output, session) {
               else if (nzchar(txt)) txt else NA_character_
     if (is.numeric(old) && nzchar(txt) && is.na(newval))
       guard_notify("cell_edit", "Not a number: the cell was set to empty (a missing reading).")
+    if (identical(old[row], newval) || (is.na(old[row]) && is.na(newval)) || (is.numeric(old) && isTRUE(all.equal(old[row], newval)))) {
+      refresh_data_table(); return(invisible(FALSE))   # v2.28.3: an edit cancelled with Escape (or retyped as it was) changes nothing
+    }
     d[[col]][row] <- newval
     ingest_data(d, rv$data_source, keep_state = TRUE, time_col = rv$time_col)
     set_data_status(sprintf("Row %d, column '%s' set to %s. Everything downstream was recomputed.", row, colnames(d)[col],
@@ -13135,6 +13384,7 @@ server <- function(input, output, session) {
     refresh_data_table()
     invisible(TRUE)
   }
+  observeEvent(input$kc_cell_text, guard_notify("cell_edit", sprintf("'%s' is not a number: the cell was set to empty (a missing reading).", substr(as.character(input$kc_cell_text)[1], 1, 40)), "warning"))   # v2.28.3
   observeEvent(input$data_view_table_cell_edit, {
     info <- input$data_view_table_cell_edit
     req(is.list(info), all(c("row", "col") %in% names(info)))                  # round 3: a scalar / malformed message is ignored
@@ -13211,10 +13461,18 @@ server <- function(input, output, session) {
   observeEvent(input$samples_none, select_samples("none"))
 
   # A blank sample is not a sample to plot: take it out of the selection (and say so)
+  # v2.28.3: and when it stops being the blank (another blank mode or another blank sample) it is put back in the selection;
+  # it used to stay out until the file was loaded again
+  blank_prev <- reactiveVal("")
   observeEvent(list(input$blank_mode, input$blank_sample, input$selected_samples), {
     b <- blank_sample_current()
     cur <- sel_samples()
-    if (nzchar(b) && b %in% cur) {
+    old <- isolate(blank_prev()); blank_prev(b)
+    if (nzchar(old) && !identical(old, b) && old %in% rv$od_vars && !old %in% cur) {
+      cur <- rv$od_vars[rv$od_vars %in% c(cur, old)]
+      updateSelectInput(session, "selected_samples", selected = setdiff(cur, b))
+      guard_notify("blank_sample_back", sprintf("'%s' is no longer the blank and is plotted again.", old), "message")
+    } else if (nzchar(b) && b %in% cur) {
       updateSelectInput(session, "selected_samples", selected = setdiff(cur, b))
       guard_notify("blank_sample", sprintf("'%s' is the blank: its mean curve is subtracted and it is left out of the samples.", b), "message")
     }
@@ -13301,7 +13559,10 @@ server <- function(input, output, session) {
       per  <- if (ntp > 0) round(as.numeric(cnts) / ntp, 1) else NA
       paste0(names(cnts), " (~", per, " rep/time)", collapse = ", ")
     } else {
-      paste0(names(rv$col_map), " (", lengths(rv$col_map),
+      nb <- suppressWarnings(as.integer(rv$n_blocks %||% 1L)); if (!length(nb) || is.na(nb)) nb <- 1L
+      if (nb > 1L)   # v2.28.3: stacked time blocks are the replicates; "(1 col)" read as no replicates
+        paste0(names(rv$col_map), " (", lengths(rv$col_map) * nb, " replicates: ", nb, " stacked time blocks)", collapse = ", ")
+      else paste0(names(rv$col_map), " (", lengths(rv$col_map),
              ifelse(lengths(rv$col_map) > 1, " replicate cols)", " col)"),
              collapse = ", ")
     }
@@ -13472,6 +13733,9 @@ server <- function(input, output, session) {
     if (length(rv$colour_map)) doc$colour_map <- list(source = rv$colour_map_source %||% "", map = as.list(rv$colour_map))
     doc
   })
+  # v2.28.3: Load Settings "never touches your data, sample selection, or time filter": the time-filter switch and the
+  # per-sample time windows are applied only when a PROJECT file is opened (load_ctx$project), never from a settings file
+  load_ctx <- new.env(parent = emptyenv()); load_ctx$project <- FALSE
   load_project <- function(path, name = basename(path)) {
     # the whole load is guarded: a file of any shape ends in a notification, never in an error that ends the session
     tryCatch(load_project_body(path, name), error = function(e) {
@@ -13514,7 +13778,9 @@ server <- function(input, output, session) {
     if (is.list(doc$settings) && !is.null(names(doc$settings))) {
       tf <- tempfile(fileext = ".json"); on.exit(unlink(tf), add = TRUE)
       jsonlite::write_json(doc$settings, tf, auto_unbox = TRUE, digits = NA, na = "null", null = "null")
+      load_ctx$project <- TRUE; on.exit(load_ctx$project <- FALSE, add = TRUE); rv$load_stamp <- Sys.time()
       load_settings_file(tf)
+      load_ctx$project <- FALSE
     }
     # what was selected, excluded and filtered (the lists drawn later take their pending values)
     sl <- if (is.list(doc$selection) && !is.null(names(doc$selection))) doc$selection else list(); vars <- rv$od_vars
@@ -13545,6 +13811,7 @@ server <- function(input, output, session) {
   # Never touches: file input, sample selection, time filter range.
   # v2.27.0: the body of Load Settings as a function of the file's path, so a project file applies its settings the same way
   load_settings_file <- function(sf) {
+    rv$load_stamp <- Sys.time()   # v2.28.3: the unit-change rescale of excluded times stands down while a file sets both
     # Hardening round 1 (finding 34): the whole body is guarded. A settings file that parses to a scalar, an array or
     # something this app cannot read used to raise an error in the observer, which ENDS the Shiny session.
     tryCatch({
@@ -13693,7 +13960,8 @@ server <- function(input, output, session) {
     is_sample_key <- rep(FALSE, length(gkeys))
     for (pfx in sample_prefixes) is_sample_key <- is_sample_key | startsWith(gkeys, pfx)
     is_sample_key <- is_sample_key & !(gkeys %in% global_exceptions)
-    skip_key <- gkeys %in% data_inputs | is_sample_key | is_table_state_key(gkeys)
+    skip_key <- gkeys %in% data_inputs | is_sample_key | is_table_state_key(gkeys) |
+                (gkeys %in% "enable_time_filter" & !isTRUE(load_ctx$project))   # v2.28.3: a settings file leaves the time filter alone
     unk_key  <- !skip_key & !(gkeys %in% inp_names) & !grepl("^(region|marker)_.*_[0-9]+$", gkeys)   # v2.26.1: drawn later from the file (dyn_init)
     ignored_unknown <- gkeys[unk_key]
     for (gi in which(!skip_key & !unk_key)) {
@@ -14314,7 +14582,7 @@ server <- function(input, output, session) {
             condition = paste0("input['marker_color_", i, "'] == 'custom'"),
             textInput(paste0("marker_color_custom_", i), "HEX:", iv(paste0("marker_color_custom_", i), "#000000"))
           ),
-          sliderInput(paste0("marker_size_", i), "Width:", 0.1, 3, iv(paste0("marker_size_", i), 1), 0.1),
+          sliderInput(paste0("marker_size_", i), "Width:", 0.1, 3, iv(paste0("marker_size_", i), 0.5), 0.1),   # v2.28.3: 0.5 (1 was heavier than the data lines)
           checkboxInput(paste0("marker_label_", i), "Add Label", iv(paste0("marker_label_", i), FALSE)),
           conditionalPanel(
             condition = paste0("input['marker_label_", i, "'] == true"),
@@ -14336,7 +14604,7 @@ server <- function(input, output, session) {
   excluded_timepoints_file <- function() {
     k <- time_conv_k(); tp <- rv$all_timepoints
     if (is.null(tp)) return(numeric(0))
-    ex <- parse_excluded_timepoints(input$exclude_timepoints, tp * k)
+    ex <- parse_excluded_timepoints(input$exclude_timepoints, tp * k)   # the displayed unit (hardening F29)
     um <- attr(ex, "unmatched")
     if (length(um)) guard_notify("time_unmatched", paste(um, collapse = ". "), "message")
     as.numeric(ex) / k
@@ -14374,7 +14642,11 @@ server <- function(input, output, session) {
   time_window_for <- function(sample) {
     vid <- safe_id(sample)
     num <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1 && is.finite(v)) v else NA_real_ }
-    c(from = num(input[[paste0("tw_min_", vid)]]), to = num(input[[paste0("tw_max_", vid)]]))
+    w <- c(from = num(input[[paste0("tw_min_", vid)]]), to = num(input[[paste0("tw_max_", vid)]]))
+    if (all(is.finite(w)) && w[["from"]] > w[["to"]])   # v2.28.3: an inverted window removed the sample with no word
+      guard_notify(paste0("tw_inverted_", vid), sprintf("The time window of '%s' runs from %s to %s, which keeps nothing: the sample is not drawn. Swap the two times.",
+                                                       sample, format(w[["from"]]), format(w[["to"]])), "warning")
+    w
   }
   # The windows set for `samples` (default: the selected samples) as a data frame (sample, from, to);
   # zero rows when none is set.
@@ -14485,7 +14757,8 @@ server <- function(input, output, session) {
   od_filter_range <- function() {
     if (!isTRUE(input$use_od_filter)) return(NULL)
     lo <- curation_num(input$od_min, -Inf); hi <- curation_num(input$od_max, Inf)
-    if (lo > hi) { tmp <- lo; lo <- hi; hi <- tmp }
+    if (lo > hi) { tmp <- lo; lo <- hi; hi <- tmp
+      guard_notify("od_range_swap", "The OD range minimum was larger than its maximum; the two are swapped.", "message") }   # v2.28.3: said, not silent
     c(lo, hi)
   }
   replicate_catalog_current <- function() {
@@ -15162,8 +15435,9 @@ server <- function(input, output, session) {
                    column(6, numericInput(panel_cfg_id(g, "legend_y"), "Legend y (0-1):", num(g, "legend_y"), 0, 1, 0.01))),
           fluidRow(column(6, textInput(panel_cfg_id(g, "xlab"), "X-axis label:", val(g, "xlab"))),
                    column(6, textInput(panel_cfg_id(g, "ylab"), "Y-axis label:", val(g, "ylab")))),
-          fluidRow(column(3, numericInput(panel_cfg_id(g, "xmin"), "X min:", num(g, "xmin"))), column(3, numericInput(panel_cfg_id(g, "xmax"), "X max:", num(g, "xmax"))),
-                   column(3, numericInput(panel_cfg_id(g, "ymin"), "Y min:", num(g, "ymin"))), column(3, numericInput(panel_cfg_id(g, "ymax"), "Y max:", num(g, "ymax")))),
+          # v2.28.3: two per row (four in a row were ~45 px wide: a click landed on the spinner and typing went after "-1")
+          fluidRow(column(6, numericInput(panel_cfg_id(g, "xmin"), "X min:", num(g, "xmin"))), column(6, numericInput(panel_cfg_id(g, "xmax"), "X max:", num(g, "xmax")))),
+          fluidRow(column(6, numericInput(panel_cfg_id(g, "ymin"), "Y min:", num(g, "ymin"))), column(6, numericInput(panel_cfg_id(g, "ymax"), "Y max:", num(g, "ymax")))),
           fluidRow(column(4, checkboxInput(panel_cfg_id(g, "hide_points"), "Hide points", isTRUE(val(g, "hide_points", FALSE)))),
                    column(4, checkboxInput(panel_cfg_id(g, "hide_lines"), "Hide lines", isTRUE(val(g, "hide_lines", FALSE)))),
                    column(4, checkboxInput(panel_cfg_id(g, "hide_errors"), "Hide error bars / bands", isTRUE(val(g, "hide_errors", FALSE))))),
@@ -15362,6 +15636,17 @@ server <- function(input, output, session) {
   # Hardening: the custom axis limits as the figure may use them. NULL when custom limits are off. A cleared box takes
   # the data range on that side; a reversed pair is swapped, an equal pair widened by 5 %; on a log axis a bound <= 0
   # is the log floor; limits that miss the data completely are replaced by the data range (with a notification).
+  # v2.28.3: the cap width in the x scale's own units. On a log x axis ggplot draws the cap in log10 units, so a width in
+  # minutes made caps decades wide; there the cap is the same share of the log10 range (a typed absolute width cannot
+  # apply, so the default 1.5 % is used).
+  error_cap_width <- function(time) {
+    if (identical(sel1("x_scale_type", "linear"), "log")) {
+      tp <- time[is.finite(time) & time > 0]
+      rng <- if (length(tp) > 1) diff(range(log10(tp))) else 1
+      return(rng * (if (isTRUE(input$error_cap_relative)) nin("error_bar_width") else 1.5) / 100)
+    }
+    if (isTRUE(input$error_cap_relative)) diff(range(time, na.rm = TRUE)) * nin("error_bar_width") / 100 else nin("error_bar_width")
+  }
   eff_limits <- function(axis, plot_data) {
     if (!isTRUE(input[[paste0("custom_", axis, "_limits")]])) return(NULL)
     log_ax <- identical(input[[paste0(axis, "_scale_type")]], "log")
@@ -15374,13 +15659,16 @@ server <- function(input, output, session) {
     if (log_ax) {
       floor_v <- if (identical(axis, "y") && isTRUE(input$use_advanced_ticks) && is.finite(ylog_exp("y_log_min_exponent"))) 10^ylog_exp("y_log_min_exponent")
                  else if (length(pos)) min(pos) / 2 else 1e-9
+      if ((!is.na(lo) && lo <= 0) || (!is.na(hi) && hi <= 0))   # v2.28.3: say so instead of changing it silently
+        guard_notify(paste0("limits_log_", axis), sprintf("A log %s axis cannot start or end at 0 or below; that limit is set automatically.", toupper(axis)), "message")
       if (!is.na(lo) && lo <= 0) lo <- floor_v
       if (!is.na(hi) && hi <= 0) hi <- NA_real_
     }
     if (is.na(lo)) lo <- rng[1]
     if (is.na(hi)) hi <- rng[2]
-    if (lo > hi) { t <- lo; lo <- hi; hi <- t }
-    if (lo == hi) { if (log_ax) { lo <- lo / 1.05; hi <- hi * 1.05 } else { w <- if (lo == 0) 0.05 else abs(lo) * 0.05; lo <- lo - w; hi <- hi + w } }
+    if (lo > hi) { t <- lo; lo <- hi; hi <- t
+      guard_notify(paste0("limits_swap_", axis), sprintf("The %s minimum was larger than the maximum; the two are swapped.", toupper(axis)), "message") }
+    if (lo == hi) { guard_notify(paste0("limits_same_", axis), sprintf("The %s minimum and maximum are the same; the range is widened a little around it.", toupper(axis)), "message"); if (log_ax) { lo <- lo / 1.05; hi <- hi * 1.05 } else { w <- if (lo == 0) 0.05 else abs(lo) * 0.05; lo <- lo - w; hi <- hi + w } }
     if (length(vals) && (hi < min(vals) || lo > max(vals))) {
       guard_notify(paste0("limits_", axis), sprintf("The custom %s limits (%s to %s) do not overlap the data (%s to %s); the data range is used.",
                                                     toupper(axis), format(lo, digits = 4), format(hi, digits = 4),
@@ -15474,6 +15762,8 @@ server <- function(input, output, session) {
     # v2.17: horizontal OD threshold line (ported from the companion app), with an optional label at
     # the right end in the axis-text size. Not drawn at or below 0 on a log axis.
     thr <- suppressWarnings(as.numeric(input$threshold_value))
+    if (isTRUE(input$enable_threshold) && length(thr) == 1 && is.finite(thr) && identical(sel1("y_scale_type"), "log") && thr <= 0)   # v2.28.3: not silently
+      guard_notify("threshold_log", "The threshold line is at 0 or below, which a log y axis cannot show; it is not drawn.", "message")
     if (isTRUE(input$enable_threshold) && length(thr) == 1 && is.finite(thr) &&
         !(identical(sel1("y_scale_type"), "log") && thr <= 0)) {
       thr_col <- input$threshold_color %||% "grey40"
@@ -15583,8 +15873,7 @@ server <- function(input, output, session) {
         blt <- if (!is.null(sel1("error_bar_style")) && sel1("error_bar_style", APP_DEFAULTS$error_bar_style) == "dashed") "dashed" else "solid"
         # v2.12: cap width as % of the x range, and a fixed bar colour (black /
         # grey bars are the journal convention when the lines carry the colour)
-        cap_w <- if (isTRUE(input$error_cap_relative))
-          diff(range(plot_data$time, na.rm = TRUE)) * nin("error_bar_width") / 100 else nin("error_bar_width")
+        cap_w <- error_cap_width(plot_data$time)   # v2.28.3: on a log x axis the cap is a share of the log range
         eb_col <- sel1("error_bar_color", "sample")
         eb_aes <- if (eb_col == "sample") aes(x = time, ymin = err_lo, ymax = err_hi, color = variable)
                   else aes(x = time, ymin = err_lo, ymax = err_hi, group = variable)
@@ -15608,7 +15897,7 @@ server <- function(input, output, session) {
         } else {
           p <- p + do.call(geom_linerange, c(list(data = eb_data, mapping = eb_aes,
                                   linewidth = nin("error_bar_thickness"),
-                                  linetype = blt, position = pos, inherit.aes = FALSE), eb_fixed, kg))
+                                  linetype = blt, position = pos, inherit.aes = FALSE, show.legend = FALSE), eb_fixed))   # v2.28.3: no bar glyph in the key (as with T bars)
         }
       }
     }
@@ -15747,12 +16036,14 @@ server <- function(input, output, session) {
     x_exp  <- expansion(mult = c(nin("x_expand_left"),   nin("x_expand_right")))
     y_exp  <- expansion(mult = c(nin("y_expand_bottom"), nin("y_expand_top")))
     x_lims <- eff_limits("x", plot_data)
+    if (identical(sel1("x_scale_type", "linear"), "log") && any(is.finite(plot_data$time) & plot_data$time <= 0))   # v2.28.3: not silently
+      guard_notify("x_log_zero", "Readings at time 0 (or earlier) cannot be placed on a log x axis and are left out of the figure.", "message")
     # v2.27.4: with a typed x range that ends at a time point (0 to 120 with a reading at 120), the error bar's cap reaches
     # half a cap past the end; the scale dropped that cap end as out of range and the whole cap vanished. Within half a cap
     # of the range an x value is kept at the edge (the cap is cut at the frame, as a journal figure shows it); farther out
     # it is dropped as before.
     x_oob <- if (is.null(x_lims)) scales::censor else {
-      cap_hw <- (if (isTRUE(input$error_cap_relative)) diff(range(plot_data$time, na.rm = TRUE)) * nin("error_bar_width") / 100 else nin("error_bar_width")) / 2
+      cap_hw <- error_cap_width(plot_data$time) / 2
       cap_hw <- if (is.finite(cap_hw) && cap_hw > 0) cap_hw * 1.001 else 0
       function(x, range = c(0, 1)) {
         r <- sort(range); y <- x
@@ -15839,7 +16130,10 @@ server <- function(input, output, session) {
 
       p <- p + if (is.null(mjb)) scale_x_continuous(limits = x_lims, expand = x_exp, guide = guide_prism_minor(), oob = x_oob)
                else scale_x_continuous(limits = x_lims, expand = x_exp, breaks = mjb,
-                                       minor_breaks = mnb, guide = x_guide_min, oob = x_oob)
+                                       minor_breaks = mnb, guide = x_guide_min, oob = x_oob,
+                                       # v2.28.3: each tick label on its own, at most 3 decimals ("0.83", not "0.8333333" with
+                                       # every other label padded to 0.0000000); whole numbers print as before
+                                       labels = function(b) vapply(b, function(v) if (is.na(v)) NA_character_ else format(round(v, 3), trim = TRUE, drop0trailing = TRUE, scientific = FALSE), ""))
     } else {
       p <- p + scale_x_continuous(limits = x_lims, expand = x_exp, oob = x_oob)
     }
@@ -16580,10 +16874,16 @@ server <- function(input, output, session) {
     x_range <- tryCatch({
       pd <- prepare_plot_data(); diff(range(pd$time, na.rm = TRUE))
     }, error = function(e) NULL)
-    apply_settings(journal_preset_settings(w, h, input$journal_panel_label %||% "", x_range))
-    showNotification(sprintf(paste0("Journal preset applied: %s x %s mm, Arial 6-8 pt, ",
-                                    "SVG export. Preview switched to true export size."),
-                             round(w, 1), h),
+    js <- journal_preset_settings(w, h, input$journal_panel_label %||% "", x_range)
+    # v2.28.3: the panel has the fixed size and the figure grows around it (about 12 mm of axes and labels), so a narrow
+    # column (Science single, 55 mm) used to get a 77 mm figure while the message said 55 mm. The panel now shrinks so the
+    # figure fits the column; wider columns keep the 65 mm journal panel.
+    pw <- if (is.finite(w) && w - JOURNAL_AXES_MM < 65) max(30, floor(w - JOURNAL_AXES_MM)) else 65
+    js$panel_width_mm <- pw; js$panel_height_mm <- pw
+    apply_settings(js)
+    showNotification(sprintf(paste0("Journal preset applied: panel %s x %s mm (figure about %s mm wide with its axes, for a %s mm column), ",
+                                    "Arial 6-8 pt, SVG export. Preview switched to true export size."),
+                             pw, pw, pw + JOURNAL_AXES_MM, round(w, 1)),
                      type = "message", duration = 8)
   }
   observeEvent(input$apply_journal_preset,     apply_journal_preset_now())
@@ -16689,6 +16989,18 @@ server <- function(input, output, session) {
     }, error = function(e) NULL)
     paste(c(s1, s2, s2p, s3, s4, s5, s6), collapse = " ")
   }
+  # v2.28.3: two samples shown under the same name cannot be told apart in the legend: say so
+  observe({
+    s <- sel_samples(); req(length(s) > 1)
+    labs <- vapply(s, function(v) display_name_of(v, rv$display_names), "")
+    d <- unique(labs[duplicated(labs)])
+    if (length(d)) guard_notify("dup_names", sprintf("More than one sample is shown as '%s': the legend cannot tell them apart. Rename one in Quick edit.", d[1]), "warning")
+  })
+  # v2.28.3: the figure's text alternative for screen readers is the figure legend text (as drafted on the Legend text tab)
+  observe({
+    txt <- tryCatch(figure_legend_string(), error = function(e) "")
+    session$sendCustomMessage("kcFigAlt", if (nzchar(txt)) txt else "the lysis curve (no data loaded yet)")
+  })
   output$figure_legend_text <- renderText({
     txt <- figure_legend_string()
     if (nzchar(txt)) txt else "Load data and select samples to draft a legend."
@@ -16702,8 +17014,30 @@ server <- function(input, output, session) {
     sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
     mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
     lt <- vapply(ss, function(s) if (!sl) NA_character_ else { w <- legend_line_words(aes_v$line_types[[s]]); if (is.na(w)) "solid line" else w }, "", USE.NAMES = FALSE)
-    data.frame(name = markup_to_plain(unname(aes_v$leg_labels[ss])), hex = hex, colour = colour_words(hex), marker = ifelse(is.na(mk), "none", mk),
-               line = ifelse(is.na(lt), "none", lt), stringsAsFactors = FALSE)
+    out <- data.frame(name = markup_to_plain(unname(aes_v$leg_labels[ss])), hex = hex, colour = colour_words(hex), marker = ifelse(is.na(mk), "none", mk),
+                      line = ifelse(is.na(lt), "none", lt), stringsAsFactors = FALSE)
+    # v2.28.3: a sample drawn differently in one panel (the panel's own sample styles) gets a row of its own for that
+    # panel, "name (in panel B)", so the table matches every panel of the figure
+    if (isTRUE(drawn) && panel_legend_mode()) {
+      extra <- tryCatch({
+        pm <- panel_membership_now(ss, resolve_aesthetics(ss), min_panels = 2L)
+        if (is.null(pm)) NULL else do.call(rbind, lapply(pm$levels, function(g) {
+          who <- ss[vapply(ss, function(x) g %in% pm$map[[x]], NA)]; ov <- panel_smp_get(g, who)
+          if (!length(ov)) return(NULL)
+          ag <- apply_panel_samples(list(shapes = aes_v$shapes[who], colors = aes_v$colors[who], line_types = aes_v$line_types[who],
+                                         leg_labels = aes_v$leg_labels[who], filled_map = aes_v$filled_map[who]), ov)
+          xs <- intersect(names(ov), who); if (!length(xs)) return(NULL)
+          hx <- toupper(unname(ag$colors[xs]))
+          data.frame(name = paste0(markup_to_plain(unname(ag$leg_labels[xs])), " (in panel ", markup_to_plain(g), ")"), hex = hx,
+                     colour = colour_words(hx),
+                     marker = vapply(xs, function(x) if (sp) legend_marker_words(ag$shapes[[x]], ag$filled_map[[x]]) else "none", "", USE.NAMES = FALSE),
+                     line = vapply(xs, function(x) if (!sl) "none" else { w <- legend_line_words(ag$line_types[[x]]); if (is.na(w)) "solid line" else w }, "", USE.NAMES = FALSE),
+                     stringsAsFactors = FALSE)
+        }))
+      }, error = function(e) NULL)
+      if (!is.null(extra) && nrow(extra)) out <- rbind(out, extra)
+    }
+    out
   }
   output$legend_samples_table <- renderUI({
     plot_inputs_debounced()
@@ -16798,10 +17132,15 @@ server <- function(input, output, session) {
 
   # ── Analysis figures (v2.11) ─────────────────────────────────────────────────
   # v2.12.4: lysis-onset threshold as a fraction (input is a percentage; default 5 %)
+  # v2.28.3: with the lab's "lysis complete" OD and the only-complete-lysis switch attached (attrs; measured OD scale only)
+  lysis_floor_current <- function() {   # the "lysis complete" OD (NA: off, or a transform is applied)
+    v <- suppressWarnings(as.numeric(input$lysis_complete_od %||% APP_DEFAULTS$lysis_complete_od))
+    if (length(v) != 1L || !is.finite(v) || v <= 0 || !identical(transform_mode_current(), "none")) NA_real_ else v
+  }
   lysis_threshold_current <- function() {
     p <- input$metrics_lysis_threshold_pct %||% 5
     if (!is.numeric(p) || !is.finite(p)) p <- 5
-    min(max(p, 1), 50) / 100
+    structure(min(max(p, 1), 50) / 100, complete_od = lysis_floor_current(), require_complete = isTRUE(input$lysis_require_complete))
   }
   replicate_metric_rows_current <- function() {
     compute_replicate_metric_rows(prepare_replicate_data(),
@@ -17041,7 +17380,9 @@ server <- function(input, output, session) {
       growth_rate = {
         gr <- compute_growth_rate_curves(prepare_replicate_data(), window = smooth_win())
         if (is.null(gr)) stop("Growth rate needs at least 3 positive OD points per curve.")
-        gr$variable <- factor(gr$variable, levels = sample_levels(samps))
+        gr <- gr[is.finite(gr$mu_mean), , drop = FALSE]   # v2.28.3: a sample without a rate is left out of the legend too
+        if (!nrow(gr) || length(unique(gr$time)) < 2) stop("Growth rate needs more readings per curve than the rate window (smoothing) spans.")
+        gr$variable <- droplevels(factor(gr$variable, levels = sample_levels(samps)))
         # band = the main figure's error measure (compute_growth_rate_curves gives SD and n)
         et <- sel1("error_type", "sem"); em <- nin("error_multiplier", 1)
         gr$mu_sd <- if (et == "none") NA_real_ else em * switch(et,
@@ -17063,7 +17404,9 @@ server <- function(input, output, session) {
         # lyses; a zero crossing marks the peak.
         gr <- compute_od_rate_curves(prepare_replicate_data(), window = smooth_win())
         if (is.null(gr)) stop("The rate of OD change needs at least 3 readings per replicate curve.")
-        gr$variable <- factor(gr$variable, levels = sample_levels(samps))
+        gr <- gr[is.finite(gr$rate_mean), , drop = FALSE]   # v2.28.3
+        if (!nrow(gr) || length(unique(gr$time)) < 2) stop("The rate of OD change needs more readings per curve than the rate window (smoothing) spans.")
+        gr$variable <- droplevels(factor(gr$variable, levels = sample_levels(samps)))
         leg_xy <- list(x = gr$time, y = gr$rate_mean, g = gr$variable)
         g <- ggplot(gr, aes(x = time, y = rate_mean, color = variable, linetype = variable, group = variable)) +
           geom_hline(yintercept = 0, linewidth = pt2lw(0.5), color = "grey50", linetype = "dashed")
@@ -17770,11 +18113,59 @@ server <- function(input, output, session) {
     p
   }
   
+  # v2.28.3: a figure tab's "Place the key on the figure" switch: off hides the legend on the figure (the downloaded key
+  # is still cut from the same legend, so the two always match); attributes (figure notes, a matrix legend) are kept
+  key_switch <- function(p, k) {
+    if (isTRUE(input[[paste0(k, "_key_on_figure")]] %||% TRUE) || !inherits(p, "ggplot") || is_placeholder_plot(p)) return(p)
+    at <- attributes(p); q <- p + ggplot2::theme(legend.position = "none")
+    for (nm in setdiff(names(at), names(attributes(q)))) attr(q, nm) <- at[[nm]]
+    attr(q, "matrix_legend") <- NULL
+    q
+  }
+  # v2.28.3: the legend text starter of any figure: its samples (those in its colour / fill / shape legend), each with the
+  # colour, marker and line it is drawn with, in words: "WT (black, filled circles); lysA (orange, filled squares)"
+  figure_legend_text_for <- function(p, drawn = FALSE) {
+    if (!inherits(p, "ggplot") || is_placeholder_plot(p)) return("")
+    b <- tryCatch(kc_with_scratch_device(function() ggplot2::ggplot_build(p)), error = function(e) NULL)
+    if (is.null(b)) return("")
+    all_s <- sel_samples(); keys <- character(0)
+    for (ae in c("colour", "fill", "shape")) {
+      sc <- b$plot$scales$get_scales(ae)
+      if (!is.null(sc)) { br <- tryCatch(as.character(sc$get_breaks()), error = function(e) character(0)); keys <- c(keys, intersect(br[!is.na(br)], all_s)) }
+    }
+    keys <- unique(keys)
+    if (!length(keys)) {   # v2.28.3: a figure whose legend entries are not sample names (Compare overlay keys): its colour legend as drawn
+      sc <- b$plot$scales$get_scales("colour") %||% b$plot$scales$get_scales("fill")
+      if (is.null(sc)) return("")
+      br <- tryCatch(sc$get_breaks(), error = function(e) NULL); br <- br[!is.na(br)]
+      if (!length(br)) return("")
+      lb <- tryCatch(sc$get_labels(br), error = function(e) as.character(br)); cl <- tryCatch(sc$map(br), error = function(e) rep(NA, length(br)))
+      lb <- vapply(lb, function(x) markup_to_plain(paste(as.character(x), collapse = "")), "")
+      return(paste0(paste(paste0(lb, " (", colour_words(cl), ")"), collapse = "; "), "."))
+    }
+    av <- if (isTRUE(drawn)) resolve_aesthetics_drawn(keys) else resolve_aesthetics(keys)   # v2.28.3: the lysis curve as drawn (matched panels)
+    geoms <- vapply(p$layers, function(l) class(l$geom)[1], "")
+    pts <- any(geoms %in% c("GeomPoint", "GeomPointrange")); lns <- any(geoms %in% c("GeomLine", "GeomPath", "GeomStep"))
+    cw <- colour_words(unname(av$colors[keys]))
+    paste0(paste(vapply(seq_along(keys), function(i) legend_sample_text(markup_to_plain(unname(av$leg_labels[[keys[i]]])), av$colors[[keys[i]]],
+                                                                        av$shapes[[keys[i]]], av$filled_map[[keys[i]]], av$line_types[[keys[i]]],
+                                                                        show_points = pts, show_lines = lns, word = cw[i]), ""), collapse = "; "), ".")
+  }
+  key_text_ui <- function(fig, drawn = FALSE) {
+    txt <- tryCatch(figure_legend_text_for(fig, drawn), error = function(e) "")
+    if (!nzchar(txt)) return(p(class = "kc-leg-help", style = "font-size:.8em;", "No legend on this figure to describe."))
+    tagList(tags$label(style = "font-size:.85em;margin-top:4px;", "Legend text starter (copy and edit):"),
+            tags$textarea(class = "form-control", readonly = NA, rows = 3, style = "font-size:.82em;", `aria-label` = "Legend text starter", txt))
+  }
+  output$analysis_legend_text <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot(sel1("analysis_type", "metric_summary"))) })
+  output$fit_legend_text      <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot("fit_overlay")) })
+  output$compare_legend_text  <- renderUI({ req(rv$data, sel_samples(), rv_cmp$ds); key_text_ui(generate_compare_plot()) })
+  output$compose_legend_text  <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_plot(), drawn = TRUE) })
   generate_analysis_plot <- function(type = sel1("analysis_type", "metric_summary")) {
     req(rv$data, sel_samples())
     tryCatch({
       if (plot_data_is_empty(plot_data_or_empty())) return(empty_state_figure())    # hardening: nothing left after the filters
-      build_analysis_plot(type)
+      key_switch(build_analysis_plot(type), if (identical(type, "fit_overlay")) "fit" else "analysis")   # v2.28.3
     }, error = function(e) {
       ggplot() +
         annotate("text", x = 0.5, y = 0.5,
@@ -17860,15 +18251,22 @@ server <- function(input, output, session) {
     types <- unname(COMPOSE_PANEL_CHOICES[COMPOSE_PANEL_CHOICES %in% sel])   # composed in checkbox order
     # each requested type gives a named list of plots (one, or one per group for "main_by_group"); v2.27.3: built as panels of
     # one figure, so every key stays inside its own panel (the multi-panel agreement)
+    why <- new.env(parent = emptyenv())   # v2.28.3: the reason each left-out panel is not available (shown with its name)
     built <- with_panels_inside(lapply(setNames(types, types), function(ty) {
       if (identical(ty, "main_by_group")) return(tryCatch(main_group_plots(), error = function(e) list()))
+      # v2.28.3: the lysis curve as it is drawn: with "A legend in each panel" its panels, each with its own legend inside
+      if (identical(ty, "main") && panel_legend_mode()) { pl <- tryCatch(main_group_plots(min_panels = 2L), error = function(e) list()); if (length(pl)) return(pl) }
+      if (identical(ty, "compare")) { pl <- tryCatch(compare_facet_plots(), error = function(e) NULL); if (length(pl)) return(pl) }
       p <- tryCatch(if (identical(ty, "main")) generate_plot() else if (identical(ty, "compare")) generate_compare_plot() else generate_analysis_plot(ty),
                     error = function(e) NULL)
+      if (!is.null(p) && is_placeholder_plot(p)) why[[ty]] <- tryCatch(placeholder_reason(p), error = function(e) NULL)
       if (is.null(p) || is_placeholder_plot(p)) list() else setNames(list(p), ty)
     }))
     ok      <- vapply(built, length, integer(1)) > 0
-    skipped <- names(COMPOSE_PANEL_CHOICES)[match(types[!ok], COMPOSE_PANEL_CHOICES)]
+    skipped <- vapply(types[!ok], function(ty) { nm <- names(COMPOSE_PANEL_CHOICES)[match(ty, COMPOSE_PANEL_CHOICES)]
+                                                 r <- why[[ty]]; if (is.character(r) && length(r) == 1L && nzchar(r)) paste0(nm, " (", sub("\\.$", "", r), ")") else nm }, "", USE.NAMES = FALSE)
     plots   <- if (any(ok)) do.call(c, unname(built[ok])) else list()
+    plots   <- lapply(plots, key_switch, "compose")   # v2.28.3: the Compose tab's "Place the key on the figure"
     n <- length(plots)
     ncol    <- min(num_or(sel1("compose_ncol"), 2, 1, 12), max(n, 1L))      # (round 3: 1 / 2 in the box; never NA)
     rows    <- if (n) ceiling(n / ncol) else 0L
@@ -17960,7 +18358,8 @@ server <- function(input, output, session) {
                         if (nzchar(sel1("metrics_ref_sample", ""))) paste0("Each sample vs reference '", dname(sel1("metrics_ref_sample")), "'. ") else "All pairs. ",
                         "p values Holm-adjusted; Hedges' g = standardized mean difference; ",
                         "95% CI of the difference (Welch)."), notes)
-    else notes <- c("No comparison possible yet: load data with 2+ replicates per sample.", notes)
+    else notes <- c(paste0("No comparison possible for this metric: it needs two or more samples that each have a value in 2+ replicates. ",
+                           "A metric such as lysis onset is empty for a sample that does not lyse; choose another metric, or check the replicates."), notes)   # v2.28.3
     cav <- technical_rep_caveat()      # v2.22: pseudoreplication banner
     tagList(if (!is.null(cav)) div(class = "settings-status warn", style = "margin-bottom:8px;", cav),
             div(lapply(notes, function(n) div(class = "stats-note", n))))
@@ -18889,7 +19288,7 @@ server <- function(input, output, session) {
       geom_point(aes(color = sample, shape = sample, fill = sample), size = nin("shape_size", 3) * 0.8) +
       scale_color_manual(values = cols, labels = labs_v, limits = lim_q, name = NULL) +
       marker_scales(samps, aes_v, labs_v, limits = lim_q) +
-      labs(x = "Theoretical normal quantile", y = axis_y_label(paste0("Residual: ", metric_axis_label(m, tunit = time_unit_from_label(input$x_axis_label), ylab = input$y_axis_label %||% "OD"))))
+      labs(x = "Theoretical normal quantile", y = axis_y_label(paste0("Residual: ", metric_axis_label(m, tunit = time_unit_from_label(xlab_now()), ylab = input$y_axis_label %||% "OD"))))
     s22_finish_figure(p, xy = list(x = d$theoretical, y = d$residual, g = d$sample))
   }
   s22_qq_fig <- s22_figure_shell(s22_qq_build, "qq", "s22_qq_container", "s22_qq_img", "s22_qq_plot", "downloadQQFigure", "qq_plot")
@@ -18974,7 +19373,7 @@ server <- function(input, output, session) {
     s22_note(paste0("Trapezoid area of max(", input$y_axis_label %||% "OD", " - baseline, 0) over ",
                     if (nzchar(trimws(input$auc_from %||% "")) || nzchar(trimws(input$auc_to %||% ""))) "the typed window" else "the whole curve",
                     "; baseline: ", c(none = "none (0)", first = "the first reading of each replicate", value = "the fixed value", min = "the minimum of each replicate")[[s22_choice(input$auc_baseline, c("none", "first", "value", "min"), "none")]], ". ",
-                    "Units: ", input$y_axis_label %||% "OD", " x ", time_unit_from_label(input$x_axis_label), "."),
+                    "Units: ", input$y_axis_label %||% "OD", " x ", time_unit_from_label(xlab_now()), "."),
              if (isTRUE(input$auc_relative %||% TRUE) && !nzchar(s22_ref())) "Set the reference sample (Stats & Reports) for the relative AUC." else NA_character_,
              if (length(nts)) paste0("Notes: ", paste(utils::head(nts, 4), collapse = "; "), ".") else NA_character_,
              "The relative AUC is the ratio of mean AUCs (log-delta CI, approximate at n = 3). The comparison below uses the post-hoc method chosen above.")
@@ -19332,7 +19731,7 @@ server <- function(input, output, session) {
     av <- if (!is.null(a) && focus %in% a$sample && is.finite(a$mean[a$sample == focus])) formatC(signif(a$mean[a$sample == focus], 3), format = "g") else "—"
     e <- tryCatch(exp_window_by_group(s22_curves()$pd, NULL, "mean", input$expwin_mode %||% "auto", input$expwin_from, input$expwin_to, input$expwin_min_points %||% 4), error = function(e) NULL)
     ev <- if (!is.null(e) && focus %in% e$sample && is.finite(e$doubling_time[e$sample == focus])) formatC(signif(e$doubling_time[e$sample == focus], 3), format = "g") else "—"
-    unit <- time_unit_from_label(input$x_axis_label)
+    unit <- time_unit_from_label(xlab_now())
     list(card("AUC", av, paste0(dname(focus), ", ", input$y_axis_label %||% "OD", " x ", unit)),
          card("Doubling time (exp. window)", ev, paste0(dname(focus), ", ", unit)))
   }
@@ -19618,7 +20017,11 @@ server <- function(input, output, session) {
   })
   output$downloadMethodsTxt <- downloadHandler(
     filename = function() paste0("methods_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"),
-    content  = function(file) writeLines(enc2utf8(input$methods_text %||% ""), file, useBytes = TRUE)
+    content  = function(file) {   # v2.28.3: the drafted paragraph when the box is empty (as the zips do); it wrote a 1-byte file
+      mth <- trimws(input$methods_text %||% "")
+      if (!nzchar(mth)) mth <- trimws(tryCatch(draft_methods_text(), error = function(e) ""))
+      writeLines(enc2utf8(mth), file, useBytes = TRUE)
+    }
   )
 
   # v2.17: every Experiment Notebook field as a named list (label = value), custom keys appended under
@@ -19811,6 +20214,12 @@ server <- function(input, output, session) {
       }
       attempt <- function(label, expr) tryCatch(expr, error = function(e)
         skipped <<- c(skipped, paste0(label, ": ", friendly_error_message(e))))
+      # v2.28.3: every figure's own legend key next to it (legend_key_<stem>.svg / .png), per the legend-key rule
+      key_pair <- function(p, stem) {
+        k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
+        if (!is.null(k)) for (fmt in c("svg", "png"))
+          write_legend_key(k, file.path(dir, paste0("legend_key_", stem, ".", fmt)), fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
+      }
       attempt("Lysis curve (main)", { sz <- export_size_in(); write_pair(main_plot_obj(), main_file_stem(), sz[1], sz[2]) })
       for (ty in unname(ANALYSIS_FIGURE_CHOICES)) {
         lab <- names(ANALYSIS_FIGURE_CHOICES)[match(ty, ANALYSIS_FIGURE_CHOICES)]
@@ -19822,14 +20231,16 @@ server <- function(input, output, session) {
             if (fixed_mode()) { g <- fixed_figure(p, ty); sz <- size_from_grob(g, ty); obj <- g }
             else { sz <- export_size_in(); obj <- p }
             write_pair(obj, analysis_file_stem(ty, if (fixed_mode()) sz), sz[1], sz[2])
+            key_pair(p, analysis_file_stem(ty, if (fixed_mode()) sz))
           }
         })
       }
       if (!is.null(rv_cmp$ds)) attempt("Compare figure", {     # v2.22
         p <- generate_compare_plot()
         if (is_placeholder_plot(p)) skipped <- c(skipped, paste0("Compare figure: ", placeholder_reason(p)))
-        else if (fixed_mode()) { g <- fixed_figure(p, "compare"); sz <- size_from_grob(g, "compare"); write_pair(g, compare_file_stem(), sz[1], sz[2]) }
-        else { sz <- export_size_in(); write_pair(p, compare_file_stem(), sz[1], sz[2]) }
+        else if (fixed_mode()) { g <- compare_fixed_info(); sz <- size_from_grob(g, "compare"); write_pair(g, compare_file_stem(), sz[1], sz[2]) }   # v2.28.3: as drawn
+        else { sz <- export_size_in(); write_pair(compare_plot_obj(), compare_file_stem(), sz[1], sz[2]) }
+        if (!is_placeholder_plot(p)) key_pair(p, compare_file_stem())
       })
       if (has_patchwork) attempt("Composed figure", {
         comp <- compose_info()
@@ -19884,7 +20295,7 @@ server <- function(input, output, session) {
                   "Blank/media OD subtracted",
                   "Data handling (OD range, excluded replicates, blank, transform)",
                   "μmax smoothing window", "Peak-detection smoothing window",
-                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Reference sample",
+                  "Peak used for lysis metrics", "Lysis-onset threshold (%)", "Lysis complete at OD", "Reference sample",
                   "R vector memory limit", "Figure raster size"),
       value = c(sel1("x_scale_type", ""), sel1("y_scale_type", ""),
                 input$x_axis_label, input$y_axis_label, palette_in(),
@@ -19899,6 +20310,7 @@ server <- function(input, output, session) {
                 if (identical(sel1("metrics_peak_mode", "global"), "first_local"))
                   "first peak before a > 10 % decline" else "global maximum",
                 input$metrics_lysis_threshold_pct %||% 5,
+                { fl <- lysis_floor_current(); if (!is.finite(fl)) "not used" else paste0(fl, if (isTRUE(input$lysis_require_complete)) " (only complete lysis counts)" else "") },
                 if (nzchar(sel1("metrics_ref_sample", ""))) display_mapping_text(sel1("metrics_ref_sample"), rv$display_names)
                 else "none (infection metrics omitted)",
                 # v2.14.1 memory diagnostics: the limit R runs under and the pixel sizes used
@@ -20359,8 +20771,10 @@ server <- function(input, output, session) {
       if (!is.null(aes$leg_col)) updateTextInput(session, paste0("legcol_",   vid), value = as.character(aes$leg_col))
       if (!is.null(aes$group)) {     # v2.18: a v2.18 file; a missing window means "no limit", not "leave as is"
         updateTextInput(session, paste0("group_", vid), value = as.character(aes$group))
-        updateNumericInput(session, paste0("tw_min_", vid), value = if (is.null(aes$tw_min)) NA else aes$tw_min)
-        updateNumericInput(session, paste0("tw_max_", vid), value = if (is.null(aes$tw_max)) NA else aes$tw_max)
+        if (isTRUE(load_ctx$project)) {   # v2.28.3: time windows are part of the time filter: only a project restores them
+          updateNumericInput(session, paste0("tw_min_", vid), value = if (is.null(aes$tw_min)) NA else aes$tw_min)
+          updateNumericInput(session, paste0("tw_max_", vid), value = if (is.null(aes$tw_max)) NA else aes$tw_max)
+        }
       }
       if (isTRUE(aes$hidden)) hide <- c(hide, vn)
     }
@@ -20581,11 +20995,48 @@ server <- function(input, output, session) {
         }
         p <- build_plot(dplyr::bind_rows(pdA, pdB), keys, aes_k, rep_fn = rep_fn)
       }
-      add_notes_caption(p)
+      key_switch(add_notes_caption(p), "compare")   # v2.28.3
     }, error = function(e) {
       if (inherits(e, "shiny.silent.error")) stop(e)
       plot_error_figure(friendly_error_message(e))
     })
+  }
+  # v2.28.3: side by side, each dataset is a panel of its own with its own legend inside, listing only what that panel
+  # draws (the multi-panel agreement); the faceted ggplot kept one union legend in panel A. NULL when not side by side.
+  compare_facet_plots <- function() {
+    ds <- rv_cmp$ds
+    if (is.null(ds) || is.null(rv$data) || !identical(input$compare_mode %||% "overlay", "facet")) return(NULL)
+    ss <- compare_sample_sets(); if (!length(ss$A) || !length(ss$B)) return(NULL)
+    lab <- compare_labels_now(); sc <- compare_scope(ds)
+    pdA <- prepare_plot_data(samples = ss$A); pdB <- sc$prepare_plot_data(samples = ss$B)
+    if (is.null(pdA) || !nrow(pdA) || is.null(pdB) || !nrow(pdB)) return(NULL)
+    aes_u <- resolve_aesthetics(unique(c(ss$A, ss$B)))
+    one <- function(pd, smp, rep_fn, title) {
+      used <- smp[smp %in% unique(as.character(pd$variable))]
+      aes_f <- lapply(aes_u[c("shapes", "colors", "line_types", "leg_labels", "filled_map")], function(x) x[used])
+      build_plot(pd, used, aes_f, rep_fn = rep_fn, facets = FALSE, panel_inside = TRUE) + labs(title = text_label(title), tag = NULL)
+    }
+    repA <- function(samples, which) tryCatch(prepare_replicate_data(samples = ss$A, which = which), error = function(e) NULL)
+    repB <- function(samples, which) tryCatch(sc$prepare_replicate_data(samples = ss$B, which = which), error = function(e) NULL)
+    # the same axes and ticks in both panels (as the faceted figure had: scales fixed): each panel gets the other's first
+    # and last time as empty rows, so its automatic ticks run over the same range
+    xr <- range(c(pdA$time, pdB$time), na.rm = TRUE)
+    pad <- function(pd) { e <- pd[c(1L, 1L), , drop = FALSE]; e$time <- xr
+                          for (cl in setdiff(names(e), c("time", "variable"))) if (is.numeric(e[[cl]])) e[[cl]] <- NA_real_
+                          rbind(pd, e) }
+    pa <- one(pad(pdA), ss$A, repA, lab[["A"]]); pb <- one(pad(pdB), ss$B, repB, lab[["B"]])
+    yr <- range(c(pdA$mean_value, pdB$mean_value), na.rm = TRUE)
+    lims <- list(ggplot2::expand_limits(y = if (identical(sel1("y_scale_type"), "log")) yr[yr > 0] else yr))
+    setNames(list(key_switch(suppressWarnings(pa + lims), "compare"), key_switch(suppressWarnings(pb + lims), "compare")), c("compare:A", "compare:B"))
+  }
+  compare_facet_composite <- function() {
+    pl <- compare_facet_plots(); if (is.null(pl)) return(NULL)
+    tsz <- nin("compose_tag_size", 8); fnt <- sel1("font_family", "Arial")
+    if (!fixed_mode()) return(compose_figure(pl, ncol = 2, tag_size = tsz, font = fnt, tags_on = FALSE))
+    d <- panel_dims_mm("main")
+    g <- compose_fixed_figure(lapply(pl, function(pg) fixed_panel_grob(pg, d[1], d[2])), ncol = 2, tag_size = tsz, font = fnt, tags_on = FALSE)
+    attr(g, "panel_mm") <- d
+    g
   }
   compare_panel_count <- function(p) {
     if (inherits(p$facet, "FacetNull")) return(1L)
@@ -20593,9 +21044,15 @@ server <- function(input, output, session) {
   }
   compare_fixed_info <- reactive({
     p <- generate_compare_plot()
+    if (!is_placeholder_plot(p)) { cf <- tryCatch(compare_facet_composite(), error = function(e) NULL); if (!is.null(cf)) return(cf) }   # v2.28.3
     fixed_figure(p, "compare")
   })
-  compare_plot_obj <- function() if (fixed_mode()) compare_fixed_info() else generate_compare_plot()
+  compare_plot_obj <- function() {
+    if (fixed_mode()) return(compare_fixed_info())
+    p <- generate_compare_plot()
+    if (!is_placeholder_plot(p)) { cf <- tryCatch(compare_facet_composite(), error = function(e) NULL); if (!is.null(cf)) return(cf) }   # v2.28.3
+    p
+  }
   compare_size_in <- function() {
     if (!fixed_mode()) return(export_size_in())
     tryCatch(size_from_grob(compare_fixed_info(), "compare"),
@@ -20699,8 +21156,14 @@ server <- function(input, output, session) {
     attempt <- function(label, expr) tryCatch(expr, error = function(e) skip(label, friendly_error_message(e)))
     sz_custom <- if (!is.null(size_mm)) size_mm / 25.4 else NULL
     # one figure: p = the ggplot, kind = its panel kind, stem = the file stem
+    # v2.28.3: with "Legend key" ticked, every exported figure gets its own key (legend_key_<stem>.<fmt>), not only the main one
+    key_for <- function(p, stem) if ("legend_key" %in% as.character(outputs)) {
+      k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
+      if (!is.null(k)) { f <- file.path(dir, paste0("legend_key_", stem, ".", fmt)); write_legend_key(k, f, fmt, dpi); written <<- c(written, basename(f)) }
+    }
     one_figure <- function(label, p, kind, stem_fun) {
       if (is_placeholder_plot(p)) return(skip(label, placeholder_reason(p)))
+      key_for(p, stem_fun(NULL))
       if (!is.null(sz_custom)) return(put(p, stem_fun(sz_custom), sz_custom[1], sz_custom[2]))
       if (fixed_mode()) { g <- fixed_figure(p, kind); s <- size_from_grob(g, kind); put(g, stem_fun(s), s[1], s[2]) }
       else { s <- export_size_in(); put(p, stem_fun(NULL), s[1], s[2]) }
@@ -20738,9 +21201,9 @@ server <- function(input, output, session) {
       else attempt("Compare figure", {
         p <- generate_compare_plot()
         if (is_placeholder_plot(p)) skip("Compare figure", placeholder_reason(p))
-        else if (!is.null(sz_custom)) put(p, compare_file_stem(), sz_custom[1], sz_custom[2])
-        else if (fixed_mode()) { g <- fixed_figure(p, "compare"); s <- size_from_grob(g, "compare"); put(g, compare_file_stem(), s[1], s[2]) }
-        else { s <- export_size_in(); put(p, compare_file_stem(), s[1], s[2]) }
+        else { key_for(p, compare_file_stem()); if (!is.null(sz_custom)) put(compare_plot_obj(), compare_file_stem(), sz_custom[1], sz_custom[2])
+        else if (fixed_mode()) { g <- compare_fixed_info(); s <- size_from_grob(g, "compare"); put(g, compare_file_stem(), s[1], s[2]) }   # v2.28.3: as drawn
+        else { s <- export_size_in(); put(compare_plot_obj(), compare_file_stem(), s[1], s[2]) } }
       })
     }
     if ("csv_summary" %in% sel) attempt("Summary statistics", csv(with_stats_caveat(stats_table_display()), "summary_statistics.csv"))

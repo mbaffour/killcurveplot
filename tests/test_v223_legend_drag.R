@@ -55,7 +55,7 @@ testServer(app, {
 cat("\n--- Part B: drag the legend ---\n")
 d <- env$APP_DEFAULTS
 check("legend_inside_x, legend_inside_y (0.98 each) were appended after the v2.23.3 defaults, together (later versions append after them)",
-      { i <- match(c("legend_inside_x", "legend_inside_y"), names(d)); all(!is.na(i)) && diff(i) == 1L && all(names(d)[-seq_len(i[2])] %in% c("figure_labels", "facet_letters", "facet_size_mode", "facet_legends", "facet_n_panels", "panel_style_match", "error_cap_past_marker")) } && d$legend_inside_x == 0.98 && d$legend_inside_y == 0.98)
+      { i <- match(c("legend_inside_x", "legend_inside_y"), names(d)); all(!is.na(i)) && diff(i) == 1L && all(names(d)[-seq_len(i[2])] %in% c("figure_labels", "facet_letters", "facet_size_mode", "facet_legends", "facet_n_panels", "panel_style_match", "analysis_key_on_figure", "fit_key_on_figure", "compose_key_on_figure", "compare_key_on_figure", "lysis_complete_od", "lysis_require_complete", "error_cap_past_marker")) } && d$legend_inside_x == 0.98 && d$legend_inside_y == 0.98)
 check("both are numeric boxes in the UI with 0..1 ranges",
       all(vapply(c("legend_inside_x", "legend_inside_y"), function(i) { r <- env$NUMERIC_INPUT_RANGES[[i]]; !is.null(r) && r[["min"]] == 0 && r[["max"]] == 1 }, logical(1))))
 check("legend_position accepts inside-custom (LEGEND_POSITIONS_OK and the select's choices)",

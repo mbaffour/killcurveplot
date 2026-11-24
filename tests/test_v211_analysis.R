@@ -754,7 +754,7 @@ testServer(app, {
   session$setInputs(compose_panels = c("main", "growth_rate", "dose_response"))
   ir <- compose_info()
   check("a panel that cannot render (dose-response with one MOI level) is skipped and reported",
-        identical(ir$types, c("main", "growth_rate")) && identical(ir$skipped, "MOI dose-response") && ir$n == 2 &&
+        identical(ir$types, c("main", "growth_rate")) && startsWith(ir$skipped, "MOI dose-response") && length(ir$skipped) == 1L && ir$n == 2 &&
         inherits(ir$plot, "patchwork"))
   session$setInputs(compose_panels = "dose_response")
   io <- compose_info()

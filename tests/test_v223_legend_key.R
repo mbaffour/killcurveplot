@@ -55,9 +55,9 @@ check("colour_words: two different blues become dark blue / light blue; a lone c
         identical(env$colour_words(c("#0072B2", "#377EB8", "#56B4E9")), c("dark blue", "blue", "light blue")))   # three shades: ends qualified, middle plain
 check("colour_words: NA / blank stay NA and do not disturb the others", identical(env$colour_words(c(NA, "#0072B2", "", "#56B4E9")), c(NA, "dark blue", NA, "light blue")))
 check("legend_sample_text takes the qualified word", identical(env$legend_sample_text("A", "#0072B2", 16, TRUE, "solid", word = "dark blue"), "A (dark blue, filled circles)"))
-check("colour_word: the table is the twelve words of the spec plus navy / olive / maroon / magenta (v2.26.1)",
+check("colour_word: the table is the twelve words of the spec plus navy / olive / maroon / magenta (v2.26.1) and crimson (v2.28.3)",
       identical(sort(words), sort(c("black", "white", "grey", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "brown",
-                                    "navy", "olive", "maroon", "magenta"))))
+                                    "navy", "olive", "maroon", "magenta", "crimson"))))
 pal_hex <- unique(c(unlist(lapply(c("viridis", "plasma", "colorblind", "publication", "set1", "rainbow", "gray", "blues", "blue_red"),
                                   function(p) env$get_palette_colors(p, 12))),
                     "#000000", "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#A65628", "#F781BF", "#999999", "#66C2A5", "#FC8D62", "#8DA0CB", "#FFFF33", "#009E73"))

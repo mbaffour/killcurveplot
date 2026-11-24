@@ -221,7 +221,7 @@ check("relative to a control: the label names the control", grepl("relative to U
 check("'control' with no control chosen changes nothing (effective transform none: the default axis and label)", identical(tr$ctl0$eff, "none") && identical(tr$ctl0$lab, "A[550]") && isTRUE(all.equal(tr$ctl0$exp, env$APP_DEFAULTS$y_log_max_exponent)))
 check("the legend text names the transformed measure", grepl("measured as ln A550", tr$legend, fixed = TRUE))
 check("a y label the user typed is left alone", identical(tr$own, "\"My own label\""))
-check("Enter applies an edit in the data table (the editor only saved on blur)", has("ev.key === 'Enter'", "ev.target.matches('#data_view_table td input')) ev.target.blur();"))
+check("Enter applies an edit in the data table (the editor only saved on blur)", has("ev.key === 'Enter'", "t.matches('#data_view_table td input')", "fixVal(t); t.blur();"))   # v2.28.3: the script also reads a decimal comma and cancels on Escape
 
 cat(sprintf("\nSUMMARY: %d passed, %d failed\n", pass, fail))
 if (fail > 0) quit(status = 1)

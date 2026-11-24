@@ -692,7 +692,7 @@ testServer(app, {
   check("F28: a typed value that is not a time point (105) excludes nothing", length(setdiff(tt_long, prepare_plot_data()$time)) == 0)
   um <- attr(env$parse_excluded_timepoints("105, 100", tt_long), "unmatched")
   check("F28: ... and is reported with its nearest neighbours ('Time point 105 is not in the data; nearest are 100 and 110')",
-        length(um) == 1 && grepl("Time point 105 is not in the data; nearest are 100 and 110", um))
+        length(um) == 1 && grepl("Time point 105 is not in the data and is ignored; nearest are 100 and 110", um))   # v2.28.3 wording
 })
 check("F27: parse_excluded_timepoints keeps its plain numeric result for a matching value (no attribute)",
       identical(env$parse_excluded_timepoints("30", c(0, 30, 60)), 30) && identical(env$parse_excluded_timepoints("30.0000000001", c(0, 30, 60)), 30))
