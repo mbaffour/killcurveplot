@@ -1825,7 +1825,9 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       }
       fl <- suppressWarnings(as.numeric(lysis_complete_od))
       if (!is.na(onset) && length(fl) == 1L && is.finite(fl)) {   # v2.28.3: lysis complete = the OD after the peak falls below fl
-        k <- which(is.finite(od_vec[post_peak]) & od_vec[post_peak] < fl)
+        # v2.29.0 (review B2): a curve whose peak is already below fl never FALLS below it; it used to be "complete" at the
+        # first reading after the peak, before lysis began. No completion time for such a curve.
+        k <- if (is.finite(max_od) && max_od >= fl) which(is.finite(od_vec[post_peak]) & od_vec[post_peak] < fl) else integer(0)
         if (length(k)) {
           j <- post_peak[k[1]]; y0 <- od_vec[j - 1L]; y1 <- od_vec[j]
           lysis_complete_time <- if (is.finite(y0) && y0 >= fl && y0 > y1) t_vec[j - 1L] + (t_vec[j] - t_vec[j - 1L]) * (y0 - fl) / (y0 - y1) else t_vec[j]
@@ -9022,14 +9024,16 @@ marker_extent_pt <- function(samps, aes_v, colours = NULL, size = 1.5, stroke = 
 }
 GeomKcCapPastMarker <- ggplot2::ggproto(
   "GeomKcCapPastMarker", ggplot2::GeomErrorbar,
-  default_aes  = ggplot2::aes(!!!c(unclass(ggplot2::GeomErrorbar$default_aes), list(kc_mk = 0, kc_mv = 0))),
+  default_aes  = ggplot2::aes(!!!c(unclass(ggplot2::GeomErrorbar$default_aes), list(kc_mk = 0, kc_mv = 0, x0 = NA_real_))),
   extra_params = c(ggplot2::GeomErrorbar$extra_params, "kc_margin_pt"),
   draw_key     = ggplot2::draw_key_blank,
   draw_panel   = function(self, data, panel_params, coord, lineend = "butt", width = NULL, flipped_aes = FALSE, kc_margin_pt = MARKER_CAP_MARGIN_PT) {
     data <- data[is.finite(data$kc_mk) & data$kc_mk > 0 & is.finite(data$ymin) & is.finite(data$ymax), , drop = FALSE]
     if (!nrow(data)) return(ggplot2::zeroGrob())
+    if (is.null(data$x0) || !any(is.finite(data$x0))) data$x0 <- data$x   # v2.29.0: the marker's x (a dodged bar stands beside it)
     d <- coord$transform(data, panel_params)
-    grid::gTree(kc = d[, c("x", "xmin", "xmax", "ymin", "ymax", "colour", "alpha", "linewidth", "linetype", "kc_mk", "kc_mv")],
+    d$x0[!is.finite(d$x0)] <- d$x[!is.finite(d$x0)]
+    grid::gTree(kc = d[, c("x", "x0", "xmin", "xmax", "ymin", "ymax", "colour", "alpha", "linewidth", "linetype", "kc_mk", "kc_mv")],
                 kc_margin = kc_margin_pt, kc_lineend = lineend, cl = "kc_cap_past_marker")
   })
 # Drawing time: the panel's size is known, so the bar's half-length and cap half-width are measured in points.
@@ -9037,9 +9041,12 @@ makeContent_kc_cap_past_marker <- function(x) {
   d <- x$kc
   h <- grid::convertHeight(grid::unit(abs(d$ymax - d$ymin) / 2, "npc"), "bigpts", valueOnly = TRUE)
   w <- grid::convertWidth(grid::unit(abs(d$xmax - d$xmin) / 2, "npc"), "bigpts", valueOnly = TRUE)
-  hid <- is.finite(h) & is.finite(w) & h < d$kc_mv & w < d$kc_mk
+  # v2.29.0 (review B7): a bar moved beside its marker (Position: Dodge on a short time axis) is in plain view; only a
+  # bar whose stem AND caps lie under the marker is hidden. The caps are centred on the marker.
+  off <- grid::convertWidth(grid::unit(abs(d$x - d$x0), "npc"), "bigpts", valueOnly = TRUE)
+  hid <- is.finite(h) & is.finite(w) & is.finite(off) & h < d$kc_mv & off + w < d$kc_mk
   if (!any(hid)) return(grid::setChildren(x, grid::gList()))
-  d <- d[hid, , drop = FALSE]; e <- rep(d$kc_mk + x$kc_margin, 2); xc <- rep(d$x, 2)
+  d <- d[hid, , drop = FALSE]; e <- rep(d$kc_mk + x$kc_margin, 2); xc <- rep(d$x0, 2)
   cap <- grid::segmentsGrob(x0 = grid::unit(xc, "npc") - grid::unit(e, "bigpts"), x1 = grid::unit(xc, "npc") + grid::unit(e, "bigpts"),
                             y0 = grid::unit(c(d$ymin, d$ymax), "npc"), y1 = grid::unit(c(d$ymin, d$ymax), "npc"), name = "caps",
                             gp = grid::gpar(col = scales::alpha(rep(d$colour, 2), rep(d$alpha, 2)), lwd = rep(d$linewidth, 2) * ggplot2::.pt,
@@ -13065,12 +13072,22 @@ server <- function(input, output, session) {
   observeEvent(input$time_convert, {
     k_new <- time_convert_factor(sel1("time_convert", "none")); k_old <- isolate(tc_prev()); tc_prev(k_new)
     if (is.null(k_old) || isTRUE(all.equal(k_old, k_new))) return(invisible(NULL))
-    ls <- isolate(rv$load_stamp)
-    if (!is.null(ls) && as.numeric(difftime(Sys.time(), ls, units = "secs")) < 5) return(invisible(NULL))
+    # v2.29.0 (review A7, P2): a PROJECT restores the unit and the box together (the box is already in the project's unit),
+    # so the one unit change it causes is not converted. That used to be "any change within 5 s of a load": a slow open
+    # converted the box a second time (1.5 h became 0.025), and a settings file, which sets the unit but never the box,
+    # left the box unconverted (30 min was read as 30 h).
+    g <- isolate(rv$unit_guard)
+    if (!is.null(g)) { rv$unit_guard <- NULL; if (identical(g, sel1("time_convert", "none"))) return(invisible(NULL)) }
     txt <- isolate(input$exclude_timepoints %||% "")
     if (!is.character(txt) || length(txt) != 1L || is.na(txt) || !nzchar(trimws(txt))) return(invisible(NULL))
     toks <- strsplit(trimws(txt), "[,; ]+")[[1]]; v <- suppressWarnings(as.numeric(toks))
-    new <- vapply(seq_along(toks), function(i) if (is.finite(v[i])) format(signif(v[i] / k_old * k_new, 8), trim = TRUE, drop0trailing = TRUE, scientific = FALSE) else toks[i], "")
+    # v2.29.0 (review B9): a value that is a time point converts to that time point (620 min -> 10.3333333333 h -> 620 min;
+    # it used to come back as 619.9998, with a notice about the app's own rounding)
+    tp_new <- sort(unique(isolate(rv$all_timepoints))) * k_new; tp_new <- tp_new[is.finite(tp_new)]
+    conv <- function(x) { x <- x / k_old * k_new
+      if (length(tp_new)) { j <- which.min(abs(tp_new - x)); if (abs(tp_new[j] - x) <= 1e-6 * max(1, abs(x))) x <- tp_new[j] }
+      format(x, digits = 12, trim = TRUE, drop0trailing = TRUE, scientific = FALSE) }
+    new <- vapply(seq_along(toks), function(i) if (is.finite(v[i])) conv(v[i]) else toks[i], "")
     updateTextInput(session, "exclude_timepoints", value = paste(new, collapse = ", "))
   }, ignoreInit = FALSE, ignoreNULL = FALSE)
   output$excluded_timepoints_preview <- renderUI({
@@ -13650,15 +13667,18 @@ server <- function(input, output, session) {
   # v2.28.3: and when it stops being the blank (another blank mode or another blank sample) it is put back in the selection;
   # it used to stay out until the file was loaded again
   blank_prev <- reactiveVal("")
+  blank_taken <- reactiveVal("")   # v2.29.0 (review B8): the sample the APP took off the figure; one the user had hidden stays hidden
   observeEvent(list(input$blank_mode, input$blank_sample, input$selected_samples), {
     b <- blank_sample_current()
     cur <- sel_samples()
     old <- isolate(blank_prev()); blank_prev(b)
-    if (nzchar(old) && !identical(old, b) && old %in% rv$od_vars && !old %in% cur) {
+    if (nzchar(old) && !identical(old, b) && old %in% rv$od_vars && !old %in% cur && identical(old, isolate(blank_taken()))) {
+      blank_taken("")
       cur <- rv$od_vars[rv$od_vars %in% c(cur, old)]
       updateSelectInput(session, "selected_samples", selected = setdiff(cur, b))
       guard_notify("blank_sample_back", sprintf("'%s' is no longer the blank and is plotted again.", old), "message")
     } else if (nzchar(b) && b %in% cur) {
+      blank_taken(b)
       updateSelectInput(session, "selected_samples", selected = setdiff(cur, b))
       guard_notify("blank_sample", sprintf("'%s' is the blank: its mean curve is subtracted and it is left out of the samples.", b), "message")
     }
@@ -13840,7 +13860,7 @@ server <- function(input, output, session) {
             shape_filled = input[[paste0("shape_filled_", vid)]] %||% unname(ra$filled_map[[vn]]),
             line_type    = input[[paste0("line_type_",    vid)]] %||% unname(ra$line_types[[vn]]),
             legend_label = display_name_of(vn, rv$display_names),   # v2.21: the display name (the key stays the raw name)
-            group        = trimws(input[[paste0("group_", vid)]] %||% ""),     # v2.18; a file with this key also carries the windows
+            group        = trimws(input[[paste0("group_", vid)]] %||% unname(ra$groups[[vn]]) %||% ""),     # v2.18; a file with this key also carries the windows (v2.29.0: no row yet = the loaded file's group)
             panel        = trimws(input[[paste0("facet_of_", vid)]] %||% ""),  # v2.22: the panel typed in the Panels section
             leg_row      = trimws(input[[paste0("legrow_", vid)]] %||% ""),    # v2.22: matrix-legend row / column
             leg_col      = trimws(input[[paste0("legcol_", vid)]] %||% "")
@@ -13863,8 +13883,11 @@ server <- function(input, output, session) {
       if (length(lp)) doc$label_positions <- lp
       ev <- isolate(every_wanted()); if (length(ev)) doc$panel_every <- as.list(ev)   # v2.26.0: the samples drawn in every panel
       pcs <- tryCatch(isolate({ sm <- sel_samples(); pm <- panel_membership_now(sm, resolve_aesthetics(sm))
-                               c(rv$panel_cfg[setdiff(names(rv$panel_cfg), if (is.null(pm)) character(0) else pm$levels)],
-                                 if (is.null(pm)) list() else panel_cfg_all(pm$levels)) }), error = function(e) list())
+                               # v2.29.0 (review A3): the panels on screen are stored under pkey() (a renamed sample's RAW name),
+                               # so that is what is left out of the stored copies; the old copy was written too and won on open
+                               cur <- if (is.null(pm)) list() else panel_cfg_all(pm$levels)
+                               on_screen <- if (is.null(pm)) character(0) else unique(c(pm$levels, vapply(pm$levels, pkey, ""), names(cur)))
+                               c(rv$panel_cfg[setdiff(names(rv$panel_cfg), on_screen)], cur) }), error = function(e) list())
       if (length(pcs)) doc$panel_settings <- pcs                                        # v2.26.0: each panel's own settings
       pks <- tryCatch(isolate(if (identical(sel1("facet_source", "group"), "pick")) panel_picks_now() else NULL), error = function(e) NULL)
       if (length(pks)) doc$panel_picks <- lapply(pks, function(q) list(name = q$name, samples = as.list(q$samples)))   # v2.26.0
@@ -13979,6 +14002,9 @@ server <- function(input, output, session) {
       tf <- tempfile(fileext = ".json"); on.exit(unlink(tf), add = TRUE)
       jsonlite::write_json(doc$settings, tf, auto_unbox = TRUE, digits = NA, na = "null", null = "null")
       load_ctx$project <- TRUE; on.exit(load_ctx$project <- FALSE, add = TRUE); rv$load_stamp <- Sys.time()
+      # v2.29.0: the unit this project sets; the unit-change observer leaves the restored exclude box alone for that change
+      pu <- doc$settings$global_settings$time_convert
+      rv$unit_guard <- if (is.character(pu) && length(pu) == 1L && !is.na(pu) && !identical(pu, isolate(sel1("time_convert", "none")))) pu else NULL
       load_settings_file(tf)
       load_ctx$project <- FALSE
     }
@@ -14116,7 +14142,7 @@ server <- function(input, output, session) {
     } else every_wanted(character(0))
     if (is.list(s$label_positions)) {                    # v2.25.0 (an old lysis-curve-app file: its floating_labels, see translate_old_settings)
       rv$float_pos <- float_pos_clean(s$label_positions$samples); rv$note_pos <- float_pos_clean(s$label_positions$notes)
-    }
+    } else if (isTRUE(load_ctx$project)) { rv$float_pos <- list(); rv$note_pos <- list() }   # v2.29.0 (review A5): a project with nothing dragged opens with nothing dragged
 
     # ── Apply global visual settings ──────────────────────────────────────────
     # Skip anything data-specific or per-sample — only visual controls
@@ -14847,7 +14873,8 @@ server <- function(input, output, session) {
   time_window_for <- function(sample) {
     vid <- safe_id(sample)
     num <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1 && is.finite(v)) v else NA_real_ }
-    w <- c(from = num(input[[paste0("tw_min_", vid)]]), to = num(input[[paste0("tw_max_", vid)]]))
+    imp <- rv$imported_settings$samples[[sample]]            # v2.29.0: no time-window row drawn yet: the loaded file's window
+    w <- c(from = num(input[[paste0("tw_min_", vid)]] %||% (if (is.list(imp)) imp[["tw_min"]])), to = num(input[[paste0("tw_max_", vid)]] %||% (if (is.list(imp)) imp[["tw_max"]])))
     if (all(is.finite(w)) && w[["from"]] > w[["to"]])   # v2.28.3: an inverted window removed the sample with no word
       guard_notify(paste0("tw_inverted_", vid), sprintf("The time window of '%s' runs from %s to %s, which keeps nothing: the sample is not drawn. Swap the two times.",
                                                        sample, format(w[["from"]]), format(w[["to"]])), "warning")
@@ -15198,8 +15225,12 @@ server <- function(input, output, session) {
     def_colors <- default_sample_colours(n)   # v2.26.1: no repeat past the twelfth sample
     for (i in seq_len(n)) {
       vn  <- samples[i]; vid <- safe_id(vn)
-      si  <- input[[paste0("shape_", vid)]]
-      fi <- input[[paste0("shape_filled_", vid)]]
+      # v2.29.0 (review A2): a sample with no sidebar row yet (page 2 of Variable Styling, or hidden) takes the style a
+      # loaded file gave it, exactly what its row shows once drawn. It used to be drawn, and saved again, with the defaults.
+      imp <- rv$imported_settings$samples[[vn]]
+      imp1 <- function(k) { v <- if (is.list(imp)) imp[[k]] else NULL; if (is.atomic(v) && length(v) == 1L && !is.na(v)) v else NULL }
+      si  <- input[[paste0("shape_", vid)]] %||% imp1("shape")
+      fi <- input[[paste0("shape_filled_", vid)]] %||% (if (is.null(input[[paste0("shape_", vid)]])) imp1("shape_filled"))
       mk <- normalise_marker(if (!is.null(si)) si else default_sample_shape(i),     # v2.23.9: one rule, here (v2.26.1: the sidebar's cycle)
                              if (!is.null(fi)) fi else TRUE)
       shapes[i] <- mk$shape
@@ -15213,6 +15244,8 @@ server <- function(input, output, session) {
         colors[i] <- normalize_hex_color(input[[paste0("color_", vid)]])
       else if (!is.null(sel))
         colors[i] <- sel
+      else if (!is.null(imp1("color")) && !is.null(ic <- tryCatch(normalize_hex_color(as.character(imp1("color"))), error = function(e) NULL)))
+        colors[i] <- ic                             # v2.29.0: no row yet: the loaded file's colour
       else if (!is.null(paper_colour_of(vn)))      # v2.23.4: the paper style's colour for this sample name
         colors[i] <- paper_colour_of(vn)
       else if (!is.null(rv$palette_colors)) {
@@ -15222,13 +15255,13 @@ server <- function(input, output, session) {
       } else
         colors[i] <- def_colors[(i - 1) %% length(def_colors) + 1]
       
-      lt <- input[[paste0("line_type_", vid)]]
-      line_types[i] <- if (!is.null(lt)) lt else "solid"
+      lt <- input[[paste0("line_type_", vid)]] %||% imp1("line_type")
+      line_types[i] <- if (!is.null(lt)) as.character(lt) else "solid"
       
       leg_labels[i] <- display_name_of(vn, rv$display_names)   # v2.21: the display name (quick-edit strip)
       
 
-      gi <- input[[paste0("group_", vid)]]
+      gi <- input[[paste0("group_", vid)]] %||% imp1("group")
       groups[i] <- if (!is.null(gi) && length(gi) == 1 && !is.na(gi)) trimws(as.character(gi)) else ""
     }
     list(shapes = shapes, colors = colors, line_types = line_types,
@@ -16092,8 +16125,8 @@ server <- function(input, output, session) {
             mk <- marker_extent_pt(samples, aes_vals, colours = display_colors, size = nin("shape_size"), stroke = nin("point_stroke"))
             eb_mk <- eb_data; ix <- match(as.character(eb_mk$variable), mk$variable)
             eb_mk$kc_mk <- ifelse(is.na(ix), 0, mk$kc_mk[ix]); eb_mk$kc_mv <- ifelse(is.na(ix), 0, mk$kc_mv[ix])
-            mk_aes <- if (eb_col == "sample") aes(x = time, ymin = err_lo, ymax = err_hi, color = variable, kc_mk = kc_mk, kc_mv = kc_mv)
-                      else aes(x = time, ymin = err_lo, ymax = err_hi, group = variable, kc_mk = kc_mk, kc_mv = kc_mv)
+            mk_aes <- if (eb_col == "sample") aes(x = time, ymin = err_lo, ymax = err_hi, color = variable, kc_mk = kc_mk, kc_mv = kc_mv, x0 = time)
+                      else aes(x = time, ymin = err_lo, ymax = err_hi, group = variable, kc_mk = kc_mk, kc_mv = kc_mv, x0 = time)
             if (any(eb_mk$kc_mk > 0))
               p <- p + ggplot2::layer(data = eb_mk, mapping = mk_aes, stat = "identity", geom = GeomKcCapPastMarker, position = pos,
                                       inherit.aes = FALSE, show.legend = FALSE,
@@ -16375,14 +16408,33 @@ server <- function(input, output, session) {
     }
     # v2.28.1: "drop readings outside the axis" drops READINGS. An error bar whose mean is on the axis but one end runs past
     # a limit was deleted whole (ggplot removes the row); it now runs to the frame, as it does with "squish".
+    # v2.29.0 (review B5, P1): only a bar that CROSSES a limit is cut at it. A bar that lies entirely off the axis (the
+    # 25th-75th percentile bar of a skewed sample) is left out, not drawn as a dash on the frame; and a bar whose point is
+    # dropped is dropped with it (the log floor used to lift such a bar back onto the axis, with no point).
     if (identical(input$y_oob, "censor") && length(y_lims) == 2L && all(is.finite(y_lims))) {
       yl <- sort(y_lims)
       for (li in seq_along(p$layers)) {
         ly <- p$layers[[li]]
         if (!inherits(ly$geom, c("GeomErrorbar", "GeomLinerange")) || !is.data.frame(ly$data) || !all(c("err_lo", "err_hi", "mean_value") %in% names(ly$data))) next
         dd <- ly$data; on <- is.finite(dd$mean_value) & dd$mean_value >= yl[1] & dd$mean_value <= yl[2]
-        dd$err_lo[on] <- pmin(pmax(dd$err_lo[on], yl[1]), yl[2]); dd$err_hi[on] <- pmin(pmax(dd$err_hi[on], yl[1]), yl[2])
+        dd <- dd[on | !is.finite(dd$mean_value), , drop = FALSE]; on <- is.finite(dd$mean_value)
+        cross <- on & is.finite(dd$err_lo) & is.finite(dd$err_hi) & dd$err_hi >= yl[1] & dd$err_lo <= yl[2]
+        dd$err_lo[cross] <- pmin(pmax(dd$err_lo[cross], yl[1]), yl[2]); dd$err_hi[cross] <- pmin(pmax(dd$err_hi[cross], yl[1]), yl[2])
         ly$data <- dd
+      }
+    }
+    # v2.29.0 (review A1): x_oob keeps a cap end that reaches half a cap past a typed x limit. But a scale's oob sees every
+    # x of every layer, so a READING just beyond the limit (dense plate-reader runs) was moved onto the frame and drawn
+    # there with its own OD. Readings outside the typed range are left out here; only cap ends reach x_oob.
+    if (length(x_lims) == 2L && all(is.finite(x_lims))) {
+      xl <- sort(x_lims); x_tol <- 1e-9 * max(1, abs(xl))
+      x_is_time <- function(m) !is.null(m) && identical(tryCatch(rlang::as_label(m), error = function(e) ""), "time")
+      in_x <- function(d) if (is.data.frame(d) && is.numeric(d[["time"]])) d[is.na(d$time) | (d$time >= xl[1] - x_tol & d$time <= xl[2] + x_tol), , drop = FALSE] else d
+      base_x <- x_is_time(p$mapping$x)
+      if (base_x) p$data <- in_x(p$data)
+      for (li in seq_along(p$layers)) {
+        ly <- p$layers[[li]]
+        if (is.data.frame(ly$data) && (x_is_time(ly$mapping$x) || (is.null(ly$mapping$x) && isTRUE(ly$inherit.aes) && base_x))) ly$data <- in_x(ly$data)
       }
     }
 
@@ -17135,7 +17187,9 @@ server <- function(input, output, session) {
                  if (!is.null(med))   paste0(" in ", med) else "",
                  if (!is.null(temp))  paste0(" at ", temp, " °C") else "", ".")
     # v2.23.1: each curve with its colour in words, its marker (only when points are drawn) and a non-solid line type
-    ss <- panel_samples_now(sel_samples()); lab_plain <- markup_to_plain(unname(aes_v$leg_labels[ss]))   # v2.26.0: the samples drawn
+    ss <- panel_samples_now(sel_samples())   # v2.26.0: the samples drawn
+    ss <- ss[ss %in% unique(as.character(pd$variable))]   # v2.29.0 (audit gap 4): a sample with no reading left (time filter, its own window, every replicate excluded) is not drawn, so not named
+    lab_plain <- markup_to_plain(unname(aes_v$leg_labels[ss]))
     cw <- colour_words(unname(aes_v$colors[ss]))      # v2.23.6: "dark blue" / "light blue" when two curves share a colour word
     s2 <- paste0("Curves: ", paste(vapply(seq_along(ss), function(i)
             legend_sample_text(lab_plain[i], aes_v$colors[[ss[i]]], aes_v$shapes[[ss[i]]], aes_v$filled_map[[ss[i]]], aes_v$line_types[[ss[i]]],
@@ -17215,6 +17269,8 @@ server <- function(input, output, session) {
   legend_samples_df <- function(drawn = TRUE) {
     ss <- sel_samples(); if (is.null(rv$data) || !length(ss)) return(NULL)
     if (isTRUE(drawn)) ss <- panel_samples_now(ss)   # v2.26.1: the samples the figure draws (a sample picked for no panel is left off, as in the legend text and key)
+    if (isTRUE(drawn)) { pd0 <- tryCatch(prepare_plot_data(), error = function(e) NULL)   # v2.29.0 (audit gap 4): nor a sample with no reading left
+                         if (!is.null(pd0) && nrow(pd0)) ss <- ss[ss %in% unique(as.character(pd0$variable))]; if (!length(ss)) return(NULL) }
     aes_v <- if (isTRUE(drawn)) resolve_aesthetics_drawn(ss) else resolve_aesthetics(ss); hex <- toupper(unname(aes_v$colors[ss]))
     sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
     mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
@@ -17262,8 +17318,116 @@ server <- function(input, output, session) {
   legend_key_for <- function(p) {
     if (inherits(p, "gtable") && !is.null(attr(p, "width_in"))) return(p)   # v2.26.0: already a key (main_legend_key)
     k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
-    if (is.null(k)) k <- legend_key_grob(generate_plot())
+    # v2.29.0 (audit gap 1): a figure with no legend of its own (the metric summary, AUC, time to threshold ...) used to get
+    # the MAIN figure's key: samples the figure had dropped, filled markers and lines it does not draw, another order, other
+    # colours. Its key is now made from what the figure itself draws (figure_key_entries()).
+    if (is.null(k)) k <- tryCatch(key_from_entries(figure_key_entries(p)), error = function(e) NULL)
     k
+  }
+  # ── v2.29.0: what a figure's legend says, read from the figure itself ───────────────────────────────────────────────
+  # One row per entry of the figure's discrete colour (else fill, else shape) scale, as built: the label shown, the colour,
+  # and the marker / fill / line the figure's own scales or layers give it. A layer drawn with show.legend = FALSE (the
+  # replicate points behind the means) does not make a glyph. On a figure whose x axis lists the samples the entries are in
+  # that order. NULL for a figure with no such scale (a heatmap's colour bar).
+  figure_key_entries <- function(p) {
+    if (!inherits(p, "ggplot") || is_placeholder_plot(p)) return(NULL)
+    b <- tryCatch(kc_with_scratch_device(function() ggplot2::ggplot_build(p)), error = function(e) NULL)
+    if (is.null(b)) return(NULL)
+    disc <- function(ae) { sc <- b$plot$scales$get_scales(ae); if (!is.null(sc) && isTRUE(tryCatch(sc$is_discrete(), error = function(e) FALSE))) sc else NULL }
+    brk  <- function(sc) { v <- tryCatch(sc$get_breaks(), error = function(e) NULL); as.character(v[!is.na(v)]) }
+    main <- NULL; main_ae <- ""
+    for (ae in c("colour", "fill", "shape")) { sc <- disc(ae); if (!is.null(sc) && length(brk(sc))) { main <- sc; main_ae <- ae; break } }
+    if (is.null(main)) {
+      # one panel per sample and no colour scale (the replicate small multiples): each panel's name with the colour of its boldest line
+      lay <- b$layout$layout; fv <- setdiff(names(lay), c("PANEL", "ROW", "COL", "SCALE_X", "SCALE_Y", "COORD"))
+      li <- which(vapply(p$layers, function(l) inherits(l$geom, c("GeomLine", "GeomPath")), NA))
+      if (length(fv) != 1L || !length(li) || nrow(lay) < 2L) return(NULL)
+      lw <- vapply(li, function(i) suppressWarnings(max(as.numeric(b$data[[i]]$linewidth), na.rm = TRUE)), 0); d <- b$data[[li[which.max(lw)]]]
+      col <- vapply(as.character(lay$PANEL), function(pn) { v <- as.character(d$colour[as.character(d$PANEL) == pn]); if (length(v)) v[1] else NA_character_ }, "", USE.NAMES = FALSE)
+      nm <- as.character(lay[[fv]]); ok <- !is.na(col) & !is.na(nm)
+      if (!any(ok)) return(NULL)
+      en <- data.frame(key = nm[ok], label = vapply(nm[ok], function(x) markup_to_plain(x), "", USE.NAMES = FALSE), colour = col[ok], fill = NA_character_, pch = NA_integer_,
+                       shape = NA_integer_, filled = TRUE, linetype = "solid", stringsAsFactors = FALSE)
+      attr(en, "has_point") <- FALSE; attr(en, "has_line") <- TRUE; attr(en, "has_bar") <- FALSE
+      return(en)
+    }
+    keys <- brk(main)
+    lab <- tryCatch(main$get_labels(keys), error = function(e) keys)
+    lab <- vapply(seq_along(keys), function(i) { x <- tryCatch(lab[[i]], error = function(e) keys[i]); x <- markup_to_plain(paste(as.character(x), collapse = "")); if (nzchar(x)) x else keys[i] }, "")
+    mapv <- function(ae) { sc <- disc(ae); if (is.null(sc) || !all(keys %in% brk(sc))) return(NULL)
+                           v <- tryCatch(sc$map(keys), error = function(e) NULL); if (length(v) == length(keys)) v else NULL }
+    ly  <- p$layers; vis <- ly[!vapply(ly, function(l) isFALSE(l$show.legend), NA)]; use <- if (length(vis)) vis else ly
+    is_g <- function(l, cl) inherits(l$geom, cl)
+    pts <- Filter(function(l) is_g(l, c("GeomPoint", "GeomPointrange")), use)
+    lns <- Filter(function(l) is_g(l, c("GeomLine", "GeomPath", "GeomStep")) && !is_g(l, "GeomErrorbar"), use)
+    bars <- Filter(function(l) is_g(l, c("GeomBar", "GeomCol", "GeomRect", "GeomTile")), use)
+    one <- function(l, k, d) { v <- if (length(l)) l[[1]]$aes_params[[k]] else NULL; if (is.atomic(v) && length(v) == 1L && !is.na(v)) v else d }
+    col  <- if (identical(main_ae, "shape")) rep("#000000", length(keys)) else as.character(tryCatch(main$map(keys), error = function(e) rep("#000000", length(keys))))
+    fill <- mapv("fill") %||% rep(one(pts, "fill", NA), length(keys))
+    pch  <- suppressWarnings(as.integer(mapv("shape") %||% rep(one(pts, "shape", 19L), length(keys))))
+    lty  <- as.character(mapv("linetype") %||% rep(one(lns, "linetype", "solid"), length(keys)))
+    # the marker as the app names it: its base form and whether it is drawn filled (21-25 with a white / no fill, and 0-6, are open)
+    white <- function(f) is.na(f) || tolower(as.character(f)) %in% c("white", "#ffffff", "#ffffffff", "transparent", "na")
+    base <- c("21" = 16L, "19" = 16L, "20" = 16L, "1" = 16L, "22" = 15L, "0" = 15L, "24" = 17L, "2" = 17L, "23" = 18L, "5" = 18L, "6" = 25L)
+    filled <- vapply(seq_along(keys), function(i) if (is.na(pch[i])) TRUE else if (pch[i] %in% 21:25) !white(fill[i]) else !(pch[i] %in% c(0L, 1L, 2L, 5L, 6L)), NA)
+    shp <- vapply(pch, function(v) if (is.na(v)) NA_integer_ else if (as.character(v) %in% names(base)) base[[as.character(v)]] else v, 1L)
+    en <- data.frame(key = keys, label = lab, colour = col, fill = as.character(fill), pch = pch, shape = shp, filled = filled, linetype = lty, stringsAsFactors = FALSE)
+    attr(en, "has_point") <- length(pts) > 0L; attr(en, "has_line") <- length(lns) > 0L; attr(en, "has_bar") <- length(bars) > 0L && !length(pts)
+    # the order of a figure whose x axis lists the samples
+    xo <- tryCatch({ xs <- b$layout$panel_params[[1]]$x; as.character(xs$get_labels()) }, error = function(e) character(0))
+    xo <- vapply(xo, function(x) markup_to_plain(paste(as.character(x), collapse = "")), "", USE.NAMES = FALSE)
+    if (length(xo) && all(en$label %in% xo) && !anyDuplicated(en$label)) { o <- order(match(en$label, xo)); a <- attributes(en)[c("has_point", "has_line", "has_bar")]; en <- en[o, , drop = FALSE]; for (k in names(a)) attr(en, k) <- a[[k]] }
+    en
+  }
+  # A key drawn from those entries, in the figure's font: for a figure that has no legend to cut a key from.
+  key_from_entries <- function(en) {
+    if (is.null(en) || !nrow(en)) return(NULL)
+    labs <- make.unique(en$label); d <- data.frame(lab = factor(labs, levels = labs), x = seq_along(labs), y = 1)
+    v <- function(x) stats::setNames(x, labs)
+    g <- ggplot2::ggplot(d, ggplot2::aes(x, y, colour = lab)) + ggplot2::scale_colour_manual(values = v(en$colour), name = NULL)
+    if (isTRUE(attr(en, "has_line"))) g <- g + ggplot2::geom_line(ggplot2::aes(linetype = lab, group = lab), linewidth = nin("line_thickness", 0.5)) +
+        ggplot2::scale_linetype_manual(values = v(en$linetype), name = NULL)
+    if (isTRUE(attr(en, "has_point")) || isTRUE(attr(en, "has_bar")) || !isTRUE(attr(en, "has_line"))) {
+      bar <- isTRUE(attr(en, "has_bar"))
+      pch <- if (bar) rep(22L, nrow(en)) else ifelse(is.na(en$pch), 19L, en$pch)
+      fl  <- if (bar) ifelse(is.na(en$fill) | en$fill == "NA", en$colour, en$fill) else ifelse(is.na(en$fill) | en$fill == "NA", en$colour, en$fill)
+      g <- g + ggplot2::geom_point(ggplot2::aes(shape = lab, fill = lab), size = if (bar) 3 else max(nin("shape_size", 1.5), 1.2), stroke = nin("point_stroke", 0.5)) +
+        ggplot2::scale_shape_manual(values = v(pch), name = NULL) + ggplot2::scale_fill_manual(values = v(fl), name = NULL)
+    }
+    fam <- sel1("font_family", "sans"); pt <- nin("legend_font_size", 7)
+    g <- g + ggplot2::theme_void() + ggplot2::theme(legend.position = "right", legend.text = ggplot2::element_text(family = fam, size = pt, colour = "black"),
+                                                   legend.key.size = grid::unit(max(nin("legend_key_mm", 4), 3), "mm"), legend.key = ggplot2::element_blank())
+    legend_key_grob(g)
+  }
+  # The Compose figure's key (audit gap 2): the key of each composed panel, stacked under the panel's letter and name; one
+  # key when every panel says the same. It used to be the main figure's key whatever was composed.
+  compose_panel_titles <- function(nms) {
+    kind <- sub(":.*$", "", nms); own <- ifelse(grepl(":", nms, fixed = TRUE), sub("^[^:]*:", "", nms), "")
+    nm <- names(COMPOSE_PANEL_CHOICES)[match(kind, COMPOSE_PANEL_CHOICES)]; nm[is.na(nm)] <- kind[is.na(nm)]
+    nm <- ifelse(nzchar(own), markup_to_plain(own), nm)
+    tag <- if (isTRUE(input$compose_tags %||% TRUE)) (if (identical(input$compose_tag_case %||% "a", "A")) LETTERS else letters)[seq_along(nms)] else rep("", length(nms))
+    tag[is.na(tag)] <- ""
+    trimws(paste(tag, nm))
+  }
+  compose_legend_key <- function() {
+    pl <- compose_info()$panels
+    if (!length(pl)) return(NULL)
+    keys <- lapply(pl, function(z) tryCatch(legend_key_for(z), error = function(e) NULL))
+    sig  <- vapply(pl, function(z) { en <- tryCatch(figure_key_entries(z), error = function(e) NULL)
+                                     if (is.null(en)) "" else paste(c(do.call(paste, c(en[c("label", "colour", "fill", "pch", "linetype")], sep = "|")), unlist(attributes(en)[c("has_point", "has_line", "has_bar")])), collapse = ";") }, "")
+    ok <- !vapply(keys, is.null, NA)
+    if (!any(ok)) return(NULL)
+    if (length(unique(sig[ok])) == 1L && all(nzchar(sig[ok]))) return(keys[ok][[1]])
+    stack_legend_keys(keys, compose_panel_titles(names(pl)), font = sel1("font_family", "sans"), size = nin("legend_font_size", 7))
+  }
+  compose_legend_text <- function() {
+    pl <- compose_info()$panels
+    if (!length(pl)) return("")
+    tx <- vapply(pl, function(z) tryCatch(figure_legend_text_for(z), error = function(e) ""), "")
+    ok <- nzchar(tx)
+    if (!any(ok)) return("")
+    if (length(unique(tx[ok])) == 1L) return(unname(tx[ok][1]))
+    paste(paste0(compose_panel_titles(names(pl))[ok], ": ", tx[ok]), collapse = " ")
   }
   # v2.26.0: the main figure's key. When "A legend in each panel" draws a sample differently in some panel, the key is the
   # panels' own keys stacked (each under its letter and name), so it matches what each panel shows.
@@ -17332,7 +17496,7 @@ server <- function(input, output, session) {
   output$downloadAnalysisLegendKey <- legend_key_download(function() sel1("analysis_type", "figure"),
                                                           function() generate_analysis_plot(sel1("analysis_type", "metric_summary")))
   output$downloadFitLegendKey      <- legend_key_download(function() "fit", function() generate_analysis_plot("fit_overlay"))
-  output$downloadComposeLegendKey  <- legend_key_download(function() "compose", function() generate_plot())   # the composed panels share the main figure's colours and names
+  output$downloadComposeLegendKey  <- legend_key_download(function() "compose", function() compose_legend_key() %||% legend_key_for(generate_plot()))   # v2.29.0: the composed panels' own keys
   output$downloadCompareLegendKey  <- legend_key_download(function() "compare", function() { req(rv_cmp$ds); generate_compare_plot() })
 
   # ── Analysis figures (v2.11) ─────────────────────────────────────────────────
@@ -18329,43 +18493,45 @@ server <- function(input, output, session) {
   }
   # v2.28.3: the legend text starter of any figure: its samples (those in its colour / fill / shape legend), each with the
   # colour, marker and line it is drawn with, in words: "WT (black, filled circles); lysA (orange, filled squares)"
+  # v2.29.0 (review B3, B6; audit gap 3): read from the figure's own scales and layers (figure_key_entries()), not from
+  # the main file's selection and the main figure's styles. A renamed sample, a sample that is only in the second file of
+  # a Compare figure, open circles where the figure draws open circles, no markers where it draws none.
   figure_legend_text_for <- function(p, drawn = FALSE) {
-    if (!inherits(p, "ggplot") || is_placeholder_plot(p)) return("")
-    b <- tryCatch(kc_with_scratch_device(function() ggplot2::ggplot_build(p)), error = function(e) NULL)
-    if (is.null(b)) return("")
-    all_s <- sel_samples(); keys <- character(0)
-    for (ae in c("colour", "fill", "shape")) {
-      sc <- b$plot$scales$get_scales(ae)
-      if (!is.null(sc)) { br <- tryCatch(as.character(sc$get_breaks()), error = function(e) character(0)); keys <- c(keys, intersect(br[!is.na(br)], all_s)) }
-    }
-    keys <- unique(keys)
-    if (!length(keys)) {   # v2.28.3: a figure whose legend entries are not sample names (Compare overlay keys): its colour legend as drawn
-      sc <- b$plot$scales$get_scales("colour") %||% b$plot$scales$get_scales("fill")
-      if (is.null(sc)) return("")
-      br <- tryCatch(sc$get_breaks(), error = function(e) NULL); br <- br[!is.na(br)]
-      if (!length(br)) return("")
-      lb <- tryCatch(sc$get_labels(br), error = function(e) as.character(br)); cl <- tryCatch(sc$map(br), error = function(e) rep(NA, length(br)))
-      lb <- vapply(lb, function(x) markup_to_plain(paste(as.character(x), collapse = "")), "")
-      return(paste0(paste(paste0(lb, " (", colour_words(cl), ")"), collapse = "; "), "."))
-    }
-    av <- if (isTRUE(drawn)) resolve_aesthetics_drawn(keys) else resolve_aesthetics(keys)   # v2.28.3: the lysis curve as drawn (matched panels)
-    geoms <- vapply(p$layers, function(l) class(l$geom)[1], "")
-    pts <- any(geoms %in% c("GeomPoint", "GeomPointrange")); lns <- any(geoms %in% c("GeomLine", "GeomPath", "GeomStep"))
-    cw <- colour_words(unname(av$colors[keys]))
-    paste0(paste(vapply(seq_along(keys), function(i) legend_sample_text(markup_to_plain(unname(av$leg_labels[[keys[i]]])), av$colors[[keys[i]]],
-                                                                        av$shapes[[keys[i]]], av$filled_map[[keys[i]]], av$line_types[[keys[i]]],
-                                                                        show_points = pts, show_lines = lns, word = cw[i]), ""), collapse = "; "), ".")
+    en <- tryCatch(figure_key_entries(p), error = function(e) NULL)
+    if (is.null(en) || !nrow(en)) return("")
+    cw <- colour_words(en$colour)
+    pts <- isTRUE(attr(en, "has_point")); lns <- isTRUE(attr(en, "has_line"))
+    main <- paste0(paste(vapply(seq_len(nrow(en)), function(i) legend_sample_text(en$label[i], en$colour[i], en$shape[i], en$filled[i], en$linetype[i],
+                                                                                 show_points = pts, show_lines = lns, word = cw[i]), ""), collapse = "; "), ".")
+    # a line type that tells something else apart (the two files of a Compare overlay)
+    extra <- tryCatch({
+      b <- kc_with_scratch_device(function() ggplot2::ggplot_build(p)); sc <- b$plot$scales$get_scales("linetype")
+      if (is.null(sc) || !isTRUE(sc$is_discrete())) "" else {
+        bk <- sc$get_breaks(); bk <- as.character(bk[!is.na(bk)])
+        if (!length(bk) || all(bk %in% en$key)) "" else {
+          lb <- vapply(sc$get_labels(bk), function(x) markup_to_plain(paste(as.character(x), collapse = "")), "")
+          lt <- as.character(sc$map(bk)); w <- vapply(lt, function(x) { z <- legend_line_words(x); if (is.na(z)) "solid line" else z }, "")
+          paste0(" Lines: ", paste(paste0(lb, " (", w, ")"), collapse = "; "), ".") } } }, error = function(e) "")
+    paste0(main, extra)
   }
-  key_text_ui <- function(fig, drawn = FALSE) {
-    txt <- tryCatch(figure_legend_text_for(fig, drawn), error = function(e) "")
-    if (!nzchar(txt)) return(p(class = "kc-leg-help", style = "font-size:.8em;", "No legend on this figure to describe."))
+  key_text_box <- function(txt) {
+    if (!is.character(txt) || length(txt) != 1L || !nzchar(txt)) return(p(class = "kc-leg-help", style = "font-size:.8em;", "No legend on this figure to describe."))
     tagList(tags$label(style = "font-size:.85em;margin-top:4px;", "Legend text starter (copy and edit):"),
             tags$textarea(class = "form-control", readonly = NA, rows = 3, style = "font-size:.82em;", `aria-label` = "Legend text starter", txt))
   }
+  key_text_ui <- function(fig, drawn = FALSE) key_text_box(tryCatch(figure_legend_text_for(fig, drawn), error = function(e) ""))
+  # v2.29.0 (review B3): Compare side by side is two panels: each file's samples under its own name
+  compare_legend_text <- function() {
+    pl <- tryCatch(compare_facet_plots(), error = function(e) NULL)
+    if (!length(pl)) return(tryCatch(figure_legend_text_for(generate_compare_plot()), error = function(e) ""))
+    lab <- compare_labels_now(); tx <- vapply(pl, function(z) tryCatch(figure_legend_text_for(z), error = function(e) ""), "")
+    nm <- c(as.character(lab[["A"]]), as.character(lab[["B"]]))[seq_along(tx)]
+    paste(paste0(nm, ": ", tx)[nzchar(tx)], collapse = " ")
+  }
   output$analysis_legend_text <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot(sel1("analysis_type", "metric_summary"))) })
   output$fit_legend_text      <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot("fit_overlay")) })
-  output$compare_legend_text  <- renderUI({ req(rv$data, sel_samples(), rv_cmp$ds); key_text_ui(generate_compare_plot()) })
-  output$compose_legend_text  <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_plot(), drawn = TRUE) })
+  output$compare_legend_text  <- renderUI({ req(rv$data, sel_samples(), rv_cmp$ds); key_text_box(tryCatch(compare_legend_text(), error = function(e) "")) })
+  output$compose_legend_text  <- renderUI({ req(rv$data, sel_samples()); key_text_box(tryCatch(compose_legend_text(), error = function(e) "")) })   # v2.29.0: what the composed panels draw
   generate_analysis_plot <- function(type = sel1("analysis_type", "metric_summary")) {
     req(rv$data, sel_samples())
     tryCatch({
@@ -18506,6 +18672,7 @@ server <- function(input, output, session) {
     }
     list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
          types = unique(sub(":.*$", "", names(plots))), width_mm = sz_mm[1], height_mm = sz_mm[2],
+         panels = plots,   # v2.29.0: the composed panels themselves (their keys and legend text)
          size_clamped = isTRUE(attr(sz_mm, "clamped")))
   })
   compose_size_in <- function() { i <- compose_info(); c(safe_figure_size_in(i$width_mm / 25.4, i$height_mm / 25.4)) }
@@ -20332,6 +20499,8 @@ server <- function(input, output, session) {
         ggsave(file.path(dir, "figure_composed.svg"), plot = comp$plot, device = export_device("svg"),
                width = comp$width_mm, height = comp$height_mm, units = "mm", bg = "white", limitsize = FALSE)
         made <- c(made, "figure_composed.svg")
+        ck <- tryCatch(compose_legend_key(), error = function(e) NULL)   # v2.29.0 (audit gap 2): the composed figure's own key
+        if (!is.null(ck)) { write_legend_key(ck, file.path(dir, "legend_key_figure_composed.svg"), "svg"); made <- c(made, "legend_key_figure_composed.svg") }
       }
       write_json(settings_json_list(), file.path(dir, "settings.json"), pretty = TRUE, auto_unbox = TRUE)
       rp <- prepare_replicate_data()
@@ -20421,7 +20590,7 @@ server <- function(input, output, session) {
         skipped <<- c(skipped, paste0(label, ": ", friendly_error_message(e))))
       # v2.28.3: every figure's own legend key next to it (legend_key_<stem>.svg / .png), per the legend-key rule
       key_pair <- function(p, stem) {
-        k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
+        k <- tryCatch(legend_key_for(p), error = function(e) NULL)   # v2.29.0: a figure with no legend of its own gets its key too
         if (!is.null(k)) for (fmt in c("svg", "png"))
           write_legend_key(k, file.path(dir, paste0("legend_key_", stem, ".", fmt)), fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
       }
@@ -20452,6 +20621,8 @@ server <- function(input, output, session) {
         if (is.null(comp$plot)) skipped <- c(skipped, "Composed figure: no panel is available for this selection.")
         else {
           write_pair(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+          ck <- tryCatch(compose_legend_key(), error = function(e) NULL)   # v2.29.0 (audit gap 2): the composed figure's own key
+          if (!is.null(ck)) key_pair(ck, composed_file_stem(c(comp$width_mm, comp$height_mm)))
           if (length(comp$skipped))
             skipped <- c(skipped, paste0("Composed figure, panel left out: ", comp$skipped))
         }
@@ -21372,6 +21543,9 @@ server <- function(input, output, session) {
     xr <- range(c(pdA$time, pdB$time), na.rm = TRUE)
     pad <- function(pd) { e <- pd[c(1L, 1L), , drop = FALSE]; e$time <- xr
                           for (cl in setdiff(names(e), c("time", "variable"))) if (is.numeric(e[[cl]])) e[[cl]] <- NA_real_
+                          # v2.29.0 (review B1): an empty row at a time the sample HAS a reading broke its line there (the
+                          # first segment of one curve in each panel was missing); only times it has no reading at are added
+                          e <- e[!(e$time %in% pd$time[as.character(pd$variable) == as.character(e$variable[1])]), , drop = FALSE]
                           rbind(pd, e) }
     pa <- one(pad(pdA), ss$A, repA, lab[["A"]]); pb <- one(pad(pdB), ss$B, repB, lab[["B"]])
     yr <- range(c(pdA$mean_value, pdB$mean_value), na.rm = TRUE)
@@ -21507,15 +21681,16 @@ server <- function(input, output, session) {
     # one figure: p = the ggplot, kind = its panel kind, stem = the file stem
     # v2.28.3: with "Legend key" ticked, every exported figure gets its own key (legend_key_<stem>.<fmt>), not only the main one
     key_for <- function(p, stem) if ("legend_key" %in% as.character(outputs)) {
-      k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
+      k <- tryCatch(legend_key_for(p), error = function(e) NULL)   # v2.29.0: a figure with no legend of its own gets its key too
       if (!is.null(k)) { f <- file.path(dir, paste0("legend_key_", stem, ".", fmt)); write_legend_key(k, f, fmt, dpi); written <<- c(written, basename(f)) }
     }
     one_figure <- function(label, p, kind, stem_fun) {
       if (is_placeholder_plot(p)) return(skip(label, placeholder_reason(p)))
+      # v2.29.0 (audit gap 10): the key file is named after ITS figure's file (it carried the main figure's size tag)
+      if (!is.null(sz_custom)) { key_for(p, stem_fun(sz_custom)); return(put(p, stem_fun(sz_custom), sz_custom[1], sz_custom[2])) }
+      if (fixed_mode()) { g <- fixed_figure(p, kind); s <- size_from_grob(g, kind); key_for(p, stem_fun(s)); return(put(g, stem_fun(s), s[1], s[2])) }
       key_for(p, stem_fun(NULL))
-      if (!is.null(sz_custom)) return(put(p, stem_fun(sz_custom), sz_custom[1], sz_custom[2]))
-      if (fixed_mode()) { g <- fixed_figure(p, kind); s <- size_from_grob(g, kind); put(g, stem_fun(s), s[1], s[2]) }
-      else { s <- export_size_in(); put(p, stem_fun(NULL), s[1], s[2]) }
+      s <- export_size_in(); put(p, stem_fun(NULL), s[1], s[2])
     }
     sel <- as.character(outputs)
     # v2.26.1: the main figure as the Download button writes it (main_plot_obj(): the matrix legend, a legend in each panel);
@@ -21542,7 +21717,11 @@ server <- function(input, output, session) {
       else attempt("Composed figure", {
         comp <- compose_info()
         if (is.null(comp$plot)) skip("Composed figure", "no panel is available for this selection.")
-        else put(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+        else {
+          put(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+          ck <- tryCatch(compose_legend_key(), error = function(e) NULL)   # v2.29.0 (audit gap 2): the composed figure's own key
+          if (!is.null(ck)) key_for(ck, composed_file_stem(c(comp$width_mm, comp$height_mm)))
+        }
       })
     }
     if ("compare" %in% sel) {

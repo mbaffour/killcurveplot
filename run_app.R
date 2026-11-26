@@ -30,12 +30,14 @@ app <- source(APP)$value
 port <- suppressWarnings(as.integer(Sys.getenv("KC_PORT", "")))
 if (identical(Sys.getenv("KC_AUTO_STOP"), "1")) {
   server <- app$serverFuncSource()
-  open_tabs <- 0L
+  open_tabs <- 0L; last_close <- Sys.time()
+  # v2.29.0: stop only when no tab has been open for the whole 15 s after the LAST close. Each close used to leave its own
+  # timer, and an old one could stop the app half a second after a later close (a page reload in that moment lost the work).
   app$serverFuncSource <- function() function(input, output, session) {
     open_tabs <<- open_tabs + 1L
     session$onSessionEnded(function() {
-      open_tabs <<- open_tabs - 1L
-      later::later(function() if (open_tabs <= 0L) shiny::stopApp(), 15)
+      open_tabs <<- open_tabs - 1L; last_close <<- Sys.time()
+      later::later(function() if (open_tabs <= 0L && as.numeric(difftime(Sys.time(), last_close, units = "secs")) >= 14.5) shiny::stopApp(), 15)
     })
     server(input, output, session)
   }
