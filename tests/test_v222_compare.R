@@ -280,7 +280,11 @@ testServer(app, {
   other <- env$make_demo_data(); names(other)[-1] <- rep(c("S one", "S two", "S three"), each = 3)
   session$setInputs(theme_autoapply = TRUE)
   ingest_data(other, "other")
-  check("themes: a file whose sample names do not match the theme is not styled by it", length(rv$qe_colors) == 0)
+  # v2.29.0: a scheme has its own colours, and samples it does not know take its next free ones (their names, markers
+  # and lines are left alone); a theme without colours of its own still styles nothing here (tests/test_v229_colour_scheme.R)
+  check("themes: a file whose sample names do not match takes the scheme's free colours, and nothing else from it",
+        setequal(names(rv$qe_colors), rv$od_vars) && !anyDuplicated(unlist(rv$qe_colors)) && !any(unlist(rv$qe_colors) %in% c("#112233", "#445566")) &&
+          identical(unname(dname(rv$od_vars)), rv$od_vars))
   session$setInputs(selected_samples = rv$od_vars)
   gs <- settings_json_list()$global_settings
   check("settings files carry the v2.22 settings but never the UI-only or data inputs",

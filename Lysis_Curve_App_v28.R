@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.28.3"
+APP_VERSION <- "2.29.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -8145,22 +8145,77 @@ theme_stored_name <- function(path) {
 }
 # Round 2 (#37): "a b" and "a_b" sanitise to the same file name. The second one gets a short hash of its display name so it
 # no longer overwrites the first; the display name is stored inside the JSON and shown by theme_display_names().
-theme_write <- function(name, aes_map, qe_colors = NULL, display_names = NULL, dir = themes_dir_path()) {
-  key <- theme_key(name)
+# v2.29.0 (colour scheme for a paper): a theme also holds `palette`, the scheme's colours in order. merge = TRUE (the
+# default) keeps the samples already in the file and adds / replaces the given ones, so one scheme collects the samples
+# of every experiment of a paper (saving used to replace the file: the first experiment's samples were lost when the
+# second was saved). palette = NULL keeps the file's palette. key = a file key to write to as it is (a project file
+# restoring its scheme).
+theme_write <- function(name, aes_map, qe_colors = NULL, display_names = NULL, dir = themes_dir_path(), palette = NULL, merge = TRUE, key = NULL) {
+  forced <- !is.null(key)
+  key <- theme_key(if (forced) key else name)
   if (!nzchar(key)) stop("Enter a theme name.")
   if (!dir.exists(dir)) dir.create(dir, showWarnings = FALSE, recursive = TRUE)
   disp <- trimws(name)
-  if (file.exists(theme_path(key, dir))) {
+  if (!forced && file.exists(theme_path(key, dir))) {
     prior <- theme_stored_name(theme_path(key, dir))
     if (!is.null(prior) && !identical(prior, disp)) key <- paste0(key, "_", safe_id_hash(disp))
   }
   aes_map <- lapply(aes_map, function(a) a[intersect(names(a), c("color", "shape", "shape_filled", "line_type", "legend_label"))])
-  qc <- qe_colors[intersect(names(aes_map), names(qe_colors))]
+  qc <- as.list(qe_colors[intersect(names(aes_map), names(qe_colors))])
   dn <- if (length(display_names)) as.list(display_names[intersect(names(aes_map), names(display_names))]) else list()
-  jsonlite::write_json(list(version = "1.0", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = disp,
-                            sample_aesthetics = aes_map, qe_colors = as.list(qc), display_names = dn),
-                       theme_path(key, dir), pretty = TRUE, auto_unbox = TRUE)
+  old <- if (isTRUE(merge)) theme_read(key, dir) else NULL
+  if (!is.null(old)) {
+    same <- function(l) names(l)[!(theme_name_norm(names(l)) %in% theme_name_norm(names(aes_map)))]   # "ev" saved again replaces "EV": one sample, one entry
+    old$sample_aesthetics <- old$sample_aesthetics[same(old$sample_aesthetics)]; old$qe_colors <- old$qe_colors[same(old$qe_colors)]; old$display_names <- old$display_names[same(old$display_names)]
+    keep <- setdiff(names(old$sample_aesthetics), names(aes_map))
+    qc_old <- old$qe_colors[setdiff(names(old$qe_colors), names(aes_map))]        # a sample saved again takes its new colour
+    dn_old <- old$display_names[setdiff(names(old$display_names), names(aes_map))]
+    aes_map <- c(old$sample_aesthetics[keep], aes_map); qc <- c(qc_old, qc); dn <- c(dn_old, dn)
+  }
+  pal <- if (!is.null(palette)) theme_palette_clean(palette) else if (!is.null(old) && isTRUE(old$has_palette)) old$palette else character(0)
+  doc <- list(version = "1.1", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = disp,
+              sample_aesthetics = aes_map, qe_colors = as.list(qc), display_names = as.list(dn))
+  if (length(pal)) doc$palette <- as.list(pal)
+  jsonlite::write_json(doc, theme_path(key, dir), pretty = TRUE, auto_unbox = TRUE)
   invisible(key)
+}
+# The colours of a scheme from whatever was typed or stored: hex codes (#E69F00, E69F00, #abc) or R colour names,
+# separated by commas, semicolons or spaces. Upper-case #RRGGBB, no repeats, SCHEME_PALETTE_MAX at most; junk is dropped.
+SCHEME_PALETTE_MAX <- 40L
+theme_palette_clean <- function(x) {
+  if (is.null(x)) return(character(0))
+  x <- tryCatch(as.character(unlist(x, use.names = FALSE)), error = function(e) character(0))
+  x <- x[!is.na(x)]
+  if (!length(x)) return(character(0))
+  x <- unlist(strsplit(substr(paste(utils::head(x, 400L), collapse = ","), 1L, 8000L), "[,;[:space:]]+"))
+  x <- x[nzchar(x)]
+  hex <- vapply(x, function(v) {
+    if (grepl("^#?[0-9A-Fa-f]{6}$", v)) return(toupper(paste0("#", sub("^#", "", v))))
+    if (grepl("^#[0-9A-Fa-f]{3}$", v)) return(toupper(paste0("#", paste(rep(strsplit(sub("^#", "", v), "")[[1]], each = 2), collapse = ""))))
+    if (!grepl("^[A-Za-z][A-Za-z0-9]*$", v)) return(NA_character_)               # a colour name ("1" is R's palette index, not a name)
+    tryCatch(toupper(grDevices::rgb(t(grDevices::col2rgb(v)), maxColorValue = 255)), error = function(e) NA_character_)
+  }, "", USE.NAMES = FALSE)
+  utils::head(unique(hex[!is.na(hex)]), SCHEME_PALETTE_MAX)
+}
+# the colour a scheme holds for each of its samples (the quick-edit colour wins, as when it is applied), upper-case hex
+theme_sample_colours <- function(theme) {
+  nm <- names(theme$sample_aesthetics)
+  out <- vapply(nm, function(n) {
+    v <- theme$qe_colors[[n]] %||% theme$sample_aesthetics[[n]][["color"]]
+    v <- if (is.atomic(v) && length(v) == 1L && !is.na(v)) theme_palette_clean(as.character(v)) else character(0)
+    if (length(v)) v[1] else NA_character_
+  }, "")
+  out[!is.na(out)]
+}
+# The colours for samples a scheme does not know: its colours no known sample has, in order; when they run out, further
+# colours that are distinct from every scheme colour (distinct_colours()).
+scheme_free_colours <- function(theme, n) {
+  n <- suppressWarnings(as.integer(n)[1]); if (is.na(n) || n <= 0L) return(character(0))
+  known <- unique(unname(theme_sample_colours(theme)))
+  free  <- setdiff(theme$palette, known)
+  if (length(free) >= n) return(free[seq_len(n)])
+  base <- unique(c(theme$palette, known))
+  c(free, utils::tail(distinct_colours(base, length(base) + n - length(free)), n - length(free)))
 }
 # why a theme could not be applied: the file is there but is not a theme (a bare value, no samples), or it is gone
 theme_problem_message <- function(key, dir = themes_dir_path())
@@ -8175,18 +8230,36 @@ theme_read <- function(name, dir = themes_dir_path()) {
   s <- tryCatch(jsonlite::fromJSON(f, simplifyVector = FALSE), error = function(e) NULL)
   if (!is.list(s)) return(NULL)            # finding 37: a file holding a bare value is not a theme
   sa <- s[["sample_aesthetics"]] %||% s[["samples"]]
-  if (is.null(sa) || !length(sa) || !is.list(sa) || is.null(names(sa))) return(NULL)   # round 2: a bare value / unnamed list is not a theme
-  list(sample_aesthetics = sa, qe_colors = s$qe_colors %||% list(), display_names = s$display_names %||% list())
+  if (is.null(sa) || !length(sa) || !is.list(sa) || is.null(names(sa))) {              # round 2: a bare value / unnamed list is not a theme
+    if (!length(theme_palette_clean(s[["palette"]]))) return(NULL)                     # v2.29.0: colours and no samples yet is a scheme
+    sa <- stats::setNames(list(), character(0))
+  }
+  qc <- if (is.list(s$qe_colors) && !is.null(names(s$qe_colors))) s$qe_colors else list()
+  dn <- if (is.list(s$display_names) && !is.null(names(s$display_names))) s$display_names else list()
+  th <- list(sample_aesthetics = sa, qe_colors = qc, display_names = dn)
+  # v2.29.0: the scheme's colours. A file written before v2.29 has none: its samples' colours stand in for the swatches,
+  # and has_palette = FALSE keeps it from recolouring samples it does not know (what such a theme always did).
+  pal <- theme_palette_clean(s[["palette"]])
+  th$has_palette <- length(pal) > 0
+  th$palette <- if (th$has_palette) pal else utils::head(unique(unname(theme_sample_colours(th))), SCHEME_PALETTE_MAX)
+  th
 }
 theme_delete <- function(name, dir = themes_dir_path()) {
   f <- theme_path(name, dir)
   isTRUE(nzchar(theme_key(name)) && file.exists(f) && file.remove(f))
 }
 # the entries of a theme that apply to `samples` (the names that match), as the same structure
+# v2.29.0: a name that differs only in capitals or spacing ("ev", " EV ", "N4  gp60") is the same sample; an exact match
+# wins. The entries come back under the loaded samples' own names.
+theme_name_norm <- function(x) tolower(gsub("[[:space:]]+", " ", trimws(as.character(x))))
 theme_for_samples <- function(theme, samples) {
-  hit <- intersect(samples, names(theme$sample_aesthetics))
-  list(sample_aesthetics = theme$sample_aesthetics[hit], qe_colors = theme$qe_colors[intersect(hit, names(theme$qe_colors))],
-       display_names = theme$display_names[intersect(hit, names(theme$display_names))], matched = hit)
+  tn <- names(theme$sample_aesthetics); samples <- as.character(samples)
+  j <- match(samples, tn)
+  if (anyNA(j)) j[is.na(j)] <- match(theme_name_norm(samples[is.na(j)]), theme_name_norm(tn))
+  ok <- !is.na(j); hit <- samples[ok]; src <- tn[j[ok]]
+  take <- function(l) { k <- src %in% names(l); stats::setNames(l[src[k]], hit[k]) }
+  list(sample_aesthetics = stats::setNames(theme$sample_aesthetics[src], hit), qe_colors = take(theme$qe_colors),
+       display_names = take(theme$display_names), matched = hit)
 }
 
 # ── Cumulative-build parity (PowerPoint slides, GIF frames) ───────────────────────────────────────
@@ -9680,6 +9753,14 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
       checkboxInput("canvas_edit", "Edit labels on the figure (click a legend entry, axis title or title)", APP_DEFAULTS$canvas_edit)),
   div(style = "display:none;", checkboxInput("quick_edit_open", "Show the quick-edit strip", APP_DEFAULTS$quick_edit_open)),
   conditionalPanel("input.quick_edit_open == true",
+    # v2.29.0: the colour scheme of the paper, where the colours are picked
+    div(class = "kc-qe-scheme",
+        div(class = "kc-qe-scheme-pick", selectInput("qe_scheme", "Colour scheme:", choices = c("None" = ""), selected = "", selectize = FALSE)),
+        uiOutput("qe_scheme_swatches", inline = TRUE),
+        actionButton("qe_scheme_apply", "Use on these samples", class = "btn-default btn-xs", title = "Give the loaded samples the scheme's colours and styles: by sample name, and its next free colours for samples it does not know"),
+        actionButton("qe_scheme_save", "Save colours to scheme", class = "btn-default btn-xs", title = "Keep these samples' colours, markers, lines and names in the scheme (added to what it already holds)")),
+    p(class = "kc-qe-note", "Click a sample's colour square to pick one of these colours; the box beside it gives any colour. ",
+      "A scheme remembers the colours by sample name for every file of a paper (more under Color Palettes in the sidebar)."),
     uiOutput("quick_edit_rows"),
     markup_buttons_ui(),   # v2.22: acts on the name / label box last clicked
     div(class = "kc-qe-global",
@@ -9828,15 +9909,94 @@ ui <- fluidPage(lang = "en",
              Shiny.setInputValue('qe_show_event', {sample: row.getAttribute('data-sample'), show: t.checked}, {priority: 'event'});
          });
          // the server tells the strip the colour each sample really has (sidebar colour, palette or the strip's own)
+         var kcDrawn = {};   // v2.29.0: the colour each sample is drawn with (differs from its own under matched panels)
          function swatches(m) {
            for (var i = 0; i < m.ids.length; i++) {
              var inp = document.getElementById(m.ids[i]), c = m.colors[i];
+             if (m.drawn && m.drawn[i]) kcDrawn[m.ids[i]] = String(m.drawn[i]).toUpperCase();
              if (inp && document.activeElement !== inp && inp.value.toLowerCase() !== String(c).toLowerCase()) inp.value = c;
              var sw = document.getElementById(m.ids[i].replace('qe_color_', 'qe_swatch_')); if (sw) sw.style.backgroundColor = c;
            }
          }
          if (window.Shiny && Shiny.addCustomMessageHandler) Shiny.addCustomMessageHandler('kcSwatches', swatches);
          else if (window.jQuery) jQuery(document).on('shiny:connected', function() { Shiny.addCustomMessageHandler('kcSwatches', swatches); });
+         // v2.29.0: the scheme's colours where a sample's colour is picked. A click on a row's colour square opens a small
+         // dialog of the colours in #kc_scheme_palette (the active scheme, else the palette in use); choosing one writes
+         // it into the row's colour box and fires its input event, so the existing path does the rest. Keyboard: the
+         // square is a button; arrows move, Enter / Space choose, Escape closes and gives the focus back.
+         var kcSchemePop = null, kcSchemeFor = null;
+         function kcSchemeClose(back) {
+           if (!kcSchemePop) return;
+           kcSchemePop.remove(); kcSchemePop = null;
+           if (kcSchemeFor) { kcSchemeFor.setAttribute('aria-expanded', 'false'); if (back) kcSchemeFor.focus(); }
+           kcSchemeFor = null;
+         }
+         function kcSchemeOpen(btn) {
+           kcSchemeClose(false);
+           var holder = document.getElementById('kc_scheme_palette'), inp = document.getElementById(btn.id.replace('qe_swatch_', 'qe_color_'));
+           if (!holder || !inp) return;
+           var cols = (holder.getAttribute('data-colors') || '').split(',').filter(function(c) { return /^#[0-9A-Fa-f]{6}$/.test(c); });
+           var words = (holder.getAttribute('data-words') || '').split('|');
+           if (!cols.length) return;
+           var row = btn.closest('.kc-qe-row'), name = row ? row.getAttribute('data-sample') : '';
+           var used = {};
+           document.querySelectorAll('.kc-qe-row').forEach(function(r) {
+             if (r === row) return;
+             var c = r.querySelector('.kc-qe-color'), on = r.querySelector('.kc-qe-show input');
+             if (!c || (on && !on.checked)) return;
+             var k = c.value.toUpperCase(); (used[k] = used[k] || []).push(r.getAttribute('data-sample'));
+           });
+           var pop = document.createElement('div');
+           pop.className = 'kc-scheme-pop'; pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-label', 'Colours for ' + name);
+           var head = document.createElement('div'); head.className = 'kc-scheme-head'; head.textContent = 'Colour of ' + name; pop.appendChild(head);
+           var grid = document.createElement('div'); grid.className = 'kc-scheme-grid'; pop.appendChild(grid);
+           var cur = inp.value.toUpperCase(), anyUsed = false, first = null;
+           cols.forEach(function(c, i) {
+             var b = document.createElement('button'), u = used[c.toUpperCase()], w = words[i] || c;
+             b.type = 'button'; b.className = 'kc-scheme-opt'; b.style.backgroundColor = c;
+             var lab = w + ' ' + c + (u ? ' (used by ' + u.join(', ') + ')' : '') + (c.toUpperCase() === cur ? ' (this sample now)' : '');
+             b.title = lab; b.setAttribute('aria-label', lab);
+             if (c.toUpperCase() === cur) { b.classList.add('kc-cur'); b.setAttribute('aria-pressed', 'true'); first = b; } else b.setAttribute('aria-pressed', 'false');
+             if (u) { b.classList.add('kc-used'); anyUsed = true; }
+             b.addEventListener('click', function() {
+               inp.value = c.toLowerCase();
+               inp.dispatchEvent(new Event('input', {bubbles: true}));
+               kcSchemeClose(true);
+             });
+             grid.appendChild(b);
+           });
+           var note = function(t) { var n = document.createElement('div'); n.className = 'kc-scheme-note'; n.textContent = t; pop.appendChild(n); };
+           if (anyUsed) note('A dot marks a colour another shown sample has.');
+           var dr = kcDrawn[inp.id];
+           if (dr && dr !== cur) note('Matched panels: in the figure this sample takes the colour of its match in the first panel. Change that sample, or set Sample styles across panels to Each sample its own style.');
+           document.body.appendChild(pop);
+           var r = btn.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+           var left = Math.max(6, Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - pw - 6));
+           var top = r.bottom + window.scrollY + 4;
+           if (r.bottom + ph + 8 > window.innerHeight && r.top - ph - 4 > 0) top = r.top + window.scrollY - ph - 4;
+           pop.style.left = left + 'px'; pop.style.top = top + 'px';
+           kcSchemePop = pop; kcSchemeFor = btn; btn.setAttribute('aria-expanded', 'true');
+           (first || grid.firstChild).focus();
+         }
+         document.addEventListener('click', function(ev) {
+           var b = ev.target && ev.target.closest ? ev.target.closest('button.kc-qe-swatch') : null;
+           if (b) { ev.preventDefault(); if (kcSchemeFor === b) kcSchemeClose(true); else kcSchemeOpen(b); return; }
+           if (kcSchemePop && !kcSchemePop.contains(ev.target)) kcSchemeClose(false);
+         });
+         document.addEventListener('keydown', function(ev) {
+           if (!kcSchemePop) return;
+           if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); kcSchemeClose(true); return; }
+           var opts = Array.prototype.slice.call(kcSchemePop.querySelectorAll('.kc-scheme-opt')), i = opts.indexOf(document.activeElement);
+           if (ev.key === 'Tab') {            // the dialog keeps the focus while it is open
+             ev.preventDefault(); if (!opts.length) return;
+             opts[(i + (ev.shiftKey ? -1 : 1) + opts.length) % opts.length].focus(); return;
+           }
+           var step = {ArrowRight: 1, ArrowLeft: -1, ArrowDown: 8, ArrowUp: -8}[ev.key];
+           if (!step || i < 0) return;
+           ev.preventDefault();
+           var j = i + step; if (j < 0 || j >= opts.length) return;
+           opts[j].focus();
+         }, true);
          // v2.22: click-to-edit labels on the figure (the inline SVG of output od_plot_svg). mark() tags the legend
          // entries, axis titles and title / subtitle; a click opens one popover whose Apply writes into the existing
          // quick-edit / sidebar inputs, so the v2.21 pipeline does the rest. Event-delegated; nothing is kept
@@ -10556,7 +10716,27 @@ ui <- fluidPage(lang = "en",
       .kc-qe-row { display:flex; align-items:center; gap:8px; padding:1px 0; }
       .kc-qe-row .form-group { margin:0; flex:1 1 auto; min-width:0; }
       .kc-qe-row .form-control { height:26px; padding:2px 6px; font-size:1em; }
-      .kc-qe-swatch { display:inline-block; width:12px; height:12px; flex:0 0 12px; border:1px solid rgba(0,0,0,.35); border-radius:2px; }
+      .kc-qe-swatch { display:inline-block; width:20px; height:20px; flex:0 0 20px; padding:0; border:1px solid rgba(0,0,0,.45); border-radius:3px; cursor:pointer; }
+      .kc-qe-swatch:focus-visible, .kc-scheme-opt:focus-visible { outline:2px solid #0b5fff; outline-offset:2px; }
+      .kc-qe-scheme { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; margin:2px 0 2px; }
+      .kc-qe-scheme-pick { flex:0 1 230px; min-width:150px; }
+      .kc-qe-scheme-pick .form-group { margin:0; }
+      .kc-qe-scheme-pick label { font-size:.9em; margin-bottom:1px; }
+      .kc-qe-scheme-pick select { height:26px; padding:2px 6px; font-size:1em; }
+      .kc-qe-scheme .btn { margin-bottom:2px; }
+      .kc-scheme-swatches { display:inline-flex; flex-wrap:wrap; gap:3px; align-items:center; margin-bottom:4px; max-width:340px; }
+      .kc-scheme-chip { display:inline-block; width:14px; height:14px; border:1px solid rgba(0,0,0,.35); border-radius:2px; }
+      .kc-scheme-pop { position:absolute; z-index:2000; background:#fff; color:#222; border:1px solid #9aa3ad; border-radius:6px; box-shadow:0 4px 14px rgba(0,0,0,.25); padding:8px; max-width:268px; }
+      .kc-scheme-head { font-size:.82em; font-weight:bold; margin-bottom:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .kc-scheme-grid { display:grid; grid-template-columns:repeat(8, 26px); gap:5px; }
+      .kc-scheme-opt { width:26px; height:26px; padding:0; border:1px solid rgba(0,0,0,.45); border-radius:4px; cursor:pointer; position:relative; }
+      .kc-scheme-opt.kc-cur { box-shadow:0 0 0 2px #fff, 0 0 0 4px #222; }
+      .kc-scheme-opt.kc-used::after { content:''; position:absolute; right:2px; top:2px; width:7px; height:7px; border-radius:50%; background:#fff; border:1.5px solid #222; }
+      .kc-scheme-note { font-size:.76em; color:#444; margin-top:6px; }
+      body.kc-night .kc-scheme-pop { background:#1b2028; color:#e6ebf1; border-color:#566170; }
+      body.kc-night .kc-scheme-note { color:#c4ccd6; }
+      body.kc-night .kc-scheme-opt.kc-cur { box-shadow:0 0 0 2px #1b2028, 0 0 0 4px #fff; }
+      .kc-scheme-file .form-group { margin-bottom:0; } .kc-scheme-file label { font-size:.78em; font-weight:normal; }
       .kc-qe-color { width:30px; height:24px; flex:0 0 30px; padding:0; border:1px solid #ccc; background:none; cursor:pointer; }
       .kc-qe-show { flex:0 0 auto; margin:0; }
       .kc-qe-show .checkbox { margin:0; }
@@ -11118,20 +11298,26 @@ ui <- fluidPage(lang = "en",
                    ),
                    # v2.22: project themes (per-sample styles kept by sample name, as JSON files in themes/)
                    div(class = "panel-section",
-                       h4("Project Themes", class = "panel-title"),
+                       h4("Colour scheme for a paper (project themes)", class = "panel-title"),
                        p(style = "font-size:.82em;color:#555;margin-bottom:8px;",
-                         "A theme remembers each sample's colour, shape, filled, line type and display name by sample name, ",
-                         "so \"WT\" stays black / solid / circle in every session."),
-                       selectInput("active_theme", "Active theme:", choices = c("None" = ""), selected = ""),
+                         "A scheme keeps the paper's colours, and each sample's colour, shape, filled, line type and display name by sample name, ",
+                         "so \"WT\" stays black / solid / circle in every file and every session. Saving adds the loaded samples to the scheme; ",
+                         "samples it does not know take its next free colours. The same menu and buttons are in the Quick edit strip."),
+                       selectInput("active_theme", "Colour scheme:", choices = c("None" = ""), selected = ""),
                        checkboxInput("theme_autoapply", "Auto-apply to matching sample names on data load", APP_DEFAULTS$theme_autoapply),
+                       textInput("theme_palette", "Colours of the scheme (hex codes or colour names, in order):", "", placeholder = "blank = the colours in use"),
                        fluidRow(
-                         column(7, textInput("theme_name", "Theme name:", "")),
-                         column(5, actionButton("save_theme", "Save styles as theme", style = "margin-top:25px;width:100%;font-size:.78em;"))),
+                         column(7, textInput("theme_name", "Name of a new scheme:", "")),
+                         column(5, actionButton("save_theme", "Save styles as scheme", style = "margin-top:25px;width:100%;font-size:.78em;"))),
                        fluidRow(
                          column(6, actionButton("apply_theme", "Apply now", style = "width:100%;font-size:.8em;")),
-                         column(6, actionButton("delete_theme", "Delete theme", style = "width:100%;font-size:.78em;background:#dc3545;color:white;border:none;"))),
+                         column(6, actionButton("delete_theme", "Delete scheme", style = "width:100%;font-size:.78em;background:#dc3545;color:white;border:none;"))),
+                       fluidRow(style = "margin-top:8px;",
+                         column(6, downloadButton("download_theme", "Download scheme", style = "width:100%;font-size:.78em;")),
+                         column(6, div(class = "kc-scheme-file", fileInput("theme_file", "Load a scheme file (.json)", accept = c(".json", "application/json"))))),
                        p(style = "font-size:.8em;color:#888;margin-top:8px;margin-bottom:0;",
-                         "Themes are JSON files in the ", tags$code("themes/"), " folder next to the app; commit it to share a lab-standard look.")
+                         "Schemes are JSON files in the ", tags$code("themes/"), " folder next to the app; a project file (.kcproj) carries its scheme with it. ",
+                         "Send the downloaded file to a co-author to share the paper's colours.")
                    )
                  ),
                  
@@ -12392,7 +12578,7 @@ NUMERIC_INPUT_RANGES <- tryCatch(collect_numeric_ranges(ui), error = function(e)
 # replaced at run time (updateSelectInput(choices = ...): the sample, column and theme lists) have no fixed choices: skipped
 # here. Round 4: the server reads them through sel1() / sel_multi() against the choices of the moment (dyn_choices()).
 DYNAMIC_SELECT_IDS <- c("time_col_choice", "selected_samples", "metrics_ref_sample", "blank_sample", "transform_control", "data_cell_col",
-                        "facet_source", "compose_width", "active_theme", "compare_samples_b", "sheet_choice", "cmp_samples", "excluded_reps")
+                        "facet_source", "compose_width", "active_theme", "qe_scheme", "compare_samples_b", "sheet_choice", "cmp_samples", "excluded_reps")
 collect_select_choices <- function(node) {
   out <- list()
   unesc <- function(v) { v <- gsub("&lt;", "<", v, fixed = TRUE); v <- gsub("&gt;", ">", v, fixed = TRUE); v <- gsub("&quot;", "\"", v, fixed = TRUE)
@@ -12679,7 +12865,7 @@ server <- function(input, output, session) {
     time_col_choice = as.character(colnames(rv$data)),
     sheet_choice    = as.character(rv$xlsx_sheets),
     facet_source    = unname(facet_source_choices()),
-    active_theme    = c("", theme_list()),
+    active_theme    = , qe_scheme = c("", theme_list()),   # v2.29.0: the strip's scheme menu mirrors the sidebar's
     compose_width   = c("double", "single", "custom"),
     NULL)
   # Round 4: a multi-select read as a character vector of its VALID choices only (the loaded samples / metrics / replicate ids).
@@ -13612,7 +13798,8 @@ server <- function(input, output, session) {
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                            "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
-                           "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",   # v2.22
+                           "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",
+                           "qe_scheme", "qe_scheme_apply", "qe_scheme_save", "qe_scheme_name", "qe_scheme_name_ok", "theme_palette", "theme_file",   # v2.29.0: the scheme's own controls (the scheme is a file; active_theme names it)   # v2.22
                            "cmp_samples",   # v2.22: the samples of the Compare fits block belong to the file
                            "apply_style_band", "apply_style_slide", "apply_style_pdf")   # v2.22: one-click style buttons
       # Per-sample dynamic input prefixes — handled separately below
@@ -13731,6 +13918,12 @@ server <- function(input, output, session) {
     doc$data <- Filter(Negate(is.null), doc$data); doc$selection <- Filter(Negate(is.null), doc$selection)
     if (!is.null(ds) && !is.null(ds$data)) doc$compare <- list(source = ds$data_source %||% "second file", frame = frame_to_doc(ds$data), time_col = ds$time_col)
     if (length(rv$colour_map)) doc$colour_map <- list(source = rv$colour_map_source %||% "", map = as.list(rv$colour_map))
+    # v2.29.0: the colour scheme in use goes with the project (the file itself, not only its name)
+    sk <- sel1("active_theme", "") %||% ""
+    if (nzchar(sk) && file.exists(theme_path(sk))) {
+      sf <- tryCatch(jsonlite::fromJSON(theme_path(sk), simplifyVector = FALSE), error = function(e) NULL)
+      if (is.list(sf)) doc$scheme <- list(key = sk, file = sf)
+    }
     doc
   })
   # v2.28.3: Load Settings "never touches your data, sample selection, or time filter": the time-filter switch and the
@@ -13774,6 +13967,13 @@ server <- function(input, output, session) {
       m <- m[!is.na(m) & nzchar(names(m)) & grepl("^#[0-9A-Fa-f]{6}$", m)]   # the colours read_colour_map() accepts
       if (length(m)) { rv$colour_map <- setNames(toupper(as.character(m)), names(m)); rv$colour_map_source <- s1(doc$colour_map$source, name) }
     } else { rv$colour_map <- NULL; rv$colour_map_source <- NULL }
+    # v2.29.0: the project's colour scheme, when this computer does not have it (one that is here is left as it is)
+    if (is.list(doc$scheme) && is.list(doc$scheme$file)) tryCatch({
+      sk <- s1(doc$scheme$key, "")
+      if (nzchar(sk) && identical(sk, theme_key(sk)) && !file.exists(theme_path(sk))) {
+        if (!is.null(scheme_import_doc(doc$scheme$file, sk, key = sk))) refresh_theme_choices(selected = isolate(sel1("active_theme", "")))
+      }
+    }, error = function(e) invisible(NULL))
     # every setting and sample style, exactly as Load Settings applies them
     if (is.list(doc$settings) && !is.null(names(doc$settings))) {
       tf <- tempfile(fileext = ".json"); on.exit(unlink(tf), add = TRUE)
@@ -13930,7 +14130,8 @@ server <- function(input, output, session) {
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                          "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
-                         "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",   # v2.22
+                         "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",
+                           "qe_scheme", "qe_scheme_apply", "qe_scheme_save", "qe_scheme_name", "qe_scheme_name_ok", "theme_palette", "theme_file",   # v2.29.0: the scheme's own controls (the scheme is a file; active_theme names it)   # v2.22
                            "cmp_samples",   # v2.22: the samples of the Compare fits block belong to the file
                          "apply_style_band", "apply_style_slide", "apply_style_pdf")   # v2.22
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
@@ -14430,7 +14631,8 @@ server <- function(input, output, session) {
       nm  <- if (!is.null(imp$legend_label) && nzchar(trimws(imp$legend_label))) imp$legend_label else vn
       col <- hex7(cols[[i]])
       div(class = "kc-qe-row", `data-sample` = vn,
-          span(class = "kc-qe-swatch", id = paste0("qe_swatch_", vid), style = paste0("background-color:", col, ";")),
+          tags$button(type = "button", class = "kc-qe-swatch", id = paste0("qe_swatch_", vid), style = paste0("background-color:", col, ";"),   # v2.29.0: opens the scheme's colours
+                      title = paste("Pick a scheme colour for", vn), `aria-label` = paste("Pick a scheme colour for", vn), `aria-haspopup` = "dialog"),
           textInput(paste0("qe_name_", vid), span(class = "sr-only", paste("Name shown for", vn)), value = nm,
                     width = "100%", placeholder = vn),
           tags$input(type = "color", class = "kc-qe-color", id = paste0("qe_color_", vid), value = col,
@@ -14512,7 +14714,10 @@ server <- function(input, output, session) {
     vars <- qe_vars(); req(length(vars))
     cols <- resolve_aesthetics(vars)$colors
     hex7 <- vapply(cols, function(x) tryCatch(grDevices::rgb(t(grDevices::col2rgb(x)), maxColorValue = 255), error = function(e) "#000000"), "")
-    session$sendCustomMessage("kcSwatches", list(ids = paste0("qe_color_", safe_id(vars)), colors = unname(hex7)))
+    # v2.29.0: and the colour each is DRAWN with (matched panels give a sample its match's colour), for the picker's note
+    drawn <- tryCatch(resolve_aesthetics_drawn(vars)$colors, error = function(e) cols)
+    drawn7 <- vapply(drawn, function(x) tryCatch(grDevices::rgb(t(grDevices::col2rgb(x)), maxColorValue = 255), error = function(e) "#000000"), "")
+    session$sendCustomMessage("kcSwatches", list(ids = as.list(paste0("qe_color_", safe_id(vars))), colors = as.list(unname(hex7)), drawn = as.list(unname(drawn7))))
   })
 
   # ── Dynamic UI: region / marker settings ────────────────────────────────────
@@ -20791,9 +20996,32 @@ server <- function(input, output, session) {
     nms <- theme_list()
     sel <- selected %||% isolate(sel1("active_theme", "")) %||% ""
     if (!(sel %in% nms)) sel <- ""
-    updateSelectInput(session, "active_theme", choices = c("None" = "", setNames(nms, theme_display_names(nms))), selected = sel)
+    ch <- c("None" = "", setNames(nms, theme_display_names(nms)))
+    updateSelectInput(session, "active_theme", choices = ch, selected = sel)
+    updateSelectInput(session, "qe_scheme",    choices = ch, selected = sel)   # v2.29.0: the same list in the Quick edit strip
+    scheme_rev(isolate(scheme_rev()) + 1L)
     invisible(nms)
   }
+  # ── v2.29.0: colour scheme for a paper ─────────────────────────────────────────────────────────────
+  # The active scheme (a theme file) as read now, or NULL. scheme_rev is bumped whenever a file is written or removed.
+  scheme_rev <- reactiveVal(0L)
+  scheme_now <- function() {
+    scheme_rev()
+    key <- sel1("active_theme", "")
+    if (is.null(key) || !nzchar(key)) return(NULL)
+    th <- tryCatch(theme_read(key), error = function(e) NULL)
+    if (is.null(th)) NULL else c(th, list(key = key))
+  }
+  # The colours offered where a sample's colour is picked: the active scheme's, else those of the Color Palette menu
+  # (or the default colours), so the swatches are useful with no scheme too.
+  scheme_palette_now <- function() {
+    sc <- scheme_now()
+    if (!is.null(sc) && length(sc$palette)) return(utils::head(sc$palette, SCHEME_PALETTE_MAX))
+    n <- max(length(rv$od_vars), 1L); pal <- palette_in()
+    utils::head(unique(toupper(normalize_hex_color_vec(if (!identical(pal, "custom")) get_palette_colors(pal, max(n, 8L)) else default_sample_colours(max(n, 12L))))), SCHEME_PALETTE_MAX)
+  }
+  normalize_hex_color_vec <- function(x) vapply(x, function(v) tryCatch(grDevices::rgb(t(grDevices::col2rgb(v)), maxColorValue = 255), error = function(e) "#000000"), "", USE.NAMES = FALSE)
+  scheme_last <- new.env(parent = emptyenv()); scheme_last$filled <- 0L
   refresh_theme_choices()
   # the style of each loaded sample: colour (the quick-edit colour wins), shape, filled, line type, display name
   collect_sample_aesthetics <- function(samps) {
@@ -20804,10 +21032,28 @@ server <- function(input, output, session) {
            line_type = unname(aes_v$line_types[[vn]]), legend_label = unname(aes_v$leg_labels[[vn]])))
   }
   # Save the current styles of the loaded samples as a theme; the key (file name) or NULL
+  # v2.29.0: the save ADDS these samples to the scheme (theme_write merges). The scheme's colours: what is typed in the
+  # "Colours of the scheme" box, else the colours the file already has, else the palette in use; a colour a sample uses
+  # is always one of them.
   theme_save_current <- function(name) {
     samps <- rv$od_vars
-    if (is.null(samps) || !length(samps)) stop("Load data before saving a theme.")
-    theme_write(name, collect_sample_aesthetics(samps), qe_colors = rv$qe_colors, display_names = rv$display_names)
+    if (is.null(samps) || !length(samps)) {                      # no data yet: a scheme of the typed colours alone
+      typed0 <- theme_palette_clean(isolate(input$theme_palette))
+      if (!length(typed0)) stop("Load data, or type the scheme's colours, before saving a colour scheme.")
+      key0 <- theme_write(name, list(), palette = typed0); scheme_rev(isolate(scheme_rev()) + 1L)
+      return(key0)
+    }
+    aes_map <- collect_sample_aesthetics(samps)
+    prior <- tryCatch(theme_read(theme_key(name)), error = function(e) NULL)
+    typed <- theme_palette_clean(isolate(input$theme_palette))
+    same_as_active <- identical(theme_key(name), isolate(sel1("active_theme", "")))
+    base  <- if (length(typed) && (same_as_active || is.null(prior))) typed
+             else if (!is.null(prior) && isTRUE(prior$has_palette)) prior$palette
+             else isolate(scheme_palette_now())
+    used  <- theme_palette_clean(unlist(lapply(aes_map, function(a) a$color)))
+    key <- theme_write(name, aes_map, qe_colors = rv$qe_colors, display_names = rv$display_names, palette = unique(c(base, used)))
+    scheme_rev(isolate(scheme_rev()) + 1L)
+    key
   }
   # Apply a saved theme to the samples whose names match; the number of samples styled
   theme_apply_named <- function(name, samps = rv$od_vars) {
@@ -20816,7 +21062,22 @@ server <- function(input, output, session) {
     m <- theme_for_samples(th, samps)
     aes_map <- m$sample_aesthetics
     for (vn in names(m$qe_colors)) aes_map[[vn]]$color <- m$qe_colors[[vn]]
-    apply_sample_aes(aes_map, samps, via_qe = TRUE)
+    k <- apply_sample_aes(aes_map, samps, via_qe = TRUE)
+    # v2.29.0: loaded samples the scheme does not know take its next free colours (a scheme with its own colours only:
+    # a theme saved before v2.29 styles the names it knows and nothing else, as it always did)
+    scheme_last$filled <- 0L
+    rest <- setdiff(intersect(as.character(samps), isolate(rv$od_vars)), m$matched)
+    if (isTRUE(th$has_palette) && length(rest)) {
+      cols <- scheme_free_colours(th, length(rest))
+      scheme_last$filled <- apply_sample_aes(stats::setNames(lapply(cols, function(cc) list(color = cc)), rest), rest, via_qe = TRUE)
+    }
+    k
+  }
+  # what an apply did, in one sentence (k samples matched by name, scheme_last$filled given the scheme's free colours)
+  scheme_applied_message <- function(key, k) {
+    nm <- unname(theme_display_names(key)); f <- scheme_last$filled %||% 0L
+    paste0(sprintf("Colour scheme '%s': %d of %d samples matched by name", nm, k, length(rv$od_vars)),
+           if (f > 0L) sprintf("; %d the scheme does not know took its next free colours (Save colours to scheme keeps them)", f) else "", ".")
   }
   theme_autoapply_on_load <- function() {
     key <- isolate(sel1("active_theme", ""))
@@ -20824,30 +21085,118 @@ server <- function(input, output, session) {
     tryCatch({
       k <- theme_apply_named(key, rv$od_vars)
       if (is.na(k)) showNotification(theme_problem_message(key), type = "warning")
-      else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
+      else showNotification(scheme_applied_message(key, k), type = "message")
     }, error = function(e) invisible(NULL))
     invisible(NULL)
   }
-  observeEvent(input$save_theme, {
-    nm <- trimws(input$theme_name %||% "")
-    if (!nzchar(theme_key(nm))) { showNotification("Enter a theme name before saving.", type = "warning"); return() }
+  scheme_save_named <- function(nm) {
+    if (!nzchar(theme_key(nm))) { showNotification("Enter a name for the colour scheme before saving.", type = "warning"); return(invisible(NULL)) }
+    known <- length(tryCatch(theme_read(theme_key(nm)), error = function(e) NULL)$sample_aesthetics)
     key <- tryCatch(theme_save_current(nm), error = function(e) { showNotification(conditionMessage(e), type = "warning"); NULL })
-    if (is.null(key)) return()
+    if (is.null(key)) return(invisible(NULL))
     refresh_theme_choices(selected = key)
-    showNotification(sprintf("Theme '%s' saved (%d samples).", key, length(rv$od_vars)), type = "message")
-  })
-  observeEvent(input$apply_theme, {
+    th <- theme_read(key)
+    updateTextInput(session, "theme_palette", value = paste(th$palette, collapse = ", "))
+    showNotification(sprintf("Colour scheme '%s' saved: %d samples of this file%s; %d colours.", unname(theme_display_names(key)), length(rv$od_vars),
+                             if (known > 0L) sprintf(" added to the %d it had (%d in all)", known, length(th$sample_aesthetics)) else "", length(th$palette)),
+                     type = "message")
+    invisible(key)
+  }
+  scheme_apply_active <- function() {
     key <- sel1("active_theme", "")          # round 4: a saved theme only ("../../x" or a list is not one: it used to reach another theme's file)
-    if (!nzchar(key)) { showNotification("Select a theme first.", type = "warning"); return() }
+    if (!nzchar(key)) { showNotification("Choose a colour scheme first (or save the colours in use as one).", type = "warning"); return(invisible(NULL)) }
     k <- theme_apply_named(key, rv$od_vars)
     if (is.na(k)) showNotification(theme_problem_message(key), type = "warning")
-    else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
+    else showNotification(scheme_applied_message(key, k), type = "message")
+    invisible(k)
+  }
+  observeEvent(input$save_theme, scheme_save_named(trimws(input$theme_name %||% "")))
+  observeEvent(input$apply_theme, scheme_apply_active())
+  # v2.29.0: the same from the Quick edit strip. Save writes to the scheme chosen there; with none chosen it asks for a name.
+  observeEvent(input$qe_scheme_apply, scheme_apply_active())
+  observeEvent(input$qe_scheme_save, {
+    if (is.null(rv$od_vars) || !length(rv$od_vars)) { showNotification("Load data before saving a colour scheme.", type = "warning"); return() }
+    key <- sel1("active_theme", "")
+    if (nzchar(key)) { scheme_save_named(unname(theme_display_names(key))); return() }
+    showModal(modalDialog(title = "New colour scheme", size = "s", easyClose = TRUE,
+                          textInput("qe_scheme_name", "Name (for example the paper's short title):", ""),
+                          p(class = "kc-qe-note", "It keeps each sample's colour, marker, line and display name by sample name, and the colours in use as the scheme's colours."),
+                          footer = tagList(modalButton("Cancel"), actionButton("qe_scheme_name_ok", "Save", class = "btn-primary"))))
+  })
+  observeEvent(input$qe_scheme_name_ok, {
+    nm <- input$qe_scheme_name; nm <- if (is.character(nm) && length(nm) == 1L && !is.na(nm)) trimws(substr(nm, 1L, 120L)) else ""
+    if (!nzchar(theme_key(nm))) { showNotification("Enter a name for the colour scheme.", type = "warning"); return() }
+    removeModal()
+    scheme_save_named(nm)
+  })
+  # the two scheme menus (sidebar, strip) show the same scheme; the colour box shows the chosen scheme's colours
+  observeEvent(input$qe_scheme, {
+    v <- sel1("qe_scheme", "") %||% ""
+    if (!identical(v, sel1("active_theme", "") %||% "")) updateSelectInput(session, "active_theme", selected = v)
+  }, ignoreInit = TRUE)
+  observeEvent(input$active_theme, {
+    v <- sel1("active_theme", "") %||% ""
+    if (!identical(v, sel1("qe_scheme", "") %||% "")) updateSelectInput(session, "qe_scheme", selected = v)
+    sc <- scheme_now()
+    updateTextInput(session, "theme_palette", value = if (!is.null(sc)) paste(sc$palette, collapse = ", ") else "")
+  }, ignoreInit = TRUE)
+  output$qe_scheme_swatches <- renderUI({
+    pal <- scheme_palette_now(); words <- tryCatch(colour_words(pal), error = function(e) pal); words[is.na(words)] <- pal[is.na(words)]   # "dark blue" / "light blue" when two share a word
+    sc <- scheme_now()
+    span(class = "kc-scheme-swatches", id = "kc_scheme_palette", `data-colors` = paste(pal, collapse = ","), `data-words` = paste(words, collapse = "|"),
+         role = "img", `aria-label` = paste0(if (is.null(sc)) "Colours of the palette in use: " else "Colours of the scheme: ", paste(words, collapse = ", ")),
+         lapply(seq_along(pal), function(i) span(class = "kc-scheme-chip", style = paste0("background-color:", pal[i], ";"), title = paste(words[i], pal[i]))))
+  })
+  outputOptions(output, "qe_scheme_swatches", suspendWhenHidden = FALSE)
+  # a scheme as a file: download the chosen one (with none chosen, the styles in use as a scheme), load one from a file
+  scheme_doc_current <- function() {
+    samps <- rv$od_vars; aes_map <- if (length(samps)) collect_sample_aesthetics(samps) else list()
+    list(version = "1.1", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = "Colour scheme", sample_aesthetics = aes_map,
+         qe_colors = as.list(rv$qe_colors[intersect(names(aes_map), names(rv$qe_colors))]),
+         display_names = as.list(rv$display_names[intersect(names(aes_map), names(rv$display_names))]),
+         palette = as.list(unique(c(scheme_palette_now(), theme_palette_clean(unlist(lapply(aes_map, function(a) a$color)))))))
+  }
+  output$download_theme <- downloadHandler(
+    filename = function() { key <- isolate(sel1("active_theme", "")); paste0(if (nzchar(key %||% "")) key else "colour_scheme", ".json") },
+    content = function(file) {
+      key <- isolate(sel1("active_theme", "")) %||% ""
+      if (nzchar(key) && file.exists(theme_path(key))) file.copy(theme_path(key), file, overwrite = TRUE)
+      else jsonlite::write_json(isolate(scheme_doc_current()), file, pretty = TRUE, auto_unbox = TRUE)
+    })
+  # A scheme from a file (a co-author's, another computer's). It is checked and rewritten through theme_write(), never
+  # copied as it is; a scheme of the same name that is already here is kept, and the file comes in as "<name> (imported)".
+  scheme_import_doc <- function(doc, fallback_name, key = NULL) {
+    if (!is.list(doc) || is.null(names(doc))) return(NULL)
+    sa <- doc[["sample_aesthetics"]] %||% doc[["samples"]]
+    sa <- if (is.list(sa) && !is.null(names(sa))) sa[vapply(sa, is.list, NA) & nzchar(names(sa))] else list()
+    sa <- utils::head(sa, 2000L)
+    pal <- theme_palette_clean(doc[["palette"]])
+    if (!length(sa) && !length(pal)) return(NULL)
+    nm <- doc[["name"]]; nm <- if (is.character(nm) && length(nm) == 1L && !is.na(nm) && nzchar(theme_key(nm))) trimws(substr(nm, 1L, 120L)) else fallback_name
+    if (!nzchar(theme_key(nm))) nm <- "Imported scheme"
+    one_chr <- function(l) { l <- if (is.list(l) && !is.null(names(l))) l else list(); l[vapply(l, function(v) is.character(v) && length(v) == 1L && !is.na(v), NA)] }
+    if (is.null(key) && file.exists(theme_path(nm))) nm <- paste(nm, "(imported)")
+    if (!length(sa)) sa <- list()
+    theme_write(nm, sa, qe_colors = one_chr(doc[["qe_colors"]]), display_names = unlist(one_chr(doc[["display_names"]])), palette = pal, merge = FALSE, key = key)
+  }
+  observeEvent(input$theme_file, {
+    f <- input$theme_file
+    if (!is.list(f) || is.null(f$datapath) || length(f$datapath) != 1L || !file.exists(f$datapath)) return()
+    fname <- if (is.character(f$name) && length(f$name) == 1L) f$name else "scheme.json"
+    if (isTRUE(file.size(f$datapath) > 2e6)) { showNotification(sprintf("'%s' is too large to be a colour scheme.", fname), type = "warning"); return() }
+    doc <- tryCatch(jsonlite::fromJSON(f$datapath, simplifyVector = FALSE), error = function(e) NULL)
+    key <- tryCatch(scheme_import_doc(doc, tools::file_path_sans_ext(basename(fname))), error = function(e) NULL)
+    if (is.null(key)) { showNotification(sprintf("'%s' is not a colour scheme of this app; nothing was changed.", fname), type = "warning"); return() }
+    refresh_theme_choices(selected = key)
+    th <- theme_read(key)
+    showNotification(sprintf("Colour scheme '%s' loaded (%d samples, %d colours). Press 'Use on these samples' to apply it.",
+                             unname(theme_display_names(key)), length(th$sample_aesthetics), length(th$palette)), type = "message", duration = 8)
   })
   observeEvent(input$delete_theme, {
     key <- sel1("active_theme", "")
-    if (!nzchar(key)) { showNotification("Select a theme to delete.", type = "warning"); return() }
-    showModal(modalDialog(title = "Delete theme", size = "s", easyClose = TRUE,
-                          p("Permanently delete the theme ", tags$b(key), " from the themes folder?"),
+    if (!nzchar(key)) { showNotification("Choose the colour scheme to delete.", type = "warning"); return() }
+    showModal(modalDialog(title = "Delete colour scheme", size = "s", easyClose = TRUE,
+                          p("Permanently delete the colour scheme ", tags$b(unname(theme_display_names(key))), " from the themes folder?"),
                           footer = tagList(modalButton("Cancel"),
                                            actionButton("delete_theme_confirm", "Delete", style = "background:#dc3545;color:white;border:none;"))))
   })
@@ -20856,7 +21205,7 @@ server <- function(input, output, session) {
     if (!nzchar(key)) return()
     ok <- tryCatch(theme_delete(key), error = function(e) FALSE)
     refresh_theme_choices(selected = "")
-    showNotification(if (ok) sprintf("Theme '%s' deleted.", key) else sprintf("Theme '%s' could not be deleted.", key),
+    showNotification(if (ok) sprintf("Colour scheme '%s' deleted.", key) else sprintf("Colour scheme '%s' could not be deleted.", key),
                      type = if (ok) "message" else "warning")
   })
 
