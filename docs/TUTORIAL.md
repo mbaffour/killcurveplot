@@ -139,6 +139,41 @@ Styling).
 * **Color**: a named colour, a HEX code, RGB sliders, or the swatch in the Quick edit strip.
 * **Group**: a free-text group (used by *Panels*, section 9).
 
+### One colour scheme for a whole paper
+
+A paper has several experiments and one set of colours: the empty vector is black in every figure, a given construct
+is always the same orange. A **colour scheme** keeps that for you. Everything is in the Quick edit strip under the
+figure:
+
+![The Quick edit strip: the colour scheme menu, its colours, and the box of colours opened from a sample's colour square](tutorial/44_colour_scheme.jpg)
+
+1. **Pick colours from the scheme, not from a colour wheel.** Click a sample's **colour square**. A small box opens
+   with the scheme's colours (with no scheme chosen: the colours of the palette in use). A dot marks a colour another
+   shown sample already has; the sample's own colour is ringed. One click sets it. The colour box beside the square
+   still gives any colour at all. From the keyboard: Tab to the square, Enter, arrows, Enter; Escape closes.
+2. **Save colours to scheme.** The first time it asks for a name (the paper's short title). The scheme keeps each
+   sample's colour, marker, fill, line type and display name **by sample name**, and the colours in use as *the
+   scheme's colours*.
+3. **Load the next experiment.** With the scheme chosen in **Colour scheme:** it is applied by itself: samples it
+   knows by name get their colours back (capitals and spacing do not matter: `ev` is `EV`), and samples it has never
+   seen take its **next free colours**, so a new strain never borrows the colour of a strain from another figure.
+   **Use on these samples** applies it again at any time (it also puts back a colour you changed by hand).
+4. **Save colours to scheme** again: the new samples are **added** to the scheme. After a few files it knows every
+   sample of the paper.
+
+The same controls, and three more, are in the sidebar under **Color Palettes → Colour scheme for a paper**:
+
+* **Colours of the scheme**: type or paste the paper's colours in order (`#000000, #E69F00, skyblue ...`) and save.
+  With no data loaded this makes a scheme of those colours alone, ready before the first experiment.
+* **Download scheme** / **Load a scheme file**: one small file to send to a co-author or carry to another computer.
+  A loaded file never replaces a scheme of the same name that is already there (it comes in as "name (imported)").
+* **Auto-apply on data load** (on by default) and **Delete scheme**.
+
+A **project file** (section 12) carries its scheme with it: opening the project on another computer brings the scheme
+along. With matched panels (section 9.7) a sample in a later panel is drawn in the colour of its match in the first
+panel; the colour box says so when you open it for such a sample. Schemes saved as *themes* before v2.29 keep working
+as they did (they style the names they know and nothing else) until they are saved again.
+
 **Whole palettes** are under **Color Palettes** (the default is the colour-blind-safe Okabe-Ito set). **Line & Point
 Settings** sets the line width, marker size and stroke for all samples, and **Hide lines** for points-only figures:
 
@@ -602,7 +637,8 @@ The **Help** tab holds a one-screen summary of where every label is set, and all
 Type `A` as the Panel label and choose letters *1, 2, 3* (drawn as A, then 1, 2, 3), or choose *A1, A2, A3*.
 
 **The same style for every experiment.**
-Style once, Save Settings, then Load Settings File on each new dataset (and Load colour map for fixed colours).
+Style once, Save Settings, then Load Settings File on each new dataset. For the colours, markers and names of the
+samples, keep a colour scheme (section 4): it is applied by itself to every file you load.
 
 **Figure + statistics for a paper.**
 Download figure bundle (.zip): figure, legend key, legend text, methods, statistics and source data in one file.

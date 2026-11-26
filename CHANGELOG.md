@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.29.0 — 2026-11-25
+
+**A colour scheme for a paper: pick from the paper's colours, and every experiment gets the same ones.**
+- **Pick from the scheme's colours.** In the Quick edit strip, a sample's colour square is now a button: it opens the
+  scheme's colours (with no scheme: the palette in use), marks the colours other shown samples have, and sets the
+  colour with one click. Keyboard: Enter, arrows, Escape. The free colour box beside it is unchanged.
+- **Scheme menu and two buttons in the strip**: *Colour scheme*, *Use on these samples*, *Save colours to scheme* (the
+  first save asks for a name).
+- **A scheme is a theme file that also holds its colours.** Saving now **adds** the loaded samples to the scheme; it
+  used to replace the file, so the first experiment's samples were lost when the second was saved. Sample names match
+  capitals and spacing aside. Samples the scheme does not know take its next free colours (never the colour of a
+  sample it knows); when they run out, further distinct colours follow.
+- **Sidebar (Color Palettes → Colour scheme for a paper)**: type the scheme's colours (hex codes or colour names),
+  download a scheme, load a scheme file (checked and rewritten, never replacing a scheme of the same name).
+- **Project files carry their scheme**: opening a project where the scheme is missing brings it back; a scheme that is
+  already there is left as it is.
+- Themes saved before v2.29 behave as before until saved again. With no scheme chosen every figure is byte-identical
+  to v2.28.3. `tests/test_v229_colour_scheme.R` (33 checks).
+
 ## v2.28.3 — 2026-11-24
 
 **A five-tester click-through (data, figure, panels / Compose / Compare, analysis, accessibility): what did not work now does.**
