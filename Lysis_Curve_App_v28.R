@@ -2993,6 +2993,8 @@ legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL, yrange = NULL,
   corners <- c("top-left", "top-right", "bottom-left", "bottom-right")
   ok <- is.finite(x) & is.finite(y)
   if (isTRUE(log_y)) ok <- ok & y > 0
+  # v2.29.0 (review A4): with an x range given, a point outside it is not on the panel and holds no corner
+  if (!is.null(box) && length(xrange) == 2L && all(is.finite(xrange)) && diff(range(xrange)) > 0) ok <- ok & x >= min(xrange) & x <= max(xrange)
   x <- x[ok]; y <- y[ok]
   if (!length(x)) return(setNames(rep(0L, 4), corners))
   if (isTRUE(log_y)) y <- log10(y)
@@ -15411,7 +15413,7 @@ server <- function(input, output, session) {
   # stays inside (panel_ctx$inside, set by with_panels_inside())
   panel_ctx <- new.env(parent = emptyenv()); panel_ctx$inside <- FALSE
   with_panels_inside <- function(expr) { old <- panel_ctx$inside; panel_ctx$inside <- TRUE; on.exit(panel_ctx$inside <- old, add = TRUE); expr }
-  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12, special_legend = FALSE, force_inside = FALSE, yrange = NULL) {
+  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12, special_legend = FALSE, force_inside = FALSE, yrange = NULL, xrange = NULL) {
     force_inside <- isTRUE(force_inside) || isTRUE(panel_ctx$inside)
     tf      <- if (isTRUE(input$bold_title))        "bold"   else "plain"
     af      <- if (isTRUE(input$italic_axis_labels)) "italic" else "plain"
@@ -15478,7 +15480,8 @@ server <- function(input, output, session) {
         xy <- list(x = dd$x, y = if (log_y) 10^dd$y else dd$y, per_point = 8)
       }
       cnt <- if (is.null(xy)) c("top-left" = 0L)
-             else legend_corner_counts(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars), yrange = if (isTRUE(force_inside)) yrange)
+             else legend_corner_counts(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars), yrange = if (isTRUE(force_inside)) yrange,
+                                       xrange = xrange)   # v2.29.0 (review A4): the corners of the panel as drawn (a typed x range), not of the data's own time range
       if (!is.null(xy$per_point)) cnt <- cnt / xy$per_point   # interpolated points -> data-point equivalents
       if (if (isTRUE(force_inside)) n_entries > PANEL_INSIDE_MAX_ENTRIES else (n_entries > INSIDE_LEGEND_MAX_ENTRIES || min(cnt) >= INSIDE_LEGEND_MAX_POINTS)) {
         layers <- c(layers, list(theme(legend.position = "right")))
@@ -16443,7 +16446,7 @@ server <- function(input, output, session) {
     p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value, g = plot_data$variable),
                                  n_entries = n_vars, log_y = identical(sel1("y_scale_type"), "log"),
                                  label_chars = max(nchar(unname(leg_labels)), 1), special_legend = TRUE,
-                                 force_inside = panel_inside, yrange = y_lims)   # v2.27.2: a panel's key stays inside
+                                 force_inside = panel_inside, yrange = y_lims, xrange = x_lims)   # v2.27.2: a panel's key stays inside
     # v2.24.1: a dashed / dotted / dot-dashed line needs a longer key to show its pattern (in the standard 4 mm key the
     # marker covers it, so a dashed and a solid sample looked the same in the legend). Only when such a line is drawn.
     if (!isTRUE(input$hide_lines) && any(!(as.character(line_types) %in% c("solid", "blank"))))
@@ -16472,7 +16475,12 @@ server <- function(input, output, session) {
         corner <- if (n_vars > PANEL_INSIDE_MAX_ENTRIES) NULL else tryCatch(
           facet_inside_corner(plot_data$time, plot_data$mean_value, plot_data$variable, plot_data$group, grp_map$levels, ncol = fnc_f,
                               log_y = identical(sel1("y_scale_type"), "log"),
-                              box = inside_legend_box(n_vars, max(nchar(unname(leg_labels)), 1)), yrange = y_lims),
+                              box = inside_legend_box(n_vars, max(nchar(unname(leg_labels)), 1)),
+                              # v2.29.0 (review A6): panels that share one y axis are measured against it (the range of all the
+                              # data when none is typed), not each against its own points
+                              yrange = y_lims %||% (if ((input$facet_scales %||% "fixed") %in% c("fixed", "free_x")) {
+                                yy <- plot_data$mean_value[is.finite(plot_data$mean_value) & (!identical(sel1("y_scale_type"), "log") | plot_data$mean_value > 0)]
+                                if (length(yy) >= 2L && diff(range(yy)) > 0) range(yy) })),
           error = function(e) NULL)
         p <- p + if (is.null(corner)) theme(legend.position = "right") else inside_legend_theme(corner)
       }
