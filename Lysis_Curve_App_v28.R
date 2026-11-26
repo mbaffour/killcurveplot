@@ -13033,9 +13033,13 @@ server <- function(input, output, session) {
   
   output$palette_preview <- renderUI({
     pal <- palette_in()
-    if (pal == "custom" || is.null(rv$od_vars)) return(NULL)
+    sc <- tryCatch(scheme_now(), error = function(e) NULL)
+    note <- if (!is.null(sc) && !is.null(rv$od_vars) && length(rv$qe_colors))   # v2.29.0: say why the menu seems to do nothing
+      p(class = "kc-qe-note", style = "margin-top:6px;", "A colour scheme is in use: the samples have its colours, which win over this menu. ",
+        "To use a palette instead, choose None as the colour scheme and press Clear & Reset (or pick the colours by hand).")
+    if (pal == "custom" || is.null(rv$od_vars)) return(note)
     cols <- get_palette_colors(pal, min(24, length(rv$od_vars)))   # v2.26.1: every sample's colour (up to 24), not just the first 8
-    div(p("Preview:"),
+    div(note, p("Preview:"),
         div(style = "margin-top:6px;",
             lapply(cols, function(col)
               div(style = paste0("display:inline-block;width:28px;height:20px;",
@@ -17321,8 +17325,8 @@ server <- function(input, output, session) {
 
   # ── v2.23.1: the legend key of every figure ─────────────────────────────────
   # legend_key_grob() / write_legend_key() do the work; each figure tab has a thin download handler of the same two
-  # helpers. A figure with no legend of its own (the metric summary, the time-to-threshold bars ...) gets the main
-  # figure's key: the colours, markers and names are by sample, so the key is the same.
+  # helpers. A figure with no legend of its own (the metric summary, the time-to-threshold bars ...) gets a key made
+  # from what it draws (v2.29.0, figure_key_entries(); it used to get the main figure's key, which was not the same).
   legend_key_for <- function(p) {
     if (inherits(p, "gtable") && !is.null(attr(p, "width_in"))) return(p)   # v2.26.0: already a key (main_legend_key)
     k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
@@ -17368,7 +17372,7 @@ server <- function(input, output, session) {
     is_g <- function(l, cl) inherits(l$geom, cl)
     pts <- Filter(function(l) is_g(l, c("GeomPoint", "GeomPointrange")), use)
     lns <- Filter(function(l) is_g(l, c("GeomLine", "GeomPath", "GeomStep")) && !is_g(l, "GeomErrorbar"), use)
-    bars <- Filter(function(l) is_g(l, c("GeomBar", "GeomCol", "GeomRect", "GeomTile")), use)
+    bars <- Filter(function(l) is_g(l, c("GeomBar", "GeomCol", "GeomRect", "GeomTile", "GeomBoxplot")), use)   # bars / boxes carry the sample colour: their glyph is the filled box
     one <- function(l, k, d) { v <- if (length(l)) l[[1]]$aes_params[[k]] else NULL; if (is.atomic(v) && length(v) == 1L && !is.na(v)) v else d }
     col  <- if (identical(main_ae, "shape")) rep("#000000", length(keys)) else as.character(tryCatch(main$map(keys), error = function(e) rep("#000000", length(keys))))
     fill <- mapv("fill") %||% rep(one(pts, "fill", NA), length(keys))
@@ -17380,7 +17384,7 @@ server <- function(input, output, session) {
     filled <- vapply(seq_along(keys), function(i) if (is.na(pch[i])) TRUE else if (pch[i] %in% 21:25) !white(fill[i]) else !(pch[i] %in% c(0L, 1L, 2L, 5L, 6L)), NA)
     shp <- vapply(pch, function(v) if (is.na(v)) NA_integer_ else if (as.character(v) %in% names(base)) base[[as.character(v)]] else v, 1L)
     en <- data.frame(key = keys, label = lab, colour = col, fill = as.character(fill), pch = pch, shape = shp, filled = filled, linetype = lty, stringsAsFactors = FALSE)
-    attr(en, "has_point") <- length(pts) > 0L; attr(en, "has_line") <- length(lns) > 0L; attr(en, "has_bar") <- length(bars) > 0L && !length(pts)
+    attr(en, "has_bar") <- length(bars) > 0L; attr(en, "has_point") <- length(pts) > 0L && !length(bars); attr(en, "has_line") <- length(lns) > 0L && !length(bars)
     # the order of a figure whose x axis lists the samples
     xo <- tryCatch({ xs <- b$layout$panel_params[[1]]$x; as.character(xs$get_labels()) }, error = function(e) character(0))
     xo <- vapply(xo, function(x) markup_to_plain(paste(as.character(x), collapse = "")), "", USE.NAMES = FALSE)
@@ -21199,6 +21203,18 @@ server <- function(input, output, session) {
     n <- max(length(rv$od_vars), 1L); pal <- palette_in()
     utils::head(unique(toupper(normalize_hex_color_vec(if (!identical(pal, "custom")) get_palette_colors(pal, max(n, 8L)) else default_sample_colours(max(n, 12L))))), SCHEME_PALETTE_MAX)
   }
+  # With matched panels (Sample styles across panels) a sample of a later panel is DRAWN in the colour of its match in the
+  # first panel. sample -> the sample whose colour it is drawn in (itself when it follows nobody, or with panels off).
+  scheme_leaders <- function(samps) {
+    id <- stats::setNames(as.character(samps), as.character(samps))
+    mode <- isolate(sel1("panel_style_match", "own"))
+    if (!isTRUE(isolate(input$facet_by_group)) || !mode %in% c("line", "fill", "same") || !length(samps)) return(id)
+    tryCatch(isolate({
+      full <- sel_samples(); fa <- resolve_aesthetics(full); drawn <- panel_samples_now(full)
+      ld <- panel_style_leaders(drawn, panel_membership_now(drawn, fa, min_panels = 2L))$leader
+      hit <- intersect(names(ld), names(id)); id[hit] <- unname(ld[hit]); id
+    }), error = function(e) id)
+  }
   normalize_hex_color_vec <- function(x) vapply(x, function(v) tryCatch(grDevices::rgb(t(grDevices::col2rgb(v)), maxColorValue = 255), error = function(e) "#000000"), "", USE.NAMES = FALSE)
   scheme_last <- new.env(parent = emptyenv()); scheme_last$filled <- 0L
   refresh_theme_choices()
@@ -21229,8 +21245,12 @@ server <- function(input, output, session) {
     base  <- if (length(typed) && (same_as_active || is.null(prior))) typed
              else if (!is.null(prior) && isTRUE(prior$has_palette)) prior$palette
              else isolate(scheme_palette_now())
+    # a sample drawn in its match's colour (matched panels) is kept in THAT colour: the scheme holds the colours the
+    # figures show, and its own unseen colour does not count as taken
+    qe <- rv$qe_colors; ld <- scheme_leaders(samps)
+    for (f in samps[ld[samps] != samps]) if (!is.null(lc <- aes_map[[ld[[f]]]]$color)) { aes_map[[f]]$color <- lc; qe[[f]] <- lc }
     used  <- theme_palette_clean(unlist(lapply(aes_map, function(a) a$color)))
-    key <- theme_write(name, aes_map, qe_colors = rv$qe_colors, display_names = rv$display_names, palette = unique(c(base, used)))
+    key <- theme_write(name, aes_map, qe_colors = qe, display_names = rv$display_names, palette = unique(c(base, used)))
     scheme_rev(isolate(scheme_rev()) + 1L)
     key
   }
@@ -21247,8 +21267,14 @@ server <- function(input, output, session) {
     scheme_last$filled <- 0L
     rest <- setdiff(intersect(as.character(samps), isolate(rv$od_vars)), m$matched)
     if (isTRUE(th$has_palette) && length(rest)) {
-      cols <- scheme_free_colours(th, length(rest))
-      scheme_last$filled <- apply_sample_aes(stats::setNames(lapply(cols, function(cc) list(color = cc)), rest), rest, via_qe = TRUE)
+      # a sample that is drawn in its match's colour (matched panels) takes no colour of the scheme: it gets its match's,
+      # so the scheme's colours are spent on the curves that show them
+      ld <- scheme_leaders(isolate(rv$od_vars)); fol <- rest[ld[rest] != rest & ld[rest] %in% isolate(rv$od_vars)]; own <- setdiff(rest, fol)
+      cols <- stats::setNames(scheme_free_colours(th, length(own)), own)
+      got <- c(vapply(aes_map, function(a) as.character(a$color %||% NA_character_), ""), cols)
+      folc <- got[ld[fol]]; names(folc) <- fol; folc <- folc[!is.na(folc)]
+      fill <- c(cols, folc)
+      scheme_last$filled <- if (length(fill)) apply_sample_aes(lapply(fill, function(cc) list(color = unname(cc))), names(fill), via_qe = TRUE) else 0L
     }
     k
   }

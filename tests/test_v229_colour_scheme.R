@@ -141,6 +141,25 @@ check("a theme from before v2.29 styles the names it knows and nothing else", id
 check("with no data the typed colours alone make a scheme; with neither, nothing is saved",
       identical(R$empty_key, "Colours_only") && identical(R$empty$palette, c("#010101", "#020202")) && identical(R$empty_err, "stopped") && is.null(env$theme_read("Nothing")))
 
+cat("\n--- matched panels: the scheme's colours go to the curves that show them ---\n")
+M <- new.env()
+testServer(app, {
+  S <- session$setInputs
+  env$theme_write("Matched", list(), palette = c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"), merge = FALSE)
+  ingest_data(mk(c("EV", "N4 a", "N4 b", "EV + drug", "N4 a + drug", "N4 b + drug")), "m1.csv"); do.call(S, env$APP_DEFAULTS)
+  S(selected_samples = rv$od_vars, active_theme = "Matched", qe_scheme = "Matched", theme_palette = "")
+  S(group_EV = "plain", group_N4_a = "plain", group_N4_b = "plain", group_EV___drug = "drug", group_N4_a___drug = "drug", group_N4_b___drug = "drug",
+    facet_by_group = TRUE, facet_source = "group"); session$flushReact()
+  M$mode <- sel1("panel_style_match"); M$lead <- scheme_leaders(rv$od_vars)
+  M$k <- theme_apply_named("Matched"); M$cols <- toupper(unlist(rv$qe_colors[rv$od_vars]))
+  theme_save_current("Matched"); M$saved <- toupper(unname(env$theme_sample_colours(env$theme_read("Matched"))))
+  M$free <- env$scheme_free_colours(env$theme_read("Matched"), 1)
+})
+check("matched panels are the default, and the second panel's samples follow the first panel's", identical(M$mode, "line") && identical(unname(M$lead[c("EV + drug", "N4 b + drug")]), c("EV", "N4 b")))
+check("six samples in two matched panels use three of the scheme's colours: each follower has its match's colour",
+      identical(unname(M$cols[c("EV", "N4 a", "N4 b")]), c("#000000", "#E69F00", "#56B4E9")) && identical(unname(M$cols[4:6]), unname(M$cols[1:3])))
+check("the scheme keeps the colours the figures show, so the next new strain gets the scheme's fourth colour", length(unique(M$saved)) == 3L && identical(M$free, "#009E73"))
+
 unlink(th_dir, recursive = TRUE)
 cat("\n", pass, "passed,", fail, "failed\n")
 if (fail > 0) quit(status = 1)
