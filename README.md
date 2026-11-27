@@ -200,6 +200,8 @@ All settings are in the left sidebar, organized into collapsible sections. Click
 
 **Color Palettes** — Choose from preset palettes (Viridis, Colorblind-friendly, Publication, etc.) or use custom colors per sample. For MOI series, the two dose-gradient palettes (v2.17), **Blues (dose gradient)** and **Blue to red (dose gradient)**, make the first sample (usually the uninfected control) black and run the other samples from low to high dose.
 
+**Colour scheme for a paper (v2.29.0)** — Keep one set of colours across every experiment of a paper. In the Quick edit strip, click a sample's colour square to pick from the scheme's colours, then **Save colours to scheme**. The scheme remembers each sample's colour, marker, line and display name by sample name; it is applied by itself to the next file you load, and samples it has not seen take its next free colours. Saving again adds the new samples. A scheme can be downloaded and loaded as a file, and a project file (`.kcproj`) carries its scheme with it. See the tutorial, section 4.
+
 **Line & Point Settings** — Control line thickness and point appearance. Toggle points on/off and adjust their size.
 
 **Label Options** — Add labels at the end of each line to identify samples without needing the legend.
@@ -657,4 +659,4 @@ published work, please cite it using that file's metadata (GitHub and Zenodo bot
 
 ---
 
-*Lysis Curve OD Visualization App v2.28.3 (2026-11-24) — Michael Baffour Awuah / Ramsey Lab*
+*Lysis Curve OD Visualization App v2.29.0 (2026-11-25) — Michael Baffour Awuah / Ramsey Lab*

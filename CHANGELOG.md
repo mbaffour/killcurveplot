@@ -1,5 +1,71 @@
 # Changelog
 
+## v2.29.0 — 2026-11-25
+
+**A colour scheme for a paper: pick from the paper's colours, and every experiment gets the same ones.**
+- **Pick from the scheme's colours.** In the Quick edit strip, a sample's colour square is now a button: it opens the
+  scheme's colours (with no scheme: the palette in use), marks the colours other shown samples have, and sets the
+  colour with one click. Keyboard: Enter, arrows, Escape. The free colour box beside it is unchanged.
+- **Scheme menu and two buttons in the strip**: *Colour scheme*, *Use on these samples*, *Save colours to scheme* (the
+  first save asks for a name).
+- **A scheme is a theme file that also holds its colours.** Saving now **adds** the loaded samples to the scheme; it
+  used to replace the file, so the first experiment's samples were lost when the second was saved. Sample names match
+  capitals and spacing aside. Samples the scheme does not know take its next free colours (never the colour of a
+  sample it knows); when they run out, further distinct colours follow.
+- **Sidebar (Color Palettes → Colour scheme for a paper)**: type the scheme's colours (hex codes or colour names),
+  download a scheme, load a scheme file (checked and rewritten, never replacing a scheme of the same name).
+- **Project files carry their scheme**: opening a project where the scheme is missing brings it back; a scheme that is
+  already there is left as it is.
+- Themes saved before v2.29 behave as before until saved again. With no scheme chosen every figure is byte-identical
+  to v2.28.3. `tests/test_v229_colour_scheme.R` (33 checks).
+
+**Fixes from a review of v2.27.0 to v2.28.3 and an audit of the legend-key rule** (three independent reviewers; every
+finding reproduced by a script before it was fixed; `tests/test_v229_review_fixes.R`, 31 checks).
+
+Wrong figures or numbers:
+- **A typed x range could draw readings from beyond it.** Since v2.27.4 a reading within half an error-bar cap past the
+  typed limit was moved onto the frame edge and drawn there with its own OD (dense plate-reader runs: 5-min readings over
+  12 h with every default). Only readings inside the range are drawn; the last bar still keeps its cap.
+- **Compare side by side** lost the first line segment of one curve in each panel.
+- **Lysis complete** was reported before lysis began for a curve whose peak is already below the "complete" OD; such a
+  curve now has no completion time.
+- **"Drop readings outside the axis"**: a bar that lies entirely off the axis is left out (it was drawn as a dash on the
+  frame), and a bar whose point is dropped is dropped with it.
+- **Position "Dodge"**: bars standing beside their marker no longer get the caps meant for bars hidden under it.
+- **A panel's inside legend** is placed against the panel as drawn: a typed x range, and for one legend over several
+  panels the shared y axis. It could sit on the curves while an empty corner was free.
+
+Projects and settings:
+- A sample with no sidebar row yet (page 2 of Variable Styling, or a hidden sample) is drawn, and saved again, with the
+  style the file gave it; it used to fall back to the defaults, so hidden samples lost their style on the next save.
+- With one panel per sample and a renamed sample, that panel's settings were saved twice and the older copy won on open.
+- Opening a project no longer keeps label places dragged in the previous work.
+- **Excluded time points and the time unit**: a value that is a time point converts exactly (620 min, 10.3333333333 h,
+  620 min again; it came back as 619.9998). A slow project open no longer converts the box a second time, and a settings
+  file that changes the unit now converts the box (30 min was read as 30 h).
+- A sample you had hidden is not shown again when it stops being the blank.
+- The Mac app's auto-stop waits 15 s after the **last** tab closes (an older timer could stop it during a page reload).
+
+Legend key and legend text (the legend-key rule):
+- **Figures with no legend of their own** (metric summary, AUC, time to threshold, replicate small multiples) got the
+  main figure's key: samples the figure had dropped, filled markers and lines it does not draw, another order. Each now
+  gets a key made from what it draws, and that key is written in the zip exports too.
+- **Compose**: the key is the composed panels' own keys (stacked under each panel's letter and name when they differ),
+  the text starter describes each panel, and the composed figure's key is in every archive. Both used to be the main
+  figure's, whatever was composed.
+- **Legend text starter of analysis, fit and Compare figures** is read from the figure itself: renamed samples are no
+  longer lost, a sample only in the second Compare file is named, open circles are called open circles, no marker is
+  named where none is drawn, and the Compare overlay says which file is dashed.
+- **Main figure**: the text starter and the samples table leave out a sample that has no reading left (time filter, its
+  own window, every replicate excluded), as the key already did.
+- Batch export: an analysis figure's key file is named after its own figure file.
+
+Known and not changed here (from the same audit): panels placed as separate figures are not lined up when one of them has
+its legend above or to the left, a title of its own, or wider tick labels; five analysis figure kinds keep their legend
+outside the panel in Compose; a legend wrapped at the bottom of the figure and its standalone key use different rows and
+columns; with lines hidden the key shows a disc under each marker; colour words can repeat with four similar colours;
+the kept end cap is not applied on log, square-root or reversed x axes.
+
 ## v2.28.3 — 2026-11-24
 
 **A five-tester click-through (data, figure, panels / Compose / Compare, analysis, accessibility): what did not work now does.**

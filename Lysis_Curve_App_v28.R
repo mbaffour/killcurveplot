@@ -331,7 +331,7 @@ kc_with_measure_device <- function(expr) {
 # Single source of truth for the app version. Used in the HTML report footer
 # and the saved-settings JSON so a bundle/session can be tied back to the code
 # that produced it (audit KC-8: the settings JSON used to hardcode "2.5").
-APP_VERSION <- "2.28.3"
+APP_VERSION <- "2.29.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1825,7 +1825,9 @@ compute_one_curve_metrics <- function(t_vec, od_vec, sample_name,
       }
       fl <- suppressWarnings(as.numeric(lysis_complete_od))
       if (!is.na(onset) && length(fl) == 1L && is.finite(fl)) {   # v2.28.3: lysis complete = the OD after the peak falls below fl
-        k <- which(is.finite(od_vec[post_peak]) & od_vec[post_peak] < fl)
+        # v2.29.0 (review B2): a curve whose peak is already below fl never FALLS below it; it used to be "complete" at the
+        # first reading after the peak, before lysis began. No completion time for such a curve.
+        k <- if (is.finite(max_od) && max_od >= fl) which(is.finite(od_vec[post_peak]) & od_vec[post_peak] < fl) else integer(0)
         if (length(k)) {
           j <- post_peak[k[1]]; y0 <- od_vec[j - 1L]; y1 <- od_vec[j]
           lysis_complete_time <- if (is.finite(y0) && y0 >= fl && y0 > y1) t_vec[j - 1L] + (t_vec[j] - t_vec[j - 1L]) * (y0 - fl) / (y0 - y1) else t_vec[j]
@@ -2991,6 +2993,8 @@ legend_corner_counts <- function(x, y, log_y = FALSE, box = NULL, yrange = NULL,
   corners <- c("top-left", "top-right", "bottom-left", "bottom-right")
   ok <- is.finite(x) & is.finite(y)
   if (isTRUE(log_y)) ok <- ok & y > 0
+  # v2.29.0 (review A4): with an x range given, a point outside it is not on the panel and holds no corner
+  if (!is.null(box) && length(xrange) == 2L && all(is.finite(xrange)) && diff(range(xrange)) > 0) ok <- ok & x >= min(xrange) & x <= max(xrange)
   x <- x[ok]; y <- y[ok]
   if (!length(x)) return(setNames(rep(0L, 4), corners))
   if (isTRUE(log_y)) y <- log10(y)
@@ -8145,22 +8149,77 @@ theme_stored_name <- function(path) {
 }
 # Round 2 (#37): "a b" and "a_b" sanitise to the same file name. The second one gets a short hash of its display name so it
 # no longer overwrites the first; the display name is stored inside the JSON and shown by theme_display_names().
-theme_write <- function(name, aes_map, qe_colors = NULL, display_names = NULL, dir = themes_dir_path()) {
-  key <- theme_key(name)
+# v2.29.0 (colour scheme for a paper): a theme also holds `palette`, the scheme's colours in order. merge = TRUE (the
+# default) keeps the samples already in the file and adds / replaces the given ones, so one scheme collects the samples
+# of every experiment of a paper (saving used to replace the file: the first experiment's samples were lost when the
+# second was saved). palette = NULL keeps the file's palette. key = a file key to write to as it is (a project file
+# restoring its scheme).
+theme_write <- function(name, aes_map, qe_colors = NULL, display_names = NULL, dir = themes_dir_path(), palette = NULL, merge = TRUE, key = NULL) {
+  forced <- !is.null(key)
+  key <- theme_key(if (forced) key else name)
   if (!nzchar(key)) stop("Enter a theme name.")
   if (!dir.exists(dir)) dir.create(dir, showWarnings = FALSE, recursive = TRUE)
   disp <- trimws(name)
-  if (file.exists(theme_path(key, dir))) {
+  if (!forced && file.exists(theme_path(key, dir))) {
     prior <- theme_stored_name(theme_path(key, dir))
     if (!is.null(prior) && !identical(prior, disp)) key <- paste0(key, "_", safe_id_hash(disp))
   }
   aes_map <- lapply(aes_map, function(a) a[intersect(names(a), c("color", "shape", "shape_filled", "line_type", "legend_label"))])
-  qc <- qe_colors[intersect(names(aes_map), names(qe_colors))]
+  qc <- as.list(qe_colors[intersect(names(aes_map), names(qe_colors))])
   dn <- if (length(display_names)) as.list(display_names[intersect(names(aes_map), names(display_names))]) else list()
-  jsonlite::write_json(list(version = "1.0", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = disp,
-                            sample_aesthetics = aes_map, qe_colors = as.list(qc), display_names = dn),
-                       theme_path(key, dir), pretty = TRUE, auto_unbox = TRUE)
+  old <- if (isTRUE(merge)) theme_read(key, dir) else NULL
+  if (!is.null(old)) {
+    same <- function(l) names(l)[!(theme_name_norm(names(l)) %in% theme_name_norm(names(aes_map)))]   # "ev" saved again replaces "EV": one sample, one entry
+    old$sample_aesthetics <- old$sample_aesthetics[same(old$sample_aesthetics)]; old$qe_colors <- old$qe_colors[same(old$qe_colors)]; old$display_names <- old$display_names[same(old$display_names)]
+    keep <- setdiff(names(old$sample_aesthetics), names(aes_map))
+    qc_old <- old$qe_colors[setdiff(names(old$qe_colors), names(aes_map))]        # a sample saved again takes its new colour
+    dn_old <- old$display_names[setdiff(names(old$display_names), names(aes_map))]
+    aes_map <- c(old$sample_aesthetics[keep], aes_map); qc <- c(qc_old, qc); dn <- c(dn_old, dn)
+  }
+  pal <- if (!is.null(palette)) theme_palette_clean(palette) else if (!is.null(old) && isTRUE(old$has_palette)) old$palette else character(0)
+  doc <- list(version = "1.1", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = disp,
+              sample_aesthetics = aes_map, qe_colors = as.list(qc), display_names = as.list(dn))
+  if (length(pal)) doc$palette <- as.list(pal)
+  jsonlite::write_json(doc, theme_path(key, dir), pretty = TRUE, auto_unbox = TRUE)
   invisible(key)
+}
+# The colours of a scheme from whatever was typed or stored: hex codes (#E69F00, E69F00, #abc) or R colour names,
+# separated by commas, semicolons or spaces. Upper-case #RRGGBB, no repeats, SCHEME_PALETTE_MAX at most; junk is dropped.
+SCHEME_PALETTE_MAX <- 40L
+theme_palette_clean <- function(x) {
+  if (is.null(x)) return(character(0))
+  x <- tryCatch(as.character(unlist(x, use.names = FALSE)), error = function(e) character(0))
+  x <- x[!is.na(x)]
+  if (!length(x)) return(character(0))
+  x <- unlist(strsplit(substr(paste(utils::head(x, 400L), collapse = ","), 1L, 8000L), "[,;[:space:]]+"))
+  x <- x[nzchar(x)]
+  hex <- vapply(x, function(v) {
+    if (grepl("^#?[0-9A-Fa-f]{6}$", v)) return(toupper(paste0("#", sub("^#", "", v))))
+    if (grepl("^#[0-9A-Fa-f]{3}$", v)) return(toupper(paste0("#", paste(rep(strsplit(sub("^#", "", v), "")[[1]], each = 2), collapse = ""))))
+    if (!grepl("^[A-Za-z][A-Za-z0-9]*$", v)) return(NA_character_)               # a colour name ("1" is R's palette index, not a name)
+    tryCatch(toupper(grDevices::rgb(t(grDevices::col2rgb(v)), maxColorValue = 255)), error = function(e) NA_character_)
+  }, "", USE.NAMES = FALSE)
+  utils::head(unique(hex[!is.na(hex)]), SCHEME_PALETTE_MAX)
+}
+# the colour a scheme holds for each of its samples (the quick-edit colour wins, as when it is applied), upper-case hex
+theme_sample_colours <- function(theme) {
+  nm <- names(theme$sample_aesthetics)
+  out <- vapply(nm, function(n) {
+    v <- theme$qe_colors[[n]] %||% theme$sample_aesthetics[[n]][["color"]]
+    v <- if (is.atomic(v) && length(v) == 1L && !is.na(v)) theme_palette_clean(as.character(v)) else character(0)
+    if (length(v)) v[1] else NA_character_
+  }, "")
+  out[!is.na(out)]
+}
+# The colours for samples a scheme does not know: its colours no known sample has, in order; when they run out, further
+# colours that are distinct from every scheme colour (distinct_colours()).
+scheme_free_colours <- function(theme, n) {
+  n <- suppressWarnings(as.integer(n)[1]); if (is.na(n) || n <= 0L) return(character(0))
+  known <- unique(unname(theme_sample_colours(theme)))
+  free  <- setdiff(theme$palette, known)
+  if (length(free) >= n) return(free[seq_len(n)])
+  base <- unique(c(theme$palette, known))
+  c(free, utils::tail(distinct_colours(base, length(base) + n - length(free)), n - length(free)))
 }
 # why a theme could not be applied: the file is there but is not a theme (a bare value, no samples), or it is gone
 theme_problem_message <- function(key, dir = themes_dir_path())
@@ -8175,18 +8234,36 @@ theme_read <- function(name, dir = themes_dir_path()) {
   s <- tryCatch(jsonlite::fromJSON(f, simplifyVector = FALSE), error = function(e) NULL)
   if (!is.list(s)) return(NULL)            # finding 37: a file holding a bare value is not a theme
   sa <- s[["sample_aesthetics"]] %||% s[["samples"]]
-  if (is.null(sa) || !length(sa) || !is.list(sa) || is.null(names(sa))) return(NULL)   # round 2: a bare value / unnamed list is not a theme
-  list(sample_aesthetics = sa, qe_colors = s$qe_colors %||% list(), display_names = s$display_names %||% list())
+  if (is.null(sa) || !length(sa) || !is.list(sa) || is.null(names(sa))) {              # round 2: a bare value / unnamed list is not a theme
+    if (!length(theme_palette_clean(s[["palette"]]))) return(NULL)                     # v2.29.0: colours and no samples yet is a scheme
+    sa <- stats::setNames(list(), character(0))
+  }
+  qc <- if (is.list(s$qe_colors) && !is.null(names(s$qe_colors))) s$qe_colors else list()
+  dn <- if (is.list(s$display_names) && !is.null(names(s$display_names))) s$display_names else list()
+  th <- list(sample_aesthetics = sa, qe_colors = qc, display_names = dn)
+  # v2.29.0: the scheme's colours. A file written before v2.29 has none: its samples' colours stand in for the swatches,
+  # and has_palette = FALSE keeps it from recolouring samples it does not know (what such a theme always did).
+  pal <- theme_palette_clean(s[["palette"]])
+  th$has_palette <- length(pal) > 0
+  th$palette <- if (th$has_palette) pal else utils::head(unique(unname(theme_sample_colours(th))), SCHEME_PALETTE_MAX)
+  th
 }
 theme_delete <- function(name, dir = themes_dir_path()) {
   f <- theme_path(name, dir)
   isTRUE(nzchar(theme_key(name)) && file.exists(f) && file.remove(f))
 }
 # the entries of a theme that apply to `samples` (the names that match), as the same structure
+# v2.29.0: a name that differs only in capitals or spacing ("ev", " EV ", "N4  gp60") is the same sample; an exact match
+# wins. The entries come back under the loaded samples' own names.
+theme_name_norm <- function(x) tolower(gsub("[[:space:]]+", " ", trimws(as.character(x))))
 theme_for_samples <- function(theme, samples) {
-  hit <- intersect(samples, names(theme$sample_aesthetics))
-  list(sample_aesthetics = theme$sample_aesthetics[hit], qe_colors = theme$qe_colors[intersect(hit, names(theme$qe_colors))],
-       display_names = theme$display_names[intersect(hit, names(theme$display_names))], matched = hit)
+  tn <- names(theme$sample_aesthetics); samples <- as.character(samples)
+  j <- match(samples, tn)
+  if (anyNA(j)) j[is.na(j)] <- match(theme_name_norm(samples[is.na(j)]), theme_name_norm(tn))
+  ok <- !is.na(j); hit <- samples[ok]; src <- tn[j[ok]]
+  take <- function(l) { k <- src %in% names(l); stats::setNames(l[src[k]], hit[k]) }
+  list(sample_aesthetics = stats::setNames(theme$sample_aesthetics[src], hit), qe_colors = take(theme$qe_colors),
+       display_names = take(theme$display_names), matched = hit)
 }
 
 # ── Cumulative-build parity (PowerPoint slides, GIF frames) ───────────────────────────────────────
@@ -8949,14 +9026,16 @@ marker_extent_pt <- function(samps, aes_v, colours = NULL, size = 1.5, stroke = 
 }
 GeomKcCapPastMarker <- ggplot2::ggproto(
   "GeomKcCapPastMarker", ggplot2::GeomErrorbar,
-  default_aes  = ggplot2::aes(!!!c(unclass(ggplot2::GeomErrorbar$default_aes), list(kc_mk = 0, kc_mv = 0))),
+  default_aes  = ggplot2::aes(!!!c(unclass(ggplot2::GeomErrorbar$default_aes), list(kc_mk = 0, kc_mv = 0, x0 = NA_real_))),
   extra_params = c(ggplot2::GeomErrorbar$extra_params, "kc_margin_pt"),
   draw_key     = ggplot2::draw_key_blank,
   draw_panel   = function(self, data, panel_params, coord, lineend = "butt", width = NULL, flipped_aes = FALSE, kc_margin_pt = MARKER_CAP_MARGIN_PT) {
     data <- data[is.finite(data$kc_mk) & data$kc_mk > 0 & is.finite(data$ymin) & is.finite(data$ymax), , drop = FALSE]
     if (!nrow(data)) return(ggplot2::zeroGrob())
+    if (is.null(data$x0) || !any(is.finite(data$x0))) data$x0 <- data$x   # v2.29.0: the marker's x (a dodged bar stands beside it)
     d <- coord$transform(data, panel_params)
-    grid::gTree(kc = d[, c("x", "xmin", "xmax", "ymin", "ymax", "colour", "alpha", "linewidth", "linetype", "kc_mk", "kc_mv")],
+    d$x0[!is.finite(d$x0)] <- d$x[!is.finite(d$x0)]
+    grid::gTree(kc = d[, c("x", "x0", "xmin", "xmax", "ymin", "ymax", "colour", "alpha", "linewidth", "linetype", "kc_mk", "kc_mv")],
                 kc_margin = kc_margin_pt, kc_lineend = lineend, cl = "kc_cap_past_marker")
   })
 # Drawing time: the panel's size is known, so the bar's half-length and cap half-width are measured in points.
@@ -8964,9 +9043,12 @@ makeContent_kc_cap_past_marker <- function(x) {
   d <- x$kc
   h <- grid::convertHeight(grid::unit(abs(d$ymax - d$ymin) / 2, "npc"), "bigpts", valueOnly = TRUE)
   w <- grid::convertWidth(grid::unit(abs(d$xmax - d$xmin) / 2, "npc"), "bigpts", valueOnly = TRUE)
-  hid <- is.finite(h) & is.finite(w) & h < d$kc_mv & w < d$kc_mk
+  # v2.29.0 (review B7): a bar moved beside its marker (Position: Dodge on a short time axis) is in plain view; only a
+  # bar whose stem AND caps lie under the marker is hidden. The caps are centred on the marker.
+  off <- grid::convertWidth(grid::unit(abs(d$x - d$x0), "npc"), "bigpts", valueOnly = TRUE)
+  hid <- is.finite(h) & is.finite(w) & is.finite(off) & h < d$kc_mv & off + w < d$kc_mk
   if (!any(hid)) return(grid::setChildren(x, grid::gList()))
-  d <- d[hid, , drop = FALSE]; e <- rep(d$kc_mk + x$kc_margin, 2); xc <- rep(d$x, 2)
+  d <- d[hid, , drop = FALSE]; e <- rep(d$kc_mk + x$kc_margin, 2); xc <- rep(d$x0, 2)
   cap <- grid::segmentsGrob(x0 = grid::unit(xc, "npc") - grid::unit(e, "bigpts"), x1 = grid::unit(xc, "npc") + grid::unit(e, "bigpts"),
                             y0 = grid::unit(c(d$ymin, d$ymax), "npc"), y1 = grid::unit(c(d$ymin, d$ymax), "npc"), name = "caps",
                             gp = grid::gpar(col = scales::alpha(rep(d$colour, 2), rep(d$alpha, 2)), lwd = rep(d$linewidth, 2) * ggplot2::.pt,
@@ -9680,6 +9762,14 @@ quick_edit_ui <- div(class = "kc-qe", id = "kc_qe",
       checkboxInput("canvas_edit", "Edit labels on the figure (click a legend entry, axis title or title)", APP_DEFAULTS$canvas_edit)),
   div(style = "display:none;", checkboxInput("quick_edit_open", "Show the quick-edit strip", APP_DEFAULTS$quick_edit_open)),
   conditionalPanel("input.quick_edit_open == true",
+    # v2.29.0: the colour scheme of the paper, where the colours are picked
+    div(class = "kc-qe-scheme",
+        div(class = "kc-qe-scheme-pick", selectInput("qe_scheme", "Colour scheme:", choices = c("None" = ""), selected = "", selectize = FALSE)),
+        uiOutput("qe_scheme_swatches", inline = TRUE),
+        actionButton("qe_scheme_apply", "Use on these samples", class = "btn-default btn-xs", title = "Give the loaded samples the scheme's colours and styles: by sample name, and its next free colours for samples it does not know"),
+        actionButton("qe_scheme_save", "Save colours to scheme", class = "btn-default btn-xs", title = "Keep these samples' colours, markers, lines and names in the scheme (added to what it already holds)")),
+    p(class = "kc-qe-note", "Click a sample's colour square to pick one of these colours; the box beside it gives any colour. ",
+      "A scheme remembers the colours by sample name for every file of a paper (more under Color Palettes in the sidebar)."),
     uiOutput("quick_edit_rows"),
     markup_buttons_ui(),   # v2.22: acts on the name / label box last clicked
     div(class = "kc-qe-global",
@@ -9828,9 +9918,11 @@ ui <- fluidPage(lang = "en",
              Shiny.setInputValue('qe_show_event', {sample: row.getAttribute('data-sample'), show: t.checked}, {priority: 'event'});
          });
          // the server tells the strip the colour each sample really has (sidebar colour, palette or the strip's own)
+         window.kcDrawn = window.kcDrawn || {};   // v2.29.0: the colour each sample is drawn with (differs from its own under matched panels)
          function swatches(m) {
            for (var i = 0; i < m.ids.length; i++) {
              var inp = document.getElementById(m.ids[i]), c = m.colors[i];
+             if (m.drawn && m.drawn[i]) window.kcDrawn[m.ids[i]] = String(m.drawn[i]).toUpperCase();
              if (inp && document.activeElement !== inp && inp.value.toLowerCase() !== String(c).toLowerCase()) inp.value = c;
              var sw = document.getElementById(m.ids[i].replace('qe_color_', 'qe_swatch_')); if (sw) sw.style.backgroundColor = c;
            }
@@ -10316,6 +10408,86 @@ ui <- fluidPage(lang = "en",
            jQuery(document).on('shiny:idle', kcMark);
            jQuery(document).on('shiny:inputchanged', function(ev) { if (ev.name === 'canvas_edit' && !ev.value) kcClose(); });
          }
+       })();
+       // v2.29.0: its own function (the page script above keeps the keyboard's native behaviour and never cancels an event)
+       (function() {
+         // v2.29.0: the scheme's colours where a sample's colour is picked. A click on a row's colour square opens a small
+         // dialog of the colours in #kc_scheme_palette (the active scheme, else the palette in use); choosing one writes
+         // it into the row's colour box and fires its input event, so the existing path does the rest. Keyboard: the
+         // square is a button; arrows move, Enter / Space choose, Escape closes and gives the focus back.
+         var kcSchemePop = null, kcSchemeFor = null;
+         function kcSchemeClose(back) {
+           if (!kcSchemePop) return;
+           kcSchemePop.remove(); kcSchemePop = null;
+           if (kcSchemeFor) { kcSchemeFor.setAttribute('aria-expanded', 'false'); if (back) kcSchemeFor.focus(); }
+           kcSchemeFor = null;
+         }
+         function kcSchemeOpen(btn) {
+           kcSchemeClose(false);
+           var holder = document.getElementById('kc_scheme_palette'), inp = document.getElementById(btn.id.replace('qe_swatch_', 'qe_color_'));
+           if (!holder || !inp) return;
+           var cols = (holder.getAttribute('data-colors') || '').split(',').filter(function(c) { return /^#[0-9A-Fa-f]{6}$/.test(c); });
+           var words = (holder.getAttribute('data-words') || '').split('|');
+           if (!cols.length) return;
+           var row = btn.closest('.kc-qe-row'), name = row ? row.getAttribute('data-sample') : '';
+           var used = {};
+           document.querySelectorAll('.kc-qe-row').forEach(function(r) {
+             if (r === row) return;
+             var c = r.querySelector('.kc-qe-color'), on = r.querySelector('.kc-qe-show input');
+             if (!c || (on && !on.checked)) return;
+             var k = c.value.toUpperCase(); (used[k] = used[k] || []).push(r.getAttribute('data-sample'));
+           });
+           var pop = document.createElement('div');
+           pop.className = 'kc-scheme-pop'; pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-label', 'Colours for ' + name);
+           var head = document.createElement('div'); head.className = 'kc-scheme-head'; head.textContent = 'Colour of ' + name; pop.appendChild(head);
+           var grid = document.createElement('div'); grid.className = 'kc-scheme-grid'; pop.appendChild(grid);
+           var cur = inp.value.toUpperCase(), anyUsed = false, first = null;
+           cols.forEach(function(c, i) {
+             var b = document.createElement('button'), u = used[c.toUpperCase()], w = words[i] || c;
+             b.type = 'button'; b.className = 'kc-scheme-opt'; b.style.backgroundColor = c;
+             var lab = w + ' ' + c + (u ? ' (used by ' + u.join(', ') + ')' : '') + (c.toUpperCase() === cur ? ' (this sample now)' : '');
+             b.title = lab; b.setAttribute('aria-label', lab);
+             if (c.toUpperCase() === cur) { b.classList.add('kc-cur'); b.setAttribute('aria-pressed', 'true'); first = b; } else b.setAttribute('aria-pressed', 'false');
+             if (u) { b.classList.add('kc-used'); anyUsed = true; }
+             b.addEventListener('click', function() {
+               inp.value = c.toLowerCase();
+               inp.dispatchEvent(new Event('input', {bubbles: true}));
+               kcSchemeClose(true);
+             });
+             grid.appendChild(b);
+           });
+           var note = function(t) { var n = document.createElement('div'); n.className = 'kc-scheme-note'; n.textContent = t; pop.appendChild(n); };
+           if (anyUsed) note('A dot marks a colour another shown sample has.');
+           var dr = (window.kcDrawn || {})[inp.id];
+           if (dr && dr !== cur) note('Matched panels: in the figure this sample takes the colour of its match in the first panel. Change that sample, or set Sample styles across panels to Each sample its own style.');
+           document.body.appendChild(pop);
+           var r = btn.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+           var left = Math.max(6, Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - pw - 6));
+           var top = r.bottom + window.scrollY + 4;
+           if (r.bottom + ph + 8 > window.innerHeight && r.top - ph - 4 > 0) top = r.top + window.scrollY - ph - 4;
+           pop.style.left = left + 'px'; pop.style.top = top + 'px';
+           kcSchemePop = pop; kcSchemeFor = btn; btn.setAttribute('aria-expanded', 'true');
+           (first || grid.firstChild).focus();
+         }
+         document.addEventListener('click', function(ev) {
+           var b = ev.target && ev.target.closest ? ev.target.closest('button.kc-qe-swatch') : null;
+           if (b) { ev.preventDefault(); if (kcSchemeFor === b) kcSchemeClose(true); else kcSchemeOpen(b); return; }
+           if (kcSchemePop && !kcSchemePop.contains(ev.target)) kcSchemeClose(false);
+         });
+         document.addEventListener('keydown', function(ev) {
+           if (!kcSchemePop) return;
+           if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); kcSchemeClose(true); return; }
+           var opts = Array.prototype.slice.call(kcSchemePop.querySelectorAll('.kc-scheme-opt')), i = opts.indexOf(document.activeElement);
+           if (ev.key === 'Tab') {            // the dialog keeps the focus while it is open
+             ev.preventDefault(); if (!opts.length) return;
+             opts[(i + (ev.shiftKey ? -1 : 1) + opts.length) % opts.length].focus(); return;
+           }
+           var step = {ArrowRight: 1, ArrowLeft: -1, ArrowDown: 8, ArrowUp: -8}[ev.key];
+           if (!step || i < 0) return;
+           ev.preventDefault();
+           var j = i + step; if (j < 0 || j >= opts.length) return;
+           opts[j].focus();
+         }, true);
        })();"
     )),
     # v2.23.2: Copy figure -- the preview (inline SVG or PNG) is drawn to a PNG in the browser and put on the clipboard
@@ -10556,7 +10728,27 @@ ui <- fluidPage(lang = "en",
       .kc-qe-row { display:flex; align-items:center; gap:8px; padding:1px 0; }
       .kc-qe-row .form-group { margin:0; flex:1 1 auto; min-width:0; }
       .kc-qe-row .form-control { height:26px; padding:2px 6px; font-size:1em; }
-      .kc-qe-swatch { display:inline-block; width:12px; height:12px; flex:0 0 12px; border:1px solid rgba(0,0,0,.35); border-radius:2px; }
+      .kc-qe-swatch { display:inline-block; width:20px; height:20px; flex:0 0 20px; padding:0; border:1px solid rgba(0,0,0,.45); border-radius:3px; cursor:pointer; }
+      .kc-qe-swatch:focus-visible, .kc-scheme-opt:focus-visible { outline:2px solid #0b5fff; outline-offset:2px; }
+      .kc-qe-scheme { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; margin:2px 0 2px; }
+      .kc-qe-scheme-pick { flex:0 1 230px; min-width:150px; }
+      .kc-qe-scheme-pick .form-group { margin:0; }
+      .kc-qe-scheme-pick label { font-size:.9em; margin-bottom:1px; }
+      .kc-qe-scheme-pick select { height:26px; padding:2px 6px; font-size:1em; }
+      .kc-qe-scheme .btn { margin-bottom:2px; }
+      .kc-scheme-swatches { display:inline-flex; flex-wrap:wrap; gap:3px; align-items:center; margin-bottom:4px; max-width:340px; }
+      .kc-scheme-chip { display:inline-block; width:14px; height:14px; border:1px solid rgba(0,0,0,.35); border-radius:2px; }
+      .kc-scheme-pop { position:absolute; z-index:2000; background:#fff; color:#222; border:1px solid #9aa3ad; border-radius:6px; box-shadow:0 4px 14px rgba(0,0,0,.25); padding:8px; max-width:268px; }
+      .kc-scheme-head { font-size:.82em; font-weight:bold; margin-bottom:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .kc-scheme-grid { display:grid; grid-template-columns:repeat(8, 26px); gap:5px; }
+      .kc-scheme-opt { width:26px; height:26px; padding:0; border:1px solid rgba(0,0,0,.45); border-radius:4px; cursor:pointer; position:relative; }
+      .kc-scheme-opt.kc-cur { box-shadow:0 0 0 2px #fff, 0 0 0 4px #222; }
+      .kc-scheme-opt.kc-used::after { content:''; position:absolute; right:2px; top:2px; width:7px; height:7px; border-radius:50%; background:#fff; border:1.5px solid #222; }
+      .kc-scheme-note { font-size:.76em; color:#444; margin-top:6px; }
+      body.kc-night .kc-scheme-pop { background:#1b2028; color:#e6ebf1; border-color:#566170; }
+      body.kc-night .kc-scheme-note { color:#c4ccd6; }
+      body.kc-night .kc-scheme-opt.kc-cur { box-shadow:0 0 0 2px #1b2028, 0 0 0 4px #fff; }
+      .kc-scheme-file .form-group { margin-bottom:0; } .kc-scheme-file label { font-size:.78em; font-weight:normal; }
       .kc-qe-color { width:30px; height:24px; flex:0 0 30px; padding:0; border:1px solid #ccc; background:none; cursor:pointer; }
       .kc-qe-show { flex:0 0 auto; margin:0; }
       .kc-qe-show .checkbox { margin:0; }
@@ -11118,20 +11310,26 @@ ui <- fluidPage(lang = "en",
                    ),
                    # v2.22: project themes (per-sample styles kept by sample name, as JSON files in themes/)
                    div(class = "panel-section",
-                       h4("Project Themes", class = "panel-title"),
+                       h4("Colour scheme for a paper (project themes)", class = "panel-title"),
                        p(style = "font-size:.82em;color:#555;margin-bottom:8px;",
-                         "A theme remembers each sample's colour, shape, filled, line type and display name by sample name, ",
-                         "so \"WT\" stays black / solid / circle in every session."),
-                       selectInput("active_theme", "Active theme:", choices = c("None" = ""), selected = ""),
+                         "A scheme keeps the paper's colours, and each sample's colour, shape, filled, line type and display name by sample name, ",
+                         "so \"WT\" stays black / solid / circle in every file and every session. Saving adds the loaded samples to the scheme; ",
+                         "samples it does not know take its next free colours. The same menu and buttons are in the Quick edit strip."),
+                       selectInput("active_theme", "Colour scheme:", choices = c("None" = ""), selected = ""),
                        checkboxInput("theme_autoapply", "Auto-apply to matching sample names on data load", APP_DEFAULTS$theme_autoapply),
+                       textInput("theme_palette", "Colours of the scheme (hex codes or colour names, in order):", "", placeholder = "blank = the colours in use"),
                        fluidRow(
-                         column(7, textInput("theme_name", "Theme name:", "")),
-                         column(5, actionButton("save_theme", "Save styles as theme", style = "margin-top:25px;width:100%;font-size:.78em;"))),
+                         column(7, textInput("theme_name", "Name of a new scheme:", "")),
+                         column(5, actionButton("save_theme", "Save styles as scheme", style = "margin-top:25px;width:100%;font-size:.78em;"))),
                        fluidRow(
                          column(6, actionButton("apply_theme", "Apply now", style = "width:100%;font-size:.8em;")),
-                         column(6, actionButton("delete_theme", "Delete theme", style = "width:100%;font-size:.78em;background:#dc3545;color:white;border:none;"))),
+                         column(6, actionButton("delete_theme", "Delete scheme", style = "width:100%;font-size:.78em;background:#dc3545;color:white;border:none;"))),
+                       fluidRow(style = "margin-top:8px;",
+                         column(6, downloadButton("download_theme", "Download scheme", style = "width:100%;font-size:.78em;")),
+                         column(6, div(class = "kc-scheme-file", fileInput("theme_file", "Load a scheme file (.json)", accept = c(".json", "application/json"))))),
                        p(style = "font-size:.8em;color:#888;margin-top:8px;margin-bottom:0;",
-                         "Themes are JSON files in the ", tags$code("themes/"), " folder next to the app; commit it to share a lab-standard look.")
+                         "Schemes are JSON files in the ", tags$code("themes/"), " folder next to the app; a project file (.kcproj) carries its scheme with it. ",
+                         "Send the downloaded file to a co-author to share the paper's colours.")
                    )
                  ),
                  
@@ -12392,7 +12590,7 @@ NUMERIC_INPUT_RANGES <- tryCatch(collect_numeric_ranges(ui), error = function(e)
 # replaced at run time (updateSelectInput(choices = ...): the sample, column and theme lists) have no fixed choices: skipped
 # here. Round 4: the server reads them through sel1() / sel_multi() against the choices of the moment (dyn_choices()).
 DYNAMIC_SELECT_IDS <- c("time_col_choice", "selected_samples", "metrics_ref_sample", "blank_sample", "transform_control", "data_cell_col",
-                        "facet_source", "compose_width", "active_theme", "compare_samples_b", "sheet_choice", "cmp_samples", "excluded_reps")
+                        "facet_source", "compose_width", "active_theme", "qe_scheme", "compare_samples_b", "sheet_choice", "cmp_samples", "excluded_reps")
 collect_select_choices <- function(node) {
   out <- list()
   unesc <- function(v) { v <- gsub("&lt;", "<", v, fixed = TRUE); v <- gsub("&gt;", ">", v, fixed = TRUE); v <- gsub("&quot;", "\"", v, fixed = TRUE)
@@ -12679,7 +12877,7 @@ server <- function(input, output, session) {
     time_col_choice = as.character(colnames(rv$data)),
     sheet_choice    = as.character(rv$xlsx_sheets),
     facet_source    = unname(facet_source_choices()),
-    active_theme    = c("", theme_list()),
+    active_theme    = , qe_scheme = c("", theme_list()),   # v2.29.0: the strip's scheme menu mirrors the sidebar's
     compose_width   = c("double", "single", "custom"),
     NULL)
   # Round 4: a multi-select read as a character vector of its VALID choices only (the loaded samples / metrics / replicate ids).
@@ -12838,9 +13036,13 @@ server <- function(input, output, session) {
   
   output$palette_preview <- renderUI({
     pal <- palette_in()
-    if (pal == "custom" || is.null(rv$od_vars)) return(NULL)
+    sc <- tryCatch(scheme_now(), error = function(e) NULL)
+    note <- if (!is.null(sc) && !is.null(rv$od_vars) && length(rv$qe_colors))   # v2.29.0: say why the menu seems to do nothing
+      p(class = "kc-qe-note", style = "margin-top:6px;", "A colour scheme is in use: the samples have its colours, which win over this menu. ",
+        "To use a palette instead, choose None as the colour scheme and press Clear & Reset (or pick the colours by hand).")
+    if (pal == "custom" || is.null(rv$od_vars)) return(note)
     cols <- get_palette_colors(pal, min(24, length(rv$od_vars)))   # v2.26.1: every sample's colour (up to 24), not just the first 8
-    div(p("Preview:"),
+    div(note, p("Preview:"),
         div(style = "margin-top:6px;",
             lapply(cols, function(col)
               div(style = paste0("display:inline-block;width:28px;height:20px;",
@@ -12879,12 +13081,22 @@ server <- function(input, output, session) {
   observeEvent(input$time_convert, {
     k_new <- time_convert_factor(sel1("time_convert", "none")); k_old <- isolate(tc_prev()); tc_prev(k_new)
     if (is.null(k_old) || isTRUE(all.equal(k_old, k_new))) return(invisible(NULL))
-    ls <- isolate(rv$load_stamp)
-    if (!is.null(ls) && as.numeric(difftime(Sys.time(), ls, units = "secs")) < 5) return(invisible(NULL))
+    # v2.29.0 (review A7, P2): a PROJECT restores the unit and the box together (the box is already in the project's unit),
+    # so the one unit change it causes is not converted. That used to be "any change within 5 s of a load": a slow open
+    # converted the box a second time (1.5 h became 0.025), and a settings file, which sets the unit but never the box,
+    # left the box unconverted (30 min was read as 30 h).
+    g <- isolate(rv$unit_guard)
+    if (!is.null(g)) { rv$unit_guard <- NULL; if (identical(g, sel1("time_convert", "none"))) return(invisible(NULL)) }
     txt <- isolate(input$exclude_timepoints %||% "")
     if (!is.character(txt) || length(txt) != 1L || is.na(txt) || !nzchar(trimws(txt))) return(invisible(NULL))
     toks <- strsplit(trimws(txt), "[,; ]+")[[1]]; v <- suppressWarnings(as.numeric(toks))
-    new <- vapply(seq_along(toks), function(i) if (is.finite(v[i])) format(signif(v[i] / k_old * k_new, 8), trim = TRUE, drop0trailing = TRUE, scientific = FALSE) else toks[i], "")
+    # v2.29.0 (review B9): a value that is a time point converts to that time point (620 min -> 10.3333333333 h -> 620 min;
+    # it used to come back as 619.9998, with a notice about the app's own rounding)
+    tp_new <- sort(unique(isolate(rv$all_timepoints))) * k_new; tp_new <- tp_new[is.finite(tp_new)]
+    conv <- function(x) { x <- x / k_old * k_new
+      if (length(tp_new)) { j <- which.min(abs(tp_new - x)); if (abs(tp_new[j] - x) <= 1e-6 * max(1, abs(x))) x <- tp_new[j] }
+      format(x, digits = 12, trim = TRUE, drop0trailing = TRUE, scientific = FALSE) }
+    new <- vapply(seq_along(toks), function(i) if (is.finite(v[i])) conv(v[i]) else toks[i], "")
     updateTextInput(session, "exclude_timepoints", value = paste(new, collapse = ", "))
   }, ignoreInit = FALSE, ignoreNULL = FALSE)
   output$excluded_timepoints_preview <- renderUI({
@@ -13464,15 +13676,18 @@ server <- function(input, output, session) {
   # v2.28.3: and when it stops being the blank (another blank mode or another blank sample) it is put back in the selection;
   # it used to stay out until the file was loaded again
   blank_prev <- reactiveVal("")
+  blank_taken <- reactiveVal("")   # v2.29.0 (review B8): the sample the APP took off the figure; one the user had hidden stays hidden
   observeEvent(list(input$blank_mode, input$blank_sample, input$selected_samples), {
     b <- blank_sample_current()
     cur <- sel_samples()
     old <- isolate(blank_prev()); blank_prev(b)
-    if (nzchar(old) && !identical(old, b) && old %in% rv$od_vars && !old %in% cur) {
+    if (nzchar(old) && !identical(old, b) && old %in% rv$od_vars && !old %in% cur && identical(old, isolate(blank_taken()))) {
+      blank_taken("")
       cur <- rv$od_vars[rv$od_vars %in% c(cur, old)]
       updateSelectInput(session, "selected_samples", selected = setdiff(cur, b))
       guard_notify("blank_sample_back", sprintf("'%s' is no longer the blank and is plotted again.", old), "message")
     } else if (nzchar(b) && b %in% cur) {
+      blank_taken(b)
       updateSelectInput(session, "selected_samples", selected = setdiff(cur, b))
       guard_notify("blank_sample", sprintf("'%s' is the blank: its mean curve is subtracted and it is left out of the samples.", b), "message")
     }
@@ -13612,7 +13827,8 @@ server <- function(input, output, session) {
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                            "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
-                           "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",   # v2.22
+                           "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",
+                           "qe_scheme", "qe_scheme_apply", "qe_scheme_save", "qe_scheme_name", "qe_scheme_name_ok", "theme_palette", "theme_file",   # v2.29.0: the scheme's own controls (the scheme is a file; active_theme names it)   # v2.22
                            "cmp_samples",   # v2.22: the samples of the Compare fits block belong to the file
                            "apply_style_band", "apply_style_slide", "apply_style_pdf")   # v2.22: one-click style buttons
       # Per-sample dynamic input prefixes — handled separately below
@@ -13653,7 +13869,7 @@ server <- function(input, output, session) {
             shape_filled = input[[paste0("shape_filled_", vid)]] %||% unname(ra$filled_map[[vn]]),
             line_type    = input[[paste0("line_type_",    vid)]] %||% unname(ra$line_types[[vn]]),
             legend_label = display_name_of(vn, rv$display_names),   # v2.21: the display name (the key stays the raw name)
-            group        = trimws(input[[paste0("group_", vid)]] %||% ""),     # v2.18; a file with this key also carries the windows
+            group        = trimws(input[[paste0("group_", vid)]] %||% unname(ra$groups[[vn]]) %||% ""),     # v2.18; a file with this key also carries the windows (v2.29.0: no row yet = the loaded file's group)
             panel        = trimws(input[[paste0("facet_of_", vid)]] %||% ""),  # v2.22: the panel typed in the Panels section
             leg_row      = trimws(input[[paste0("legrow_", vid)]] %||% ""),    # v2.22: matrix-legend row / column
             leg_col      = trimws(input[[paste0("legcol_", vid)]] %||% "")
@@ -13676,8 +13892,11 @@ server <- function(input, output, session) {
       if (length(lp)) doc$label_positions <- lp
       ev <- isolate(every_wanted()); if (length(ev)) doc$panel_every <- as.list(ev)   # v2.26.0: the samples drawn in every panel
       pcs <- tryCatch(isolate({ sm <- sel_samples(); pm <- panel_membership_now(sm, resolve_aesthetics(sm))
-                               c(rv$panel_cfg[setdiff(names(rv$panel_cfg), if (is.null(pm)) character(0) else pm$levels)],
-                                 if (is.null(pm)) list() else panel_cfg_all(pm$levels)) }), error = function(e) list())
+                               # v2.29.0 (review A3): the panels on screen are stored under pkey() (a renamed sample's RAW name),
+                               # so that is what is left out of the stored copies; the old copy was written too and won on open
+                               cur <- if (is.null(pm)) list() else panel_cfg_all(pm$levels)
+                               on_screen <- if (is.null(pm)) character(0) else unique(c(pm$levels, vapply(pm$levels, pkey, ""), names(cur)))
+                               c(rv$panel_cfg[setdiff(names(rv$panel_cfg), on_screen)], cur) }), error = function(e) list())
       if (length(pcs)) doc$panel_settings <- pcs                                        # v2.26.0: each panel's own settings
       pks <- tryCatch(isolate(if (identical(sel1("facet_source", "group"), "pick")) panel_picks_now() else NULL), error = function(e) NULL)
       if (length(pks)) doc$panel_picks <- lapply(pks, function(q) list(name = q$name, samples = as.list(q$samples)))   # v2.26.0
@@ -13731,6 +13950,12 @@ server <- function(input, output, session) {
     doc$data <- Filter(Negate(is.null), doc$data); doc$selection <- Filter(Negate(is.null), doc$selection)
     if (!is.null(ds) && !is.null(ds$data)) doc$compare <- list(source = ds$data_source %||% "second file", frame = frame_to_doc(ds$data), time_col = ds$time_col)
     if (length(rv$colour_map)) doc$colour_map <- list(source = rv$colour_map_source %||% "", map = as.list(rv$colour_map))
+    # v2.29.0: the colour scheme in use goes with the project (the file itself, not only its name)
+    sk <- sel1("active_theme", "") %||% ""
+    if (nzchar(sk) && file.exists(theme_path(sk))) {
+      sf <- tryCatch(jsonlite::fromJSON(theme_path(sk), simplifyVector = FALSE), error = function(e) NULL)
+      if (is.list(sf)) doc$scheme <- list(key = sk, file = sf)
+    }
     doc
   })
   # v2.28.3: Load Settings "never touches your data, sample selection, or time filter": the time-filter switch and the
@@ -13774,11 +13999,21 @@ server <- function(input, output, session) {
       m <- m[!is.na(m) & nzchar(names(m)) & grepl("^#[0-9A-Fa-f]{6}$", m)]   # the colours read_colour_map() accepts
       if (length(m)) { rv$colour_map <- setNames(toupper(as.character(m)), names(m)); rv$colour_map_source <- s1(doc$colour_map$source, name) }
     } else { rv$colour_map <- NULL; rv$colour_map_source <- NULL }
+    # v2.29.0: the project's colour scheme, when this computer does not have it (one that is here is left as it is)
+    if (is.list(doc$scheme) && is.list(doc$scheme$file)) tryCatch({
+      sk <- s1(doc$scheme$key, "")
+      if (nzchar(sk) && identical(sk, theme_key(sk)) && !file.exists(theme_path(sk))) {
+        if (!is.null(scheme_import_doc(doc$scheme$file, sk, key = sk))) refresh_theme_choices(selected = isolate(sel1("active_theme", "")))
+      }
+    }, error = function(e) invisible(NULL))
     # every setting and sample style, exactly as Load Settings applies them
     if (is.list(doc$settings) && !is.null(names(doc$settings))) {
       tf <- tempfile(fileext = ".json"); on.exit(unlink(tf), add = TRUE)
       jsonlite::write_json(doc$settings, tf, auto_unbox = TRUE, digits = NA, na = "null", null = "null")
       load_ctx$project <- TRUE; on.exit(load_ctx$project <- FALSE, add = TRUE); rv$load_stamp <- Sys.time()
+      # v2.29.0: the unit this project sets; the unit-change observer leaves the restored exclude box alone for that change
+      pu <- doc$settings$global_settings$time_convert
+      rv$unit_guard <- if (is.character(pu) && length(pu) == 1L && !is.na(pu) && !identical(pu, isolate(sel1("time_convert", "none")))) pu else NULL
       load_settings_file(tf)
       load_ctx$project <- FALSE
     }
@@ -13916,7 +14151,7 @@ server <- function(input, output, session) {
     } else every_wanted(character(0))
     if (is.list(s$label_positions)) {                    # v2.25.0 (an old lysis-curve-app file: its floating_labels, see translate_old_settings)
       rv$float_pos <- float_pos_clean(s$label_positions$samples); rv$note_pos <- float_pos_clean(s$label_positions$notes)
-    }
+    } else if (isTRUE(load_ctx$project)) { rv$float_pos <- list(); rv$note_pos <- list() }   # v2.29.0 (review A5): a project with nothing dragged opens with nothing dragged
 
     # ── Apply global visual settings ──────────────────────────────────────────
     # Skip anything data-specific or per-sample — only visual controls
@@ -13930,7 +14165,8 @@ server <- function(input, output, session) {
                            "data_edit_reset", "data_cell_set", "data_cell_row", "data_cell_col", "data_cell_value",
                            "data_entry_text", "data_entry_sep", "data_entry_apply", "data_entry_clear", "rep_qc_flag",
                          "apply_n4_look", "compare_file", "compare_samples_b", "save_theme", "apply_theme", "delete_theme",
-                         "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",   # v2.22
+                         "delete_theme_confirm", "theme_name", "night_mode", "batch_select_all", "batch_select_none",
+                           "qe_scheme", "qe_scheme_apply", "qe_scheme_save", "qe_scheme_name", "qe_scheme_name_ok", "theme_palette", "theme_file",   # v2.29.0: the scheme's own controls (the scheme is a file; active_theme names it)   # v2.22
                            "cmp_samples",   # v2.22: the samples of the Compare fits block belong to the file
                          "apply_style_band", "apply_style_slide", "apply_style_pdf")   # v2.22
     sample_prefixes <- c("line_type_","shape_","shape_filled_","color_selector_",
@@ -14430,7 +14666,8 @@ server <- function(input, output, session) {
       nm  <- if (!is.null(imp$legend_label) && nzchar(trimws(imp$legend_label))) imp$legend_label else vn
       col <- hex7(cols[[i]])
       div(class = "kc-qe-row", `data-sample` = vn,
-          span(class = "kc-qe-swatch", id = paste0("qe_swatch_", vid), style = paste0("background-color:", col, ";")),
+          tags$button(type = "button", class = "kc-qe-swatch", id = paste0("qe_swatch_", vid), style = paste0("background-color:", col, ";"),   # v2.29.0: opens the scheme's colours
+                      title = paste("Pick a scheme colour for", vn), `aria-label` = paste("Pick a scheme colour for", vn), `aria-haspopup` = "dialog"),
           textInput(paste0("qe_name_", vid), span(class = "sr-only", paste("Name shown for", vn)), value = nm,
                     width = "100%", placeholder = vn),
           tags$input(type = "color", class = "kc-qe-color", id = paste0("qe_color_", vid), value = col,
@@ -14512,7 +14749,10 @@ server <- function(input, output, session) {
     vars <- qe_vars(); req(length(vars))
     cols <- resolve_aesthetics(vars)$colors
     hex7 <- vapply(cols, function(x) tryCatch(grDevices::rgb(t(grDevices::col2rgb(x)), maxColorValue = 255), error = function(e) "#000000"), "")
-    session$sendCustomMessage("kcSwatches", list(ids = paste0("qe_color_", safe_id(vars)), colors = unname(hex7)))
+    # v2.29.0: and the colour each is DRAWN with (matched panels give a sample its match's colour), for the picker's note
+    drawn <- tryCatch(resolve_aesthetics_drawn(vars)$colors, error = function(e) cols)
+    drawn7 <- vapply(drawn, function(x) tryCatch(grDevices::rgb(t(grDevices::col2rgb(x)), maxColorValue = 255), error = function(e) "#000000"), "")
+    session$sendCustomMessage("kcSwatches", list(ids = as.list(paste0("qe_color_", safe_id(vars))), colors = as.list(unname(hex7)), drawn = as.list(unname(drawn7))))
   })
 
   # ── Dynamic UI: region / marker settings ────────────────────────────────────
@@ -14642,7 +14882,8 @@ server <- function(input, output, session) {
   time_window_for <- function(sample) {
     vid <- safe_id(sample)
     num <- function(v) { v <- suppressWarnings(as.numeric(v)); if (length(v) == 1 && is.finite(v)) v else NA_real_ }
-    w <- c(from = num(input[[paste0("tw_min_", vid)]]), to = num(input[[paste0("tw_max_", vid)]]))
+    imp <- rv$imported_settings$samples[[sample]]            # v2.29.0: no time-window row drawn yet: the loaded file's window
+    w <- c(from = num(input[[paste0("tw_min_", vid)]] %||% (if (is.list(imp)) imp[["tw_min"]])), to = num(input[[paste0("tw_max_", vid)]] %||% (if (is.list(imp)) imp[["tw_max"]])))
     if (all(is.finite(w)) && w[["from"]] > w[["to"]])   # v2.28.3: an inverted window removed the sample with no word
       guard_notify(paste0("tw_inverted_", vid), sprintf("The time window of '%s' runs from %s to %s, which keeps nothing: the sample is not drawn. Swap the two times.",
                                                        sample, format(w[["from"]]), format(w[["to"]])), "warning")
@@ -14993,8 +15234,12 @@ server <- function(input, output, session) {
     def_colors <- default_sample_colours(n)   # v2.26.1: no repeat past the twelfth sample
     for (i in seq_len(n)) {
       vn  <- samples[i]; vid <- safe_id(vn)
-      si  <- input[[paste0("shape_", vid)]]
-      fi <- input[[paste0("shape_filled_", vid)]]
+      # v2.29.0 (review A2): a sample with no sidebar row yet (page 2 of Variable Styling, or hidden) takes the style a
+      # loaded file gave it, exactly what its row shows once drawn. It used to be drawn, and saved again, with the defaults.
+      imp <- rv$imported_settings$samples[[vn]]
+      imp1 <- function(k) { v <- if (is.list(imp)) imp[[k]] else NULL; if (is.atomic(v) && length(v) == 1L && !is.na(v)) v else NULL }
+      si  <- input[[paste0("shape_", vid)]] %||% imp1("shape")
+      fi <- input[[paste0("shape_filled_", vid)]] %||% (if (is.null(input[[paste0("shape_", vid)]])) imp1("shape_filled"))
       mk <- normalise_marker(if (!is.null(si)) si else default_sample_shape(i),     # v2.23.9: one rule, here (v2.26.1: the sidebar's cycle)
                              if (!is.null(fi)) fi else TRUE)
       shapes[i] <- mk$shape
@@ -15008,6 +15253,8 @@ server <- function(input, output, session) {
         colors[i] <- normalize_hex_color(input[[paste0("color_", vid)]])
       else if (!is.null(sel))
         colors[i] <- sel
+      else if (!is.null(imp1("color")) && !is.null(ic <- tryCatch(normalize_hex_color(as.character(imp1("color"))), error = function(e) NULL)))
+        colors[i] <- ic                             # v2.29.0: no row yet: the loaded file's colour
       else if (!is.null(paper_colour_of(vn)))      # v2.23.4: the paper style's colour for this sample name
         colors[i] <- paper_colour_of(vn)
       else if (!is.null(rv$palette_colors)) {
@@ -15017,13 +15264,13 @@ server <- function(input, output, session) {
       } else
         colors[i] <- def_colors[(i - 1) %% length(def_colors) + 1]
       
-      lt <- input[[paste0("line_type_", vid)]]
-      line_types[i] <- if (!is.null(lt)) lt else "solid"
+      lt <- input[[paste0("line_type_", vid)]] %||% imp1("line_type")
+      line_types[i] <- if (!is.null(lt)) as.character(lt) else "solid"
       
       leg_labels[i] <- display_name_of(vn, rv$display_names)   # v2.21: the display name (quick-edit strip)
       
 
-      gi <- input[[paste0("group_", vid)]]
+      gi <- input[[paste0("group_", vid)]] %||% imp1("group")
       groups[i] <- if (!is.null(gi) && length(gi) == 1 && !is.na(gi)) trimws(as.character(gi)) else ""
     }
     list(shapes = shapes, colors = colors, line_types = line_types,
@@ -15173,7 +15420,7 @@ server <- function(input, output, session) {
   # stays inside (panel_ctx$inside, set by with_panels_inside())
   panel_ctx <- new.env(parent = emptyenv()); panel_ctx$inside <- FALSE
   with_panels_inside <- function(expr) { old <- panel_ctx$inside; panel_ctx$inside <- TRUE; on.exit(panel_ctx$inside <- old, add = TRUE); expr }
-  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12, special_legend = FALSE, force_inside = FALSE, yrange = NULL) {
+  figure_theme_layers <- function(xy = NULL, n_entries = 0, log_y = FALSE, label_chars = 12, special_legend = FALSE, force_inside = FALSE, yrange = NULL, xrange = NULL) {
     force_inside <- isTRUE(force_inside) || isTRUE(panel_ctx$inside)
     tf      <- if (isTRUE(input$bold_title))        "bold"   else "plain"
     af      <- if (isTRUE(input$italic_axis_labels)) "italic" else "plain"
@@ -15240,7 +15487,8 @@ server <- function(input, output, session) {
         xy <- list(x = dd$x, y = if (log_y) 10^dd$y else dd$y, per_point = 8)
       }
       cnt <- if (is.null(xy)) c("top-left" = 0L)
-             else legend_corner_counts(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars), yrange = if (isTRUE(force_inside)) yrange)
+             else legend_corner_counts(xy$x, xy$y, log_y, box = inside_legend_box(n_entries, label_chars), yrange = if (isTRUE(force_inside)) yrange,
+                                       xrange = xrange)   # v2.29.0 (review A4): the corners of the panel as drawn (a typed x range), not of the data's own time range
       if (!is.null(xy$per_point)) cnt <- cnt / xy$per_point   # interpolated points -> data-point equivalents
       if (if (isTRUE(force_inside)) n_entries > PANEL_INSIDE_MAX_ENTRIES else (n_entries > INSIDE_LEGEND_MAX_ENTRIES || min(cnt) >= INSIDE_LEGEND_MAX_POINTS)) {
         layers <- c(layers, list(theme(legend.position = "right")))
@@ -15887,8 +16135,8 @@ server <- function(input, output, session) {
             mk <- marker_extent_pt(samples, aes_vals, colours = display_colors, size = nin("shape_size"), stroke = nin("point_stroke"))
             eb_mk <- eb_data; ix <- match(as.character(eb_mk$variable), mk$variable)
             eb_mk$kc_mk <- ifelse(is.na(ix), 0, mk$kc_mk[ix]); eb_mk$kc_mv <- ifelse(is.na(ix), 0, mk$kc_mv[ix])
-            mk_aes <- if (eb_col == "sample") aes(x = time, ymin = err_lo, ymax = err_hi, color = variable, kc_mk = kc_mk, kc_mv = kc_mv)
-                      else aes(x = time, ymin = err_lo, ymax = err_hi, group = variable, kc_mk = kc_mk, kc_mv = kc_mv)
+            mk_aes <- if (eb_col == "sample") aes(x = time, ymin = err_lo, ymax = err_hi, color = variable, kc_mk = kc_mk, kc_mv = kc_mv, x0 = time)
+                      else aes(x = time, ymin = err_lo, ymax = err_hi, group = variable, kc_mk = kc_mk, kc_mv = kc_mv, x0 = time)
             if (any(eb_mk$kc_mk > 0))
               p <- p + ggplot2::layer(data = eb_mk, mapping = mk_aes, stat = "identity", geom = GeomKcCapPastMarker, position = pos,
                                       inherit.aes = FALSE, show.legend = FALSE,
@@ -16170,14 +16418,33 @@ server <- function(input, output, session) {
     }
     # v2.28.1: "drop readings outside the axis" drops READINGS. An error bar whose mean is on the axis but one end runs past
     # a limit was deleted whole (ggplot removes the row); it now runs to the frame, as it does with "squish".
+    # v2.29.0 (review B5, P1): only a bar that CROSSES a limit is cut at it. A bar that lies entirely off the axis (the
+    # 25th-75th percentile bar of a skewed sample) is left out, not drawn as a dash on the frame; and a bar whose point is
+    # dropped is dropped with it (the log floor used to lift such a bar back onto the axis, with no point).
     if (identical(input$y_oob, "censor") && length(y_lims) == 2L && all(is.finite(y_lims))) {
       yl <- sort(y_lims)
       for (li in seq_along(p$layers)) {
         ly <- p$layers[[li]]
         if (!inherits(ly$geom, c("GeomErrorbar", "GeomLinerange")) || !is.data.frame(ly$data) || !all(c("err_lo", "err_hi", "mean_value") %in% names(ly$data))) next
         dd <- ly$data; on <- is.finite(dd$mean_value) & dd$mean_value >= yl[1] & dd$mean_value <= yl[2]
-        dd$err_lo[on] <- pmin(pmax(dd$err_lo[on], yl[1]), yl[2]); dd$err_hi[on] <- pmin(pmax(dd$err_hi[on], yl[1]), yl[2])
+        dd <- dd[on | !is.finite(dd$mean_value), , drop = FALSE]; on <- is.finite(dd$mean_value)
+        cross <- on & is.finite(dd$err_lo) & is.finite(dd$err_hi) & dd$err_hi >= yl[1] & dd$err_lo <= yl[2]
+        dd$err_lo[cross] <- pmin(pmax(dd$err_lo[cross], yl[1]), yl[2]); dd$err_hi[cross] <- pmin(pmax(dd$err_hi[cross], yl[1]), yl[2])
         ly$data <- dd
+      }
+    }
+    # v2.29.0 (review A1): x_oob keeps a cap end that reaches half a cap past a typed x limit. But a scale's oob sees every
+    # x of every layer, so a READING just beyond the limit (dense plate-reader runs) was moved onto the frame and drawn
+    # there with its own OD. Readings outside the typed range are left out here; only cap ends reach x_oob.
+    if (length(x_lims) == 2L && all(is.finite(x_lims))) {
+      xl <- sort(x_lims); x_tol <- 1e-9 * max(1, abs(xl))
+      x_is_time <- function(m) !is.null(m) && identical(tryCatch(rlang::as_label(m), error = function(e) ""), "time")
+      in_x <- function(d) if (is.data.frame(d) && is.numeric(d[["time"]])) d[is.na(d$time) | (d$time >= xl[1] - x_tol & d$time <= xl[2] + x_tol), , drop = FALSE] else d
+      base_x <- x_is_time(p$mapping$x)
+      if (base_x) p$data <- in_x(p$data)
+      for (li in seq_along(p$layers)) {
+        ly <- p$layers[[li]]
+        if (is.data.frame(ly$data) && (x_is_time(ly$mapping$x) || (is.null(ly$mapping$x) && isTRUE(ly$inherit.aes) && base_x))) ly$data <- in_x(ly$data)
       }
     }
 
@@ -16186,7 +16453,7 @@ server <- function(input, output, session) {
     p <- p + figure_theme_layers(xy = list(x = plot_data$time, y = plot_data$mean_value, g = plot_data$variable),
                                  n_entries = n_vars, log_y = identical(sel1("y_scale_type"), "log"),
                                  label_chars = max(nchar(unname(leg_labels)), 1), special_legend = TRUE,
-                                 force_inside = panel_inside, yrange = y_lims)   # v2.27.2: a panel's key stays inside
+                                 force_inside = panel_inside, yrange = y_lims, xrange = x_lims)   # v2.27.2: a panel's key stays inside
     # v2.24.1: a dashed / dotted / dot-dashed line needs a longer key to show its pattern (in the standard 4 mm key the
     # marker covers it, so a dashed and a solid sample looked the same in the legend). Only when such a line is drawn.
     if (!isTRUE(input$hide_lines) && any(!(as.character(line_types) %in% c("solid", "blank"))))
@@ -16215,7 +16482,12 @@ server <- function(input, output, session) {
         corner <- if (n_vars > PANEL_INSIDE_MAX_ENTRIES) NULL else tryCatch(
           facet_inside_corner(plot_data$time, plot_data$mean_value, plot_data$variable, plot_data$group, grp_map$levels, ncol = fnc_f,
                               log_y = identical(sel1("y_scale_type"), "log"),
-                              box = inside_legend_box(n_vars, max(nchar(unname(leg_labels)), 1)), yrange = y_lims),
+                              box = inside_legend_box(n_vars, max(nchar(unname(leg_labels)), 1)),
+                              # v2.29.0 (review A6): panels that share one y axis are measured against it (the range of all the
+                              # data when none is typed), not each against its own points
+                              yrange = y_lims %||% (if ((input$facet_scales %||% "fixed") %in% c("fixed", "free_x")) {
+                                yy <- plot_data$mean_value[is.finite(plot_data$mean_value) & (!identical(sel1("y_scale_type"), "log") | plot_data$mean_value > 0)]
+                                if (length(yy) >= 2L && diff(range(yy)) > 0) range(yy) })),
           error = function(e) NULL)
         p <- p + if (is.null(corner)) theme(legend.position = "right") else inside_legend_theme(corner)
       }
@@ -16930,7 +17202,9 @@ server <- function(input, output, session) {
                  if (!is.null(med))   paste0(" in ", med) else "",
                  if (!is.null(temp))  paste0(" at ", temp, " °C") else "", ".")
     # v2.23.1: each curve with its colour in words, its marker (only when points are drawn) and a non-solid line type
-    ss <- panel_samples_now(sel_samples()); lab_plain <- markup_to_plain(unname(aes_v$leg_labels[ss]))   # v2.26.0: the samples drawn
+    ss <- panel_samples_now(sel_samples())   # v2.26.0: the samples drawn
+    ss <- ss[ss %in% unique(as.character(pd$variable))]   # v2.29.0 (audit gap 4): a sample with no reading left (time filter, its own window, every replicate excluded) is not drawn, so not named
+    lab_plain <- markup_to_plain(unname(aes_v$leg_labels[ss]))
     cw <- colour_words(unname(aes_v$colors[ss]))      # v2.23.6: "dark blue" / "light blue" when two curves share a colour word
     s2 <- paste0("Curves: ", paste(vapply(seq_along(ss), function(i)
             legend_sample_text(lab_plain[i], aes_v$colors[[ss[i]]], aes_v$shapes[[ss[i]]], aes_v$filled_map[[ss[i]]], aes_v$line_types[[ss[i]]],
@@ -17010,6 +17284,8 @@ server <- function(input, output, session) {
   legend_samples_df <- function(drawn = TRUE) {
     ss <- sel_samples(); if (is.null(rv$data) || !length(ss)) return(NULL)
     if (isTRUE(drawn)) ss <- panel_samples_now(ss)   # v2.26.1: the samples the figure draws (a sample picked for no panel is left off, as in the legend text and key)
+    if (isTRUE(drawn)) { pd0 <- tryCatch(prepare_plot_data(), error = function(e) NULL)   # v2.29.0 (audit gap 4): nor a sample with no reading left
+                         if (!is.null(pd0) && nrow(pd0)) ss <- ss[ss %in% unique(as.character(pd0$variable))]; if (!length(ss)) return(NULL) }
     aes_v <- if (isTRUE(drawn)) resolve_aesthetics_drawn(ss) else resolve_aesthetics(ss); hex <- toupper(unname(aes_v$colors[ss]))
     sp <- isTRUE(input$show_points); sl <- !isTRUE(input$hide_lines)
     mk <- vapply(ss, function(s) if (sp) legend_marker_words(aes_v$shapes[[s]], aes_v$filled_map[[s]]) else NA_character_, "", USE.NAMES = FALSE)
@@ -17052,13 +17328,121 @@ server <- function(input, output, session) {
 
   # ── v2.23.1: the legend key of every figure ─────────────────────────────────
   # legend_key_grob() / write_legend_key() do the work; each figure tab has a thin download handler of the same two
-  # helpers. A figure with no legend of its own (the metric summary, the time-to-threshold bars ...) gets the main
-  # figure's key: the colours, markers and names are by sample, so the key is the same.
+  # helpers. A figure with no legend of its own (the metric summary, the time-to-threshold bars ...) gets a key made
+  # from what it draws (v2.29.0, figure_key_entries(); it used to get the main figure's key, which was not the same).
   legend_key_for <- function(p) {
     if (inherits(p, "gtable") && !is.null(attr(p, "width_in"))) return(p)   # v2.26.0: already a key (main_legend_key)
     k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
-    if (is.null(k)) k <- legend_key_grob(generate_plot())
+    # v2.29.0 (audit gap 1): a figure with no legend of its own (the metric summary, AUC, time to threshold ...) used to get
+    # the MAIN figure's key: samples the figure had dropped, filled markers and lines it does not draw, another order, other
+    # colours. Its key is now made from what the figure itself draws (figure_key_entries()).
+    if (is.null(k)) k <- tryCatch(key_from_entries(figure_key_entries(p)), error = function(e) NULL)
     k
+  }
+  # ── v2.29.0: what a figure's legend says, read from the figure itself ───────────────────────────────────────────────
+  # One row per entry of the figure's discrete colour (else fill, else shape) scale, as built: the label shown, the colour,
+  # and the marker / fill / line the figure's own scales or layers give it. A layer drawn with show.legend = FALSE (the
+  # replicate points behind the means) does not make a glyph. On a figure whose x axis lists the samples the entries are in
+  # that order. NULL for a figure with no such scale (a heatmap's colour bar).
+  figure_key_entries <- function(p) {
+    if (!inherits(p, "ggplot") || is_placeholder_plot(p)) return(NULL)
+    b <- tryCatch(kc_with_scratch_device(function() ggplot2::ggplot_build(p)), error = function(e) NULL)
+    if (is.null(b)) return(NULL)
+    disc <- function(ae) { sc <- b$plot$scales$get_scales(ae); if (!is.null(sc) && isTRUE(tryCatch(sc$is_discrete(), error = function(e) FALSE))) sc else NULL }
+    brk  <- function(sc) { v <- tryCatch(sc$get_breaks(), error = function(e) NULL); as.character(v[!is.na(v)]) }
+    main <- NULL; main_ae <- ""
+    for (ae in c("colour", "fill", "shape")) { sc <- disc(ae); if (!is.null(sc) && length(brk(sc))) { main <- sc; main_ae <- ae; break } }
+    if (is.null(main)) {
+      # one panel per sample and no colour scale (the replicate small multiples): each panel's name with the colour of its boldest line
+      lay <- b$layout$layout; fv <- setdiff(names(lay), c("PANEL", "ROW", "COL", "SCALE_X", "SCALE_Y", "COORD"))
+      li <- which(vapply(p$layers, function(l) inherits(l$geom, c("GeomLine", "GeomPath")), NA))
+      if (length(fv) != 1L || !length(li) || nrow(lay) < 2L) return(NULL)
+      lw <- vapply(li, function(i) suppressWarnings(max(as.numeric(b$data[[i]]$linewidth), na.rm = TRUE)), 0); d <- b$data[[li[which.max(lw)]]]
+      col <- vapply(as.character(lay$PANEL), function(pn) { v <- as.character(d$colour[as.character(d$PANEL) == pn]); if (length(v)) v[1] else NA_character_ }, "", USE.NAMES = FALSE)
+      nm <- as.character(lay[[fv]]); ok <- !is.na(col) & !is.na(nm)
+      if (!any(ok)) return(NULL)
+      en <- data.frame(key = nm[ok], label = vapply(nm[ok], function(x) markup_to_plain(x), "", USE.NAMES = FALSE), colour = col[ok], fill = NA_character_, pch = NA_integer_,
+                       shape = NA_integer_, filled = TRUE, linetype = "solid", stringsAsFactors = FALSE)
+      attr(en, "has_point") <- FALSE; attr(en, "has_line") <- TRUE; attr(en, "has_bar") <- FALSE
+      return(en)
+    }
+    keys <- brk(main)
+    lab <- tryCatch(main$get_labels(keys), error = function(e) keys)
+    lab <- vapply(seq_along(keys), function(i) { x <- tryCatch(lab[[i]], error = function(e) keys[i]); x <- markup_to_plain(paste(as.character(x), collapse = "")); if (nzchar(x)) x else keys[i] }, "")
+    mapv <- function(ae) { sc <- disc(ae); if (is.null(sc) || !all(keys %in% brk(sc))) return(NULL)
+                           v <- tryCatch(sc$map(keys), error = function(e) NULL); if (length(v) == length(keys)) v else NULL }
+    ly  <- p$layers; vis <- ly[!vapply(ly, function(l) isFALSE(l$show.legend), NA)]; use <- if (length(vis)) vis else ly
+    is_g <- function(l, cl) inherits(l$geom, cl)
+    pts <- Filter(function(l) is_g(l, c("GeomPoint", "GeomPointrange")), use)
+    lns <- Filter(function(l) is_g(l, c("GeomLine", "GeomPath", "GeomStep")) && !is_g(l, "GeomErrorbar"), use)
+    bars <- Filter(function(l) is_g(l, c("GeomBar", "GeomCol", "GeomRect", "GeomTile", "GeomBoxplot")), use)   # bars / boxes carry the sample colour: their glyph is the filled box
+    one <- function(l, k, d) { v <- if (length(l)) l[[1]]$aes_params[[k]] else NULL; if (is.atomic(v) && length(v) == 1L && !is.na(v)) v else d }
+    col  <- if (identical(main_ae, "shape")) rep("#000000", length(keys)) else as.character(tryCatch(main$map(keys), error = function(e) rep("#000000", length(keys))))
+    fill <- mapv("fill") %||% rep(one(pts, "fill", NA), length(keys))
+    pch  <- suppressWarnings(as.integer(mapv("shape") %||% rep(one(pts, "shape", 19L), length(keys))))
+    lty  <- as.character(mapv("linetype") %||% rep(one(lns, "linetype", "solid"), length(keys)))
+    # the marker as the app names it: its base form and whether it is drawn filled (21-25 with a white / no fill, and 0-6, are open)
+    white <- function(f) is.na(f) || tolower(as.character(f)) %in% c("white", "#ffffff", "#ffffffff", "transparent", "na")
+    base <- c("21" = 16L, "19" = 16L, "20" = 16L, "1" = 16L, "22" = 15L, "0" = 15L, "24" = 17L, "2" = 17L, "23" = 18L, "5" = 18L, "6" = 25L)
+    filled <- vapply(seq_along(keys), function(i) if (is.na(pch[i])) TRUE else if (pch[i] %in% 21:25) !white(fill[i]) else !(pch[i] %in% c(0L, 1L, 2L, 5L, 6L)), NA)
+    shp <- vapply(pch, function(v) if (is.na(v)) NA_integer_ else if (as.character(v) %in% names(base)) base[[as.character(v)]] else v, 1L)
+    en <- data.frame(key = keys, label = lab, colour = col, fill = as.character(fill), pch = pch, shape = shp, filled = filled, linetype = lty, stringsAsFactors = FALSE)
+    attr(en, "has_bar") <- length(bars) > 0L; attr(en, "has_point") <- length(pts) > 0L && !length(bars); attr(en, "has_line") <- length(lns) > 0L && !length(bars)
+    # the order of a figure whose x axis lists the samples
+    xo <- tryCatch({ xs <- b$layout$panel_params[[1]]$x; as.character(xs$get_labels()) }, error = function(e) character(0))
+    xo <- vapply(xo, function(x) markup_to_plain(paste(as.character(x), collapse = "")), "", USE.NAMES = FALSE)
+    if (length(xo) && all(en$label %in% xo) && !anyDuplicated(en$label)) { o <- order(match(en$label, xo)); a <- attributes(en)[c("has_point", "has_line", "has_bar")]; en <- en[o, , drop = FALSE]; for (k in names(a)) attr(en, k) <- a[[k]] }
+    en
+  }
+  # A key drawn from those entries, in the figure's font: for a figure that has no legend to cut a key from.
+  key_from_entries <- function(en) {
+    if (is.null(en) || !nrow(en)) return(NULL)
+    labs <- make.unique(en$label); d <- data.frame(lab = factor(labs, levels = labs), x = seq_along(labs), y = 1)
+    v <- function(x) stats::setNames(x, labs)
+    g <- ggplot2::ggplot(d, ggplot2::aes(x, y, colour = lab)) + ggplot2::scale_colour_manual(values = v(en$colour), name = NULL)
+    if (isTRUE(attr(en, "has_line"))) g <- g + ggplot2::geom_line(ggplot2::aes(linetype = lab, group = lab), linewidth = nin("line_thickness", 0.5)) +
+        ggplot2::scale_linetype_manual(values = v(en$linetype), name = NULL)
+    if (isTRUE(attr(en, "has_point")) || isTRUE(attr(en, "has_bar")) || !isTRUE(attr(en, "has_line"))) {
+      bar <- isTRUE(attr(en, "has_bar"))
+      pch <- if (bar) rep(22L, nrow(en)) else ifelse(is.na(en$pch), 19L, en$pch)
+      fl  <- if (bar) ifelse(is.na(en$fill) | en$fill == "NA", en$colour, en$fill) else ifelse(is.na(en$fill) | en$fill == "NA", en$colour, en$fill)
+      g <- g + ggplot2::geom_point(ggplot2::aes(shape = lab, fill = lab), size = if (bar) 3 else max(nin("shape_size", 1.5), 1.2), stroke = nin("point_stroke", 0.5)) +
+        ggplot2::scale_shape_manual(values = v(pch), name = NULL) + ggplot2::scale_fill_manual(values = v(fl), name = NULL)
+    }
+    fam <- sel1("font_family", "sans"); pt <- nin("legend_font_size", 7)
+    g <- g + ggplot2::theme_void() + ggplot2::theme(legend.position = "right", legend.text = ggplot2::element_text(family = fam, size = pt, colour = "black"),
+                                                   legend.key.size = grid::unit(max(nin("legend_key_mm", 4), 3), "mm"), legend.key = ggplot2::element_blank())
+    legend_key_grob(g)
+  }
+  # The Compose figure's key (audit gap 2): the key of each composed panel, stacked under the panel's letter and name; one
+  # key when every panel says the same. It used to be the main figure's key whatever was composed.
+  compose_panel_titles <- function(nms) {
+    kind <- sub(":.*$", "", nms); own <- ifelse(grepl(":", nms, fixed = TRUE), sub("^[^:]*:", "", nms), "")
+    nm <- names(COMPOSE_PANEL_CHOICES)[match(kind, COMPOSE_PANEL_CHOICES)]; nm[is.na(nm)] <- kind[is.na(nm)]
+    nm <- ifelse(nzchar(own), markup_to_plain(own), nm)
+    tag <- if (isTRUE(input$compose_tags %||% TRUE)) (if (identical(input$compose_tag_case %||% "a", "A")) LETTERS else letters)[seq_along(nms)] else rep("", length(nms))
+    tag[is.na(tag)] <- ""
+    trimws(paste(tag, nm))
+  }
+  compose_legend_key <- function() {
+    pl <- compose_info()$panels
+    if (!length(pl)) return(NULL)
+    keys <- lapply(pl, function(z) tryCatch(legend_key_for(z), error = function(e) NULL))
+    sig  <- vapply(pl, function(z) { en <- tryCatch(figure_key_entries(z), error = function(e) NULL)
+                                     if (is.null(en)) "" else paste(c(do.call(paste, c(en[c("label", "colour", "fill", "pch", "linetype")], sep = "|")), unlist(attributes(en)[c("has_point", "has_line", "has_bar")])), collapse = ";") }, "")
+    ok <- !vapply(keys, is.null, NA)
+    if (!any(ok)) return(NULL)
+    if (length(unique(sig[ok])) == 1L && all(nzchar(sig[ok]))) return(keys[ok][[1]])
+    stack_legend_keys(keys, compose_panel_titles(names(pl)), font = sel1("font_family", "sans"), size = nin("legend_font_size", 7))
+  }
+  compose_legend_text <- function() {
+    pl <- compose_info()$panels
+    if (!length(pl)) return("")
+    tx <- vapply(pl, function(z) tryCatch(figure_legend_text_for(z), error = function(e) ""), "")
+    ok <- nzchar(tx)
+    if (!any(ok)) return("")
+    if (length(unique(tx[ok])) == 1L) return(unname(tx[ok][1]))
+    paste(paste0(compose_panel_titles(names(pl))[ok], ": ", tx[ok]), collapse = " ")
   }
   # v2.26.0: the main figure's key. When "A legend in each panel" draws a sample differently in some panel, the key is the
   # panels' own keys stacked (each under its letter and name), so it matches what each panel shows.
@@ -17127,7 +17511,7 @@ server <- function(input, output, session) {
   output$downloadAnalysisLegendKey <- legend_key_download(function() sel1("analysis_type", "figure"),
                                                           function() generate_analysis_plot(sel1("analysis_type", "metric_summary")))
   output$downloadFitLegendKey      <- legend_key_download(function() "fit", function() generate_analysis_plot("fit_overlay"))
-  output$downloadComposeLegendKey  <- legend_key_download(function() "compose", function() generate_plot())   # the composed panels share the main figure's colours and names
+  output$downloadComposeLegendKey  <- legend_key_download(function() "compose", function() compose_legend_key() %||% legend_key_for(generate_plot()))   # v2.29.0: the composed panels' own keys
   output$downloadCompareLegendKey  <- legend_key_download(function() "compare", function() { req(rv_cmp$ds); generate_compare_plot() })
 
   # ── Analysis figures (v2.11) ─────────────────────────────────────────────────
@@ -18124,43 +18508,45 @@ server <- function(input, output, session) {
   }
   # v2.28.3: the legend text starter of any figure: its samples (those in its colour / fill / shape legend), each with the
   # colour, marker and line it is drawn with, in words: "WT (black, filled circles); lysA (orange, filled squares)"
+  # v2.29.0 (review B3, B6; audit gap 3): read from the figure's own scales and layers (figure_key_entries()), not from
+  # the main file's selection and the main figure's styles. A renamed sample, a sample that is only in the second file of
+  # a Compare figure, open circles where the figure draws open circles, no markers where it draws none.
   figure_legend_text_for <- function(p, drawn = FALSE) {
-    if (!inherits(p, "ggplot") || is_placeholder_plot(p)) return("")
-    b <- tryCatch(kc_with_scratch_device(function() ggplot2::ggplot_build(p)), error = function(e) NULL)
-    if (is.null(b)) return("")
-    all_s <- sel_samples(); keys <- character(0)
-    for (ae in c("colour", "fill", "shape")) {
-      sc <- b$plot$scales$get_scales(ae)
-      if (!is.null(sc)) { br <- tryCatch(as.character(sc$get_breaks()), error = function(e) character(0)); keys <- c(keys, intersect(br[!is.na(br)], all_s)) }
-    }
-    keys <- unique(keys)
-    if (!length(keys)) {   # v2.28.3: a figure whose legend entries are not sample names (Compare overlay keys): its colour legend as drawn
-      sc <- b$plot$scales$get_scales("colour") %||% b$plot$scales$get_scales("fill")
-      if (is.null(sc)) return("")
-      br <- tryCatch(sc$get_breaks(), error = function(e) NULL); br <- br[!is.na(br)]
-      if (!length(br)) return("")
-      lb <- tryCatch(sc$get_labels(br), error = function(e) as.character(br)); cl <- tryCatch(sc$map(br), error = function(e) rep(NA, length(br)))
-      lb <- vapply(lb, function(x) markup_to_plain(paste(as.character(x), collapse = "")), "")
-      return(paste0(paste(paste0(lb, " (", colour_words(cl), ")"), collapse = "; "), "."))
-    }
-    av <- if (isTRUE(drawn)) resolve_aesthetics_drawn(keys) else resolve_aesthetics(keys)   # v2.28.3: the lysis curve as drawn (matched panels)
-    geoms <- vapply(p$layers, function(l) class(l$geom)[1], "")
-    pts <- any(geoms %in% c("GeomPoint", "GeomPointrange")); lns <- any(geoms %in% c("GeomLine", "GeomPath", "GeomStep"))
-    cw <- colour_words(unname(av$colors[keys]))
-    paste0(paste(vapply(seq_along(keys), function(i) legend_sample_text(markup_to_plain(unname(av$leg_labels[[keys[i]]])), av$colors[[keys[i]]],
-                                                                        av$shapes[[keys[i]]], av$filled_map[[keys[i]]], av$line_types[[keys[i]]],
-                                                                        show_points = pts, show_lines = lns, word = cw[i]), ""), collapse = "; "), ".")
+    en <- tryCatch(figure_key_entries(p), error = function(e) NULL)
+    if (is.null(en) || !nrow(en)) return("")
+    cw <- colour_words(en$colour)
+    pts <- isTRUE(attr(en, "has_point")); lns <- isTRUE(attr(en, "has_line"))
+    main <- paste0(paste(vapply(seq_len(nrow(en)), function(i) legend_sample_text(en$label[i], en$colour[i], en$shape[i], en$filled[i], en$linetype[i],
+                                                                                 show_points = pts, show_lines = lns, word = cw[i]), ""), collapse = "; "), ".")
+    # a line type that tells something else apart (the two files of a Compare overlay)
+    extra <- tryCatch({
+      b <- kc_with_scratch_device(function() ggplot2::ggplot_build(p)); sc <- b$plot$scales$get_scales("linetype")
+      if (is.null(sc) || !isTRUE(sc$is_discrete())) "" else {
+        bk <- sc$get_breaks(); bk <- as.character(bk[!is.na(bk)])
+        if (!length(bk) || all(bk %in% en$key)) "" else {
+          lb <- vapply(sc$get_labels(bk), function(x) markup_to_plain(paste(as.character(x), collapse = "")), "")
+          lt <- as.character(sc$map(bk)); w <- vapply(lt, function(x) { z <- legend_line_words(x); if (is.na(z)) "solid line" else z }, "")
+          paste0(" Lines: ", paste(paste0(lb, " (", w, ")"), collapse = "; "), ".") } } }, error = function(e) "")
+    paste0(main, extra)
   }
-  key_text_ui <- function(fig, drawn = FALSE) {
-    txt <- tryCatch(figure_legend_text_for(fig, drawn), error = function(e) "")
-    if (!nzchar(txt)) return(p(class = "kc-leg-help", style = "font-size:.8em;", "No legend on this figure to describe."))
+  key_text_box <- function(txt) {
+    if (!is.character(txt) || length(txt) != 1L || !nzchar(txt)) return(p(class = "kc-leg-help", style = "font-size:.8em;", "No legend on this figure to describe."))
     tagList(tags$label(style = "font-size:.85em;margin-top:4px;", "Legend text starter (copy and edit):"),
             tags$textarea(class = "form-control", readonly = NA, rows = 3, style = "font-size:.82em;", `aria-label` = "Legend text starter", txt))
   }
+  key_text_ui <- function(fig, drawn = FALSE) key_text_box(tryCatch(figure_legend_text_for(fig, drawn), error = function(e) ""))
+  # v2.29.0 (review B3): Compare side by side is two panels: each file's samples under its own name
+  compare_legend_text <- function() {
+    pl <- tryCatch(compare_facet_plots(), error = function(e) NULL)
+    if (!length(pl)) return(tryCatch(figure_legend_text_for(generate_compare_plot()), error = function(e) ""))
+    lab <- compare_labels_now(); tx <- vapply(pl, function(z) tryCatch(figure_legend_text_for(z), error = function(e) ""), "")
+    nm <- c(as.character(lab[["A"]]), as.character(lab[["B"]]))[seq_along(tx)]
+    paste(paste0(nm, ": ", tx)[nzchar(tx)], collapse = " ")
+  }
   output$analysis_legend_text <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot(sel1("analysis_type", "metric_summary"))) })
   output$fit_legend_text      <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_analysis_plot("fit_overlay")) })
-  output$compare_legend_text  <- renderUI({ req(rv$data, sel_samples(), rv_cmp$ds); key_text_ui(generate_compare_plot()) })
-  output$compose_legend_text  <- renderUI({ req(rv$data, sel_samples()); key_text_ui(generate_plot(), drawn = TRUE) })
+  output$compare_legend_text  <- renderUI({ req(rv$data, sel_samples(), rv_cmp$ds); key_text_box(tryCatch(compare_legend_text(), error = function(e) "")) })
+  output$compose_legend_text  <- renderUI({ req(rv$data, sel_samples()); key_text_box(tryCatch(compose_legend_text(), error = function(e) "")) })   # v2.29.0: what the composed panels draw
   generate_analysis_plot <- function(type = sel1("analysis_type", "metric_summary")) {
     req(rv$data, sel_samples())
     tryCatch({
@@ -18301,6 +18687,7 @@ server <- function(input, output, session) {
     }
     list(plot = fig, n = n, ncol = ncol, rows = rows, skipped = skipped,
          types = unique(sub(":.*$", "", names(plots))), width_mm = sz_mm[1], height_mm = sz_mm[2],
+         panels = plots,   # v2.29.0: the composed panels themselves (their keys and legend text)
          size_clamped = isTRUE(attr(sz_mm, "clamped")))
   })
   compose_size_in <- function() { i <- compose_info(); c(safe_figure_size_in(i$width_mm / 25.4, i$height_mm / 25.4)) }
@@ -20127,6 +20514,8 @@ server <- function(input, output, session) {
         ggsave(file.path(dir, "figure_composed.svg"), plot = comp$plot, device = export_device("svg"),
                width = comp$width_mm, height = comp$height_mm, units = "mm", bg = "white", limitsize = FALSE)
         made <- c(made, "figure_composed.svg")
+        ck <- tryCatch(compose_legend_key(), error = function(e) NULL)   # v2.29.0 (audit gap 2): the composed figure's own key
+        if (!is.null(ck)) { write_legend_key(ck, file.path(dir, "legend_key_figure_composed.svg"), "svg"); made <- c(made, "legend_key_figure_composed.svg") }
       }
       write_json(settings_json_list(), file.path(dir, "settings.json"), pretty = TRUE, auto_unbox = TRUE)
       rp <- prepare_replicate_data()
@@ -20216,7 +20605,7 @@ server <- function(input, output, session) {
         skipped <<- c(skipped, paste0(label, ": ", friendly_error_message(e))))
       # v2.28.3: every figure's own legend key next to it (legend_key_<stem>.svg / .png), per the legend-key rule
       key_pair <- function(p, stem) {
-        k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
+        k <- tryCatch(legend_key_for(p), error = function(e) NULL)   # v2.29.0: a figure with no legend of its own gets its key too
         if (!is.null(k)) for (fmt in c("svg", "png"))
           write_legend_key(k, file.path(dir, paste0("legend_key_", stem, ".", fmt)), fmt, export_dpi_for(fmt, attr(k, "width_in"), attr(k, "height_in")))
       }
@@ -20247,6 +20636,8 @@ server <- function(input, output, session) {
         if (is.null(comp$plot)) skipped <- c(skipped, "Composed figure: no panel is available for this selection.")
         else {
           write_pair(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+          ck <- tryCatch(compose_legend_key(), error = function(e) NULL)   # v2.29.0 (audit gap 2): the composed figure's own key
+          if (!is.null(ck)) key_pair(ck, composed_file_stem(c(comp$width_mm, comp$height_mm)))
           if (length(comp$skipped))
             skipped <- c(skipped, paste0("Composed figure, panel left out: ", comp$skipped))
         }
@@ -20791,9 +21182,44 @@ server <- function(input, output, session) {
     nms <- theme_list()
     sel <- selected %||% isolate(sel1("active_theme", "")) %||% ""
     if (!(sel %in% nms)) sel <- ""
-    updateSelectInput(session, "active_theme", choices = c("None" = "", setNames(nms, theme_display_names(nms))), selected = sel)
+    ch <- c("None" = "", setNames(nms, theme_display_names(nms)))
+    updateSelectInput(session, "active_theme", choices = ch, selected = sel)
+    updateSelectInput(session, "qe_scheme",    choices = ch, selected = sel)   # v2.29.0: the same list in the Quick edit strip
+    scheme_rev(isolate(scheme_rev()) + 1L)
     invisible(nms)
   }
+  # ── v2.29.0: colour scheme for a paper ─────────────────────────────────────────────────────────────
+  # The active scheme (a theme file) as read now, or NULL. scheme_rev is bumped whenever a file is written or removed.
+  scheme_rev <- reactiveVal(0L)
+  scheme_now <- function() {
+    scheme_rev()
+    key <- sel1("active_theme", "")
+    if (is.null(key) || !nzchar(key)) return(NULL)
+    th <- tryCatch(theme_read(key), error = function(e) NULL)
+    if (is.null(th)) NULL else c(th, list(key = key))
+  }
+  # The colours offered where a sample's colour is picked: the active scheme's, else those of the Color Palette menu
+  # (or the default colours), so the swatches are useful with no scheme too.
+  scheme_palette_now <- function() {
+    sc <- scheme_now()
+    if (!is.null(sc) && length(sc$palette)) return(utils::head(sc$palette, SCHEME_PALETTE_MAX))
+    n <- max(length(rv$od_vars), 1L); pal <- palette_in()
+    utils::head(unique(toupper(normalize_hex_color_vec(if (!identical(pal, "custom")) get_palette_colors(pal, max(n, 8L)) else default_sample_colours(max(n, 12L))))), SCHEME_PALETTE_MAX)
+  }
+  # With matched panels (Sample styles across panels) a sample of a later panel is DRAWN in the colour of its match in the
+  # first panel. sample -> the sample whose colour it is drawn in (itself when it follows nobody, or with panels off).
+  scheme_leaders <- function(samps) {
+    id <- stats::setNames(as.character(samps), as.character(samps))
+    mode <- isolate(sel1("panel_style_match", "own"))
+    if (!isTRUE(isolate(input$facet_by_group)) || !mode %in% c("line", "fill", "same") || !length(samps)) return(id)
+    tryCatch(isolate({
+      full <- sel_samples(); fa <- resolve_aesthetics(full); drawn <- panel_samples_now(full)
+      ld <- panel_style_leaders(drawn, panel_membership_now(drawn, fa, min_panels = 2L))$leader
+      hit <- intersect(names(ld), names(id)); id[hit] <- unname(ld[hit]); id
+    }), error = function(e) id)
+  }
+  normalize_hex_color_vec <- function(x) vapply(x, function(v) tryCatch(grDevices::rgb(t(grDevices::col2rgb(v)), maxColorValue = 255), error = function(e) "#000000"), "", USE.NAMES = FALSE)
+  scheme_last <- new.env(parent = emptyenv()); scheme_last$filled <- 0L
   refresh_theme_choices()
   # the style of each loaded sample: colour (the quick-edit colour wins), shape, filled, line type, display name
   collect_sample_aesthetics <- function(samps) {
@@ -20804,10 +21230,32 @@ server <- function(input, output, session) {
            line_type = unname(aes_v$line_types[[vn]]), legend_label = unname(aes_v$leg_labels[[vn]])))
   }
   # Save the current styles of the loaded samples as a theme; the key (file name) or NULL
+  # v2.29.0: the save ADDS these samples to the scheme (theme_write merges). The scheme's colours: what is typed in the
+  # "Colours of the scheme" box, else the colours the file already has, else the palette in use; a colour a sample uses
+  # is always one of them.
   theme_save_current <- function(name) {
     samps <- rv$od_vars
-    if (is.null(samps) || !length(samps)) stop("Load data before saving a theme.")
-    theme_write(name, collect_sample_aesthetics(samps), qe_colors = rv$qe_colors, display_names = rv$display_names)
+    if (is.null(samps) || !length(samps)) {                      # no data yet: a scheme of the typed colours alone
+      typed0 <- theme_palette_clean(isolate(input$theme_palette))
+      if (!length(typed0)) stop("Load data, or type the scheme's colours, before saving a colour scheme.")
+      key0 <- theme_write(name, list(), palette = typed0); scheme_rev(isolate(scheme_rev()) + 1L)
+      return(key0)
+    }
+    aes_map <- collect_sample_aesthetics(samps)
+    prior <- tryCatch(theme_read(theme_key(name)), error = function(e) NULL)
+    typed <- theme_palette_clean(isolate(input$theme_palette))
+    same_as_active <- identical(theme_key(name), isolate(sel1("active_theme", "")))
+    base  <- if (length(typed) && (same_as_active || is.null(prior))) typed
+             else if (!is.null(prior) && isTRUE(prior$has_palette)) prior$palette
+             else isolate(scheme_palette_now())
+    # a sample drawn in its match's colour (matched panels) is kept in THAT colour: the scheme holds the colours the
+    # figures show, and its own unseen colour does not count as taken
+    qe <- rv$qe_colors; ld <- scheme_leaders(samps)
+    for (f in samps[ld[samps] != samps]) if (!is.null(lc <- aes_map[[ld[[f]]]]$color)) { aes_map[[f]]$color <- lc; qe[[f]] <- lc }
+    used  <- theme_palette_clean(unlist(lapply(aes_map, function(a) a$color)))
+    key <- theme_write(name, aes_map, qe_colors = qe, display_names = rv$display_names, palette = unique(c(base, used)))
+    scheme_rev(isolate(scheme_rev()) + 1L)
+    key
   }
   # Apply a saved theme to the samples whose names match; the number of samples styled
   theme_apply_named <- function(name, samps = rv$od_vars) {
@@ -20816,7 +21264,28 @@ server <- function(input, output, session) {
     m <- theme_for_samples(th, samps)
     aes_map <- m$sample_aesthetics
     for (vn in names(m$qe_colors)) aes_map[[vn]]$color <- m$qe_colors[[vn]]
-    apply_sample_aes(aes_map, samps, via_qe = TRUE)
+    k <- apply_sample_aes(aes_map, samps, via_qe = TRUE)
+    # v2.29.0: loaded samples the scheme does not know take its next free colours (a scheme with its own colours only:
+    # a theme saved before v2.29 styles the names it knows and nothing else, as it always did)
+    scheme_last$filled <- 0L
+    rest <- setdiff(intersect(as.character(samps), isolate(rv$od_vars)), m$matched)
+    if (isTRUE(th$has_palette) && length(rest)) {
+      # a sample that is drawn in its match's colour (matched panels) takes no colour of the scheme: it gets its match's,
+      # so the scheme's colours are spent on the curves that show them
+      ld <- scheme_leaders(isolate(rv$od_vars)); fol <- rest[ld[rest] != rest & ld[rest] %in% isolate(rv$od_vars)]; own <- setdiff(rest, fol)
+      cols <- stats::setNames(scheme_free_colours(th, length(own)), own)
+      got <- c(vapply(aes_map, function(a) as.character(a$color %||% NA_character_), ""), cols)
+      folc <- got[ld[fol]]; names(folc) <- fol; folc <- folc[!is.na(folc)]
+      fill <- c(cols, folc)
+      scheme_last$filled <- if (length(fill)) apply_sample_aes(lapply(fill, function(cc) list(color = unname(cc))), names(fill), via_qe = TRUE) else 0L
+    }
+    k
+  }
+  # what an apply did, in one sentence (k samples matched by name, scheme_last$filled given the scheme's free colours)
+  scheme_applied_message <- function(key, k) {
+    nm <- unname(theme_display_names(key)); f <- scheme_last$filled %||% 0L
+    paste0(sprintf("Colour scheme '%s': %d of %d samples matched by name", nm, k, length(rv$od_vars)),
+           if (f > 0L) sprintf("; %d the scheme does not know took its next free colours (Save colours to scheme keeps them)", f) else "", ".")
   }
   theme_autoapply_on_load <- function() {
     key <- isolate(sel1("active_theme", ""))
@@ -20824,30 +21293,118 @@ server <- function(input, output, session) {
     tryCatch({
       k <- theme_apply_named(key, rv$od_vars)
       if (is.na(k)) showNotification(theme_problem_message(key), type = "warning")
-      else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
+      else showNotification(scheme_applied_message(key, k), type = "message")
     }, error = function(e) invisible(NULL))
     invisible(NULL)
   }
-  observeEvent(input$save_theme, {
-    nm <- trimws(input$theme_name %||% "")
-    if (!nzchar(theme_key(nm))) { showNotification("Enter a theme name before saving.", type = "warning"); return() }
+  scheme_save_named <- function(nm) {
+    if (!nzchar(theme_key(nm))) { showNotification("Enter a name for the colour scheme before saving.", type = "warning"); return(invisible(NULL)) }
+    known <- length(tryCatch(theme_read(theme_key(nm)), error = function(e) NULL)$sample_aesthetics)
     key <- tryCatch(theme_save_current(nm), error = function(e) { showNotification(conditionMessage(e), type = "warning"); NULL })
-    if (is.null(key)) return()
+    if (is.null(key)) return(invisible(NULL))
     refresh_theme_choices(selected = key)
-    showNotification(sprintf("Theme '%s' saved (%d samples).", key, length(rv$od_vars)), type = "message")
-  })
-  observeEvent(input$apply_theme, {
+    th <- theme_read(key)
+    updateTextInput(session, "theme_palette", value = paste(th$palette, collapse = ", "))
+    showNotification(sprintf("Colour scheme '%s' saved: %d samples of this file%s; %d colours.", unname(theme_display_names(key)), length(rv$od_vars),
+                             if (known > 0L) sprintf(" added to the %d it had (%d in all)", known, length(th$sample_aesthetics)) else "", length(th$palette)),
+                     type = "message")
+    invisible(key)
+  }
+  scheme_apply_active <- function() {
     key <- sel1("active_theme", "")          # round 4: a saved theme only ("../../x" or a list is not one: it used to reach another theme's file)
-    if (!nzchar(key)) { showNotification("Select a theme first.", type = "warning"); return() }
+    if (!nzchar(key)) { showNotification("Choose a colour scheme first (or save the colours in use as one).", type = "warning"); return(invisible(NULL)) }
     k <- theme_apply_named(key, rv$od_vars)
     if (is.na(k)) showNotification(theme_problem_message(key), type = "warning")
-    else showNotification(sprintf("Theme '%s': styles applied to %d of %d samples.", key, k, length(rv$od_vars)), type = "message")
+    else showNotification(scheme_applied_message(key, k), type = "message")
+    invisible(k)
+  }
+  observeEvent(input$save_theme, scheme_save_named(trimws(input$theme_name %||% "")))
+  observeEvent(input$apply_theme, scheme_apply_active())
+  # v2.29.0: the same from the Quick edit strip. Save writes to the scheme chosen there; with none chosen it asks for a name.
+  observeEvent(input$qe_scheme_apply, scheme_apply_active())
+  observeEvent(input$qe_scheme_save, {
+    if (is.null(rv$od_vars) || !length(rv$od_vars)) { showNotification("Load data before saving a colour scheme.", type = "warning"); return() }
+    key <- sel1("active_theme", "")
+    if (nzchar(key)) { scheme_save_named(unname(theme_display_names(key))); return() }
+    showModal(modalDialog(title = "New colour scheme", size = "s", easyClose = TRUE,
+                          textInput("qe_scheme_name", "Name (for example the paper's short title):", ""),
+                          p(class = "kc-qe-note", "It keeps each sample's colour, marker, line and display name by sample name, and the colours in use as the scheme's colours."),
+                          footer = tagList(modalButton("Cancel"), actionButton("qe_scheme_name_ok", "Save", class = "btn-primary"))))
+  })
+  observeEvent(input$qe_scheme_name_ok, {
+    nm <- input$qe_scheme_name; nm <- if (is.character(nm) && length(nm) == 1L && !is.na(nm)) trimws(substr(nm, 1L, 120L)) else ""
+    if (!nzchar(theme_key(nm))) { showNotification("Enter a name for the colour scheme.", type = "warning"); return() }
+    removeModal()
+    scheme_save_named(nm)
+  })
+  # the two scheme menus (sidebar, strip) show the same scheme; the colour box shows the chosen scheme's colours
+  observeEvent(input$qe_scheme, {
+    v <- sel1("qe_scheme", "") %||% ""
+    if (!identical(v, sel1("active_theme", "") %||% "")) updateSelectInput(session, "active_theme", selected = v)
+  }, ignoreInit = TRUE)
+  observeEvent(input$active_theme, {
+    v <- sel1("active_theme", "") %||% ""
+    if (!identical(v, sel1("qe_scheme", "") %||% "")) updateSelectInput(session, "qe_scheme", selected = v)
+    sc <- scheme_now()
+    updateTextInput(session, "theme_palette", value = if (!is.null(sc)) paste(sc$palette, collapse = ", ") else "")
+  }, ignoreInit = TRUE)
+  output$qe_scheme_swatches <- renderUI({
+    pal <- scheme_palette_now(); words <- tryCatch(colour_words(pal), error = function(e) pal); words[is.na(words)] <- pal[is.na(words)]   # "dark blue" / "light blue" when two share a word
+    sc <- scheme_now()
+    span(class = "kc-scheme-swatches", id = "kc_scheme_palette", `data-colors` = paste(pal, collapse = ","), `data-words` = paste(words, collapse = "|"),
+         role = "img", `aria-label` = paste0(if (is.null(sc)) "Colours of the palette in use: " else "Colours of the scheme: ", paste(words, collapse = ", ")),
+         lapply(seq_along(pal), function(i) span(class = "kc-scheme-chip", style = paste0("background-color:", pal[i], ";"), title = paste(words[i], pal[i]))))
+  })
+  outputOptions(output, "qe_scheme_swatches", suspendWhenHidden = FALSE)
+  # a scheme as a file: download the chosen one (with none chosen, the styles in use as a scheme), load one from a file
+  scheme_doc_current <- function() {
+    samps <- rv$od_vars; aes_map <- if (length(samps)) collect_sample_aesthetics(samps) else list()
+    list(version = "1.1", saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"), name = "Colour scheme", sample_aesthetics = aes_map,
+         qe_colors = as.list(rv$qe_colors[intersect(names(aes_map), names(rv$qe_colors))]),
+         display_names = as.list(rv$display_names[intersect(names(aes_map), names(rv$display_names))]),
+         palette = as.list(unique(c(scheme_palette_now(), theme_palette_clean(unlist(lapply(aes_map, function(a) a$color)))))))
+  }
+  output$download_theme <- downloadHandler(
+    filename = function() { key <- isolate(sel1("active_theme", "")); paste0(if (nzchar(key %||% "")) key else "colour_scheme", ".json") },
+    content = function(file) {
+      key <- isolate(sel1("active_theme", "")) %||% ""
+      if (nzchar(key) && file.exists(theme_path(key))) file.copy(theme_path(key), file, overwrite = TRUE)
+      else jsonlite::write_json(isolate(scheme_doc_current()), file, pretty = TRUE, auto_unbox = TRUE)
+    })
+  # A scheme from a file (a co-author's, another computer's). It is checked and rewritten through theme_write(), never
+  # copied as it is; a scheme of the same name that is already here is kept, and the file comes in as "<name> (imported)".
+  scheme_import_doc <- function(doc, fallback_name, key = NULL) {
+    if (!is.list(doc) || is.null(names(doc))) return(NULL)
+    sa <- doc[["sample_aesthetics"]] %||% doc[["samples"]]
+    sa <- if (is.list(sa) && !is.null(names(sa))) sa[vapply(sa, is.list, NA) & nzchar(names(sa))] else list()
+    sa <- utils::head(sa, 2000L)
+    pal <- theme_palette_clean(doc[["palette"]])
+    if (!length(sa) && !length(pal)) return(NULL)
+    nm <- doc[["name"]]; nm <- if (is.character(nm) && length(nm) == 1L && !is.na(nm) && nzchar(theme_key(nm))) trimws(substr(nm, 1L, 120L)) else fallback_name
+    if (!nzchar(theme_key(nm))) nm <- "Imported scheme"
+    one_chr <- function(l) { l <- if (is.list(l) && !is.null(names(l))) l else list(); l[vapply(l, function(v) is.character(v) && length(v) == 1L && !is.na(v), NA)] }
+    if (is.null(key) && file.exists(theme_path(nm))) nm <- paste(nm, "(imported)")
+    if (!length(sa)) sa <- list()
+    theme_write(nm, sa, qe_colors = one_chr(doc[["qe_colors"]]), display_names = unlist(one_chr(doc[["display_names"]])), palette = pal, merge = FALSE, key = key)
+  }
+  observeEvent(input$theme_file, {
+    f <- input$theme_file
+    if (!is.list(f) || is.null(f$datapath) || length(f$datapath) != 1L || !file.exists(f$datapath)) return()
+    fname <- if (is.character(f$name) && length(f$name) == 1L) f$name else "scheme.json"
+    if (isTRUE(file.size(f$datapath) > 2e6)) { showNotification(sprintf("'%s' is too large to be a colour scheme.", fname), type = "warning"); return() }
+    doc <- tryCatch(jsonlite::fromJSON(f$datapath, simplifyVector = FALSE), error = function(e) NULL)
+    key <- tryCatch(scheme_import_doc(doc, tools::file_path_sans_ext(basename(fname))), error = function(e) NULL)
+    if (is.null(key)) { showNotification(sprintf("'%s' is not a colour scheme of this app; nothing was changed.", fname), type = "warning"); return() }
+    refresh_theme_choices(selected = key)
+    th <- theme_read(key)
+    showNotification(sprintf("Colour scheme '%s' loaded (%d samples, %d colours). Press 'Use on these samples' to apply it.",
+                             unname(theme_display_names(key)), length(th$sample_aesthetics), length(th$palette)), type = "message", duration = 8)
   })
   observeEvent(input$delete_theme, {
     key <- sel1("active_theme", "")
-    if (!nzchar(key)) { showNotification("Select a theme to delete.", type = "warning"); return() }
-    showModal(modalDialog(title = "Delete theme", size = "s", easyClose = TRUE,
-                          p("Permanently delete the theme ", tags$b(key), " from the themes folder?"),
+    if (!nzchar(key)) { showNotification("Choose the colour scheme to delete.", type = "warning"); return() }
+    showModal(modalDialog(title = "Delete colour scheme", size = "s", easyClose = TRUE,
+                          p("Permanently delete the colour scheme ", tags$b(unname(theme_display_names(key))), " from the themes folder?"),
                           footer = tagList(modalButton("Cancel"),
                                            actionButton("delete_theme_confirm", "Delete", style = "background:#dc3545;color:white;border:none;"))))
   })
@@ -20856,7 +21413,7 @@ server <- function(input, output, session) {
     if (!nzchar(key)) return()
     ok <- tryCatch(theme_delete(key), error = function(e) FALSE)
     refresh_theme_choices(selected = "")
-    showNotification(if (ok) sprintf("Theme '%s' deleted.", key) else sprintf("Theme '%s' could not be deleted.", key),
+    showNotification(if (ok) sprintf("Colour scheme '%s' deleted.", key) else sprintf("Colour scheme '%s' could not be deleted.", key),
                      type = if (ok) "message" else "warning")
   })
 
@@ -21023,6 +21580,9 @@ server <- function(input, output, session) {
     xr <- range(c(pdA$time, pdB$time), na.rm = TRUE)
     pad <- function(pd) { e <- pd[c(1L, 1L), , drop = FALSE]; e$time <- xr
                           for (cl in setdiff(names(e), c("time", "variable"))) if (is.numeric(e[[cl]])) e[[cl]] <- NA_real_
+                          # v2.29.0 (review B1): an empty row at a time the sample HAS a reading broke its line there (the
+                          # first segment of one curve in each panel was missing); only times it has no reading at are added
+                          e <- e[!(e$time %in% pd$time[as.character(pd$variable) == as.character(e$variable[1])]), , drop = FALSE]
                           rbind(pd, e) }
     pa <- one(pad(pdA), ss$A, repA, lab[["A"]]); pb <- one(pad(pdB), ss$B, repB, lab[["B"]])
     yr <- range(c(pdA$mean_value, pdB$mean_value), na.rm = TRUE)
@@ -21158,15 +21718,16 @@ server <- function(input, output, session) {
     # one figure: p = the ggplot, kind = its panel kind, stem = the file stem
     # v2.28.3: with "Legend key" ticked, every exported figure gets its own key (legend_key_<stem>.<fmt>), not only the main one
     key_for <- function(p, stem) if ("legend_key" %in% as.character(outputs)) {
-      k <- tryCatch(legend_key_grob(p), error = function(e) NULL)
+      k <- tryCatch(legend_key_for(p), error = function(e) NULL)   # v2.29.0: a figure with no legend of its own gets its key too
       if (!is.null(k)) { f <- file.path(dir, paste0("legend_key_", stem, ".", fmt)); write_legend_key(k, f, fmt, dpi); written <<- c(written, basename(f)) }
     }
     one_figure <- function(label, p, kind, stem_fun) {
       if (is_placeholder_plot(p)) return(skip(label, placeholder_reason(p)))
+      # v2.29.0 (audit gap 10): the key file is named after ITS figure's file (it carried the main figure's size tag)
+      if (!is.null(sz_custom)) { key_for(p, stem_fun(sz_custom)); return(put(p, stem_fun(sz_custom), sz_custom[1], sz_custom[2])) }
+      if (fixed_mode()) { g <- fixed_figure(p, kind); s <- size_from_grob(g, kind); key_for(p, stem_fun(s)); return(put(g, stem_fun(s), s[1], s[2])) }
       key_for(p, stem_fun(NULL))
-      if (!is.null(sz_custom)) return(put(p, stem_fun(sz_custom), sz_custom[1], sz_custom[2]))
-      if (fixed_mode()) { g <- fixed_figure(p, kind); s <- size_from_grob(g, kind); put(g, stem_fun(s), s[1], s[2]) }
-      else { s <- export_size_in(); put(p, stem_fun(NULL), s[1], s[2]) }
+      s <- export_size_in(); put(p, stem_fun(NULL), s[1], s[2])
     }
     sel <- as.character(outputs)
     # v2.26.1: the main figure as the Download button writes it (main_plot_obj(): the matrix legend, a legend in each panel);
@@ -21193,7 +21754,11 @@ server <- function(input, output, session) {
       else attempt("Composed figure", {
         comp <- compose_info()
         if (is.null(comp$plot)) skip("Composed figure", "no panel is available for this selection.")
-        else put(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+        else {
+          put(comp$plot, composed_file_stem(c(comp$width_mm, comp$height_mm)), comp$width_mm / 25.4, comp$height_mm / 25.4)
+          ck <- tryCatch(compose_legend_key(), error = function(e) NULL)   # v2.29.0 (audit gap 2): the composed figure's own key
+          if (!is.null(ck)) key_for(ck, composed_file_stem(c(comp$width_mm, comp$height_mm)))
+        }
       })
     }
     if ("compare" %in% sel) {
