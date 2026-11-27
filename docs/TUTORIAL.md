@@ -280,6 +280,11 @@ Open the **Legend text** tab:
   legend comes back where it was.
 * **The other figure tabs** (Analysis, Curve fitting, Compose, Compare) have the same: *Download legend key*, *Place the
   key on the figure* and a legend text starter for that figure, and Download all figures writes every figure's own key.
+  Each key and each text starter is read from the figure it belongs to (v2.29.0): a figure with no legend of its own,
+  such as the metric summary, gets a key of the samples it draws with the symbol it draws them with; the Compose key is
+  the composed panels' keys, one under each panel's letter; Compare side by side lists each file's samples under that
+  file's name. (For figures with no legend of their own the key is a download only: the samples are already named on
+  the figure's axis.)
 * **Download colour map (CSV)**: the colours as drawn (`"Sample","Hex","Colour_Name"`). **Load colour map** (Save / Load
   Settings) reads it back, so the same strain keeps the same colour across figures and projects.
 
