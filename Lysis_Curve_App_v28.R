@@ -9918,94 +9918,17 @@ ui <- fluidPage(lang = "en",
              Shiny.setInputValue('qe_show_event', {sample: row.getAttribute('data-sample'), show: t.checked}, {priority: 'event'});
          });
          // the server tells the strip the colour each sample really has (sidebar colour, palette or the strip's own)
-         var kcDrawn = {};   // v2.29.0: the colour each sample is drawn with (differs from its own under matched panels)
+         window.kcDrawn = window.kcDrawn || {};   // v2.29.0: the colour each sample is drawn with (differs from its own under matched panels)
          function swatches(m) {
            for (var i = 0; i < m.ids.length; i++) {
              var inp = document.getElementById(m.ids[i]), c = m.colors[i];
-             if (m.drawn && m.drawn[i]) kcDrawn[m.ids[i]] = String(m.drawn[i]).toUpperCase();
+             if (m.drawn && m.drawn[i]) window.kcDrawn[m.ids[i]] = String(m.drawn[i]).toUpperCase();
              if (inp && document.activeElement !== inp && inp.value.toLowerCase() !== String(c).toLowerCase()) inp.value = c;
              var sw = document.getElementById(m.ids[i].replace('qe_color_', 'qe_swatch_')); if (sw) sw.style.backgroundColor = c;
            }
          }
          if (window.Shiny && Shiny.addCustomMessageHandler) Shiny.addCustomMessageHandler('kcSwatches', swatches);
          else if (window.jQuery) jQuery(document).on('shiny:connected', function() { Shiny.addCustomMessageHandler('kcSwatches', swatches); });
-         // v2.29.0: the scheme's colours where a sample's colour is picked. A click on a row's colour square opens a small
-         // dialog of the colours in #kc_scheme_palette (the active scheme, else the palette in use); choosing one writes
-         // it into the row's colour box and fires its input event, so the existing path does the rest. Keyboard: the
-         // square is a button; arrows move, Enter / Space choose, Escape closes and gives the focus back.
-         var kcSchemePop = null, kcSchemeFor = null;
-         function kcSchemeClose(back) {
-           if (!kcSchemePop) return;
-           kcSchemePop.remove(); kcSchemePop = null;
-           if (kcSchemeFor) { kcSchemeFor.setAttribute('aria-expanded', 'false'); if (back) kcSchemeFor.focus(); }
-           kcSchemeFor = null;
-         }
-         function kcSchemeOpen(btn) {
-           kcSchemeClose(false);
-           var holder = document.getElementById('kc_scheme_palette'), inp = document.getElementById(btn.id.replace('qe_swatch_', 'qe_color_'));
-           if (!holder || !inp) return;
-           var cols = (holder.getAttribute('data-colors') || '').split(',').filter(function(c) { return /^#[0-9A-Fa-f]{6}$/.test(c); });
-           var words = (holder.getAttribute('data-words') || '').split('|');
-           if (!cols.length) return;
-           var row = btn.closest('.kc-qe-row'), name = row ? row.getAttribute('data-sample') : '';
-           var used = {};
-           document.querySelectorAll('.kc-qe-row').forEach(function(r) {
-             if (r === row) return;
-             var c = r.querySelector('.kc-qe-color'), on = r.querySelector('.kc-qe-show input');
-             if (!c || (on && !on.checked)) return;
-             var k = c.value.toUpperCase(); (used[k] = used[k] || []).push(r.getAttribute('data-sample'));
-           });
-           var pop = document.createElement('div');
-           pop.className = 'kc-scheme-pop'; pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-label', 'Colours for ' + name);
-           var head = document.createElement('div'); head.className = 'kc-scheme-head'; head.textContent = 'Colour of ' + name; pop.appendChild(head);
-           var grid = document.createElement('div'); grid.className = 'kc-scheme-grid'; pop.appendChild(grid);
-           var cur = inp.value.toUpperCase(), anyUsed = false, first = null;
-           cols.forEach(function(c, i) {
-             var b = document.createElement('button'), u = used[c.toUpperCase()], w = words[i] || c;
-             b.type = 'button'; b.className = 'kc-scheme-opt'; b.style.backgroundColor = c;
-             var lab = w + ' ' + c + (u ? ' (used by ' + u.join(', ') + ')' : '') + (c.toUpperCase() === cur ? ' (this sample now)' : '');
-             b.title = lab; b.setAttribute('aria-label', lab);
-             if (c.toUpperCase() === cur) { b.classList.add('kc-cur'); b.setAttribute('aria-pressed', 'true'); first = b; } else b.setAttribute('aria-pressed', 'false');
-             if (u) { b.classList.add('kc-used'); anyUsed = true; }
-             b.addEventListener('click', function() {
-               inp.value = c.toLowerCase();
-               inp.dispatchEvent(new Event('input', {bubbles: true}));
-               kcSchemeClose(true);
-             });
-             grid.appendChild(b);
-           });
-           var note = function(t) { var n = document.createElement('div'); n.className = 'kc-scheme-note'; n.textContent = t; pop.appendChild(n); };
-           if (anyUsed) note('A dot marks a colour another shown sample has.');
-           var dr = kcDrawn[inp.id];
-           if (dr && dr !== cur) note('Matched panels: in the figure this sample takes the colour of its match in the first panel. Change that sample, or set Sample styles across panels to Each sample its own style.');
-           document.body.appendChild(pop);
-           var r = btn.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
-           var left = Math.max(6, Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - pw - 6));
-           var top = r.bottom + window.scrollY + 4;
-           if (r.bottom + ph + 8 > window.innerHeight && r.top - ph - 4 > 0) top = r.top + window.scrollY - ph - 4;
-           pop.style.left = left + 'px'; pop.style.top = top + 'px';
-           kcSchemePop = pop; kcSchemeFor = btn; btn.setAttribute('aria-expanded', 'true');
-           (first || grid.firstChild).focus();
-         }
-         document.addEventListener('click', function(ev) {
-           var b = ev.target && ev.target.closest ? ev.target.closest('button.kc-qe-swatch') : null;
-           if (b) { ev.preventDefault(); if (kcSchemeFor === b) kcSchemeClose(true); else kcSchemeOpen(b); return; }
-           if (kcSchemePop && !kcSchemePop.contains(ev.target)) kcSchemeClose(false);
-         });
-         document.addEventListener('keydown', function(ev) {
-           if (!kcSchemePop) return;
-           if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); kcSchemeClose(true); return; }
-           var opts = Array.prototype.slice.call(kcSchemePop.querySelectorAll('.kc-scheme-opt')), i = opts.indexOf(document.activeElement);
-           if (ev.key === 'Tab') {            // the dialog keeps the focus while it is open
-             ev.preventDefault(); if (!opts.length) return;
-             opts[(i + (ev.shiftKey ? -1 : 1) + opts.length) % opts.length].focus(); return;
-           }
-           var step = {ArrowRight: 1, ArrowLeft: -1, ArrowDown: 8, ArrowUp: -8}[ev.key];
-           if (!step || i < 0) return;
-           ev.preventDefault();
-           var j = i + step; if (j < 0 || j >= opts.length) return;
-           opts[j].focus();
-         }, true);
          // v2.22: click-to-edit labels on the figure (the inline SVG of output od_plot_svg). mark() tags the legend
          // entries, axis titles and title / subtitle; a click opens one popover whose Apply writes into the existing
          // quick-edit / sidebar inputs, so the v2.21 pipeline does the rest. Event-delegated; nothing is kept
@@ -10485,6 +10408,86 @@ ui <- fluidPage(lang = "en",
            jQuery(document).on('shiny:idle', kcMark);
            jQuery(document).on('shiny:inputchanged', function(ev) { if (ev.name === 'canvas_edit' && !ev.value) kcClose(); });
          }
+       })();
+       // v2.29.0: its own function (the page script above keeps the keyboard's native behaviour and never cancels an event)
+       (function() {
+         // v2.29.0: the scheme's colours where a sample's colour is picked. A click on a row's colour square opens a small
+         // dialog of the colours in #kc_scheme_palette (the active scheme, else the palette in use); choosing one writes
+         // it into the row's colour box and fires its input event, so the existing path does the rest. Keyboard: the
+         // square is a button; arrows move, Enter / Space choose, Escape closes and gives the focus back.
+         var kcSchemePop = null, kcSchemeFor = null;
+         function kcSchemeClose(back) {
+           if (!kcSchemePop) return;
+           kcSchemePop.remove(); kcSchemePop = null;
+           if (kcSchemeFor) { kcSchemeFor.setAttribute('aria-expanded', 'false'); if (back) kcSchemeFor.focus(); }
+           kcSchemeFor = null;
+         }
+         function kcSchemeOpen(btn) {
+           kcSchemeClose(false);
+           var holder = document.getElementById('kc_scheme_palette'), inp = document.getElementById(btn.id.replace('qe_swatch_', 'qe_color_'));
+           if (!holder || !inp) return;
+           var cols = (holder.getAttribute('data-colors') || '').split(',').filter(function(c) { return /^#[0-9A-Fa-f]{6}$/.test(c); });
+           var words = (holder.getAttribute('data-words') || '').split('|');
+           if (!cols.length) return;
+           var row = btn.closest('.kc-qe-row'), name = row ? row.getAttribute('data-sample') : '';
+           var used = {};
+           document.querySelectorAll('.kc-qe-row').forEach(function(r) {
+             if (r === row) return;
+             var c = r.querySelector('.kc-qe-color'), on = r.querySelector('.kc-qe-show input');
+             if (!c || (on && !on.checked)) return;
+             var k = c.value.toUpperCase(); (used[k] = used[k] || []).push(r.getAttribute('data-sample'));
+           });
+           var pop = document.createElement('div');
+           pop.className = 'kc-scheme-pop'; pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-label', 'Colours for ' + name);
+           var head = document.createElement('div'); head.className = 'kc-scheme-head'; head.textContent = 'Colour of ' + name; pop.appendChild(head);
+           var grid = document.createElement('div'); grid.className = 'kc-scheme-grid'; pop.appendChild(grid);
+           var cur = inp.value.toUpperCase(), anyUsed = false, first = null;
+           cols.forEach(function(c, i) {
+             var b = document.createElement('button'), u = used[c.toUpperCase()], w = words[i] || c;
+             b.type = 'button'; b.className = 'kc-scheme-opt'; b.style.backgroundColor = c;
+             var lab = w + ' ' + c + (u ? ' (used by ' + u.join(', ') + ')' : '') + (c.toUpperCase() === cur ? ' (this sample now)' : '');
+             b.title = lab; b.setAttribute('aria-label', lab);
+             if (c.toUpperCase() === cur) { b.classList.add('kc-cur'); b.setAttribute('aria-pressed', 'true'); first = b; } else b.setAttribute('aria-pressed', 'false');
+             if (u) { b.classList.add('kc-used'); anyUsed = true; }
+             b.addEventListener('click', function() {
+               inp.value = c.toLowerCase();
+               inp.dispatchEvent(new Event('input', {bubbles: true}));
+               kcSchemeClose(true);
+             });
+             grid.appendChild(b);
+           });
+           var note = function(t) { var n = document.createElement('div'); n.className = 'kc-scheme-note'; n.textContent = t; pop.appendChild(n); };
+           if (anyUsed) note('A dot marks a colour another shown sample has.');
+           var dr = (window.kcDrawn || {})[inp.id];
+           if (dr && dr !== cur) note('Matched panels: in the figure this sample takes the colour of its match in the first panel. Change that sample, or set Sample styles across panels to Each sample its own style.');
+           document.body.appendChild(pop);
+           var r = btn.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+           var left = Math.max(6, Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - pw - 6));
+           var top = r.bottom + window.scrollY + 4;
+           if (r.bottom + ph + 8 > window.innerHeight && r.top - ph - 4 > 0) top = r.top + window.scrollY - ph - 4;
+           pop.style.left = left + 'px'; pop.style.top = top + 'px';
+           kcSchemePop = pop; kcSchemeFor = btn; btn.setAttribute('aria-expanded', 'true');
+           (first || grid.firstChild).focus();
+         }
+         document.addEventListener('click', function(ev) {
+           var b = ev.target && ev.target.closest ? ev.target.closest('button.kc-qe-swatch') : null;
+           if (b) { ev.preventDefault(); if (kcSchemeFor === b) kcSchemeClose(true); else kcSchemeOpen(b); return; }
+           if (kcSchemePop && !kcSchemePop.contains(ev.target)) kcSchemeClose(false);
+         });
+         document.addEventListener('keydown', function(ev) {
+           if (!kcSchemePop) return;
+           if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); kcSchemeClose(true); return; }
+           var opts = Array.prototype.slice.call(kcSchemePop.querySelectorAll('.kc-scheme-opt')), i = opts.indexOf(document.activeElement);
+           if (ev.key === 'Tab') {            // the dialog keeps the focus while it is open
+             ev.preventDefault(); if (!opts.length) return;
+             opts[(i + (ev.shiftKey ? -1 : 1) + opts.length) % opts.length].focus(); return;
+           }
+           var step = {ArrowRight: 1, ArrowLeft: -1, ArrowDown: 8, ArrowUp: -8}[ev.key];
+           if (!step || i < 0) return;
+           ev.preventDefault();
+           var j = i + step; if (j < 0 || j >= opts.length) return;
+           opts[j].focus();
+         }, true);
        })();"
     )),
     # v2.23.2: Copy figure -- the preview (inline SVG or PNG) is drawn to a PNG in the browser and put on the clipboard
